@@ -3,6 +3,7 @@ using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
+using Warehouse3PL.Domain.ValueObjects;
 
 namespace Warehouse3PL.Domain.Entities.Billing;
 
@@ -93,6 +94,30 @@ public class CarrierCostAdjustment : AuditableEntity<Guid>, ITenantEntity
             BillableActivityAdjustmentId = billableActivityAdjustmentId,
             IdempotencyKey = normalizedKey
         };
+    }
+
+    /// <summary>
+    /// Explicitly resolves the effective currency for this adjustment under contractual reconciliation rules.
+    /// If an explicit currency was persisted, validates and returns it (isInherited = false).
+    /// If omitted or blank, explicitly inherits the parent carrier charge's currency (isInherited = true) and validates it against ISO 4217.
+    /// </summary>
+    public string ResolveEffectiveCurrency(string parentChargeCurrency, out bool isInherited)
+    {
+        if (!string.IsNullOrWhiteSpace(Currency))
+        {
+            Iso4217Currencies.Validate(Currency, nameof(Currency));
+            isInherited = false;
+            return Currency.Trim().ToUpperInvariant();
+        }
+
+        if (string.IsNullOrWhiteSpace(parentChargeCurrency))
+        {
+            throw new InvalidOperationException($"Cannot inherit currency for adjustment '{Id}' because parent charge has no valid currency.");
+        }
+
+        Iso4217Currencies.Validate(parentChargeCurrency, nameof(parentChargeCurrency));
+        isInherited = true;
+        return parentChargeCurrency.Trim().ToUpperInvariant();
     }
 }
 

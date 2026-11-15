@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<message:GenericData xmlns:message="http://www.sdmx.org/resources/sdmxml/schemas/v2_1/message">
+  <Header>
+    <ID>ECB_EXR_20261112</ID>
+    <Prepared>2026-11-12T15:00:00Z</Prepared>
+    <Sender id="ECB"/>
+  </Header>
+  <DataSet>
+    <Series KEY="EXR.D.EUR.USD.SP00.A" FREQ="D" CURRENCY="USD" CURRENCY_DENOM="EUR" EXR_TYPE="SP00" EXR_SUFFIX="A">
+      <Obs OBS_DATE="2026-11-12" OBS_VALUE="1.1081" OBS_STATUS="A" />
+    </Series>
+  </DataSet>
+</message:GenericData>

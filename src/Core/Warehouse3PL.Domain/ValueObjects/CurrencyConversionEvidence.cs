@@ -150,20 +150,10 @@ public record CurrencyConversionEvidence
     }
 
     /// <summary>
-    /// Validates that the supplied string conforms to a valid 3-letter uppercase ISO 4217 currency code.
+    /// Validates that the supplied string conforms to an active, assigned 3-letter uppercase ISO 4217 currency code.
     /// </summary>
     private static void ValidateIso4217(string? currencyCode, string paramName)
     {
-        if (string.IsNullOrWhiteSpace(currencyCode))
-        {
-            throw new ArgumentException("Currency code cannot be null or whitespace.", paramName);
-        }
-
-        var trimmed = currencyCode.Trim();
-        if (trimmed.Length != 3 || !trimmed.All(char.IsAsciiLetterUpper))
-        {
-            throw new ArgumentException(
-                $"Currency code '{currencyCode}' is not a valid 3-letter uppercase ISO 4217 code.", paramName);
-        }
+        Iso4217Currencies.Validate(currencyCode, paramName);
     }
 }

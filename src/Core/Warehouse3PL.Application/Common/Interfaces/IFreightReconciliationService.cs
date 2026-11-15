@@ -40,13 +40,12 @@ public interface IFreightReconciliationService
         IReadOnlyList<(Guid PackageId, string PackageNumber, decimal WeightKg)> packages);
 
     /// <summary>
-    /// Performs reproducible currency normalization to USD, preserving exchange rate and source evidence.
+    /// Performs reproducible currency normalization to USD, resolving exchange rate and source evidence strictly from IFxRateProvider.
+    /// Explicit-rate bypasses are prohibited in authoritative financial reconciliation.
     /// </summary>
     CurrencyConversionEvidence NormalizeCurrency(
         decimal amount,
         string sourceCurrency,
         string targetCurrency,
-        DateTime effectiveDateUtc,
-        decimal? exchangeRate = null,
-        string? rateSource = null);
+        DateTime effectiveDateUtc);
 }

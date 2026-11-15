@@ -199,8 +199,13 @@ public class FreightReconciliationService : IFreightReconciliationService
                 var adj = item.Adjustment;
                 var cost = item.ParentCost;
 
-                // Currency Normalization for individual adjustments using parent currency and adjustment date
-                var adjCurrency = string.IsNullOrWhiteSpace(adj.Currency) ? cost.Currency : adj.Currency;
+                // Explicit Currency Resolution for individual adjustments:
+                // Evaluates persisted currency or explicitly inherits and validates parent charge currency under contractual rules.
+                var adjCurrency = adj.ResolveEffectiveCurrency(cost.Currency, out var isInherited);
+                if (isInherited)
+                {
+                    _logger.LogInformation("Adjustment '{AdjId}' explicitly inherits currency '{Currency}' from parent carrier record '{ParentId}'.", adj.Id, adjCurrency, cost.Id);
+                }
                 var adjEffectiveDate = adj.AdjustedAtUtc == default ? cost.CostAssessedAtUtc : adj.AdjustedAtUtc;
                 var adjConv = NormalizeCurrency(adj.CarrierCostDelta, adjCurrency, "USD", adjEffectiveDate);
 
@@ -615,18 +620,14 @@ public class FreightReconciliationService : IFreightReconciliationService
         decimal amount,
         string sourceCurrency,
         string targetCurrency,
-        DateTime effectiveDateUtc,
-        decimal? exchangeRate = null,
-        string? rateSource = null)
+        DateTime effectiveDateUtc)
     {
-        if (string.IsNullOrWhiteSpace(sourceCurrency))
-        {
-            throw new ArgumentException("Source currency code cannot be null or whitespace.", nameof(sourceCurrency));
-        }
+        Iso4217Currencies.Validate(sourceCurrency, nameof(sourceCurrency));
+        Iso4217Currencies.Validate(targetCurrency, nameof(targetCurrency));
 
-        if (string.IsNullOrWhiteSpace(targetCurrency))
+        if (effectiveDateUtc.Kind == DateTimeKind.Unspecified)
         {
-            throw new ArgumentException("Target currency code cannot be null or whitespace.", nameof(targetCurrency));
+            throw new ArgumentException("Effective date cannot have DateTimeKind.Unspecified. Must be explicitly Utc or Local.", nameof(effectiveDateUtc));
         }
 
         var src = sourceCurrency.Trim().ToUpperInvariant();
@@ -641,30 +642,13 @@ public class FreightReconciliationService : IFreightReconciliationService
                 originalAmount: amount,
                 exchangeRate: 1.0m,
                 effectiveDateUtc: utcDate,
-                rateSource: rateSource ?? "IdentityRate",
+                rateSource: "IdentityRate",
                 rateVersion: "Identity-1.0",
                 targetCurrency: tgt,
                 roundingDecimals: 4,
                 roundingMode: MidpointRounding.AwayFromZero,
                 benchmarkSeriesId: "IDENTITY",
                 integrityHash: "IDENTITY",
-                publishedAtUtc: utcDate);
-        }
-
-        if (exchangeRate.HasValue)
-        {
-            return new CurrencyConversionEvidence(
-                originalCurrency: src,
-                originalAmount: amount,
-                exchangeRate: exchangeRate.Value,
-                effectiveDateUtc: utcDate,
-                rateSource: rateSource ?? "ExplicitProvided",
-                rateVersion: "Explicit-1.0",
-                targetCurrency: tgt,
-                roundingDecimals: 4,
-                roundingMode: MidpointRounding.AwayFromZero,
-                benchmarkSeriesId: "EXPLICIT",
-                integrityHash: "EXPLICIT",
                 publishedAtUtc: utcDate);
         }
 
@@ -683,7 +667,7 @@ public class FreightReconciliationService : IFreightReconciliationService
             originalAmount: amount,
             exchangeRate: rate,
             effectiveDateUtc: utcDate,
-            rateSource: rateSource ?? source,
+            rateSource: source,
             rateVersion: version,
             targetCurrency: tgt,
             roundingDecimals: 4,

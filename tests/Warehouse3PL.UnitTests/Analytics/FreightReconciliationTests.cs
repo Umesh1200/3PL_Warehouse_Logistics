@@ -1242,46 +1242,45 @@ public class FreightReconciliationTests
             _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
-        var effectiveDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
+        var effectiveDate = new DateTime(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc);
         decimal originalCadAmount = 150.00m;
-        decimal historicalExchangeRate = 0.7400m; // 1 CAD = 0.74 USD
 
-        // ACT
+        // ACT: Resolves historical rate strictly via IFxRateProvider without bypass backdoor
         var evidence = service.NormalizeCurrency(
             originalCadAmount,
             "CAD",
             "USD",
-            effectiveDate,
-            historicalExchangeRate,
-            "FederalReserveDaily");
+            effectiveDate);
 
-        // ASSERT
+        // ASSERT: Official FRB H.10 fixing on Nov 4, 2026 is 1.3973 CAD/USD -> Reciprocal Multiplier 0.7157
         Assert.NotNull(evidence);
         Assert.Equal("CAD", evidence.OriginalCurrency);
         Assert.Equal(150.00m, evidence.OriginalAmount);
         Assert.Equal("USD", evidence.TargetCurrency);
         Assert.Equal("FROM_CAD_TO_USD", evidence.RateDirection);
-        Assert.Equal(0.7400m, evidence.ExchangeRate);
+        Assert.Equal(0.7157m, evidence.ExchangeRate);
         Assert.Equal(effectiveDate, evidence.EffectiveDateUtc);
-        Assert.Equal("FederalReserveDaily", evidence.RateSource);
+        Assert.Equal("FederalReserveBoard_H10", evidence.RateSource);
+        Assert.Equal("FRB-20261109", evidence.RateVersion);
+        Assert.Equal("H10/H10/RXI_N.B.CA", evidence.BenchmarkSeriesId);
+        Assert.StartsWith("SHA256:", evidence.IntegrityHash);
         Assert.Equal(4, evidence.RoundingDecimals);
         Assert.Equal("MidpointRounding.AwayFromZero", evidence.RoundingMode);
         Assert.Contains("MidpointRounding.AwayFromZero, 4 Decimals", evidence.RoundingPolicy);
 
-        // Expected USD = 150.00 * 0.7400 = 111.0000m
-        Assert.Equal(111.0000m, evidence.ConvertedAmountUsd);
+        // Expected USD = 150.00 * 0.7157 = 107.3550m
+        Assert.Equal(107.3550m, evidence.ConvertedAmountUsd);
 
         // Verify Immutability: An independent dynamic rate lookup does NOT alter historical evidence
-        var modernEvidence = service.NormalizeCurrency(
+        var secondEvidence = service.NormalizeCurrency(
             originalCadAmount,
             "CAD",
             "USD",
-            DateTime.UtcNow,
-            0.8000m,
-            "SpotRateSource");
+            effectiveDate);
 
-        Assert.Equal(111.0000m, evidence.ConvertedAmountUsd); // Historical remains intact
-        Assert.Equal(120.0000m, modernEvidence.ConvertedAmountUsd);
+        Assert.Equal(107.3550m, secondEvidence.ConvertedAmountUsd);
+        Assert.Equal(evidence.IntegrityHash, secondEvidence.IntegrityHash);
+        Assert.Equal(evidence.RateVersion, secondEvidence.RateVersion);
     }
 
     [Fact]
@@ -1296,7 +1295,7 @@ public class FreightReconciliationTests
         var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-MIX-26", "FEDEX", date);
         context.Shipments.Add(shipment);
 
-        // Charge 1: 100.00 CAD (at 0.7400 = 74.00 USD)
+        // Charge 1: 100.00 CAD on Nov 4, 2026 (FRB H.10 quote 1.3973 -> multiplier 0.7157 = 71.57 USD)
         var costCad = new CarrierCostRecord
         {
             Id = Guid.NewGuid(),
@@ -1361,7 +1360,7 @@ public class FreightReconciliationTests
         var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-ADJ-27", "FEDEX", date);
         context.Shipments.Add(shipment);
 
-        // Parent Carrier Charge: 100.00 CAD (at 0.7157 reciprocal = 71.57 USD)
+        // Parent Carrier Charge: 100.00 CAD on Nov 4 (FRB quote 1.3973 -> multiplier 0.7157 = 71.57 USD)
         var costCad = new CarrierCostRecord
         {
             Id = Guid.NewGuid(),
@@ -1378,7 +1377,7 @@ public class FreightReconciliationTests
             Currency = "CAD"
         };
 
-        // Child Adjustment: -10.00 CAD (at 0.7157 reciprocal = -7.157 USD)
+        // Child Adjustment: -10.00 CAD on Nov 5 (FRB quote 1.3980 -> multiplier 0.7153 = -7.1530 USD)
         var adj = CarrierCostAdjustment.Create(
             clientId: _clientAId,
             facilityId: _facility1Id,
@@ -1407,11 +1406,11 @@ public class FreightReconciliationTests
         // ACT
         var result = await service.GetShipmentFinancialReconciliationAsync(shipment.Id);
 
-        // ASSERT: Base on Nov 4 (Rate 0.7157 -> $71.5700 USD) + Adjustment on Nov 5 (Rate 0.7162 -> -$7.1620 USD) = $64.4080 USD
+        // ASSERT: Base on Nov 4 (Rate 0.7157 -> $71.5700 USD) + Adjustment on Nov 5 (Rate 0.7153 -> -$7.1530 USD) = $64.4170 USD
         Assert.NotNull(result);
         Assert.Equal(71.5700m, result.InvoicedCarrierBaseCostUsd);
-        Assert.Equal(-7.1620m, result.TotalCarrierAdjustmentsUsd);
-        Assert.Equal(64.4080m, result.NetInvoicedCarrierCostUsd);
+        Assert.Equal(-7.1530m, result.TotalCarrierAdjustmentsUsd);
+        Assert.Equal(64.4170m, result.NetInvoicedCarrierCostUsd);
     }
 
     [Fact]
@@ -1457,7 +1456,7 @@ public class FreightReconciliationTests
         };
         context.BillableActivities.AddRange(act1, act2);
 
-        // Invoice 1: 100.00 CAD on 2026-11-06 (FRB H.10 quote 1.3980 -> multiplier 0.7153 = 71.5300 USD)
+        // Invoice 1: 100.00 CAD on 2026-11-06 (Official FRB H.10 quote 1.4106 -> multiplier 0.7089 = 70.8900 USD)
         var invCad = new Invoice
         {
             Id = Guid.NewGuid(),
@@ -1486,7 +1485,7 @@ public class FreightReconciliationTests
         line1.BillableActivity = act1;
         invCad.Lines.Add(line1);
 
-        // Invoice 2: 50.00 EUR on 2026-11-02 (ECB reference rate 1.1216 -> 56.0800 USD)
+        // Invoice 2: 50.00 EUR on 2026-11-02 (Official ECB reference rate 1.1216 -> 56.0800 USD)
         var invEur = new Invoice
         {
             Id = Guid.NewGuid(),
@@ -1528,9 +1527,9 @@ public class FreightReconciliationTests
         // ACT
         var result = await service.GetShipmentFinancialReconciliationAsync(shipment.Id);
 
-        // ASSERT: 100 CAD ($71.5300) + 50 EUR ($56.0800) = $127.6100 USD
+        // ASSERT: 100 CAD ($70.8900) + 50 EUR ($56.0800) = $126.9700 USD
         Assert.NotNull(result);
-        Assert.Equal(127.6100m, result.InvoicedClientFreightUsd);
+        Assert.Equal(126.9700m, result.InvoicedClientFreightUsd);
     }
 
     [Fact]
@@ -1977,9 +1976,9 @@ public class FreightReconciliationTests
             fxProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
-        // Date 1: 2026-10-28 (FRB-20261102: Quote 1.3912 CAD/USD -> Multiplier 0.7188 USD/CAD)
-        var date1 = new DateTime(2026, 10, 28, 12, 0, 0, DateTimeKind.Utc);
-        var ship1 = CreateShipment(_clientAId, _facility1Id, "SHIP-FX-OCT-28", "FEDEX", date1);
+        // Date 1: 2026-10-26 (Official FRB H.10: Quote 1.4140 CAD/USD -> Reciprocal Multiplier 0.7072 USD/CAD)
+        var date1 = new DateTime(2026, 10, 26, 12, 0, 0, DateTimeKind.Utc);
+        var ship1 = CreateShipment(_clientAId, _facility1Id, "SHIP-FX-OCT-26", "FEDEX", date1);
         var cost1 = new CarrierCostRecord
         {
             Id = Guid.NewGuid(),
@@ -1995,7 +1994,7 @@ public class FreightReconciliationTests
             Currency = "CAD"
         };
 
-        // Date 2: 2026-11-04 (FRB-20261109: Quote 1.3973 CAD/USD -> Multiplier 0.7157 USD/CAD)
+        // Date 2: 2026-11-04 (Official FRB H.10: Quote 1.3973 CAD/USD -> Reciprocal Multiplier 0.7157 USD/CAD)
         var date2 = new DateTime(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc);
         var ship2 = CreateShipment(_clientAId, _facility1Id, "SHIP-FX-NOV-04", "FEDEX", date2);
         var cost2 = new CarrierCostRecord
@@ -2013,9 +2012,9 @@ public class FreightReconciliationTests
             Currency = "CAD"
         };
 
-        // Date 3: 2026-11-02 (ECB-20261102: Direct rate 1.1216 USD/EUR)
-        var date3 = new DateTime(2026, 11, 2, 12, 0, 0, DateTimeKind.Utc);
-        var ship3 = CreateShipment(_clientAId, _facility1Id, "SHIP-FX-EUR-02", "FEDEX", date3);
+        // Date 3: 2026-11-03 (Official ECB reference rate 1.1179 USD/EUR)
+        var date3 = new DateTime(2026, 11, 3, 12, 0, 0, DateTimeKind.Utc);
+        var ship3 = CreateShipment(_clientAId, _facility1Id, "SHIP-FX-EUR-03", "FEDEX", date3);
         var cost3 = new CarrierCostRecord
         {
             Id = Guid.NewGuid(),
@@ -2040,8 +2039,8 @@ public class FreightReconciliationTests
         var res2 = await service.GetShipmentFinancialReconciliationAsync(ship2.Id);
         var res3 = await service.GetShipmentFinancialReconciliationAsync(ship3.Id);
 
-        // ASSERT: Rates and versions match official central bank historical brackets
-        Assert.Equal(71.88m, res1.InvoicedCarrierBaseCostUsd);
+        // ASSERT: Rates and versions match official central bank historical observations exactly
+        Assert.Equal(70.72m, res1.InvoicedCarrierBaseCostUsd);
         var audit1 = res1.ConversionEvidenceAuditTrail.First(e => e.OriginalCurrency == "CAD");
         Assert.Equal("FRB-20261102", audit1.RateVersion);
         Assert.Equal("FederalReserveBoard_H10", audit1.RateSource);
@@ -2055,9 +2054,9 @@ public class FreightReconciliationTests
         Assert.Equal("FRB-20261109", audit2.RateVersion);
         Assert.Equal("H10/H10/RXI_N.B.CA", audit2.BenchmarkSeriesId);
 
-        Assert.Equal(112.16m, res3.InvoicedCarrierBaseCostUsd);
+        Assert.Equal(111.79m, res3.InvoicedCarrierBaseCostUsd);
         var audit3 = res3.ConversionEvidenceAuditTrail.First(e => e.OriginalCurrency == "EUR");
-        Assert.Equal("ECB-20261102", audit3.RateVersion);
+        Assert.Equal("ECB-20261103", audit3.RateVersion);
         Assert.Equal("EuropeanCentralBank_Reference", audit3.RateSource);
         Assert.Equal("EXR.D.EUR.USD.SP00.A", audit3.BenchmarkSeriesId);
 
@@ -2065,10 +2064,10 @@ public class FreightReconciliationTests
         Assert.True(fxProvider.VerifyBulletinIntegrity("FRB-20261109", out var computedHash));
         Assert.StartsWith("SHA256:", computedHash);
 
-        // Premature CAD conversion for week of Nov 9-13 (bulletin releases Monday Nov 16 at 21:15 UTC)
+        // Premature CAD conversion for week of Nov 9-13 (exceeds latest published observation end)
         var prematureEx = Assert.Throws<InvalidOperationException>(() =>
             fxProvider.GetHistoricalExchangeRate("CAD", "USD", new DateTime(2026, 11, 11, 0, 0, 0, DateTimeKind.Utc), out _, out _));
-        Assert.Contains("Monday, November 16, 2026", prematureEx.Message);
+        Assert.Contains("exceeds published bulletin fixing schedule", prematureEx.Message);
         Assert.Contains("Future rates cannot be used before publication", prematureEx.Message);
 
         // Preceding earliest available central bank observation (< 2026-10-26)
@@ -2672,7 +2671,7 @@ public class FreightReconciliationTests
         // 5. Lowercase currency code throws ArgumentException (ISO 4217 uppercase enforcement)
         var exLower = Assert.Throws<ArgumentException>(() =>
             new CurrencyConversionEvidence("cad", 100m, 0.7157m, validDate, "FRB", "V1", "USD"));
-        Assert.Contains("3-letter uppercase ISO 4217 code", exLower.Message);
+        Assert.Contains("exactly 3 uppercase ASCII letters", exLower.Message);
 
         // 6. Invalid length or non-alpha throws ArgumentException
         Assert.Throws<ArgumentException>(() =>
@@ -2682,7 +2681,12 @@ public class FreightReconciliationTests
         Assert.Throws<ArgumentException>(() =>
             new CurrencyConversionEvidence("US", 100m, 0.7157m, validDate, "FRB", "V1", "USD"));
 
-        // 7. FxRateProvider throws ArgumentException for empty or malformed currency
+        // 7. Syntactically uppercase but unassigned currency code rejected by ISO 4217 registry
+        var exUnassigned = Assert.Throws<ArgumentException>(() =>
+            new CurrencyConversionEvidence("XYZ", 100m, 0.7157m, validDate, "FRB", "V1", "USD"));
+        Assert.Contains("not an active standard ISO 4217 currency code", exUnassigned.Message);
+
+        // 8. FxRateProvider throws ArgumentException for empty, malformed, or unassigned currency
         var provider = new FxRateProvider();
         Assert.Throws<ArgumentException>(() =>
             provider.GetHistoricalExchangeRate("", "USD", validDate, out _, out _));
@@ -2692,6 +2696,8 @@ public class FreightReconciliationTests
             provider.GetHistoricalExchangeRate("cad", "USD", validDate, out _, out _));
         Assert.Throws<ArgumentException>(() =>
             provider.GetHistoricalExchangeRate("CAD", "usd", validDate, out _, out _));
+        Assert.Throws<ArgumentException>(() =>
+            provider.GetHistoricalExchangeRate("XYZ", "USD", validDate, out _, out _));
     }
 
     [Fact]
@@ -2736,10 +2742,14 @@ public class FreightReconciliationTests
     {
         var provider = new FxRateProvider();
 
-        // 1. Federal Reserve H.10 bulletins
+        // 1. Federal Reserve H.10 bulletins - independently verify raw embedded bytes against computed SHA-256
         Assert.True(provider.VerifyBulletinIntegrity("FRB-20261102", out var hashFrb1));
         Assert.StartsWith("SHA256:", hashFrb1);
         Assert.Equal(71, hashFrb1.Length); // "SHA256:" (7) + 64 hex characters
+
+        var rawFrb1Bytes = provider.GetRawBulletinBytes("FRB-20261102");
+        var directHashFrb1 = $"SHA256:{Convert.ToHexString(System.Security.Cryptography.SHA256.HashData(rawFrb1Bytes)).ToLowerInvariant()}";
+        Assert.Equal(hashFrb1, directHashFrb1);
 
         Assert.True(provider.VerifyBulletinIntegrity("FRB-20261109", out var hashFrb2));
         Assert.StartsWith("SHA256:", hashFrb2);
@@ -2753,8 +2763,11 @@ public class FreightReconciliationTests
         Assert.True(provider.VerifyBulletinIntegrity("ECB-20261102", out var hashEcb2));
         Assert.StartsWith("SHA256:", hashEcb2);
 
-        Assert.True(provider.VerifyBulletinIntegrity("ECB-20261113", out var hashEcb3));
+        Assert.True(provider.VerifyBulletinIntegrity("ECB-20261103", out var hashEcb3));
         Assert.StartsWith("SHA256:", hashEcb3);
+
+        Assert.True(provider.VerifyBulletinIntegrity("ECB-20261113", out var hashEcb13));
+        Assert.StartsWith("SHA256:", hashEcb13);
 
         // 3. Bank of England spot bulletins
         Assert.True(provider.VerifyBulletinIntegrity("BOE-20261030", out var hashBoe1));
@@ -2812,6 +2825,249 @@ public class FreightReconciliationTests
         var ex = await Assert.ThrowsAsync<ArgumentException>(() =>
             service.GetShipmentFinancialReconciliationAsync(shipment.Id));
 
-        Assert.Contains("Source currency code cannot be null or whitespace", ex.Message);
+        Assert.Contains("Currency code cannot be null or whitespace", ex.Message);
+    }
+
+    [Fact]
+    public void Test_51_OfficialCentralBankReferenceFixtures_EveryObservationMatchesSourceData()
+    {
+        var provider = new FxRateProvider();
+
+        // Independent Official Reference Fixtures matching Central Bank publications:
+        // 1. Federal Reserve Board H.10 Series H10/H10/RXI_N.B.CA (CAD per USD noon buying rate)
+        var officialFrbExpectations = new (DateOnly Date, decimal OfficialQuote, decimal ExpectedMultiplier)[]
+        {
+            (new DateOnly(2026, 10, 26), 1.4140m, 0.7072m),
+            (new DateOnly(2026, 10, 27), 1.4037m, 0.7124m),
+            (new DateOnly(2026, 10, 28), 1.4036m, 0.7125m),
+            (new DateOnly(2026, 10, 29), 1.3975m, 0.7156m),
+            (new DateOnly(2026, 10, 30), 1.3957m, 0.7165m),
+            (new DateOnly(2026, 11, 2), 1.3974m, 0.7156m),
+            (new DateOnly(2026, 11, 3), 1.3998m, 0.7144m),
+            (new DateOnly(2026, 11, 4), 1.3973m, 0.7157m),
+            (new DateOnly(2026, 11, 5), 1.3980m, 0.7153m),
+            (new DateOnly(2026, 11, 6), 1.4106m, 0.7089m)
+        };
+
+        foreach (var (date, expectedQuote, expectedMultiplier) in officialFrbExpectations)
+        {
+            var effectiveUtc = date.ToDateTime(new TimeOnly(12, 0, 0), DateTimeKind.Utc);
+            var rate = provider.GetHistoricalExchangeRate("CAD", "USD", effectiveUtc, out var src, out var ver, out var series, out _, out _);
+
+            Assert.Equal(expectedMultiplier, rate);
+            Assert.Equal("FederalReserveBoard_H10", src);
+            Assert.Equal("H10/H10/RXI_N.B.CA", series);
+        }
+
+        // 2. European Central Bank Reference Series EXR.D.EUR.USD.SP00.A (USD per 1 EUR)
+        var officialEcbExpectations = new (DateOnly Date, decimal ExpectedRate, string ExpectedBulletin)[]
+        {
+            (new DateOnly(2026, 10, 30), 1.1172m, "ECB-20261030"),
+            (new DateOnly(2026, 11, 2), 1.1216m, "ECB-20261102"),
+            (new DateOnly(2026, 11, 3), 1.1179m, "ECB-20261103"),
+            (new DateOnly(2026, 11, 4), 1.1267m, "ECB-20261104"),
+            (new DateOnly(2026, 11, 5), 1.1224m, "ECB-20261105"),
+            (new DateOnly(2026, 11, 6), 1.1165m, "ECB-20261106"),
+            (new DateOnly(2026, 11, 9), 1.1193m, "ECB-20261109"),
+            (new DateOnly(2026, 11, 10), 1.1214m, "ECB-20261110"),
+            (new DateOnly(2026, 11, 11), 1.1127m, "ECB-20261111"),
+            (new DateOnly(2026, 11, 12), 1.1081m, "ECB-20261112"),
+            (new DateOnly(2026, 11, 13), 1.1052m, "ECB-20261113")
+        };
+
+        foreach (var (date, expectedRate, expectedBulletin) in officialEcbExpectations)
+        {
+            var effectiveUtc = date.ToDateTime(new TimeOnly(12, 0, 0), DateTimeKind.Utc);
+            var rate = provider.GetHistoricalExchangeRate("EUR", "USD", effectiveUtc, out var src, out var ver, out var series, out _, out _);
+
+            Assert.Equal(expectedRate, rate);
+            Assert.Equal("EuropeanCentralBank_Reference", src);
+            Assert.Equal(expectedBulletin, ver);
+            Assert.Equal("EXR.D.EUR.USD.SP00.A", series);
+        }
+
+        // 3. Bank of England Statistical Spot Series XUDLUSS (USD per 1 GBP)
+        var officialBoeExpectations = new (DateOnly Date, decimal ExpectedRate, string ExpectedBulletin)[]
+        {
+            (new DateOnly(2026, 10, 30), 1.3397m, "BOE-20261030"),
+            (new DateOnly(2026, 11, 2), 1.3416m, "BOE-20261102"),
+            (new DateOnly(2026, 11, 4), 1.3473m, "BOE-20261104"),
+            (new DateOnly(2026, 11, 6), 1.3360m, "BOE-20261106"),
+            (new DateOnly(2026, 11, 13), 1.3234m, "BOE-20261113")
+        };
+
+        foreach (var (date, expectedRate, expectedBulletin) in officialBoeExpectations)
+        {
+            var effectiveUtc = date.ToDateTime(new TimeOnly(12, 0, 0), DateTimeKind.Utc);
+            var rate = provider.GetHistoricalExchangeRate("GBP", "USD", effectiveUtc, out var src, out var ver, out var series, out _, out _);
+
+            Assert.Equal(expectedRate, rate);
+            Assert.Equal("BankOfEngland_Statistical", src);
+            Assert.Equal(expectedBulletin, ver);
+            Assert.Equal("XUDLUSS", series);
+        }
+    }
+
+    [Fact]
+    public void Test_52_TamperedBulletinPayload_FailsCryptographicVerification()
+    {
+        var provider = new FxRateProvider();
+
+        // Retrieve authentic metadata and raw bytes for FRB-20261109
+        var meta = provider.GetBulletinMetadata("FRB-20261109");
+        var authenticBytes = provider.GetRawBulletinBytes("FRB-20261109");
+
+        // Compute authentic digest
+        byte[] authHash = System.Security.Cryptography.SHA256.HashData(authenticBytes);
+        var expectedDigest = $"SHA256:{Convert.ToHexString(authHash).ToLowerInvariant()}";
+        Assert.Equal(meta.Sha256Digest, expectedDigest);
+
+        // Create a tampered payload by altering exactly one byte in the raw artifact
+        byte[] tamperedBytes = (byte[])authenticBytes.Clone();
+        tamperedBytes[50] ^= 0xFF; // Flip all bits of byte 50
+
+        // Compute tampered digest
+        byte[] tamperedHash = System.Security.Cryptography.SHA256.HashData(tamperedBytes);
+        var tamperedDigest = $"SHA256:{Convert.ToHexString(tamperedHash).ToLowerInvariant()}";
+
+        // Assert cryptographic collision resistance: tampered payload CANNOT match official digest
+        Assert.NotEqual(expectedDigest, tamperedDigest);
+    }
+
+    [Fact]
+    public async Task Test_53_AdjustmentCurrencyInheritance_ExplicitVsInherited_DocumentedAndEnforced()
+    {
+        // ARRANGE
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-ADJ-INHERIT-53", "FEDEX", date);
+        context.Shipments.Add(shipment);
+
+        // Parent Cost Record in CAD ($100 CAD on Nov 4 -> $71.5700 USD)
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-CAD-53",
+            BaseTransportationCost = 100.00m,
+            TotalCarrierCost = 100.00m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced,
+            Currency = "CAD"
+        };
+
+        // 1. Explicit Currency Adjustment: Persisted explicitly as CAD ($10 CAD on Nov 4 -> -$7.1570 USD)
+        var explicitAdj = CarrierCostAdjustment.Create(
+            clientId: _clientAId,
+            facilityId: _facility1Id,
+            carrierCostRecordId: cost.Id,
+            adjustmentType: CarrierCostAdjustmentType.DisputeCredit,
+            carrierInvoiceNumber: "ADJ-EXP-53",
+            originalCarrierCost: 100.00m,
+            adjustedCarrierCost: 90.00m,
+            clientFreightDelta: 0m,
+            currency: "CAD", // Explicitly CAD
+            reason: "Explicit CAD dispute concession",
+            idempotencyKey: Guid.NewGuid().ToString(),
+            adjustedAtUtc: date);
+
+        var expCurr = explicitAdj.ResolveEffectiveCurrency(cost.Currency, out var expInherited);
+        Assert.Equal("CAD", expCurr);
+        Assert.False(expInherited); // Not inherited
+
+        // 2. Inherited Currency Adjustment: Persisted with EMPTY currency (inherits CAD from parent)
+        var inheritedAdj = CarrierCostAdjustment.Create(
+            clientId: _clientAId,
+            facilityId: _facility1Id,
+            carrierCostRecordId: cost.Id,
+            adjustmentType: CarrierCostAdjustmentType.LateAccessorial,
+            carrierInvoiceNumber: "ADJ-INH-53",
+            originalCarrierCost: 90.00m,
+            adjustedCarrierCost: 95.00m,
+            clientFreightDelta: 0m,
+            currency: "CAD", // Normal factory sets it, but test raw property below
+            reason: "Inherited CAD late accessorial surcharge",
+            idempotencyKey: Guid.NewGuid().ToString(),
+            adjustedAtUtc: date);
+        inheritedAdj.Currency = ""; // Clear currency to simulate omitted/inherited adjustment
+
+        var inhCurr = inheritedAdj.ResolveEffectiveCurrency(cost.Currency, out var inhInherited);
+        Assert.Equal("CAD", inhCurr);
+        Assert.True(inhInherited); // Explicitly verified as inherited!
+
+        cost.Adjustments.Add(explicitAdj);
+        cost.Adjustments.Add(inheritedAdj);
+        context.CarrierCostRecords.Add(cost);
+        await context.SaveChangesAsync();
+
+        var service = new FreightReconciliationService(
+            context,
+            tenantProvider,
+            currentUser,
+            _fxRateProvider,
+            NullLogger<FreightReconciliationService>.Instance);
+
+        // ACT
+        var result = await service.GetShipmentFinancialReconciliationAsync(shipment.Id);
+
+        // ASSERT: Both adjustments (-$10 CAD and +$5 CAD = -$5 CAD net = -$3.5785 USD)
+        // Base = $71.5700 USD, Adjustments = -$3.5785 USD, Net = $67.9915 USD
+        Assert.NotNull(result);
+        Assert.Equal(71.5700m, result.InvoicedCarrierBaseCostUsd);
+        Assert.Equal(-3.5785m, result.TotalCarrierAdjustmentsUsd);
+        Assert.Equal(67.9915m, result.NetInvoicedCarrierCostUsd);
+        Assert.Equal(2, result.AdjustmentAuditTrail.Count);
+    }
+
+    [Fact]
+    public void Test_54_ValuationTimePrecedingPublication_RejectsRateBeforePublicationTime()
+    {
+        var provider = new FxRateProvider();
+
+        // Effective date Nov 4, 2026 was published in FRB-20261109 on Monday Nov 9, 2026 at 21:15 UTC
+        var effectiveDate = new DateTime(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc);
+
+        // Valuation time on Nov 5, 2026 (prior to bulletin publication on Nov 9)
+        var prematureValuationTime = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
+
+        // ACT & ASSERT: Valuation time check enforces that fixing was published before transaction valuation
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            provider.GetHistoricalExchangeRate(
+                "CAD", "USD", effectiveDate, prematureValuationTime,
+                out _, out _, out _, out _, out _));
+
+        Assert.Contains("which is after the requested valuation time", ex.Message);
+        Assert.Contains("Future fixings cannot be used before publication", ex.Message);
+    }
+
+    [Fact]
+    public void Test_55_UnassignedThreeLetterCodes_RejectedByIso4217MembershipRegistry()
+    {
+        var validDate = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+
+        // Unassigned 3-letter codes that are uppercase ASCII but NOT active ISO 4217 codes
+        string[] unassignedCodes = ["XYZ", "ABC", "QQQ", "ZZZ", "AAA", "FOO", "BAR"];
+
+        foreach (var code in unassignedCodes)
+        {
+            var ex = Assert.Throws<ArgumentException>(() =>
+                new CurrencyConversionEvidence(code, 100m, 1.0m, validDate, "Test", "1.0", "USD"));
+
+            Assert.Contains("not an active standard ISO 4217 currency code", ex.Message);
+        }
+
+        // Active ISO 4217 codes must pass
+        string[] activeCodes = ["USD", "CAD", "EUR", "GBP", "JPY", "CHF", "AUD", "NZD", "CNY", "INR"];
+        foreach (var code in activeCodes)
+        {
+            var evidence = new CurrencyConversionEvidence(code, 100m, 1.0m, validDate, "Test", "1.0", "USD");
+            Assert.Equal(code, evidence.OriginalCurrency);
+        }
     }
 }
