@@ -9,6 +9,7 @@ using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
+using Warehouse3PL.Domain.ValueObjects;
 using Warehouse3PL.Infrastructure.Persistence;
 using Warehouse3PL.Infrastructure.Services.Analytics;
 using Warehouse3PL.UnitTests.Common;
@@ -36,6 +37,7 @@ public class FreightReconciliationTests
     private readonly Guid _facility1Id = Guid.NewGuid();
     private readonly Guid _facility2Id = Guid.NewGuid();
     private readonly Guid _staffUserId = Guid.NewGuid();
+    private readonly IFxRateProvider _fxRateProvider = new FxRateProvider();
 
     private async Task<(ApplicationDbContext Context, string DbName)> CreateSeededContextAsync(
         TestTenantProvider tenantProvider,
@@ -281,6 +283,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -294,8 +297,8 @@ public class FreightReconciliationTests
         // Buy-Side Separation
         Assert.Equal(100.00m, result.QuotedCarrierCostUsd);
         Assert.Equal(105.00m, result.EstimatedCarrierCostUsd);
-        Assert.Equal(115.00m, result.InvoicedCarrierBaseCostUsd);
-        Assert.Equal(0.00m, result.InvoicedCarrierAccessorialsUsd);
+        Assert.Equal(100.00m, result.InvoicedCarrierBaseCostUsd);
+        Assert.Equal(15.00m, result.InvoicedCarrierAccessorialsUsd);
         Assert.Equal(-3.00m, result.TotalCarrierAdjustmentsUsd);
         Assert.Equal(112.00m, result.NetInvoicedCarrierCostUsd);
         Assert.Equal(112.00m, result.ReconciledCarrierCostUsd);
@@ -327,6 +330,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         var emptyStart = new DateTime(2025, 1, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -421,6 +425,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -514,6 +519,7 @@ public class FreightReconciliationTests
             context,
             clientATenantProvider,
             clientAUserContext,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -582,6 +588,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT - Execute read operations
@@ -657,6 +664,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -732,6 +740,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -811,6 +820,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -842,6 +852,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // Odd cent totals to force fractional cent rounding:
@@ -919,6 +930,7 @@ public class FreightReconciliationTests
             context,
             clientATenantProvider,
             clientAUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         var now = DateTime.UtcNow;
@@ -1140,6 +1152,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -1169,6 +1182,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // Total Carrier Cost: $100.01 (1 cent residual to allocate)
@@ -1225,6 +1239,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         var effectiveDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
@@ -1277,7 +1292,7 @@ public class FreightReconciliationTests
         var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
         var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
 
-        var date = new DateTime(2026, 11, 10, 10, 0, 0, DateTimeKind.Utc);
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
         var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-MIX-26", "FEDEX", date);
         context.Shipments.Add(shipment);
 
@@ -1322,6 +1337,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -1341,7 +1357,7 @@ public class FreightReconciliationTests
         var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
         var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
 
-        var date = new DateTime(2026, 11, 10, 10, 0, 0, DateTimeKind.Utc);
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
         var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-ADJ-27", "FEDEX", date);
         context.Shipments.Add(shipment);
 
@@ -1385,6 +1401,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -1405,7 +1422,7 @@ public class FreightReconciliationTests
         var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
         var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
 
-        var date = new DateTime(2026, 11, 10, 10, 0, 0, DateTimeKind.Utc);
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
         var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-SELL-28", "FEDEX", date);
         context.Shipments.Add(shipment);
 
@@ -1505,6 +1522,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -1549,6 +1567,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT & ASSERT: Must throw InvalidOperationException rather than silently using 1.0
@@ -1608,6 +1627,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -1681,6 +1701,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -1709,6 +1730,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             unauthContext,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT & ASSERT: Unauthenticated call throws UnauthorizedException
@@ -1731,6 +1753,7 @@ public class FreightReconciliationTests
             context,
             clientTenantProvider,
             missingTenantUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         await Assert.ThrowsAsync<ForbiddenException>(() =>
@@ -1815,6 +1838,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -1842,6 +1866,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         decimal totalCarrierCost = 100.01m;
@@ -1911,6 +1936,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -1951,7 +1977,7 @@ public class FreightReconciliationTests
             fxProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
-        // Date 1: Prior to 2026-11-01 (Rate: 0.7350, Version: FRB-20261031)
+        // Date 1: Prior to 2026-11-02 (Rate: 0.7350, Version: FRB-20261102)
         var date1 = new DateTime(2026, 10, 25, 12, 0, 0, DateTimeKind.Utc);
         var ship1 = CreateShipment(_clientAId, _facility1Id, "SHIP-FX-OCT", "FEDEX", date1);
         var cost1 = new CarrierCostRecord
@@ -1969,8 +1995,8 @@ public class FreightReconciliationTests
             Currency = "CAD"
         };
 
-        // Date 2: 2026-11-10 (Rate: 0.7400, Version: FRB-20261101)
-        var date2 = new DateTime(2026, 11, 10, 12, 0, 0, DateTimeKind.Utc);
+        // Date 2: 2026-11-04 (Rate: 0.7400, Version: FRB-20261109)
+        var date2 = new DateTime(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc);
         var ship2 = CreateShipment(_clientAId, _facility1Id, "SHIP-FX-NOV-EARLY", "FEDEX", date2);
         var cost2 = new CarrierCostRecord
         {
@@ -1987,8 +2013,8 @@ public class FreightReconciliationTests
             Currency = "CAD"
         };
 
-        // Date 3: 2026-11-20 (Rate: 0.7450, Version: FRB-20261115)
-        var date3 = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc);
+        // Date 3: 2026-11-11 (Rate: 0.7450, Version: FRB-20261116)
+        var date3 = new DateTime(2026, 11, 11, 12, 0, 0, DateTimeKind.Utc);
         var ship3 = CreateShipment(_clientAId, _facility1Id, "SHIP-FX-NOV-LATE", "FEDEX", date3);
         var cost3 = new CarrierCostRecord
         {
@@ -2017,21 +2043,24 @@ public class FreightReconciliationTests
         // ASSERT: Rates and versions match historical brackets
         Assert.Equal(73.50m, res1.InvoicedCarrierBaseCostUsd);
         var audit1 = res1.ConversionEvidenceAuditTrail.First(e => e.OriginalCurrency == "CAD");
-        Assert.Equal("FRB-20261031", audit1.RateVersion);
-        Assert.Equal("FederalReserveDaily", audit1.RateSource);
+        Assert.Equal("FRB-20261102", audit1.RateVersion);
+        Assert.Equal("FederalReserveBoard_H10", audit1.RateSource);
         Assert.Equal("FROM_CAD_TO_USD", audit1.RateDirection);
+        Assert.Equal("FRB_H10_G10_CAD", audit1.BenchmarkSeriesId);
+        Assert.StartsWith("SHA256:", audit1.IntegrityHash);
+        Assert.NotEqual(default, audit1.PublishedAtUtc);
 
         Assert.Equal(74.00m, res2.InvoicedCarrierBaseCostUsd);
         var audit2 = res2.ConversionEvidenceAuditTrail.First(e => e.OriginalCurrency == "CAD");
-        Assert.Equal("FRB-20261101", audit2.RateVersion);
+        Assert.Equal("FRB-20261109", audit2.RateVersion);
 
         Assert.Equal(74.50m, res3.InvoicedCarrierBaseCostUsd);
         var audit3 = res3.ConversionEvidenceAuditTrail.First(e => e.OriginalCurrency == "CAD");
-        Assert.Equal("FRB-20261115", audit3.RateVersion);
+        Assert.Equal("FRB-20261116", audit3.RateVersion);
 
         // Unsupported currency pair throws InvalidOperationException
         var ex = Assert.Throws<InvalidOperationException>(() =>
-            fxProvider.GetHistoricalExchangeRate("JPY", "USD", DateTime.UtcNow, out _, out _));
+            fxProvider.GetHistoricalExchangeRate("JPY", "USD", new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc), out _, out _));
         Assert.Contains("Unsupported currency conversion from 'JPY' to 'USD'", ex.Message);
     }
 
@@ -2059,6 +2088,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             unassignedStaffContext,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT & ASSERT: Single query throws ForbiddenException
@@ -2102,6 +2132,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             clientUserContext,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT & ASSERT: Facility 1 is Active -> Access Allowed
@@ -2184,8 +2215,8 @@ public class FreightReconciliationTests
             CarrierCostRecordId = parent2.Id,
             AdjustmentType = CarrierCostAdjustmentType.DisputeCredit,
             Reason = "Shared dispute credit",
-            OriginalCarrierCost = 30.00m,
-            AdjustedCarrierCost = 15.00m,
+            OriginalCarrierCost = 100.00m,
+            AdjustedCarrierCost = 85.00m,
             CarrierCostDelta = -15.00m,
             AdjustedAtUtc = date.AddDays(1),
             IdempotencyKey = sharedKey
@@ -2199,6 +2230,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -2300,6 +2332,7 @@ public class FreightReconciliationTests
             context,
             tenantProvider,
             currentUser,
+            _fxRateProvider,
             NullLogger<FreightReconciliationService>.Instance);
 
         // ACT
@@ -2309,5 +2342,357 @@ public class FreightReconciliationTests
         Assert.NotNull(result);
         Assert.Equal(0.00m, result.EstimatedClientFreightUsd);
         Assert.Equal(120.00m, result.InvoicedClientFreightUsd);
+    }
+
+    [Fact]
+    public async Task Test_41_MarginRecordExists_NoQualifyingInvoiceLines_InvoicedClientFreightStrictlyZero()
+    {
+        // ARRANGE
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-NO-INV-41", "FEDEX", date);
+        context.Shipments.Add(shipment);
+
+        // Pre-dispatch quote / dispatch estimate margin record exists with estimated sell-side freight $150.00
+        var marginRecord = new ShipmentFreightMarginRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCostRecordId = Guid.NewGuid(),
+            CarrierCode = "FEDEX",
+            CarrierServiceLevel = CarrierServiceLevel.StandardGround,
+            CarrierBaseCost = 100.00m,
+            TotalCarrierCost = 100.00m,
+            ClientBaseFreight = 150.00m,
+            TotalClientFreight = 150.00m,
+            GrossMarginAmount = 50.00m,
+            MarkupPercentage = 50.00m,
+            MarginPercentage = 33.33m,
+            PackageCount = 1,
+            PricingModelApplied = FreightPricingModel.CostPlusPercentageMarkup,
+            RatedAtUtc = date
+        };
+        context.ShipmentFreightMarginRecords.Add(marginRecord);
+        // Note: Strictly NO Invoice or InvoiceLine is seeded for this shipment!
+        await context.SaveChangesAsync();
+
+        var service = new FreightReconciliationService(
+            context,
+            tenantProvider,
+            currentUser,
+            _fxRateProvider,
+            NullLogger<FreightReconciliationService>.Instance);
+
+        // ACT
+        var result = await service.GetShipmentFinancialReconciliationAsync(shipment.Id);
+
+        // ASSERT: InvoicedClientFreightUsd MUST be strictly 0.00m and ReconciledClientFreightUsd null!
+        Assert.NotNull(result);
+        Assert.Equal(150.00m, result.EstimatedClientFreightUsd);
+        Assert.Equal(0.00m, result.InvoicedClientFreightUsd);
+        Assert.Null(result.ReconciledClientFreightUsd);
+        Assert.Equal(FreightReconciliationStatus.Estimated, result.SellSideReconciliationStatus);
+    }
+
+    [Fact]
+    public async Task Test_42_ClientUser_WithStaleFacilityClaim_WhenAccessRevoked_ThrowsForbidden()
+    {
+        // ARRANGE
+        var tenantProvider = new TestTenantProvider { TenantId = _clientAId, BypassTenantFilter = true };
+        // Client token contains a stale Facility claim for Facility 1
+        var clientUserContext = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            TenantId = _clientAId,
+            UserType = UserType.Client,
+            FacilityId = _facility1Id
+        };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, clientUserContext);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-STALE-42", "FEDEX", date);
+        context.Shipments.Add(shipment);
+
+        // ClientFacilityAccess was revoked in DB after token was issued
+        var cfa = await context.ClientFacilityAccesses
+            .FirstAsync(c => c.ClientId == _clientAId && c.FacilityId == _facility1Id);
+        cfa.Status = FacilityAccessStatus.Revoked;
+        await context.SaveChangesAsync();
+
+        var service = new FreightReconciliationService(
+            context,
+            tenantProvider,
+            clientUserContext,
+            _fxRateProvider,
+            NullLogger<FreightReconciliationService>.Instance);
+
+        // ACT & ASSERT: Single shipment query fails closed
+        var exSingle = await Assert.ThrowsAsync<ForbiddenException>(() =>
+            service.GetShipmentFinancialReconciliationAsync(shipment.Id));
+        Assert.Contains("does not have active authorized access to facility", exSingle.Message);
+
+        // ACT & ASSERT: Batch query with stale facility filter fails closed
+        var exBatch = await Assert.ThrowsAsync<ForbiddenException>(() =>
+            service.GetReconciledShipmentFinancialsBatchAsync(date.AddDays(-1), date.AddDays(1), facilityId: _facility1Id));
+        Assert.Contains("is not currently active for client", exBatch.Message);
+    }
+
+    [Fact]
+    public async Task Test_43_ClientUser_WithNoActiveFacilityAssignments_UnfilteredBatch_ThrowsForbidden()
+    {
+        // ARRANGE
+        var tenantProvider = new TestTenantProvider { TenantId = _clientAId, BypassTenantFilter = true };
+        // Client user without facility claim in token
+        var clientUserContext = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            TenantId = _clientAId,
+            UserType = UserType.Client,
+            FacilityId = null
+        };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, clientUserContext);
+
+        // Revoke ALL facility assignments for Client A
+        var accesses = await context.ClientFacilityAccesses.Where(c => c.ClientId == _clientAId).ToListAsync();
+        foreach (var access in accesses)
+        {
+            access.Status = FacilityAccessStatus.Revoked;
+        }
+        await context.SaveChangesAsync();
+
+        var service = new FreightReconciliationService(
+            context,
+            tenantProvider,
+            clientUserContext,
+            _fxRateProvider,
+            NullLogger<FreightReconciliationService>.Instance);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+
+        // ACT & ASSERT: Unfiltered batch must fail closed with ForbiddenException
+        var ex = await Assert.ThrowsAsync<ForbiddenException>(() =>
+            service.GetReconciledShipmentFinancialsBatchAsync(date.AddDays(-1), date.AddDays(1)));
+        Assert.Contains("has no active facility access assignments", ex.Message);
+    }
+
+    [Fact]
+    public async Task Test_44_AdjustmentsSharingIdempotencyKey_WithConflictingFinancialPayloads_ThrowsCollisionException()
+    {
+        // ARRANGE
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-IDEM-COLLISION-44", "FEDEX", date);
+        context.Shipments.Add(shipment);
+
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-COLLIDE-44",
+            BaseTransportationCost = 100.00m,
+            TotalCarrierCost = 100.00m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+
+        // Two adjustments share same IdempotencyKey but have conflicting CarrierCostDelta (-$10.00 vs -$25.00)
+        var sharedKey = "IDEM-CONFLICT-KEY-001";
+        var adj1 = new CarrierCostAdjustment
+        {
+            Id = Guid.NewGuid(),
+            CarrierCostRecordId = cost.Id,
+            AdjustmentType = CarrierCostAdjustmentType.DisputeCredit,
+            Reason = "Initial credit",
+            OriginalCarrierCost = 100.00m,
+            AdjustedCarrierCost = 90.00m,
+            CarrierCostDelta = -10.00m,
+            AdjustedAtUtc = date.AddDays(1),
+            IdempotencyKey = sharedKey
+        };
+
+        var adj2 = new CarrierCostAdjustment
+        {
+            Id = Guid.NewGuid(),
+            CarrierCostRecordId = cost.Id,
+            AdjustmentType = CarrierCostAdjustmentType.DisputeCredit,
+            Reason = "Conflicting larger credit",
+            OriginalCarrierCost = 100.00m,
+            AdjustedCarrierCost = 75.00m,
+            CarrierCostDelta = -25.00m, // Conflicting delta!
+            AdjustedAtUtc = date.AddDays(1),
+            IdempotencyKey = sharedKey
+        };
+
+        cost.Adjustments.Add(adj1);
+        cost.Adjustments.Add(adj2);
+        context.CarrierCostRecords.Add(cost);
+        await context.SaveChangesAsync();
+
+        var service = new FreightReconciliationService(
+            context,
+            tenantProvider,
+            currentUser,
+            _fxRateProvider,
+            NullLogger<FreightReconciliationService>.Instance);
+
+        // ACT & ASSERT: Must throw InvalidOperationException due to collision conflict
+        var ex = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.GetShipmentFinancialReconciliationAsync(shipment.Id));
+        Assert.Contains("Idempotency collision detected", ex.Message);
+    }
+
+    [Fact]
+    public async Task Test_45_FuelAndInsurance_CoexistWithDetailedAccessorialRows_WithoutOmission()
+    {
+        // ARRANGE
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-FUEL-INS-45", "FEDEX", date);
+        context.Shipments.Add(shipment);
+
+        // Cost record with Base $100, Fuel $15, Insurance $5, and detailed AccessorialCharges ($30 + $20 = $50)
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-FUEL-45",
+            BaseTransportationCost = 100.00m,
+            FuelSurcharge = 15.00m,
+            InsuranceCost = 5.00m,
+            AccessorialCost = 50.00m,
+            TotalCarrierCost = 170.00m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+
+        cost.AccessorialCharges.Add(new CarrierAccessorialCharge
+        {
+            Id = Guid.NewGuid(),
+            CarrierCostRecordId = cost.Id,
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            AccessorialType = AccessorialType.LiftgateService,
+            CarrierAccessorialCode = "LIFTGATE",
+            CarrierAmount = 30.00m,
+            Currency = "USD",
+            AssessedAtUtc = date
+        });
+
+        cost.AccessorialCharges.Add(new CarrierAccessorialCharge
+        {
+            Id = Guid.NewGuid(),
+            CarrierCostRecordId = cost.Id,
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            AccessorialType = AccessorialType.ResidentialDelivery,
+            CarrierAccessorialCode = "RESIDENTIAL",
+            CarrierAmount = 20.00m,
+            Currency = "USD",
+            AssessedAtUtc = date
+        });
+
+        context.CarrierCostRecords.Add(cost);
+        await context.SaveChangesAsync();
+
+        var service = new FreightReconciliationService(
+            context,
+            tenantProvider,
+            currentUser,
+            _fxRateProvider,
+            NullLogger<FreightReconciliationService>.Instance);
+
+        // ACT
+        var result = await service.GetShipmentFinancialReconciliationAsync(shipment.Id);
+
+        // ASSERT: Total accessorials = Fuel ($15) + Insurance ($5) + Detailed ($50) = $70.00m
+        Assert.NotNull(result);
+        Assert.Equal(100.00m, result.InvoicedCarrierBaseCostUsd);
+        Assert.Equal(70.00m, result.InvoicedCarrierAccessorialsUsd);
+        Assert.Equal(170.00m, result.NetInvoicedCarrierCostUsd);
+    }
+
+    [Fact]
+    public void Test_46_InvalidFxRates_And_MalformedCurrency_FailSafely()
+    {
+        var validDate = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+
+        // 1. Zero exchange rate throws ArgumentOutOfRangeException
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new CurrencyConversionEvidence("CAD", 100m, 0m, validDate, "FRB", "V1", "USD"));
+
+        // 2. Negative exchange rate throws ArgumentOutOfRangeException
+        Assert.Throws<ArgumentOutOfRangeException>(() =>
+            new CurrencyConversionEvidence("CAD", 100m, -0.5m, validDate, "FRB", "V1", "USD"));
+
+        // 3. Null or whitespace original currency throws ArgumentException
+        Assert.Throws<ArgumentException>(() =>
+            new CurrencyConversionEvidence("", 100m, 0.74m, validDate, "FRB", "V1", "USD"));
+
+        // 4. Null or whitespace target currency throws ArgumentException
+        Assert.Throws<ArgumentException>(() =>
+            new CurrencyConversionEvidence("CAD", 100m, 0.74m, validDate, "FRB", "V1", "   "));
+
+        // 5. FxRateProvider throws ArgumentException for empty source or target currency
+        var provider = new FxRateProvider();
+        Assert.Throws<ArgumentException>(() =>
+            provider.GetHistoricalExchangeRate("", "USD", validDate, out _, out _));
+        Assert.Throws<ArgumentException>(() =>
+            provider.GetHistoricalExchangeRate("CAD", "", validDate, out _, out _));
+    }
+
+    [Fact]
+    public void Test_47_FxEffectiveDate_UnspecifiedKindRejected_LocalKindNormalizedToUtc()
+    {
+        var provider = new FxRateProvider();
+
+        // 1. Unspecified DateTimeKind throws ArgumentException
+        var unspecifiedDate = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Unspecified);
+        Assert.Throws<ArgumentException>(() =>
+            provider.GetHistoricalExchangeRate("CAD", "USD", unspecifiedDate, out _, out _));
+
+        // 2. CurrencyConversionEvidence with Unspecified DateTimeKind throws ArgumentException
+        Assert.Throws<ArgumentException>(() =>
+            new CurrencyConversionEvidence("CAD", 100m, 0.74m, unspecifiedDate, "FRB", "V1", "USD"));
+
+        // 3. DateTimeKind.Local is normalized to UTC
+        var localDate = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Local);
+        var rate = provider.GetHistoricalExchangeRate("CAD", "USD", localDate, out var source, out var version);
+        Assert.Equal(0.7400m, rate);
+        Assert.Equal("FederalReserveBoard_H10", source);
+        Assert.Equal("FRB-20261109", version);
+    }
+
+    [Fact]
+    public void Test_48_FutureFxEffectiveDate_CannotBeUsedBeforePublication()
+    {
+        var provider = new FxRateProvider();
+
+        // Effective date far beyond published bulletin schedule (e.g. 2026-12-01)
+        var futureDate = new DateTime(2026, 12, 1, 0, 0, 0, DateTimeKind.Utc);
+
+        var ex = Assert.Throws<InvalidOperationException>(() =>
+            provider.GetHistoricalExchangeRate("CAD", "USD", futureDate, out _, out _));
+
+        Assert.Contains("exceeds published bulletin fixing schedule", ex.Message);
+        Assert.Contains("Future rates cannot be used before publication", ex.Message);
     }
 }

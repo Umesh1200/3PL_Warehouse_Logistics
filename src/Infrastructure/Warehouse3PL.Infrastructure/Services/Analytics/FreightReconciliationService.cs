@@ -11,7 +11,7 @@ using Warehouse3PL.Domain.ValueObjects;
 namespace Warehouse3PL.Infrastructure.Services.Analytics;
 
 /// <summary>
-/// Service providing authoritative financial reconciliation between buy-side carrier expenses and sell-side client freight.
+/// Authoritative financial reconciliation analytics service reconciling buy-side and sell-side freight spend.
 /// Strictly enforces anti-double counting, signed adjustment accounting, multi-package conservation, and fail-closed authorization.
 /// DB-SPEC-3PL-2026 Phase 6.4.4.1 Buy-Side &amp; Sell-Side Financial Reconciliation.
 /// </summary>
@@ -27,22 +27,13 @@ public class FreightReconciliationService : IFreightReconciliationService
         IApplicationDbContext dbContext,
         ITenantProvider tenantProvider,
         ICurrentUserContext currentUserContext,
-        ILogger<FreightReconciliationService> logger)
-        : this(dbContext, tenantProvider, currentUserContext, new FxRateProvider(), logger)
-    {
-    }
-
-    public FreightReconciliationService(
-        IApplicationDbContext dbContext,
-        ITenantProvider tenantProvider,
-        ICurrentUserContext currentUserContext,
         IFxRateProvider fxRateProvider,
         ILogger<FreightReconciliationService> logger)
     {
         _dbContext = dbContext;
         _tenantProvider = tenantProvider;
         _currentUserContext = currentUserContext;
-        _fxRateProvider = fxRateProvider;
+        _fxRateProvider = fxRateProvider ?? throw new ArgumentNullException(nameof(fxRateProvider));
         _logger = logger;
     }
 
@@ -138,29 +129,100 @@ public class FreightReconciliationService : IFreightReconciliationService
         var adjustmentsAudit = new List<CarrierAdjustmentAuditDto>();
         var carrierInvoiceNumbers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        FreightReconciliationStatus buySideStatus = FreightReconciliationStatus.Estimated;
+        FreightReconciliationStatus buySideStatus;
 
         if (invoicedRecords.Count > 0)
         {
-            foreach (var inv in invoicedRecords)
+            foreach (var cost in invoicedRecords)
             {
-                if (!string.IsNullOrWhiteSpace(inv.CarrierInvoiceNumber))
+                if (!string.IsNullOrWhiteSpace(cost.CarrierInvoiceNumber))
                 {
-                    carrierInvoiceNumbers.Add(inv.CarrierInvoiceNumber.Trim());
+                    carrierInvoiceNumbers.Add(cost.CarrierInvoiceNumber.Trim());
                 }
 
-                // Currency Normalization for each individual charge line
-                decimal baseComponent = inv.BaseTransportationCost + inv.FuelSurcharge + inv.InsuranceCost;
-                var baseConv = NormalizeCurrency(baseComponent, inv.Currency, "USD", inv.CostAssessedAtUtc);
+                // Currency Normalization for individual base charge
+                var baseConv = NormalizeCurrency(cost.BaseTransportationCost, cost.Currency, "USD", cost.CostAssessedAtUtc);
                 invoicedBaseAmountUsd += baseConv.ConvertedAmountUsd;
                 conversionAuditTrail.Add(baseConv);
 
-                if (inv.AccessorialCost != 0m)
+                // Accessorial & Surcharge Accounting:
+                // Fuel and Insurance are explicit non-base surcharges on CarrierCostRecord.
+                // Detailed accessorial items in AccessorialCharges (e.g. liftgate, detention) are aggregated in addition to fuel & insurance.
+                decimal detailedAccessorials = cost.AccessorialCharges.Count > 0
+                    ? cost.AccessorialCharges.Sum(a => a.CarrierAmount)
+                    : cost.AccessorialCost;
+
+                decimal totalNonBaseSurcharges = cost.FuelSurcharge + cost.InsuranceCost + detailedAccessorials;
+
+                var accConv = NormalizeCurrency(totalNonBaseSurcharges, cost.Currency, "USD", cost.CostAssessedAtUtc);
+                invoicedAccessorialsAmountUsd += accConv.ConvertedAmountUsd;
+                conversionAuditTrail.Add(accConv);
+            }
+
+            // Detect Idempotency Collisions:
+            // If adjustments share an IdempotencyKey but differ in financial content (amounts, type, currency),
+            // throw an exception rather than silently choosing one.
+            var adjustmentsWithKeys = invoicedRecords
+                .SelectMany(c => c.Adjustments.Select(adj => new { Adjustment = adj, ParentCost = c }))
+                .Where(x => !string.IsNullOrWhiteSpace(x.Adjustment.IdempotencyKey))
+                .GroupBy(x => x.Adjustment.IdempotencyKey.Trim().ToUpperInvariant())
+                .ToList();
+
+            foreach (var group in adjustmentsWithKeys)
+            {
+                var first = group.First();
+                bool hasConflict = group.Any(item =>
+                    item.Adjustment.CarrierCostDelta != first.Adjustment.CarrierCostDelta ||
+                    item.Adjustment.AdjustmentType != first.Adjustment.AdjustmentType ||
+                    item.Adjustment.OriginalCarrierCost != first.Adjustment.OriginalCarrierCost ||
+                    item.Adjustment.AdjustedCarrierCost != first.Adjustment.AdjustedCarrierCost ||
+                    !string.Equals(item.Adjustment.Currency ?? item.ParentCost.Currency, first.Adjustment.Currency ?? first.ParentCost.Currency, StringComparison.OrdinalIgnoreCase));
+
+                if (hasConflict)
                 {
-                    var accConv = NormalizeCurrency(inv.AccessorialCost, inv.Currency, "USD", inv.CostAssessedAtUtc);
-                    invoicedAccessorialsAmountUsd += accConv.ConvertedAmountUsd;
-                    conversionAuditTrail.Add(accConv);
+                    throw new InvalidOperationException(
+                        $"Idempotency collision detected for adjustment key '{group.Key}'. Multiple adjustments share this key but contain conflicting financial values.");
                 }
+            }
+
+            // Deduplicate adjustments globally across all invoiced records for this shipment
+            var allAdjustments = invoicedRecords
+                .SelectMany(c => c.Adjustments.Select(adj => new { Adjustment = adj, ParentCost = c }))
+                .GroupBy(x => !string.IsNullOrWhiteSpace(x.Adjustment.IdempotencyKey)
+                    ? $"IDEM:{x.Adjustment.IdempotencyKey.Trim().ToUpperInvariant()}"
+                    : $"KEY:{x.Adjustment.CarrierCostRecordId}:{x.Adjustment.AdjustmentType}:{x.Adjustment.OriginalCarrierCost}:{x.Adjustment.AdjustedCarrierCost}:{x.Adjustment.AdjustedAtUtc:O}")
+                .Select(g => g.OrderByDescending(x => x.Adjustment.AdjustedAtUtc).First())
+                .ToList();
+
+            foreach (var item in allAdjustments)
+            {
+                var adj = item.Adjustment;
+                var cost = item.ParentCost;
+
+                // Currency Normalization for individual adjustments using parent currency and adjustment date
+                var adjCurrency = string.IsNullOrWhiteSpace(adj.Currency) ? cost.Currency : adj.Currency;
+                var adjEffectiveDate = adj.AdjustedAtUtc == default ? cost.CostAssessedAtUtc : adj.AdjustedAtUtc;
+                var adjConv = NormalizeCurrency(adj.CarrierCostDelta, adjCurrency, "USD", adjEffectiveDate);
+
+                totalAdjustmentsAmountUsd += adjConv.ConvertedAmountUsd;
+                conversionAuditTrail.Add(adjConv);
+
+                if (!string.IsNullOrWhiteSpace(adj.CarrierInvoiceNumber))
+                {
+                    carrierInvoiceNumbers.Add(adj.CarrierInvoiceNumber.Trim());
+                }
+
+                adjustmentsAudit.Add(new CarrierAdjustmentAuditDto
+                {
+                    AdjustmentId = adj.Id,
+                    CarrierInvoiceNumber = adj.CarrierInvoiceNumber,
+                    AdjustmentType = adj.AdjustmentType,
+                    OriginalCost = adj.OriginalCarrierCost,
+                    AdjustedCost = adj.AdjustedCarrierCost,
+                    CostDelta = adj.CarrierCostDelta,
+                    Reason = adj.Reason,
+                    AdjustedAtUtc = adj.AdjustedAtUtc
+                });
             }
 
             if (invoicedRecords.Any(c => c.Status == CarrierCostStatus.Disputed))
@@ -174,49 +236,6 @@ public class FreightReconciliationService : IFreightReconciliationService
             else
             {
                 buySideStatus = FreightReconciliationStatus.Invoiced;
-            }
-
-            // 2D. Adjustments Restricted to Authoritative Invoiced Lineage (Global Shipment Deduplication)
-            // Flatten all adjustments across invoiced records and deduplicate globally by idempotency key/composite key
-            var allInvoicedAdjustments = invoicedRecords
-                .SelectMany(c => c.Adjustments.Select(a => new { ParentCost = c, Adjustment = a }))
-                .GroupBy(x => !string.IsNullOrWhiteSpace(x.Adjustment.IdempotencyKey)
-                    ? $"KEY:{x.Adjustment.IdempotencyKey.Trim().ToUpperInvariant()}"
-                    : (!string.IsNullOrWhiteSpace(x.Adjustment.CarrierInvoiceNumber)
-                        ? $"INV:{x.Adjustment.CarrierInvoiceNumber.Trim().ToUpperInvariant()}:{x.Adjustment.AdjustmentType}:{x.Adjustment.CarrierCostDelta}"
-                        : $"ID:{x.Adjustment.Id}"))
-                .Select(g => g.First())
-                .ToList();
-
-            foreach (var item in allInvoicedAdjustments)
-            {
-                var adj = item.Adjustment;
-                var cost = item.ParentCost;
-
-                if (!string.IsNullOrWhiteSpace(adj.CarrierInvoiceNumber))
-                {
-                    carrierInvoiceNumbers.Add(adj.CarrierInvoiceNumber.Trim());
-                }
-
-                // Currency Normalization for individual adjustments using parent currency and adjustment date
-                var adjCurrency = string.IsNullOrWhiteSpace(adj.Currency) ? cost.Currency : adj.Currency;
-                var adjEffectiveDate = adj.AdjustedAtUtc == default ? cost.CostAssessedAtUtc : adj.AdjustedAtUtc;
-                var adjConv = NormalizeCurrency(adj.CarrierCostDelta, adjCurrency, "USD", adjEffectiveDate);
-
-                totalAdjustmentsAmountUsd += adjConv.ConvertedAmountUsd;
-                conversionAuditTrail.Add(adjConv);
-
-                adjustmentsAudit.Add(new CarrierAdjustmentAuditDto
-                {
-                    AdjustmentId = adj.Id,
-                    CarrierInvoiceNumber = adj.CarrierInvoiceNumber,
-                    AdjustmentType = adj.AdjustmentType,
-                    OriginalCost = adj.OriginalCarrierCost,
-                    AdjustedCost = adj.AdjustedCarrierCost,
-                    CostDelta = adj.CarrierCostDelta,
-                    Reason = adj.Reason,
-                    AdjustedAtUtc = adj.AdjustedAtUtc
-                });
             }
         }
         else
@@ -278,7 +297,7 @@ public class FreightReconciliationService : IFreightReconciliationService
         decimal invoicedClientFreightUsd = 0m;
         var clientInvoiceNumbers = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
 
-        FreightReconciliationStatus sellSideStatus = FreightReconciliationStatus.Estimated;
+        FreightReconciliationStatus sellSideStatus;
 
         if (distinctInvoiceLines.Count > 0)
         {
@@ -310,18 +329,15 @@ public class FreightReconciliationService : IFreightReconciliationService
                 sellSideStatus = FreightReconciliationStatus.Invoiced;
             }
         }
-        else if (marginRecord != null)
+        else
         {
-            var mConvFallback = NormalizeCurrency(
-                marginRecord.TotalClientFreight,
-                marginRecord.Currency ?? "USD",
-                "USD",
-                marginRecord.RatedAtUtc);
-            invoicedClientFreightUsd = mConvFallback.ConvertedAmountUsd;
-            sellSideStatus = marginRecord.IsReconciled ? FreightReconciliationStatus.Reconciled : FreightReconciliationStatus.Estimated;
+            // CRITICAL: When NO qualifying invoice lines exist, invoiced client freight is strictly 0.00m.
+            // A ShipmentFreightMarginRecord is an operational estimate/commercial baseline, NEVER an authoritative client invoice.
+            invoicedClientFreightUsd = 0.00m;
+            sellSideStatus = FreightReconciliationStatus.Estimated;
         }
 
-        // Preserve legitimate zero estimates:
+        // Resolve estimated client freight:
         // Distinguish "no estimate exists" (marginRecord == null) from "estimate exists and is zero" (marginRecord.TotalClientFreight == 0m)
         decimal estimatedClientFreightUsd;
         if (marginRecord != null)
@@ -340,31 +356,32 @@ public class FreightReconciliationService : IFreightReconciliationService
             estimatedClientFreightUsd = invoicedClientFreightUsd;
         }
 
-        // Sell-side reconciliation is strictly independent of buy-side status
-        decimal? reconciledClientFreightUsd = (sellSideStatus == FreightReconciliationStatus.Reconciled)
+        decimal? reconciledClientFreightUsd = (sellSideStatus == FreightReconciliationStatus.Reconciled && distinctInvoiceLines.Count > 0)
             ? invoicedClientFreightUsd
             : null;
 
-        // 4. Multi-Package Cost Allocation (Deterministic Tie-Break & Valid Weight Enforcement)
+        // 4. Deterministic Multi-Package Allocation
         var packageList = shipment.Packages
-            .OrderBy(p => p.PackageNumber)
             .Select(p => (
-                p.Id,
-                p.PackageNumber,
+                PackageId: p.Id,
+                PackageNumber: p.PackageNumber,
                 WeightKg: p.GrossWeightKg > 0m ? p.GrossWeightKg : (p.NetWeightKg > 0m ? p.NetWeightKg : 0m)))
             .ToList();
 
-        var packageAllocations = AllocateShipmentCostsToPackages(netInvoicedCarrierCostUsd, invoicedClientFreightUsd, packageList);
+        var packageAllocations = AllocateShipmentCostsToPackages(
+            netInvoicedCarrierCostUsd,
+            invoicedClientFreightUsd,
+            packageList);
 
-        // 5. Primary Conversion Evidence
-        var primaryEvidence = conversionAuditTrail.FirstOrDefault()
-            ?? NormalizeCurrency(netInvoicedCarrierCostUsd, "USD", "USD", shipment.DispatchedAtUtc ?? DateTime.UtcNow);
+        // 5. Build Comprehensive Audit DTO
+        var primaryEvidence = conversionAuditTrail.LastOrDefault();
+        var trackingNumber = shipment.Packages.FirstOrDefault(p => !string.IsNullOrWhiteSpace(p.TrackingNumber))?.TrackingNumber ?? string.Empty;
 
         return new ReconciledShipmentFinancialsDto
         {
             ShipmentId = shipment.Id,
             ShipmentNumber = shipment.ShipmentNumber,
-            TrackingNumber = shipment.Packages.FirstOrDefault(p => !string.IsNullOrEmpty(p.TrackingNumber))?.TrackingNumber,
+            TrackingNumber = trackingNumber,
             CarrierCode = shipment.CarrierCode,
             CarrierServiceLevel = shipment.CarrierServiceLevel,
             FacilityId = shipment.FacilityId,
@@ -438,31 +455,48 @@ public class FreightReconciliationService : IFreightReconciliationService
             .ToListAsync(cancellationToken);
 
         var shipmentDtos = new List<ReconciledShipmentFinancialsDto>(shipmentIds.Count);
-
-        foreach (var id in shipmentIds)
+        foreach (var sId in shipmentIds)
         {
-            var reconciled = await GetShipmentFinancialReconciliationAsync(id, cancellationToken);
-            shipmentDtos.Add(reconciled);
+            var recon = await GetShipmentFinancialReconciliationAsync(sId, cancellationToken);
+            shipmentDtos.Add(recon);
         }
 
-        int totalDisputed = shipmentDtos.Count(s => s.BuySideReconciliationStatus == FreightReconciliationStatus.Disputed);
+        // 3. Batch Aggregation
+        int totalShipments = shipmentDtos.Count;
+        decimal totalQuoted = shipmentDtos.Sum(s => s.QuotedCarrierCostUsd);
+        decimal totalEstimated = shipmentDtos.Sum(s => s.EstimatedCarrierCostUsd);
+        decimal totalInvoicedCarrier = shipmentDtos.Sum(s => s.InvoicedCarrierBaseCostUsd + s.InvoicedCarrierAccessorialsUsd);
+        decimal totalNetInvoicedCarrier = shipmentDtos.Sum(s => s.NetInvoicedCarrierCostUsd);
+        decimal totalReconciledCarrier = shipmentDtos.Sum(s => s.ReconciledCarrierCostUsd ?? 0m);
+
+        decimal totalInvoicedClient = shipmentDtos.Sum(s => s.InvoicedClientFreightUsd);
+        decimal totalReconciledClient = shipmentDtos.Sum(s => s.ReconciledClientFreightUsd ?? 0m);
+
+        int totalAdjustmentsCount = shipmentDtos.Sum(s => s.AdjustmentAuditTrail.Count);
+        decimal totalAdjustmentsAmount = shipmentDtos.Sum(s => s.TotalCarrierAdjustmentsUsd);
+
+        int disputedCount = shipmentDtos.Count(s =>
+            s.BuySideReconciliationStatus == FreightReconciliationStatus.Disputed ||
+            s.SellSideReconciliationStatus == FreightReconciliationStatus.Disputed);
+
         decimal disputedAmount = shipmentDtos
-            .Where(s => s.BuySideReconciliationStatus == FreightReconciliationStatus.Disputed)
+            .Where(s => s.BuySideReconciliationStatus == FreightReconciliationStatus.Disputed ||
+                        s.SellSideReconciliationStatus == FreightReconciliationStatus.Disputed)
             .Sum(s => s.NetInvoicedCarrierCostUsd);
 
         return new ReconciliationBatchSummaryDto
         {
-            TotalShipmentsCount = shipmentDtos.Count,
-            TotalQuotedAmountUsd = shipmentDtos.Sum(s => s.QuotedCarrierCostUsd),
-            TotalEstimatedAmountUsd = shipmentDtos.Sum(s => s.EstimatedCarrierCostUsd),
-            TotalInvoicedCarrierCostUsd = shipmentDtos.Sum(s => s.InvoicedCarrierBaseCostUsd + s.InvoicedCarrierAccessorialsUsd),
-            TotalNetInvoicedCarrierCostUsd = shipmentDtos.Sum(s => s.NetInvoicedCarrierCostUsd),
-            TotalReconciledCarrierCostUsd = shipmentDtos.Sum(s => s.ReconciledCarrierCostUsd ?? 0m),
-            TotalInvoicedClientFreightUsd = shipmentDtos.Sum(s => s.InvoicedClientFreightUsd),
-            TotalReconciledClientFreightUsd = shipmentDtos.Sum(s => s.ReconciledClientFreightUsd ?? 0m),
-            TotalAdjustmentsCount = shipmentDtos.Sum(s => s.AdjustmentAuditTrail.Count),
-            TotalAdjustmentsAmountUsd = shipmentDtos.Sum(s => s.TotalCarrierAdjustmentsUsd),
-            DisputedShipmentsCount = totalDisputed,
+            TotalShipmentsCount = totalShipments,
+            TotalQuotedAmountUsd = totalQuoted,
+            TotalEstimatedAmountUsd = totalEstimated,
+            TotalInvoicedCarrierCostUsd = totalInvoicedCarrier,
+            TotalNetInvoicedCarrierCostUsd = totalNetInvoicedCarrier,
+            TotalReconciledCarrierCostUsd = totalReconciledCarrier,
+            TotalInvoicedClientFreightUsd = totalInvoicedClient,
+            TotalReconciledClientFreightUsd = totalReconciledClient,
+            TotalAdjustmentsCount = totalAdjustmentsCount,
+            TotalAdjustmentsAmountUsd = totalAdjustmentsAmount,
+            DisputedShipmentsCount = disputedCount,
             DisputedAmountUsd = disputedAmount,
             Shipments = shipmentDtos.AsReadOnly()
         };
@@ -542,32 +576,27 @@ public class FreightReconciliationService : IFreightReconciliationService
             });
         }
 
-        // Exact Cent Conservation: Assign residual cents deterministically
+        // Exact Cent Conservation Rule:
+        // Adjust for any rounding residuals (CarrierCostResidual and ClientFreightResidual)
+        // by attributing the single cent residual to the heaviest package.
+        // Deterministic Tie-Breaker: Order by WeightKg desc, PackageNumber asc, PackageId asc.
         decimal carrierResidual = totalCarrierCost - runningCarrierSum;
         decimal clientResidual = totalClientFreight - runningClientSum;
 
         if (carrierResidual != 0m || clientResidual != 0m)
         {
-            // Deterministic Tie-Break:
-            // 1. WeightKg descending (heaviest package)
-            // 2. PackageNumber ascending (lexicographical tie-break)
-            // 3. PackageId ascending (absolute UUID tie-break)
-            var targetPackage = sanitizedPackages
-                .OrderByDescending(p => isFallbackEqualAllocation ? 1.0m : p.WeightKg)
-                .ThenBy(p => p.PackageNumber, StringComparer.OrdinalIgnoreCase)
-                .ThenBy(p => p.PackageId)
+            var primaryPackage = allocations
+                .OrderByDescending(a => a.WeightKg)
+                .ThenBy(a => a.PackageNumber, StringComparer.OrdinalIgnoreCase)
+                .ThenBy(a => a.PackageId)
                 .First();
 
-            int targetIdx = allocations.FindIndex(a => a.PackageId == targetPackage.PackageId);
-            if (targetIdx >= 0)
+            int targetIndex = allocations.IndexOf(primaryPackage);
+            allocations[targetIndex] = primaryPackage with
             {
-                var targetAlloc = allocations[targetIdx];
-                allocations[targetIdx] = targetAlloc with
-                {
-                    AllocatedCarrierCostUsd = targetAlloc.AllocatedCarrierCostUsd + carrierResidual,
-                    AllocatedClientFreightUsd = targetAlloc.AllocatedClientFreightUsd + clientResidual
-                };
-            }
+                AllocatedCarrierCostUsd = primaryPackage.AllocatedCarrierCostUsd + carrierResidual,
+                AllocatedClientFreightUsd = primaryPackage.AllocatedClientFreightUsd + clientResidual
+            };
         }
 
         return allocations.AsReadOnly();
@@ -584,45 +613,65 @@ public class FreightReconciliationService : IFreightReconciliationService
         var src = string.IsNullOrWhiteSpace(sourceCurrency) ? "USD" : sourceCurrency.Trim().ToUpperInvariant();
         var tgt = string.IsNullOrWhiteSpace(targetCurrency) ? "USD" : targetCurrency.Trim().ToUpperInvariant();
 
+        var utcDate = effectiveDateUtc.Kind == DateTimeKind.Local ? effectiveDateUtc.ToUniversalTime() : effectiveDateUtc;
+
         if (string.Equals(src, tgt, StringComparison.OrdinalIgnoreCase))
         {
             return new CurrencyConversionEvidence(
-                src,
-                amount,
-                1.0m,
-                effectiveDateUtc,
-                rateSource: "IdentityRate",
+                originalCurrency: src,
+                originalAmount: amount,
+                exchangeRate: 1.0m,
+                effectiveDateUtc: utcDate,
+                rateSource: rateSource ?? "IdentityRate",
                 rateVersion: "Identity-1.0",
                 targetCurrency: tgt,
                 roundingDecimals: 4,
-                roundingMode: MidpointRounding.AwayFromZero);
+                roundingMode: MidpointRounding.AwayFromZero,
+                benchmarkSeriesId: "IDENTITY",
+                integrityHash: "IDENTITY",
+                publishedAtUtc: utcDate);
         }
 
-        decimal rate;
-        string source;
-        string version;
+        if (exchangeRate.HasValue)
+        {
+            return new CurrencyConversionEvidence(
+                originalCurrency: src,
+                originalAmount: amount,
+                exchangeRate: exchangeRate.Value,
+                effectiveDateUtc: utcDate,
+                rateSource: rateSource ?? "ExplicitProvided",
+                rateVersion: "Explicit-1.0",
+                targetCurrency: tgt,
+                roundingDecimals: 4,
+                roundingMode: MidpointRounding.AwayFromZero,
+                benchmarkSeriesId: "EXPLICIT",
+                integrityHash: "EXPLICIT",
+                publishedAtUtc: utcDate);
+        }
 
-        if (exchangeRate.HasValue && exchangeRate.Value > 0m)
-        {
-            rate = exchangeRate.Value;
-            source = rateSource ?? "ContractualTenderRate";
-            version = "ExplicitCallerSnapshot";
-        }
-        else
-        {
-            rate = _fxRateProvider.GetHistoricalExchangeRate(src, tgt, effectiveDateUtc, out source, out version);
-        }
+        decimal rate = _fxRateProvider.GetHistoricalExchangeRate(
+            src,
+            tgt,
+            utcDate,
+            out var source,
+            out var version,
+            out var seriesId,
+            out var hash,
+            out var publishedAt);
 
         return new CurrencyConversionEvidence(
-            src,
-            amount,
-            rate,
-            effectiveDateUtc,
-            rateSource: source,
+            originalCurrency: src,
+            originalAmount: amount,
+            exchangeRate: rate,
+            effectiveDateUtc: utcDate,
+            rateSource: rateSource ?? source,
             rateVersion: version,
             targetCurrency: tgt,
             roundingDecimals: 4,
-            roundingMode: MidpointRounding.AwayFromZero);
+            roundingMode: MidpointRounding.AwayFromZero,
+            benchmarkSeriesId: seriesId,
+            integrityHash: hash,
+            publishedAtUtc: publishedAt);
     }
 
     #region Private Authorization & Verification Helpers
@@ -675,18 +724,7 @@ public class FreightReconciliationService : IFreightReconciliationService
             throw new ForbiddenException($"Access denied. Shipment '{shipment.ShipmentNumber}' belongs to tenant '{shipment.ClientId}'.");
         }
 
-        // If client user context carries a specific assigned facility, enforce it
-        var userFacilityId = _currentUserContext.FacilityId;
-        if (userFacilityId.HasValue && userFacilityId.Value != Guid.Empty)
-        {
-            if (userFacilityId.Value != shipment.FacilityId)
-            {
-                throw new ForbiddenException($"Access denied. Shipment '{shipment.ShipmentNumber}' belongs to facility '{shipment.FacilityId}', outside user assigned facility '{userFacilityId.Value}'.");
-            }
-            return;
-        }
-
-        // Otherwise verify against permitted facility access assignments in ClientFacilityAccess
+        // Fail-Closed: Always verify that the client has an active facility assignment in ClientFacilityAccess
         var hasActiveFacilityAccess = _dbContext.ClientFacilityAccesses
             .Any(cfa => cfa.ClientId == userTenantId.Value
                      && cfa.FacilityId == shipment.FacilityId
@@ -695,6 +733,13 @@ public class FreightReconciliationService : IFreightReconciliationService
         if (!hasActiveFacilityAccess)
         {
             throw new ForbiddenException($"Access denied. Client '{userTenantId.Value}' does not have active authorized access to facility '{shipment.FacilityId}'.");
+        }
+
+        // If client user context carries a specific assigned facility, enforce that it matches the shipment facility
+        var userFacilityId = _currentUserContext.FacilityId;
+        if (userFacilityId.HasValue && userFacilityId.Value != Guid.Empty && userFacilityId.Value != shipment.FacilityId)
+        {
+            throw new ForbiddenException($"Access denied. Shipment '{shipment.ShipmentNumber}' belongs to facility '{shipment.FacilityId}', outside user assigned facility '{userFacilityId.Value}'.");
         }
     }
 
@@ -763,18 +808,7 @@ public class FreightReconciliationService : IFreightReconciliationService
         }
         effectiveClientId = userTenantId.Value;
 
-        var userFacilityId = _currentUserContext.FacilityId;
-        if (userFacilityId.HasValue && userFacilityId.Value != Guid.Empty)
-        {
-            if (requestedFacilityId.HasValue && requestedFacilityId.Value != userFacilityId.Value)
-            {
-                throw new ForbiddenException($"Access denied. You cannot access freight financial records for facility '{requestedFacilityId.Value}'.");
-            }
-            effectiveFacilityId = userFacilityId.Value;
-            return;
-        }
-
-        // Client has no specific single facility in token: verify ClientFacilityAccess
+        // Retrieve all currently ACTIVE facility assignments for this client
         var authorizedFacilityIds = _dbContext.ClientFacilityAccesses
             .Where(cfa => cfa.ClientId == userTenantId.Value && cfa.Status == FacilityAccessStatus.Active)
             .Select(cfa => cfa.FacilityId)
@@ -785,6 +819,24 @@ public class FreightReconciliationService : IFreightReconciliationService
             throw new ForbiddenException($"Access denied. Client tenant '{userTenantId.Value}' has no active facility access assignments.");
         }
 
+        var userFacilityId = _currentUserContext.FacilityId;
+        if (userFacilityId.HasValue && userFacilityId.Value != Guid.Empty)
+        {
+            // Verify the facility claim in the token is still actively assigned!
+            if (!authorizedFacilityIds.Contains(userFacilityId.Value))
+            {
+                throw new ForbiddenException($"Access denied. Facility claim '{userFacilityId.Value}' is not currently active for client '{userTenantId.Value}'.");
+            }
+
+            if (requestedFacilityId.HasValue && requestedFacilityId.Value != userFacilityId.Value)
+            {
+                throw new ForbiddenException($"Access denied. You cannot access freight financial records for facility '{requestedFacilityId.Value}'.");
+            }
+            effectiveFacilityId = userFacilityId.Value;
+            return;
+        }
+
+        // Client has no specific single facility in token: verify against active assignments
         if (requestedFacilityId.HasValue)
         {
             if (!authorizedFacilityIds.Contains(requestedFacilityId.Value))

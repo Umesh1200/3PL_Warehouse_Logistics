@@ -22,4 +22,18 @@ public interface IFxRateProvider
         DateTime effectiveDateUtc,
         out string rateSource,
         out string rateVersion);
+
+    /// <summary>
+    /// Resolves the authoritative historical exchange rate for the given currency pair on the specified effective date,
+    /// returning comprehensive provenance evidence including publication timestamp, benchmark series ID, and cryptographic integrity digest.
+    /// </summary>
+    decimal GetHistoricalExchangeRate(
+        string sourceCurrency,
+        string targetCurrency,
+        DateTime effectiveDateUtc,
+        out string rateSource,
+        out string rateVersion,
+        out string benchmarkSeriesId,
+        out string integrityHash,
+        out DateTime publishedAtUtc);
 }

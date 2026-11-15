@@ -39,19 +39,34 @@ public record CurrencyConversionEvidence
     public decimal ConvertedAmountUsd { get; init; }
 
     /// <summary>
-    /// Historical date and time at which the exchange rate was effective.
+    /// Historical date and time at which the exchange rate was effective in UTC.
     /// </summary>
     public DateTime EffectiveDateUtc { get; init; }
 
     /// <summary>
-    /// Authoritative source or rate provider (e.g., "FederalReserveDaily", "ECBReferenceDaily", "ContractualTenderRate").
+    /// Authoritative source or rate provider (e.g., "FederalReserveBoard_H10", "EuropeanCentralBank_Reference", "BankOfEngland_SpotStatistical").
     /// </summary>
-    public string RateSource { get; init; } = "FederalReserveDaily";
+    public string RateSource { get; init; } = "FederalReserveBoard_H10";
 
     /// <summary>
-    /// Discrete rate publication version or snapshot identifier (e.g., "FRB-20261101", "ExplicitCallerSnapshot").
+    /// Discrete rate publication version or snapshot identifier (e.g., "FRB-20261102", "ExplicitCallerSnapshot").
     /// </summary>
     public string RateVersion { get; init; } = "1.0.0";
+
+    /// <summary>
+    /// Central bank benchmark series identifier (e.g., "FRB_H10_G10_CAD", "ECB_EXR_D_EUR_USD_SP00_A").
+    /// </summary>
+    public string? BenchmarkSeriesId { get; init; }
+
+    /// <summary>
+    /// SHA-256 cryptographic digest verifying the immutable publication bulletin payload.
+    /// </summary>
+    public string? IntegrityHash { get; init; }
+
+    /// <summary>
+    /// Exact UTC timestamp when the fixing bulletin was released by the monetary authority.
+    /// </summary>
+    public DateTime? PublishedAtUtc { get; init; }
 
     /// <summary>
     /// Precision decimal places applied to the converted target amount (standard: 4 decimals).
@@ -77,23 +92,49 @@ public record CurrencyConversionEvidence
         decimal originalAmount,
         decimal exchangeRate,
         DateTime effectiveDateUtc,
-        string rateSource = "FederalReserveDaily",
+        string rateSource = "FederalReserveBoard_H10",
         string rateVersion = "1.0.0",
         string targetCurrency = "USD",
         int roundingDecimals = 4,
-        MidpointRounding roundingMode = MidpointRounding.AwayFromZero)
+        MidpointRounding roundingMode = MidpointRounding.AwayFromZero,
+        string? benchmarkSeriesId = null,
+        string? integrityHash = null,
+        DateTime? publishedAtUtc = null)
     {
-        OriginalCurrency = string.IsNullOrWhiteSpace(originalCurrency) ? "USD" : originalCurrency.Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(originalCurrency))
+        {
+            throw new ArgumentException("Original currency code cannot be null or empty.", nameof(originalCurrency));
+        }
+
+        if (string.IsNullOrWhiteSpace(targetCurrency))
+        {
+            throw new ArgumentException("Target currency code cannot be null or empty.", nameof(targetCurrency));
+        }
+
+        if (exchangeRate <= 0m)
+        {
+            throw new ArgumentOutOfRangeException(nameof(exchangeRate), exchangeRate, "Exchange rate must be strictly positive (> 0).");
+        }
+
+        if (effectiveDateUtc.Kind == DateTimeKind.Unspecified)
+        {
+            throw new ArgumentException("Effective date cannot have DateTimeKind.Unspecified. Must be explicitly Utc or Local.", nameof(effectiveDateUtc));
+        }
+
+        OriginalCurrency = originalCurrency.Trim().ToUpperInvariant();
         OriginalAmount = originalAmount;
-        ExchangeRate = exchangeRate > 0m ? exchangeRate : 1.0m;
-        TargetCurrency = string.IsNullOrWhiteSpace(targetCurrency) ? "USD" : targetCurrency.Trim().ToUpperInvariant();
+        ExchangeRate = exchangeRate;
+        TargetCurrency = targetCurrency.Trim().ToUpperInvariant();
         RateDirection = $"FROM_{OriginalCurrency}_TO_{TargetCurrency}";
-        EffectiveDateUtc = effectiveDateUtc.Kind == DateTimeKind.Utc ? effectiveDateUtc : DateTime.SpecifyKind(effectiveDateUtc, DateTimeKind.Utc);
-        RateSource = string.IsNullOrWhiteSpace(rateSource) ? "FederalReserveDaily" : rateSource.Trim();
+        EffectiveDateUtc = effectiveDateUtc.Kind == DateTimeKind.Local ? effectiveDateUtc.ToUniversalTime() : effectiveDateUtc;
+        RateSource = string.IsNullOrWhiteSpace(rateSource) ? "FederalReserveBoard_H10" : rateSource.Trim();
         RateVersion = string.IsNullOrWhiteSpace(rateVersion) ? "1.0.0" : rateVersion.Trim();
         RoundingDecimals = roundingDecimals;
         RoundingMode = $"MidpointRounding.{roundingMode}";
         RoundingPolicy = $"{RoundingMode}, {RoundingDecimals} Decimals";
+        BenchmarkSeriesId = benchmarkSeriesId;
+        IntegrityHash = integrityHash;
+        PublishedAtUtc = publishedAtUtc;
 
         if (string.Equals(OriginalCurrency, TargetCurrency, StringComparison.OrdinalIgnoreCase))
         {
