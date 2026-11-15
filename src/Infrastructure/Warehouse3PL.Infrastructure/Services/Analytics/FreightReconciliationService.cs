@@ -309,7 +309,11 @@ public class FreightReconciliationService : IFreightReconciliationService
                 }
 
                 // Currency normalization for sell-side invoice lines
-                var lineCurrency = l.Invoice?.Currency ?? "USD";
+                var lineCurrency = l.Invoice?.Currency ?? l.BillableActivity?.Currency;
+                if (string.IsNullOrWhiteSpace(lineCurrency))
+                {
+                    throw new InvalidOperationException($"Invoice line '{l.Id}' has missing currency code.");
+                }
                 var lineDate = l.Invoice?.InvoiceDate ?? (shipment.DispatchedAtUtc ?? DateTime.UtcNow);
                 var lineConv = NormalizeCurrency(l.TotalAmount, lineCurrency, "USD", lineDate);
                 invoicedClientFreightUsd += lineConv.ConvertedAmountUsd;
@@ -342,9 +346,14 @@ public class FreightReconciliationService : IFreightReconciliationService
         decimal estimatedClientFreightUsd;
         if (marginRecord != null)
         {
+            if (string.IsNullOrWhiteSpace(marginRecord.Currency))
+            {
+                throw new InvalidOperationException($"ShipmentFreightMarginRecord '{marginRecord.Id}' has missing currency code.");
+            }
+
             var mConv = NormalizeCurrency(
                 marginRecord.TotalClientFreight,
-                marginRecord.Currency ?? "USD",
+                marginRecord.Currency,
                 "USD",
                 marginRecord.RatedAtUtc);
             estimatedClientFreightUsd = mConv.ConvertedAmountUsd;
@@ -610,8 +619,18 @@ public class FreightReconciliationService : IFreightReconciliationService
         decimal? exchangeRate = null,
         string? rateSource = null)
     {
-        var src = string.IsNullOrWhiteSpace(sourceCurrency) ? "USD" : sourceCurrency.Trim().ToUpperInvariant();
-        var tgt = string.IsNullOrWhiteSpace(targetCurrency) ? "USD" : targetCurrency.Trim().ToUpperInvariant();
+        if (string.IsNullOrWhiteSpace(sourceCurrency))
+        {
+            throw new ArgumentException("Source currency code cannot be null or whitespace.", nameof(sourceCurrency));
+        }
+
+        if (string.IsNullOrWhiteSpace(targetCurrency))
+        {
+            throw new ArgumentException("Target currency code cannot be null or whitespace.", nameof(targetCurrency));
+        }
+
+        var src = sourceCurrency.Trim().ToUpperInvariant();
+        var tgt = targetCurrency.Trim().ToUpperInvariant();
 
         var utcDate = effectiveDateUtc.Kind == DateTimeKind.Local ? effectiveDateUtc.ToUniversalTime() : effectiveDateUtc;
 
