@@ -1,0 +1,16 @@
+<Solution>
+  <Folder Name="/src/" />
+  <Folder Name="/src/Core/">
+    <Project Path="src/Core/Warehouse3PL.Application/Warehouse3PL.Application.csproj" />
+    <Project Path="src/Core/Warehouse3PL.Domain/Warehouse3PL.Domain.csproj" />
+  </Folder>
+  <Folder Name="/src/Infrastructure/">
+    <Project Path="src/Infrastructure/Warehouse3PL.Infrastructure/Warehouse3PL.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/src/Presentation/">
+    <Project Path="src/Presentation/Warehouse3PL.WebApi/Warehouse3PL.WebApi.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Warehouse3PL.UnitTests/Warehouse3PL.UnitTests.csproj" />
+  </Folder>
+</Solution>
