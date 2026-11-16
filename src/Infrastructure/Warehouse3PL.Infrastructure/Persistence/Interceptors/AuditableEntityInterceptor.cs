@@ -42,36 +42,54 @@ public class AuditableEntityInterceptor : SaveChangesInterceptor
             {
                 if (entry.Entity is AuditableEntity<Guid> auditableGuid)
                 {
-                    auditableGuid.CreatedAt = utcNow;
-                    auditableGuid.CreatedBy = userId;
+                    if (auditableGuid.CreatedAt == default)
+                    {
+                        auditableGuid.CreatedAt = utcNow;
+                    }
+                    auditableGuid.CreatedBy ??= userId;
                 }
                 else if (entry.Entity is AuditableEntity<int> auditableInt)
                 {
-                    auditableInt.CreatedAt = utcNow;
-                    auditableInt.CreatedBy = userId;
+                    if (auditableInt.CreatedAt == default)
+                    {
+                        auditableInt.CreatedAt = utcNow;
+                    }
+                    auditableInt.CreatedBy ??= userId;
                 }
                 else if (entry.Entity is AuditableEntity<long> auditableLong)
                 {
-                    auditableLong.CreatedAt = utcNow;
-                    auditableLong.CreatedBy = userId;
+                    if (auditableLong.CreatedAt == default)
+                    {
+                        auditableLong.CreatedAt = utcNow;
+                    }
+                    auditableLong.CreatedBy ??= userId;
                 }
             }
             else if (entry.State == EntityState.Modified)
             {
                 if (entry.Entity is AuditableEntity<Guid> auditableGuid)
                 {
-                    auditableGuid.UpdatedAt = utcNow;
-                    auditableGuid.UpdatedBy = userId;
+                    if (!entry.Property(nameof(auditableGuid.UpdatedAt)).IsModified || auditableGuid.UpdatedAt == null)
+                    {
+                        auditableGuid.UpdatedAt = utcNow;
+                    }
+                    auditableGuid.UpdatedBy ??= userId;
                 }
                 else if (entry.Entity is AuditableEntity<int> auditableInt)
                 {
-                    auditableInt.UpdatedAt = utcNow;
-                    auditableInt.UpdatedBy = userId;
+                    if (!entry.Property(nameof(auditableInt.UpdatedAt)).IsModified || auditableInt.UpdatedAt == null)
+                    {
+                        auditableInt.UpdatedAt = utcNow;
+                    }
+                    auditableInt.UpdatedBy ??= userId;
                 }
                 else if (entry.Entity is AuditableEntity<long> auditableLong)
                 {
-                    auditableLong.UpdatedAt = utcNow;
-                    auditableLong.UpdatedBy = userId;
+                    if (!entry.Property(nameof(auditableLong.UpdatedAt)).IsModified || auditableLong.UpdatedAt == null)
+                    {
+                        auditableLong.UpdatedAt = utcNow;
+                    }
+                    auditableLong.UpdatedBy ??= userId;
                 }
             }
             else if (entry.State == EntityState.Deleted && entry.Entity is ISoftDeletable softDeletable)

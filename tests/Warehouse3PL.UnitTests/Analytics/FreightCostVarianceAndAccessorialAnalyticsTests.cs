@@ -1950,7 +1950,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
     [Fact]
     public async Task Test_34_RateCardScheduleTiers_AuditsContractualRatingCalculation()
     {
-        // ARRANGE: Gate D - RateCardSchedule with tiered volume brackets evaluated via CalculateRating(W_expected).
+        // ARRANGE: Gate D & Finding 1 - Buy-side CarrierRateAgreement with tiered volume brackets evaluated via CalculateRating(W_expected).
         // 0-5 kg @ $5.00/kg; 5-10 kg @ $4.00/kg (AllUnits model).
         // Shipment has gross weight 6.0 kg (billable weight = 6.0 kg under 0.5 kg increment).
         // Expected base cost = 6.0 kg * $4.00 = $24.00.
@@ -1963,23 +1963,16 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-TIER-34", "FEDEX", date, weightKg: 6.0m);
         context.Shipments.Add(shipment);
 
-        // Rate Card and RateCardSchedule with AllUnits tier model on BillableActivityType.CarrierFreight
-        var rateCard = RateCard.Create(_clientAId, "RC-FEDEX-34", "Commercial FedEx Rate Card", "USD");
-        rateCard.Activate();
-        context.RateCards.Add(rateCard);
+        // Buy-side CarrierRateAgreement with AllUnits tier model
+        var carrierAgreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-FEDEX-34", "Commercial FedEx Carrier Contract",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.AllUnits,
+            effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
 
-        var schedule = RateCardSchedule.Create(_clientAId, rateCard.Id, _facility1Id, 1, date.AddDays(-10), null, "USD");
-        schedule.Status = RateCardStatus.Active;
-        context.RateCardSchedules.Add(schedule);
-
-        var line = RateCardLine.Create(
-            _clientAId, schedule.Id, BillableActivityType.CarrierFreight, "KG",
-            RateModelType.PerUnit, PricingTierCalculationModel.AllUnits, baseRate: 5.00m);
-
-        line.AddTier(1, 0m, 5.0m, 5.00m);
-        line.AddTier(2, 5.0001m, 10.0m, 4.00m);
-        schedule.Lines.Add(line);
-        context.RateCardLines.Add(line);
+        carrierAgreement.AddTier(1, 0m, 5.0m, 5.00m);
+        carrierAgreement.AddTier(2, 5.0001m, 10.0m, 4.00m);
+        context.CarrierRateAgreements.Add(carrierAgreement);
 
         var cost = new CarrierCostRecord
         {
@@ -2017,7 +2010,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
     [Fact]
     public async Task Test_35_RateCardCompliance_WeightDependentRateMissingBilledWeight_ReturnsIndeterminate()
     {
-        // ARRANGE: Finding 1 - Rate card compliance audit must NOT report compliance without verified billed weight
+        // ARRANGE: Finding 1 - Carrier rate compliance audit must NOT report compliance without verified billed weight
         // when rating is weight-dependent (per-kg or tiered brackets). Missing billed weight must produce Indeterminate.
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
         var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
@@ -2027,20 +2020,13 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-WT-35", "FEDEX", date, weightKg: 10.0m);
         context.Shipments.Add(shipment);
 
-        var rateCard = RateCard.Create(_clientAId, "RC-FEDEX-35", "Commercial FedEx Rate Card", "USD");
-        rateCard.Activate();
-        context.RateCards.Add(rateCard);
-
-        var schedule = RateCardSchedule.Create(_clientAId, rateCard.Id, _facility1Id, 1, date.AddDays(-10), null, "USD");
-        schedule.Status = RateCardStatus.Active;
-        context.RateCardSchedules.Add(schedule);
-
-        // Per-KG line (weight-dependent)
-        var line = RateCardLine.Create(
-            _clientAId, schedule.Id, BillableActivityType.CarrierFreight, "KG",
-            RateModelType.PerUnit, PricingTierCalculationModel.FlatRate, baseRate: 5.00m);
-        schedule.Lines.Add(line);
-        context.RateCardLines.Add(line);
+        // Buy-side carrier contract (per-kg weight dependent)
+        var carrierAgreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-FEDEX-35", "Commercial FedEx Carrier Contract",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
+        context.CarrierRateAgreements.Add(carrierAgreement);
 
         // Carrier cost record without billed weight (BilledWeightKg = null)
         var cost = new CarrierCostRecord
@@ -2089,8 +2075,8 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
     [Fact]
     public async Task Test_36_RateCardCompliance_PostValuationContractWithBackdatedEffectiveDate_ExcludedFromHistoricalAudit()
     {
-        // ARRANGE: Findings 2 & 3 - Historical valuation cutoff asOfUtc must enforce contract evidence availability
-        // at valuation time (a.CreatedAt <= valuationTime, s.CreatedAt <= valuationTime).
+        // ARRANGE: Findings 1, 2 & 3 - Historical valuation cutoff asOfUtc must enforce contract evidence availability
+        // at valuation time (a.CreatedAt <= valuationTime, (!a.UpdatedAt.HasValue || a.UpdatedAt.Value <= valuationTime)).
         // A later-created or backdated contract must NOT rewrite an earlier historical valuation.
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
         var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
@@ -2120,23 +2106,18 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         };
         context.CarrierCostRecords.Add(cost);
 
-        // Backdated contract agreement: EffectiveFromUtc is backdated to Oct 25 (prior to shipment),
+        // Buy-side carrier contract agreement: EffectiveFromUtc is backdated to Oct 25 (prior to shipment),
         // but it was only created in the database at T2 (Nov 10).
-        var agreement = ClientFreightAgreement.Create(
-            _clientAId, "CFA-BACKDATED-36", "Backdated FedEx Agreement",
-            FreightPricingModel.FixedContractualRate, "USD",
+        var agreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-BACKDATED-36", "Backdated FedEx Carrier Agreement",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
             effectiveFromUtc: new DateTime(2026, 10, 25, 0, 0, 0, DateTimeKind.Utc),
-            effectiveToUtc: null,
-            facilityId: _facility1Id,
-            carrierCode: "FEDEX",
-            fixedFreightRate: 50.00m);
-        agreement.IsActive = true;
-        context.ClientFreightAgreements.Add(agreement);
-
-        await context.SaveChangesAsync();
-
-        // Explicitly set CreatedAt = T2 (post-valuation relative to T1)
+            facilityId: _facility1Id);
         agreement.CreatedAt = t2;
+        agreement.UpdatedAt = null;
+        context.CarrierRateAgreements.Add(agreement);
+
         await context.SaveChangesAsync();
 
         var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
@@ -2165,39 +2146,31 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
     [Fact]
     public async Task Test_37_RateCardScheduleResolution_FacilitySpecificSchedulePrecedesClientWideFallback()
     {
-        // ARRANGE: Findings 2 & 6 - RateCardSchedule resolution must strictly prefer facility-specific schedule
-        // over client-wide fallback schedule, matching domain RateCard.GetEffectiveSchedule.
+        // ARRANGE: Findings 1, 2 & 6 - Carrier agreement resolution must strictly prefer facility-specific agreement
+        // over network-wide fallback agreement.
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
         var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
         var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
 
         var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
 
-        var rateCard = RateCard.Create(_clientAId, "RC-FEDEX-37", "Commercial FedEx Rate Card", "USD");
-        rateCard.Activate();
-        context.RateCards.Add(rateCard);
+        // Agreement 1: Network-wide fallback (FacilityId = null) @ $10.00/kg base rate ($50.00 for 5 kg)
+        var networkWideAgreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-NET-37", "Network-wide FedEx Agreement",
+            baseRate: 10.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: null);
+        context.CarrierRateAgreements.Add(networkWideAgreement);
 
-        // Schedule 1: Client-wide fallback (FacilityId = null) @ $10.00/kg base rate ($50.00 for 5 kg)
-        var clientWideSchedule = RateCardSchedule.Create(_clientAId, rateCard.Id, null, 1, date.AddDays(-10), null, "USD");
-        clientWideSchedule.Status = RateCardStatus.Active;
-        var clientWideLine = RateCardLine.Create(
-            _clientAId, clientWideSchedule.Id, BillableActivityType.CarrierFreight, "KG",
-            RateModelType.PerUnit, PricingTierCalculationModel.FlatRate, baseRate: 10.00m);
-        clientWideSchedule.Lines.Add(clientWideLine);
-        context.RateCardSchedules.Add(clientWideSchedule);
-        context.RateCardLines.Add(clientWideLine);
+        // Agreement 2: Facility1-specific agreement (FacilityId = _facility1Id) @ $8.00/kg base rate ($40.00 for 5 kg)
+        var facility1Agreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-FAC1-37", "Facility1 FedEx Agreement",
+            baseRate: 8.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
+        context.CarrierRateAgreements.Add(facility1Agreement);
 
-        // Schedule 2: Facility1-specific schedule (FacilityId = _facility1Id) @ $8.00/kg base rate ($40.00 for 5 kg)
-        var facility1Schedule = RateCardSchedule.Create(_clientAId, rateCard.Id, _facility1Id, 1, date.AddDays(-10), null, "USD");
-        facility1Schedule.Status = RateCardStatus.Active;
-        var facility1Line = RateCardLine.Create(
-            _clientAId, facility1Schedule.Id, BillableActivityType.CarrierFreight, "KG",
-            RateModelType.PerUnit, PricingTierCalculationModel.FlatRate, baseRate: 8.00m);
-        facility1Schedule.Lines.Add(facility1Line);
-        context.RateCardSchedules.Add(facility1Schedule);
-        context.RateCardLines.Add(facility1Line);
-
-        // Shipment 1 at Facility1 (has specific schedule @ $40.00, carrier billed $40.00)
+        // Shipment 1 at Facility1 (has specific agreement @ $40.00, carrier billed $40.00)
         var shipment1 = CreateShipment(_clientAId, _facility1Id, "SHIP-FAC1-37", "FEDEX", date, weightKg: 5.0m);
         var cost1 = new CarrierCostRecord
         {
@@ -2216,7 +2189,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.Shipments.Add(shipment1);
         context.CarrierCostRecords.Add(cost1);
 
-        // Shipment 2 at Facility2 (no facility-specific schedule -> falls back to client-wide @ $50.00, carrier billed $50.00)
+        // Shipment 2 at Facility2 (no facility-specific agreement -> falls back to network-wide @ $50.00, carrier billed $50.00)
         var shipment2 = CreateShipment(_clientAId, _facility2Id, "SHIP-FAC2-37", "FEDEX", date, weightKg: 5.0m);
         var cost2 = new CarrierCostRecord
         {
@@ -2242,7 +2215,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         // ACT
         var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
 
-        // ASSERT: Both shipments audited and compliant against their governing schedules
+        // ASSERT: Both shipments audited and compliant against their governing agreements
         Assert.NotNull(compliance);
         Assert.Equal(2, compliance.TotalAuditedShipmentsCount);
         Assert.Equal(2, compliance.CompliantShipmentsCount);
@@ -2346,8 +2319,8 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         line2.Invoice = clientInvoice;
         line2.BillableActivity = billable2;
 
-        // Duplicate/corrected line referencing billable1 (must NOT be double-counted or misallocated to Charge 2)
-        var lineDuplicate = InvoiceLine.Create(3, InvoiceChargeCategory.Freight, "Duplicate Liftgate", 1, "UNIT", 120m, 120m, billable1.Id, BillableActivityType.CarrierFreight, _facility1Id);
+        // Duplicate/corrected line referencing billable1 (same line number 1 on clientInvoice: must be suppressed as exact duplicate)
+        var lineDuplicate = InvoiceLine.Create(1, InvoiceChargeCategory.Freight, "Duplicate Liftgate", 1, "UNIT", 120m, 120m, billable1.Id, BillableActivityType.CarrierFreight, _facility1Id);
         lineDuplicate.InvoiceId = clientInvoice.Id;
         lineDuplicate.Invoice = clientInvoice;
         lineDuplicate.BillableActivity = billable1;
@@ -2422,5 +2395,504 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         var agreementNull = new ClientFreightAgreement { WeightRoundingIncrementKg = null };
         Assert.Null(agreementNull.WeightRoundingIncrementKg);
+    }
+
+    [Fact]
+    public async Task Test_40_CarrierRateAgreement_PoundUnitOfMeasure_ConvertsKilogramsAndProducesMonetaryEquivalence()
+    {
+        // ARRANGE: Finding 3 - Pound-based rate cards must convert kilogram quantities to pounds
+        // (1 kg = 2.20462262 lb). Equivalent KG and LB contracts must produce equivalent monetary results.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+
+        // LB Agreement: $2.00 / LB
+        var lbAgreement = CarrierRateAgreement.Create(
+            "UPS", "CRA-UPS-LB", "UPS Pound Agreement",
+            baseRate: 2.00m, currency: "USD", unitOfMeasure: "LB",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
+
+        // KG Agreement: equivalent rate $2.00 * 2.20462262 = $4.40924524 / KG
+        decimal equivalentKgRate = 2.00m * 2.20462262m;
+        var kgAgreement = CarrierRateAgreement.Create(
+            "UPS", "CRA-UPS-KG", "UPS Kilogram Agreement",
+            baseRate: equivalentKgRate, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: null);
+
+        // Rating calculation directly on agreement aggregate:
+        decimal testWeightKg = 10.0m;
+        var lbRating = lbAgreement.CalculateRating(testWeightKg);
+        var kgRating = kgAgreement.CalculateRating(testWeightKg);
+
+        // 10 kg * 2.20462262 = 22.0462 lb * $2.00 = $44.0924
+        // 10 kg * $4.40924524 = $44.0924
+        Assert.Equal(decimal.Round(lbRating.TotalAmount, 2), decimal.Round(kgRating.TotalAmount, 2));
+        Assert.Equal(44.09m, decimal.Round(lbRating.TotalAmount, 2));
+
+        // Add LB agreement to context for compliance analysis
+        context.CarrierRateAgreements.Add(lbAgreement);
+
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-LB-40", "UPS", date, weightKg: 10.0m);
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "UPS",
+            CarrierInvoiceNumber = "INV-UPS-40",
+            BaseTransportationCost = 44.09m,
+            TotalCarrierCost = 44.09m,
+            BilledWeightKg = 10.0m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+        context.Shipments.Add(shipment);
+        context.CarrierCostRecords.Add(cost);
+
+        await context.SaveChangesAsync();
+
+        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT
+        var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("UPS", date.AddDays(-1), date.AddDays(2));
+
+        // ASSERT: Compliant under LB contract conversion
+        Assert.NotNull(compliance);
+        Assert.Equal(1, compliance.TotalAuditedShipmentsCount);
+        Assert.Equal(1, compliance.CompliantShipmentsCount);
+        Assert.Equal(0, compliance.IndeterminateShipmentsCount);
+        Assert.Equal(100.00m, compliance.ComplianceRatePercent);
+    }
+
+    [Fact]
+    public async Task Test_41_HistoricalValuation_PostValuationModificationExcludedFromHistoricalAudit()
+    {
+        // ARRANGE: Finding 2 - Historical valuation cutoff must enforce that contracts created before valuationTime
+        // but modified AFTER valuationTime (UpdatedAt > valuationTime) are excluded from the historical audit.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var t0 = new DateTime(2026, 11, 1, 10, 0, 0, DateTimeKind.Utc); // Contract created
+        var tShipment = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc); // Shipment dispatched
+        var tValuation = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc); // Historical valuation timestamp
+        var tModification = new DateTime(2026, 11, 10, 12, 0, 0, DateTimeKind.Utc); // Contract modified later (> tValuation)
+
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-MOD-41", "FEDEX", tShipment, weightKg: 10.0m);
+        context.Shipments.Add(shipment);
+
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-41",
+            BaseTransportationCost = 50.00m,
+            TotalCarrierCost = 50.00m,
+            BilledWeightKg = 10.0m,
+            CostAssessedAtUtc = tShipment,
+            Status = CarrierCostStatus.Invoiced
+        };
+        context.CarrierCostRecords.Add(cost);
+
+        // Contract created at T0 (Nov 1) but modified at TModification (Nov 10 > Nov 5)
+        var agreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-MOD-41", "Modified Carrier Agreement",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: t0, facilityId: _facility1Id);
+        agreement.CreatedAt = t0;
+        agreement.UpdatedAt = tModification; // Modified after valuation cutoff!
+        context.CarrierRateAgreements.Add(agreement);
+
+        await context.SaveChangesAsync();
+
+        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT 1: Valuation at tValuation (Nov 5) - contract was modified later (Nov 10), so must be excluded
+        var complianceTVal = await varianceService.GetRateCardComplianceAnalysisAsync(
+            "FEDEX", tShipment.AddDays(-1), tShipment.AddDays(2), asOfUtc: tValuation);
+
+        // ASSERT 1: Excluded from historical audit due to later modification -> Indeterminate
+        Assert.NotNull(complianceTVal);
+        Assert.Equal(1, complianceTVal.IndeterminateShipmentsCount);
+        Assert.Equal(0, complianceTVal.TotalAuditedShipmentsCount);
+
+        // ACT 2: Valuation at tPostMod (Nov 15 > Nov 10)
+        var compliancePostMod = await varianceService.GetRateCardComplianceAnalysisAsync(
+            "FEDEX", tShipment.AddDays(-1), tShipment.AddDays(2), asOfUtc: tModification.AddDays(5));
+
+        // ASSERT 2: Included once valuation timestamp is after the modification
+        Assert.NotNull(compliancePostMod);
+        Assert.Equal(0, compliancePostMod.IndeterminateShipmentsCount);
+        Assert.Equal(1, compliancePostMod.TotalAuditedShipmentsCount);
+        Assert.Equal(1, compliancePostMod.CompliantShipmentsCount);
+    }
+
+    [Fact]
+    public async Task Test_42_AccessorialRecovery_AuthoritativeInvoiceCurrency_ConvertsForeignCurrencyToUsd()
+    {
+        // ARRANGE: Finding 4 - Accessorial recovery must use authoritative invoice currency (line.Invoice.Currency)
+        // rather than assuming USD, applying official central-bank fixing rate.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-FX-42", "DHL", date);
+        context.Shipments.Add(shipment);
+
+        // Carrier cost assessed in EUR: €100.00
+        // On Nov 4, 2026, ECB EUR/USD rate is 1.0888 -> €100.00 = $108.88 USD
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "DHL",
+            Currency = "EUR",
+            TotalCarrierCost = 100.00m,
+            Status = CarrierCostStatus.Invoiced,
+            CostAssessedAtUtc = date
+        };
+
+        var charge = CarrierAccessorialCharge.Create(
+            cost.Id, _clientAId, _facility1Id, shipment.Id,
+            AccessorialType.FuelSurcharge, "EUR-FUEL", 100.00m, "EUR", "IDEM-FX-42", date);
+
+        cost.AccessorialCharges.Add(charge);
+        context.CarrierCostRecords.Add(cost);
+        context.CarrierAccessorialCharges.Add(charge);
+
+        var billable = new BillableActivity
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ActivityType = BillableActivityType.CarrierFreight,
+            Status = BillableActivityStatus.Invoiced,
+            SourceType = "CarrierAccessorialCharge",
+            SourceId = charge.Id,
+            SourceReference = "EUR-FUEL",
+            Quantity = 1,
+            UnitPrice = 100.00m,
+            TotalAmount = 100.00m,
+            Currency = "EUR"
+        };
+        context.BillableActivities.Add(billable);
+
+        // Client invoice issued in EUR (€100.00)
+        var clientInvoice = new Invoice
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            InvoiceNumber = "INV-EUR-42",
+            InvoiceDate = date,
+            Currency = "EUR",
+            Status = InvoiceStatus.Approved
+        };
+
+        var line = InvoiceLine.Create(1, InvoiceChargeCategory.Freight, "EUR Fuel Surcharge", 1, "UNIT", 100m, 100m, billable.Id, BillableActivityType.CarrierFreight, _facility1Id);
+        line.InvoiceId = clientInvoice.Id;
+        line.Invoice = clientInvoice;
+        line.BillableActivity = billable;
+        clientInvoice.Lines.Add(line);
+
+        context.Invoices.Add(clientInvoice);
+        context.InvoiceLines.Add(line);
+
+        await context.SaveChangesAsync();
+
+        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT
+        var leakage = await varianceService.GetAccessorialLeakageAnalysisAsync("DHL", date.AddDays(-1), date.AddDays(2));
+
+        // ASSERT: Carrier amount and client billed amount are both normalized using ECB EUR/USD rate (1.1267 -> $112.67)
+        Assert.NotNull(leakage);
+        Assert.Equal(112.67m, leakage.TotalCarrierAccessorialsUsd);
+        Assert.Equal(112.67m, leakage.TotalClientBilledAccessorialsUsd);
+        Assert.Equal(0.00m, leakage.TotalNetLeakageAmountUsd);
+        Assert.Equal(100.00m, leakage.AccessorialRecoveryRatePercent);
+    }
+
+    [Fact]
+    public async Task Test_43_AccessorialRecovery_ConservesMultipleLegitimateLines_PartialInvoicingAndCreditMemo()
+    {
+        // ARRANGE: Finding 5 - Accessorial recovery must conserve all legitimate qualifying invoice lines
+        // linked to the same billable activity (partial billing + supplemental billing + credit memo reversal),
+        // summing them without discarding subsequent lines due to duplicate activity IDs.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-MULTI-43", "FEDEX", date);
+        context.Shipments.Add(shipment);
+
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            TotalCarrierCost = 100.00m,
+            Status = CarrierCostStatus.Invoiced,
+            CostAssessedAtUtc = date
+        };
+
+        var charge = CarrierAccessorialCharge.Create(
+            cost.Id, _clientAId, _facility1Id, shipment.Id,
+            AccessorialType.LiftgateService, "LIFTGATE-MULTI", 100.00m, "USD", "IDEM-MULTI-43", date);
+
+        cost.AccessorialCharges.Add(charge);
+        context.CarrierCostRecords.Add(cost);
+        context.CarrierAccessorialCharges.Add(charge);
+
+        var billable = new BillableActivity
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ActivityType = BillableActivityType.CarrierFreight,
+            Status = BillableActivityStatus.Invoiced,
+            SourceType = "CarrierAccessorialCharge",
+            SourceId = charge.Id,
+            SourceReference = "LIFTGATE-MULTI",
+            Quantity = 1,
+            UnitPrice = 100.00m,
+            TotalAmount = 100.00m,
+            Currency = "USD"
+        };
+        context.BillableActivities.Add(billable);
+
+        var clientInvoice = new Invoice
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            InvoiceNumber = "INV-MULTI-43",
+            InvoiceDate = date,
+            Currency = "USD",
+            Status = InvoiceStatus.Approved
+        };
+
+        // Line 1: Partial billing $60
+        var line1 = InvoiceLine.Create(1, InvoiceChargeCategory.Freight, "Partial Liftgate 1", 1, "UNIT", 60m, 60m, billable.Id, BillableActivityType.CarrierFreight, _facility1Id);
+        line1.InvoiceId = clientInvoice.Id;
+        line1.Invoice = clientInvoice;
+        line1.BillableActivity = billable;
+
+        // Line 2: Supplemental billing $50
+        var line2 = InvoiceLine.Create(2, InvoiceChargeCategory.Freight, "Supplemental Liftgate 2", 1, "UNIT", 50m, 50m, billable.Id, BillableActivityType.CarrierFreight, _facility1Id);
+        line2.InvoiceId = clientInvoice.Id;
+        line2.Invoice = clientInvoice;
+        line2.BillableActivity = billable;
+
+        // Line 3: Credit memo adjustment -$10 (UnitPrice = 10m, TotalAmount = -10m)
+        var line3 = InvoiceLine.Create(3, InvoiceChargeCategory.Freight, "Credit Adjustment Liftgate 3", 1, "UNIT", 10m, -10m, billable.Id, BillableActivityType.CarrierFreight, _facility1Id);
+        line3.InvoiceId = clientInvoice.Id;
+        line3.Invoice = clientInvoice;
+        line3.BillableActivity = billable;
+
+        clientInvoice.Lines.Add(line1);
+        clientInvoice.Lines.Add(line2);
+        clientInvoice.Lines.Add(line3);
+
+        context.Invoices.Add(clientInvoice);
+        context.InvoiceLines.AddRange(line1, line2, line3);
+
+        await context.SaveChangesAsync();
+
+        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT
+        var leakage = await varianceService.GetAccessorialLeakageAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
+
+        // ASSERT: All three legitimate lines conserved and summed: $60 + $50 - $10 = $100.00
+        Assert.NotNull(leakage);
+        Assert.Equal(100.00m, leakage.TotalCarrierAccessorialsUsd);
+        Assert.Equal(100.00m, leakage.TotalClientBilledAccessorialsUsd);
+        Assert.Equal(0.00m, leakage.TotalNetLeakageAmountUsd);
+        Assert.Equal(100.00m, leakage.AccessorialRecoveryRatePercent);
+    }
+
+    [Fact]
+    public async Task Test_44_CarrierAgreementResolution_NewerAgreementSupersedesOlderWithoutFalseAmbiguity()
+    {
+        // ARRANGE: Finding 6 - Newer agreement with later EffectiveFromUtc cleanly supersedes older agreement.
+        // It must NOT be rejected as an ambiguous conflict.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+
+        // Older Agreement: Effective Oct 1, 2026 @ $5.00/kg
+        var olderAgreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-OLD-44", "Older FedEx Agreement",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc),
+            facilityId: _facility1Id);
+        olderAgreement.CreatedAt = new DateTime(2026, 9, 20, 0, 0, 0, DateTimeKind.Utc);
+        context.CarrierRateAgreements.Add(olderAgreement);
+
+        // Newer Agreement: Effective Nov 1, 2026 @ $6.00/kg (supersedes older agreement)
+        var newerAgreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-NEW-44", "Newer Superseding FedEx Agreement",
+            baseRate: 6.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc),
+            facilityId: _facility1Id);
+        newerAgreement.CreatedAt = new DateTime(2026, 10, 25, 0, 0, 0, DateTimeKind.Utc);
+        context.CarrierRateAgreements.Add(newerAgreement);
+
+        // Shipment on Nov 4 billed $60.00 for 10 kg ($6.00/kg -> matches newer agreement)
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-SUPER-44", "FEDEX", date, weightKg: 10.0m);
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-SUPER-44",
+            BaseTransportationCost = 60.00m,
+            TotalCarrierCost = 60.00m,
+            BilledWeightKg = 10.0m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+        context.Shipments.Add(shipment);
+        context.CarrierCostRecords.Add(cost);
+
+        await context.SaveChangesAsync();
+
+        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT
+        var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
+
+        // ASSERT: Newer agreement was selected; audited and compliant without conflict ambiguity!
+        Assert.NotNull(compliance);
+        Assert.Equal(1, compliance.TotalAuditedShipmentsCount);
+        Assert.Equal(1, compliance.CompliantShipmentsCount);
+        Assert.Equal(0, compliance.IndeterminateShipmentsCount);
+        Assert.Equal(100.00m, compliance.ComplianceRatePercent);
+    }
+
+    [Fact]
+    public async Task Test_45_DiscrepancyQueue_ContractualVariance_UsesActualBillableWeightAndRejectsMissingWeight()
+    {
+        // ARRANGE: Finding 7 - Discrepancy management queue must use actual shipment billable weight from packages
+        // (rather than fixed 1.0), and return null / indeterminate variance when required inputs or packages are missing.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+
+        // Buy-side agreement @ $5.00/kg
+        var carrierAgreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-DISC-45", "FedEx Discrepancy Contract",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
+        context.CarrierRateAgreements.Add(carrierAgreement);
+
+        // Shipment 1: Has packages with 8.0 kg billable weight. Contractual expected base cost = 8.0 * $5.00 = $40.00.
+        // Carrier invoiced $50.00 -> ContractualRateCardVarianceUsd = $50.00 - $40.00 = $10.00.
+        var shipment1 = CreateShipment(_clientAId, _facility1Id, "SHIP-DISC-45-1", "FEDEX", date, weightKg: 8.0m);
+        var cost1 = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment1.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-DISC-45-1",
+            BaseTransportationCost = 50.00m,
+            TotalCarrierCost = 50.00m,
+            BilledWeightKg = 8.0m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+        context.Shipments.Add(shipment1);
+        context.CarrierCostRecords.Add(cost1);
+
+        // Shipment 2: Has NO packages (empty packages collection).
+        // Since contract is weight-dependent ($5.00/kg), missing packages means ContractualRateCardVarianceUsd = null!
+        var shipment2 = new Shipment
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentNumber = "SHIP-DISC-45-2",
+            CarrierCode = "FEDEX",
+            CarrierServiceLevel = CarrierServiceLevel.StandardGround,
+            Status = ShipmentStatus.Dispatched,
+            DispatchedAtUtc = date,
+            TotalPackagesCount = 0,
+            TotalWeightKg = 0m
+        };
+        var estCost2 = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment2.Id,
+            CarrierCode = "FEDEX",
+            TotalCarrierCost = 45.00m,
+            CostAssessedAtUtc = date.AddHours(-1),
+            Status = CarrierCostStatus.Estimated
+        };
+        var cost2 = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment2.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-DISC-45-2",
+            BaseTransportationCost = 55.00m,
+            TotalCarrierCost = 55.00m,
+            BilledWeightKg = 8.0m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+        context.Shipments.Add(shipment2);
+        context.CarrierCostRecords.AddRange(estCost2, cost2);
+
+        await context.SaveChangesAsync();
+
+        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT
+        var queue = await varianceService.GetDiscrepancyManagementQueueAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
+
+        // ASSERT
+        Assert.NotNull(queue);
+        var item1 = queue.First(q => q.ShipmentId == shipment1.Id);
+        // Uses actual 8.0 kg billable weight: Expected = $40.00, Invoiced = $50.00, Variance = $10.00
+        Assert.Equal(40.00m, item1.ExpectedCostUsd);
+        Assert.Equal(50.00m, item1.InvoicedCostUsd);
+        Assert.Equal(10.00m, item1.ContractualRateCardVarianceUsd);
+
+        var item2 = queue.First(q => q.ShipmentId == shipment2.Id);
+        // Missing packages on weight-dependent agreement -> contractual variance is null, falls back to quote baseline ($45.00)
+        Assert.Null(item2.ContractualRateCardVarianceUsd);
+        Assert.Equal(45.00m, item2.ExpectedCostUsd);
+        Assert.Equal(10.00m, item2.OperationalQuoteVarianceUsd);
     }
 }

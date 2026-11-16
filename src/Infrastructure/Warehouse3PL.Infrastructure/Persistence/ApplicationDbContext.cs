@@ -140,6 +140,8 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<CarrierCostRecord> CarrierCostRecords => Set<CarrierCostRecord>();
     public DbSet<CarrierAccessorialCharge> CarrierAccessorialCharges => Set<CarrierAccessorialCharge>();
     public DbSet<ClientFreightAgreement> ClientFreightAgreements => Set<ClientFreightAgreement>();
+    public DbSet<CarrierRateAgreement> CarrierRateAgreements => Set<CarrierRateAgreement>();
+    public DbSet<CarrierRateTier> CarrierRateTiers => Set<CarrierRateTier>();
     public DbSet<ClientAccessorialRule> ClientAccessorialRules => Set<ClientAccessorialRule>();
     public DbSet<ShipmentFreightMarginRecord> ShipmentFreightMarginRecords => Set<ShipmentFreightMarginRecord>();
     public DbSet<CarrierCostAdjustment> CarrierCostAdjustments => Set<CarrierCostAdjustment>();

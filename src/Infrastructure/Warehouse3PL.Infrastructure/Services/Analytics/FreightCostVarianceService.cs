@@ -300,6 +300,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
                          || l.Invoice.Status == InvoiceStatus.PartiallyPaid
                          || l.Invoice.Status == InvoiceStatus.Disputed
                          || l.Invoice.Status == InvoiceStatus.Approved)
+                     && !l.Invoice.ReplacementInvoiceId.HasValue
                      && ((l.BillableActivityId.HasValue && activityIds.Contains(l.BillableActivityId.Value))
                          || (l.BillableActivity != null && chargeIds.Contains(l.BillableActivity.SourceId))))
             .ToListAsync(cancellationToken);
@@ -328,7 +329,6 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             .ToLookup(x => x.Activity!.SourceId, x => x);
 
         var allocatedInvoiceLineIds = new HashSet<Guid>();
-        var allocatedBillableActivityIds = new HashSet<Guid>();
         decimal totalCarrierAccessorials = 0m;
         decimal totalClientBilledAccessorials = 0m;
         decimal totalNetLeakage = 0m;
@@ -348,17 +348,19 @@ public class FreightCostVarianceService : IFreightCostVarianceService
                 valuationTime);
             decimal carrierUsd = carrierConv.ConvertedAmountUsd;
 
-            // Authoritative sell-side billed amount from qualifying Phase 5 InvoiceLine records (Gate A & Finding 5)
+            // Authoritative sell-side billed amount from qualifying Phase 5 InvoiceLine records (Gate A & Findings 4, 5)
             // charge.ClientAmount is strictly ignored as proof of billing.
             // Surcharge client recovery is resolved strictly through explicit charge-to-line linkage,
-            // explicitly verifying BillableActivity.SourceId == charge.Id and preventing duplicate allocation.
+            // explicitly verifying BillableActivity.SourceId == charge.Id and preserving legitimate partial/supplemental lines.
             decimal clientBilledUsd = 0m;
 
             var directItems = linesByChargeId[charge.Id]
-                .Where(x => !allocatedInvoiceLineIds.Contains(x.Line.Id) && (x.Activity == null || !allocatedBillableActivityIds.Contains(x.Activity.Id)))
-                .OrderByDescending(x => x.Line.Invoice != null ? x.Line.Invoice.InvoiceDate : x.Line.CreatedAt)
-                .ThenByDescending(x => x.Line.CreatedAt)
+                .Where(x => !allocatedInvoiceLineIds.Contains(x.Line.Id))
+                .OrderBy(x => x.Line.Invoice != null ? x.Line.Invoice.InvoiceDate : x.Line.CreatedAt)
+                .ThenBy(x => x.Line.CreatedAt)
                 .ToList();
+
+            var seenInvoiceLineKeys = new HashSet<(Guid InvoiceId, int LineNumber)>();
 
             foreach (var item in directItems)
             {
@@ -371,15 +373,22 @@ public class FreightCostVarianceService : IFreightCostVarianceService
                     continue;
                 }
 
-                // Strictly prevent duplicate allocation of the same invoice line or billable activity across charges or corrected invoices
-                if (!allocatedInvoiceLineIds.Add(line.Id) || !allocatedBillableActivityIds.Add(act.Id))
+                // Suppress exact duplicate lines on the same invoice (same invoice and line number)
+                var invoiceKey = (line.InvoiceId, line.LineNumber);
+                if (!seenInvoiceLineKeys.Add(invoiceKey))
+                {
+                    continue;
+                }
+
+                // Strictly prevent duplicate allocation of the same invoice line across charges
+                if (!allocatedInvoiceLineIds.Add(line.Id))
                 {
                     continue;
                 }
 
                 var lineConv = _reconciliationService.NormalizeCurrency(
                     line.TotalAmount,
-                    "USD",
+                    line.Invoice?.Currency ?? "USD",
                     "USD",
                     line.Invoice?.InvoiceDate ?? charge.AssessedAtUtc,
                     valuationTime);
@@ -535,6 +544,15 @@ public class FreightCostVarianceService : IFreightCostVarianceService
 
         var shipmentIds = batch.Shipments.Select(s => s.ShipmentId).ToList();
 
+        // Query shipments with packages to calculate actual billable weight (Finding 7)
+        var shipmentsWithPackages = await _dbContext.Shipments
+            .AsNoTracking()
+            .Include(s => s.Packages)
+            .Where(s => shipmentIds.Contains(s.Id))
+            .ToListAsync(cancellationToken);
+
+        var shipmentsById = shipmentsWithPackages.ToDictionary(s => s.Id);
+
         // Query all carrier cost records with adjustments for these shipments (constrained by valuation cutoff)
         var allCostRecords = await _dbContext.CarrierCostRecords
             .AsNoTracking()
@@ -547,29 +565,27 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         var start = startDateUtc.Date;
         var end = endDateUtc.Date.AddDays(1).AddTicks(-1);
 
-        // Query active client freight agreements constrained by historical valuation evidence (Findings 2 & 3)
-        var agreements = await _dbContext.ClientFreightAgreements
+        // Query active buy-side carrier rate agreements (Finding 1)
+        var carrierAgreements = await _dbContext.CarrierRateAgreements
             .AsNoTracking()
-            .Where(a => a.IsActive && (a.CarrierCode == null || a.CarrierCode == normalizedCarrier)
+            .Include(a => a.Tiers)
+            .Where(a => a.IsActive
+                     && a.CarrierCode == normalizedCarrier
                      && a.EffectiveFromUtc <= end
                      && (!a.EffectiveToUtc.HasValue || a.EffectiveToUtc.Value >= start)
-                     && a.CreatedAt <= valuationTime)
+                     && a.CreatedAt <= valuationTime
+                     && (!a.UpdatedAt.HasValue || a.UpdatedAt.Value <= valuationTime))
             .ToListAsync(cancellationToken);
 
-        // Query active commercial rate card schedules constrained by active parent rate card and historical valuation evidence
-        var rateCardSchedules = await _dbContext.RateCardSchedules
+        // Query active client freight agreements constrained by historical valuation evidence (Findings 1, 2 & 6)
+        var clientAgreements = await _dbContext.ClientFreightAgreements
             .AsNoTracking()
-            .Include(s => s.RateCard)
-            .Include(s => s.Lines)
-                .ThenInclude(l => l.Tiers)
-            .Where(s => s.Status == RateCardStatus.Active
-                     && s.RateCard != null && s.RateCard.Status == RateCardStatus.Active
-                     && s.RateCard.ClientId == s.ClientId
-                     && (!effectiveFacilityId.HasValue || s.FacilityId == effectiveFacilityId.Value || s.FacilityId == null)
-                     && s.CreatedAt <= valuationTime
-                     && s.RateCard.CreatedAt <= valuationTime
-                     && s.EffectiveFromUtc <= end
-                     && (!s.EffectiveToUtc.HasValue || s.EffectiveToUtc.Value >= start))
+            .Where(a => a.IsActive
+                     && a.CarrierCode == normalizedCarrier
+                     && a.EffectiveFromUtc <= end
+                     && (!a.EffectiveToUtc.HasValue || a.EffectiveToUtc.Value >= start)
+                     && a.CreatedAt <= valuationTime
+                     && (!a.UpdatedAt.HasValue || a.UpdatedAt.Value <= valuationTime))
             .ToListAsync(cancellationToken);
 
         foreach (var s in batch.Shipments)
@@ -588,87 +604,48 @@ public class FreightCostVarianceService : IFreightCostVarianceService
 
             var shipmentDate = s.DispatchedAtUtc ?? valuationTime;
 
-            // Deterministic Agreement Resolution: Specific carrier & facility match precedes broader match; reject ambiguous conflicts (Findings 2 & 6)
-            var candidateAgreements = agreements
-                .Where(a =>
-                    a.ClientId == s.ClientId &&
-                    a.CreatedAt <= valuationTime &&
-                    a.EffectiveFromUtc <= shipmentDate &&
-                    (!a.EffectiveToUtc.HasValue || a.EffectiveToUtc.Value >= shipmentDate) &&
-                    (a.CarrierCode == null || a.CarrierCode == normalizedCarrier) &&
-                    (!a.FacilityId.HasValue || a.FacilityId.Value == s.FacilityId) &&
-                    (!a.CarrierServiceLevel.HasValue || a.CarrierServiceLevel.Value == s.CarrierServiceLevel))
-                .OrderByDescending(a => a.CarrierCode != null)
-                .ThenByDescending(a => a.FacilityId.HasValue)
-                .ThenByDescending(a => a.CarrierServiceLevel.HasValue)
-                .ThenByDescending(a => a.EffectiveFromUtc)
-                .ThenByDescending(a => a.CreatedAt)
-                .ToList();
+            shipmentsById.TryGetValue(s.ShipmentId, out var shipmentEntity);
 
-            ClientFreightAgreement? agreement = null;
-            if (candidateAgreements.Count > 0)
-            {
-                var topAgreement = candidateAgreements[0];
-                bool hasConflict = candidateAgreements.Skip(1).Any(other =>
-                    (other.CarrierCode != null) == (topAgreement.CarrierCode != null) &&
-                    other.FacilityId.HasValue == topAgreement.FacilityId.HasValue &&
-                    other.CarrierServiceLevel.HasValue == topAgreement.CarrierServiceLevel.HasValue &&
-                    other.FixedFreightRate != topAgreement.FixedFreightRate);
+            // Deterministic Agreement Resolution: Specific carrier & facility match precedes broader match; reject ambiguous conflicts (Findings 1, 2 & 6)
+            var carrierAgreement = ResolveGoverningCarrierAgreement(
+                carrierAgreements,
+                s.ClientId,
+                s.FacilityId,
+                s.CarrierServiceLevel,
+                null,
+                shipmentDate,
+                valuationTime);
 
-                if (!hasConflict)
-                {
-                    agreement = topAgreement;
-                }
-            }
+            var clientAgreement = ResolveGoverningClientAgreement(
+                clientAgreements,
+                s.ClientId,
+                s.FacilityId,
+                s.CarrierServiceLevel,
+                shipmentDate,
+                valuationTime);
 
-            // Deterministic Schedule Resolution following RateCard.GetEffectiveSchedule (Finding 6)
-            var candidateSchedules = rateCardSchedules
-                .Where(rc =>
-                    rc.ClientId == s.ClientId &&
-                    rc.CreatedAt <= valuationTime &&
-                    rc.RateCard != null && rc.RateCard.Status == RateCardStatus.Active &&
-                    rc.RateCard.CreatedAt <= valuationTime &&
-                    rc.EffectiveFromUtc <= shipmentDate &&
-                    (!rc.EffectiveToUtc.HasValue || rc.EffectiveToUtc.Value >= shipmentDate) &&
-                    (!rc.FacilityId.HasValue || rc.FacilityId.Value == s.FacilityId))
-                .ToList();
-
-            RateCardSchedule? schedule = candidateSchedules
-                .Where(rc => rc.FacilityId == s.FacilityId)
-                .OrderByDescending(rc => rc.Version)
-                .ThenByDescending(rc => rc.EffectiveFromUtc)
-                .FirstOrDefault()
-                ?? candidateSchedules
-                .Where(rc => rc.FacilityId == null)
-                .OrderByDescending(rc => rc.Version)
-                .ThenByDescending(rc => rc.EffectiveFromUtc)
-                .FirstOrDefault();
+            decimal weightIncrement = ResolveContractualWeightIncrement(carrierAgreement, clientAgreement);
+            decimal expectedBillableWeight = shipmentEntity != null
+                ? CalculateExpectedBillableWeight(shipmentEntity.Packages, weightIncrement, carrierAgreement?.DimensionalWeightDivisor)
+                : 0m;
 
             decimal? contractualRateUsd = null;
-            if (agreement?.FixedFreightRate.HasValue == true && agreement.FixedFreightRate.Value > 0m)
+            if (shipmentEntity != null && TryResolveContractualExpectedBaseCost(
+                shipmentEntity,
+                carrierAgreement,
+                clientAgreement,
+                expectedBillableWeight,
+                out decimal contractualBaseCost,
+                out string contractCurrency,
+                out bool isWeightDependent))
             {
                 var contractConv = _reconciliationService.NormalizeCurrency(
-                    agreement.FixedFreightRate.Value,
-                    agreement.Currency,
+                    contractualBaseCost,
+                    contractCurrency,
                     "USD",
                     s.DispatchedAtUtc ?? valuationTime,
                     valuationTime);
                 contractualRateUsd = contractConv.ConvertedAmountUsd;
-            }
-            else if (schedule != null)
-            {
-                var freightLine = schedule.FindLine(BillableActivityType.CarrierFreight);
-                if (freightLine != null && freightLine.BaseRate > 0m)
-                {
-                    var ratingResult = freightLine.CalculateRating(1.0m);
-                    var schedConv = _reconciliationService.NormalizeCurrency(
-                        ratingResult.TotalAmount,
-                        schedule.Currency ?? "USD",
-                        "USD",
-                        s.DispatchedAtUtc ?? valuationTime,
-                        valuationTime);
-                    contractualRateUsd = schedConv.ConvertedAmountUsd;
-                }
             }
 
             if (invoicedRecords.Count > 0)
@@ -847,29 +824,27 @@ public class FreightCostVarianceService : IFreightCostVarianceService
 
         var costRecordsByShipment = costRecords.ToLookup(c => c.ShipmentId);
 
-        // Query active carrier agreements for this carrier constrained by historical valuation evidence (Findings 2 & 3)
-        var agreements = await _dbContext.ClientFreightAgreements
+        // Query active buy-side carrier rate agreements (Finding 1)
+        var carrierAgreements = await _dbContext.CarrierRateAgreements
             .AsNoTracking()
-            .Where(a => a.IsActive && (a.CarrierCode == null || a.CarrierCode == normalizedCarrier)
+            .Include(a => a.Tiers)
+            .Where(a => a.IsActive
+                     && a.CarrierCode == normalizedCarrier
                      && a.EffectiveFromUtc <= end
                      && (!a.EffectiveToUtc.HasValue || a.EffectiveToUtc.Value >= start)
-                     && a.CreatedAt <= valuationTime)
+                     && a.CreatedAt <= valuationTime
+                     && (!a.UpdatedAt.HasValue || a.UpdatedAt.Value <= valuationTime))
             .ToListAsync(cancellationToken);
 
-        // Query active commercial rate card schedules constrained by active parent rate card and historical valuation evidence (Findings 2, 3 & 6)
-        var rateCardSchedules = await _dbContext.RateCardSchedules
+        // Query active client freight agreements constrained by historical valuation evidence (Findings 1, 2 & 6)
+        var clientAgreements = await _dbContext.ClientFreightAgreements
             .AsNoTracking()
-            .Include(s => s.RateCard)
-            .Include(s => s.Lines)
-                .ThenInclude(l => l.Tiers)
-            .Where(s => s.Status == RateCardStatus.Active
-                     && s.RateCard != null && s.RateCard.Status == RateCardStatus.Active
-                     && s.RateCard.ClientId == s.ClientId
-                     && (!effectiveFacilityId.HasValue || s.FacilityId == effectiveFacilityId.Value || s.FacilityId == null)
-                     && s.CreatedAt <= valuationTime
-                     && s.RateCard.CreatedAt <= valuationTime
-                     && s.EffectiveFromUtc <= end
-                     && (!s.EffectiveToUtc.HasValue || s.EffectiveToUtc.Value >= start))
+            .Where(a => a.IsActive
+                     && a.CarrierCode == normalizedCarrier
+                     && a.EffectiveFromUtc <= end
+                     && (!a.EffectiveToUtc.HasValue || a.EffectiveToUtc.Value >= start)
+                     && a.CreatedAt <= valuationTime
+                     && (!a.UpdatedAt.HasValue || a.UpdatedAt.Value <= valuationTime))
             .ToListAsync(cancellationToken);
 
         int totalAudited = 0;
@@ -888,74 +863,41 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             if (shipmentCosts.Count == 0) continue;
 
             var shipmentDate = shipment.DispatchedAtUtc ?? valuationTime;
-
-            // Deterministic Agreement Resolution: Specific carrier & facility match precedes broader match; reject ambiguous conflicts (Findings 2 & 6)
-            var candidateAgreements = agreements
-                .Where(a =>
-                    a.ClientId == shipment.ClientId &&
-                    a.CreatedAt <= valuationTime &&
-                    a.EffectiveFromUtc <= shipmentDate &&
-                    (!a.EffectiveToUtc.HasValue || a.EffectiveToUtc.Value >= shipmentDate) &&
-                    (a.CarrierCode == null || a.CarrierCode == normalizedCarrier) &&
-                    (!a.FacilityId.HasValue || a.FacilityId.Value == shipment.FacilityId) &&
-                    (!a.CarrierServiceLevel.HasValue || a.CarrierServiceLevel.Value == shipment.CarrierServiceLevel || (shipmentCosts.Count > 0 && a.CarrierServiceLevel.Value == shipmentCosts[0].CarrierServiceLevel)))
-                .OrderByDescending(a => a.CarrierCode != null)
-                .ThenByDescending(a => a.FacilityId.HasValue)
-                .ThenByDescending(a => a.CarrierServiceLevel.HasValue)
-                .ThenByDescending(a => a.EffectiveFromUtc)
-                .ThenByDescending(a => a.CreatedAt)
-                .ToList();
-
-            ClientFreightAgreement? agreement = null;
-            if (candidateAgreements.Count > 0)
+            CarrierServiceLevel? serviceLevel = shipment.CarrierServiceLevel;
+            if (serviceLevel == 0 && shipmentCosts.Count > 0)
             {
-                var topAgreement = candidateAgreements[0];
-                bool hasConflict = candidateAgreements.Skip(1).Any(other =>
-                    (other.CarrierCode != null) == (topAgreement.CarrierCode != null) &&
-                    other.FacilityId.HasValue == topAgreement.FacilityId.HasValue &&
-                    other.CarrierServiceLevel.HasValue == topAgreement.CarrierServiceLevel.HasValue &&
-                    other.FixedFreightRate != topAgreement.FixedFreightRate);
-
-                if (!hasConflict)
-                {
-                    agreement = topAgreement;
-                }
+                serviceLevel = shipmentCosts[0].CarrierServiceLevel;
             }
 
-            // Deterministic Schedule Resolution following RateCard.GetEffectiveSchedule: facility-specific schedule takes precedence (Finding 6)
-            var candidateSchedules = rateCardSchedules
-                .Where(rc =>
-                    rc.ClientId == shipment.ClientId &&
-                    rc.CreatedAt <= valuationTime &&
-                    rc.RateCard != null && rc.RateCard.Status == RateCardStatus.Active &&
-                    rc.RateCard.CreatedAt <= valuationTime &&
-                    rc.EffectiveFromUtc <= shipmentDate &&
-                    (!rc.EffectiveToUtc.HasValue || rc.EffectiveToUtc.Value >= shipmentDate) &&
-                    (!rc.FacilityId.HasValue || rc.FacilityId.Value == shipment.FacilityId))
-                .ToList();
+            // Deterministic Agreement Resolution: Specific carrier & facility match precedes broader match; reject ambiguous conflicts (Findings 1, 2 & 6)
+            var carrierAgreement = ResolveGoverningCarrierAgreement(
+                carrierAgreements,
+                shipment.ClientId,
+                shipment.FacilityId,
+                serviceLevel,
+                null,
+                shipmentDate,
+                valuationTime);
 
-            RateCardSchedule? schedule = candidateSchedules
-                .Where(rc => rc.FacilityId == shipment.FacilityId)
-                .OrderByDescending(rc => rc.Version)
-                .ThenByDescending(rc => rc.EffectiveFromUtc)
-                .FirstOrDefault()
-                ?? candidateSchedules
-                .Where(rc => rc.FacilityId == null)
-                .OrderByDescending(rc => rc.Version)
-                .ThenByDescending(rc => rc.EffectiveFromUtc)
-                .FirstOrDefault();
+            var clientAgreement = ResolveGoverningClientAgreement(
+                clientAgreements,
+                shipment.ClientId,
+                shipment.FacilityId,
+                serviceLevel,
+                shipmentDate,
+                valuationTime);
 
             // 2. Resolve Contractual Weight Increment (Gate D & Finding 4)
-            decimal weightIncrement = ResolveContractualWeightIncrement(agreement);
+            decimal weightIncrement = ResolveContractualWeightIncrement(carrierAgreement, clientAgreement);
 
             // 3. Compute Expected Billable Weight W_expected = RoundToIncrement(max(Scale, Dim))
-            decimal expectedBillableWeight = CalculateExpectedBillableWeight(shipment.Packages, weightIncrement);
+            decimal expectedBillableWeight = CalculateExpectedBillableWeight(shipment.Packages, weightIncrement, carrierAgreement?.DimensionalWeightDivisor);
 
-            // 4. Resolve Contractual Expected Base Price & Weight Dependency (Findings 1 & 2)
+            // 4. Resolve Contractual Expected Base Price & Weight Dependency (Findings 1, 2 & 3)
             bool hasContractualRate = TryResolveContractualExpectedBaseCost(
                 shipment,
-                agreement,
-                schedule,
+                carrierAgreement,
+                clientAgreement,
                 expectedBillableWeight,
                 out decimal contractualBaseCost,
                 out string contractCurrency,
@@ -1079,29 +1021,38 @@ public class FreightCostVarianceService : IFreightCostVarianceService
 
     #region Helper & Authorization Methods
 
-    private static decimal ResolveContractualWeightIncrement(ClientFreightAgreement? agreement)
+    private static decimal ResolveContractualWeightIncrement(CarrierRateAgreement? carrierAgreement, ClientFreightAgreement? clientAgreement = null)
     {
-        if (agreement?.WeightRoundingIncrementKg.HasValue == true && agreement.WeightRoundingIncrementKg.Value > 0m)
+        if (carrierAgreement?.WeightRoundingIncrementKg.HasValue == true && carrierAgreement.WeightRoundingIncrementKg.Value > 0m)
         {
-            return agreement.WeightRoundingIncrementKg.Value;
+            return carrierAgreement.WeightRoundingIncrementKg.Value;
+        }
+
+        if (clientAgreement?.WeightRoundingIncrementKg.HasValue == true && clientAgreement.WeightRoundingIncrementKg.Value > 0m)
+        {
+            return clientAgreement.WeightRoundingIncrementKg.Value;
         }
 
         // Standard contractual carrier weight increment defaults to 0.5 kg (Finding 4: free-text regex parsing removed)
         return 0.5m;
     }
 
-    private static decimal CalculateExpectedBillableWeight(IEnumerable<Package> packages, decimal increment)
+    private static decimal CalculateExpectedBillableWeight(IEnumerable<Package> packages, decimal increment, decimal? contractualDimDivisor = null)
     {
         if (increment <= 0m) increment = 0.5m;
+        decimal defaultDivisor = (contractualDimDivisor.HasValue && contractualDimDivisor.Value > 0m)
+            ? contractualDimDivisor.Value
+            : 5000m;
         decimal totalExpected = 0m;
 
         foreach (var p in packages)
         {
             decimal scaleWeight = p.GrossWeightKg > 0m ? p.GrossWeightKg : p.NetWeightKg;
+            decimal dimDivisor = p.VolumetricDivisor > 0m ? p.VolumetricDivisor : defaultDivisor;
             decimal dimWeight = p.VolumetricWeightKg > 0m
                 ? p.VolumetricWeightKg
                 : ((p.LengthCm > 0m && p.WidthCm > 0m && p.HeightCm > 0m)
-                    ? (p.LengthCm * p.WidthCm * p.HeightCm) / (p.VolumetricDivisor > 0m ? p.VolumetricDivisor : 5000m)
+                    ? (p.LengthCm * p.WidthCm * p.HeightCm) / dimDivisor
                     : 0m);
 
             decimal rawWeight = Math.Max(scaleWeight, dimWeight);
@@ -1140,8 +1091,8 @@ public class FreightCostVarianceService : IFreightCostVarianceService
 
     private static bool TryResolveContractualExpectedBaseCost(
         Shipment shipment,
-        ClientFreightAgreement? agreement,
-        RateCardSchedule? rateCardSchedule,
+        CarrierRateAgreement? carrierAgreement,
+        ClientFreightAgreement? clientAgreement,
         decimal expectedBillableWeight,
         out decimal contractualBaseCost,
         out string currency,
@@ -1151,36 +1102,152 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         currency = "USD";
         isWeightDependent = false;
 
-        // 1. Check RateCardSchedule (commercial rate card line rating via CalculateRating)
-        if (rateCardSchedule != null)
+        // 1. Check CarrierRateAgreement (authoritative buy-side carrier contract)
+        if (carrierAgreement != null)
         {
-            var freightLine = rateCardSchedule.FindLine(BillableActivityType.CarrierFreight);
-            if (freightLine != null)
+            currency = carrierAgreement.Currency ?? "USD";
+            isWeightDependent = carrierAgreement.RateModel == RateModelType.PerUnit
+                             || carrierAgreement.TierModel != PricingTierCalculationModel.FlatRate
+                             || carrierAgreement.Tiers.Count > 0;
+
+            if (isWeightDependent && expectedBillableWeight <= 0m)
             {
-                currency = rateCardSchedule.Currency ?? "USD";
-                isWeightDependent = string.Equals(freightLine.UnitOfMeasure, "KG", StringComparison.OrdinalIgnoreCase)
-                                 || string.Equals(freightLine.UnitOfMeasure, "LB", StringComparison.OrdinalIgnoreCase)
-                                 || freightLine.TierModel != PricingTierCalculationModel.FlatRate
-                                 || freightLine.Tiers.Count > 0;
-                var ratingResult = freightLine.CalculateRating(expectedBillableWeight);
-                contractualBaseCost = ratingResult.TotalAmount;
-                return true;
+                return false;
             }
+
+            var ratingResult = carrierAgreement.CalculateRating(expectedBillableWeight);
+            contractualBaseCost = ratingResult.TotalAmount;
+            return true;
         }
 
-        // 2. Check ClientFreightAgreement (fixed contractual rate)
-        if (agreement != null)
+        // 2. Check ClientFreightAgreement (explicit client-negotiated buy-side carrier contract)
+        if (clientAgreement != null)
         {
-            currency = agreement.Currency ?? "USD";
-            if (agreement.FixedFreightRate.HasValue && agreement.FixedFreightRate.Value > 0m)
+            currency = clientAgreement.Currency ?? "USD";
+            if (clientAgreement.FixedFreightRate.HasValue && clientAgreement.FixedFreightRate.Value > 0m)
             {
-                contractualBaseCost = agreement.FixedFreightRate.Value;
+                contractualBaseCost = clientAgreement.FixedFreightRate.Value;
                 isWeightDependent = false;
                 return true;
             }
         }
 
         return false;
+    }
+
+    private static CarrierRateAgreement? ResolveGoverningCarrierAgreement(
+        IEnumerable<CarrierRateAgreement> agreements,
+        Guid? clientId,
+        Guid? facilityId,
+        CarrierServiceLevel? serviceLevel,
+        string? zoneOrLane,
+        DateTime asOfDate,
+        DateTime valuationTime)
+    {
+        var candidates = agreements
+            .Where(a =>
+                a.IsActive &&
+                a.CreatedAt <= valuationTime &&
+                (!a.UpdatedAt.HasValue || a.UpdatedAt.Value <= valuationTime) &&
+                a.EffectiveFromUtc <= asOfDate &&
+                (!a.EffectiveToUtc.HasValue || a.EffectiveToUtc.Value >= asOfDate) &&
+                (!a.ClientId.HasValue || a.ClientId.Value == clientId) &&
+                (!a.FacilityId.HasValue || a.FacilityId.Value == facilityId) &&
+                (!a.CarrierServiceLevel.HasValue || a.CarrierServiceLevel.Value == serviceLevel) &&
+                (string.IsNullOrEmpty(a.ZoneOrLane) || string.Equals(a.ZoneOrLane, zoneOrLane, StringComparison.OrdinalIgnoreCase)))
+            .OrderByDescending(a => a.ClientId.HasValue)
+            .ThenByDescending(a => a.FacilityId.HasValue)
+            .ThenByDescending(a => a.CarrierServiceLevel.HasValue)
+            .ThenByDescending(a => !string.IsNullOrEmpty(a.ZoneOrLane))
+            .ThenByDescending(a => a.EffectiveFromUtc)
+            .ThenByDescending(a => a.CreatedAt)
+            .ToList();
+
+        if (candidates.Count == 0) return null;
+
+        var top = candidates[0];
+
+        // Check for genuinely tied candidates (Finding 6)
+        var tiedCandidates = candidates.Skip(1).Where(other =>
+            other.ClientId.HasValue == top.ClientId.HasValue &&
+            other.FacilityId.HasValue == top.FacilityId.HasValue &&
+            other.CarrierServiceLevel.HasValue == top.CarrierServiceLevel.HasValue &&
+            !string.IsNullOrEmpty(other.ZoneOrLane) == !string.IsNullOrEmpty(top.ZoneOrLane) &&
+            other.EffectiveFromUtc == top.EffectiveFromUtc &&
+            other.CreatedAt == top.CreatedAt).ToList();
+
+        if (tiedCandidates.Count > 0)
+        {
+            bool hasFinancialConflict = tiedCandidates.Any(other =>
+                other.BaseRate != top.BaseRate ||
+                !string.Equals(other.Currency, top.Currency, StringComparison.OrdinalIgnoreCase) ||
+                !string.Equals(other.UnitOfMeasure, top.UnitOfMeasure, StringComparison.OrdinalIgnoreCase) ||
+                other.RateModel != top.RateModel ||
+                other.TierModel != top.TierModel ||
+                other.MinimumCharge != top.MinimumCharge);
+
+            if (hasFinancialConflict)
+            {
+                return null;
+            }
+        }
+
+        return top;
+    }
+
+    private static ClientFreightAgreement? ResolveGoverningClientAgreement(
+        IEnumerable<ClientFreightAgreement> agreements,
+        Guid? clientId,
+        Guid? facilityId,
+        CarrierServiceLevel? serviceLevel,
+        DateTime asOfDate,
+        DateTime valuationTime)
+    {
+        var candidates = agreements
+            .Where(a =>
+                a.IsActive &&
+                a.CreatedAt <= valuationTime &&
+                (!a.UpdatedAt.HasValue || a.UpdatedAt.Value <= valuationTime) &&
+                a.EffectiveFromUtc <= asOfDate &&
+                (!a.EffectiveToUtc.HasValue || a.EffectiveToUtc.Value >= asOfDate) &&
+                (!clientId.HasValue || a.ClientId == clientId.Value) &&
+                (!a.FacilityId.HasValue || a.FacilityId.Value == facilityId) &&
+                (!a.CarrierServiceLevel.HasValue || a.CarrierServiceLevel.Value == serviceLevel))
+            .OrderByDescending(a => a.CarrierCode != null)
+            .ThenByDescending(a => a.FacilityId.HasValue)
+            .ThenByDescending(a => a.CarrierServiceLevel.HasValue)
+            .ThenByDescending(a => a.EffectiveFromUtc)
+            .ThenByDescending(a => a.CreatedAt)
+            .ToList();
+
+        if (candidates.Count == 0) return null;
+
+        var top = candidates[0];
+
+        // Check for genuinely tied candidates (Finding 6)
+        var tiedCandidates = candidates.Skip(1).Where(other =>
+            other.ClientId == top.ClientId &&
+            (other.CarrierCode != null) == (top.CarrierCode != null) &&
+            other.FacilityId.HasValue == top.FacilityId.HasValue &&
+            other.CarrierServiceLevel.HasValue == top.CarrierServiceLevel.HasValue &&
+            other.EffectiveFromUtc == top.EffectiveFromUtc &&
+            other.CreatedAt == top.CreatedAt).ToList();
+
+        if (tiedCandidates.Count > 0)
+        {
+            bool hasFinancialConflict = tiedCandidates.Any(other =>
+                other.FixedFreightRate != top.FixedFreightRate ||
+                other.MarkupPercentage != top.MarkupPercentage ||
+                !string.Equals(other.Currency, top.Currency, StringComparison.OrdinalIgnoreCase) ||
+                other.WeightRoundingIncrementKg != top.WeightRoundingIncrementKg);
+
+            if (hasFinancialConflict)
+            {
+                return null;
+            }
+        }
+
+        return top;
     }
 
     private static (DiscrepancyRootCauseCategory RootCause, string Reason) ClassifyDiscrepancy(

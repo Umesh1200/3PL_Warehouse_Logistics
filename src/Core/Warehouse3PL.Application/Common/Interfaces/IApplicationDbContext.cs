@@ -115,6 +115,8 @@ public interface IApplicationDbContext
     DbSet<CarrierCostRecord> CarrierCostRecords { get; }
     DbSet<CarrierAccessorialCharge> CarrierAccessorialCharges { get; }
     DbSet<ClientFreightAgreement> ClientFreightAgreements { get; }
+    DbSet<CarrierRateAgreement> CarrierRateAgreements { get; }
+    DbSet<CarrierRateTier> CarrierRateTiers { get; }
     DbSet<ClientAccessorialRule> ClientAccessorialRules { get; }
     DbSet<ShipmentFreightMarginRecord> ShipmentFreightMarginRecords { get; }
     DbSet<CarrierCostAdjustment> CarrierCostAdjustments { get; }
