@@ -36,6 +36,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
     {
         var databaseName = dbName ?? Guid.NewGuid().ToString();
         var context = TestDbContextFactory.Create(tenantProvider, currentUserContext, databaseName);
+        context.AllowExplicitAuditTimestamps = true;
 
         var clientA = new Client
         {
@@ -218,7 +219,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.AddRange(quoted, estimated, invoiced);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetFreightCostVarianceSummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -343,7 +344,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.InvoiceLines.Add(clientLine);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetFreightProfitabilitySummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -387,7 +388,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var variance = await varianceService.GetFreightCostVarianceSummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -442,7 +443,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierAccessorialCharges.Add(surcharge);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetAccessorialLeakageAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -561,7 +562,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetAccessorialLeakageAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -653,7 +654,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var variance = await varianceService.GetFreightCostVarianceSummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -702,7 +703,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetFreightCostVarianceSummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -754,7 +755,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -825,7 +826,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.AddRange(quote, cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -887,7 +888,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         int initialAdjustments = await context.CarrierCostAdjustments.CountAsync();
         int initialInvoices = await context.Invoices.CountAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT: Run all analytics methods
         await varianceService.GetFreightCostVarianceSummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -921,7 +922,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.AddRange(cost1, cost2);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetFreightCostVarianceSummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -951,7 +952,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetFreightCostVarianceSummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(3));
@@ -981,7 +982,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetFreightCostVarianceSummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(3));
@@ -1053,7 +1054,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1093,7 +1094,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT: Valuation cutoff on Nov 10 (after bulletin release)
         var validAsOf = new DateTime(2026, 11, 10, 0, 0, 0, DateTimeKind.Utc);
@@ -1160,7 +1161,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetAccessorialLeakageAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1197,7 +1198,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierAccessorialCharges.Add(surcharge);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetAccessorialLeakageAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1260,7 +1261,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.InvoiceLines.Add(line);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetFreightProfitabilitySummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1307,7 +1308,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // 1. In Disputed state: Reconciled amount is $0
         var beforeSettlement = await varianceService.GetFreightCostVarianceSummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1340,7 +1341,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var variance = await varianceService.GetFreightCostVarianceSummaryAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1421,7 +1422,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var result = await varianceService.GetAccessorialLeakageAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1477,7 +1478,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierAccessorialCharges.AddRange(charge1, charge2);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT 1: Evaluated at tValuation (12:00) -> Charge 2 ($30 at 15:00) must be excluded
         var reportAtT1 = await varianceService.GetAccessorialLeakageAnalysisAsync(
@@ -1503,7 +1504,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
 
         var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT: Query window with 0 eligible shipments
         var profitability = await varianceService.GetFreightProfitabilitySummaryAsync(
@@ -1549,7 +1550,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT: Run rate card compliance audit
         var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1617,7 +1618,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1698,7 +1699,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.AddRange(quote, cost1, cost2);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var queue = await varianceService.GetDiscrepancyManagementQueueAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1767,7 +1768,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.AddRange(quote, cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var queue = await varianceService.GetDiscrepancyManagementQueueAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1928,7 +1929,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var leakage = await varianceService.GetAccessorialLeakageAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -1992,7 +1993,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -2046,7 +2047,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         context.CarrierCostRecords.Add(cost);
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT 1: Evaluate compliance without billed weight evidence
         var compliance1 = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -2120,7 +2121,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT 1: Evaluate historical audit as of T1 (before contract was entered into database)
         var complianceT1 = await varianceService.GetRateCardComplianceAnalysisAsync(
@@ -2210,7 +2211,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -2333,7 +2334,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var leakage = await varianceService.GetAccessorialLeakageAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -2456,7 +2457,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("UPS", date.AddDays(-1), date.AddDays(2));
@@ -2514,7 +2515,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT 1: Valuation at tValuation (Nov 5) - contract was modified later (Nov 10), so must be excluded
         var complianceTVal = await varianceService.GetRateCardComplianceAnalysisAsync(
@@ -2612,7 +2613,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var leakage = await varianceService.GetAccessorialLeakageAnalysisAsync("DHL", date.AddDays(-1), date.AddDays(2));
@@ -2714,7 +2715,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var leakage = await varianceService.GetAccessorialLeakageAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -2779,7 +2780,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -2876,7 +2877,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
 
         await context.SaveChangesAsync();
 
-        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
 
         // ACT
         var queue = await varianceService.GetDiscrepancyManagementQueueAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
@@ -2894,5 +2895,534 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         Assert.Null(item2.ContractualRateCardVarianceUsd);
         Assert.Equal(45.00m, item2.ExpectedCostUsd);
         Assert.Equal(10.00m, item2.OperationalQuoteVarianceUsd);
+    }
+
+    [Fact]
+    public async Task Test_46_HistoricalValuation_TierCreatedAfterCutoff_ExcludedFromHistoricalRating()
+    {
+        // ARRANGE: Finding 1 - Tiers created after valuation cutoff (CreatedAt > valuationTime)
+        // must be excluded from historical ratings. Pre-cutoff rating remains valid under earlier tiers.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var t0 = new DateTime(2026, 11, 1, 10, 0, 0, DateTimeKind.Utc); // Agreement created
+        var tShipment = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc); // Shipment dispatched
+        var tValuation = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc); // Historical valuation timestamp
+        var tTier2Created = new DateTime(2026, 11, 10, 12, 0, 0, DateTimeKind.Utc); // Tier 2 added later (> tValuation)
+
+        var agreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-TIER-46", "Tiered FedEx Agreement",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.AllUnits,
+            effectiveFromUtc: t0, facilityId: _facility1Id);
+        agreement.CreatedAt = t0;
+
+        // Tier 1 created at T0 (0-5 kg @ $5.00)
+        var tier1 = agreement.AddTier(1, 0m, 5.0m, 5.00m);
+        tier1.CreatedAt = t0;
+
+        // Tier 2 created at TTier2Created (5-15 kg @ $3.00) (> tValuation)
+        var tier2 = agreement.AddTier(2, 5.0001m, 15.0m, 3.00m);
+        tier2.CreatedAt = tTier2Created;
+
+        context.CarrierRateAgreements.Add(agreement);
+
+        // 1. Direct aggregate calculation at tValuation: Tier 2 is excluded, rated at BaseRate ($5.00/kg)
+        // 8.0 kg * $5.00 = $40.00
+        var ratingPreCutoff = agreement.CalculateRating(8.0m, valuationTime: tValuation);
+        Assert.Equal(40.00m, ratingPreCutoff.TotalAmount);
+
+        // 2. Direct aggregate calculation post-cutoff (tTier2Created + 1 day): Tier 2 is included!
+        // 8.0 kg * $3.00 (AllUnits) = $24.00
+        var ratingPostCutoff = agreement.CalculateRating(8.0m, valuationTime: tTier2Created.AddDays(1));
+        Assert.Equal(24.00m, ratingPostCutoff.TotalAmount);
+
+        // 3. Service-level compliance analysis at tValuation:
+        // Shipment has 8.0 kg, invoiced $40.00
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-TIER-46", "FEDEX", tShipment, weightKg: 8.0m);
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-TIER-46",
+            BaseTransportationCost = 40.00m,
+            TotalCarrierCost = 40.00m,
+            BilledWeightKg = 8.0m,
+            CostAssessedAtUtc = tShipment,
+            Status = CarrierCostStatus.Invoiced
+        };
+        context.Shipments.Add(shipment);
+        context.CarrierCostRecords.Add(cost);
+        await context.SaveChangesAsync();
+
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        var complianceTVal = await varianceService.GetRateCardComplianceAnalysisAsync(
+            "FEDEX", tShipment.AddDays(-1), tShipment.AddDays(2), asOfUtc: tValuation);
+
+        Assert.NotNull(complianceTVal);
+        Assert.Equal(1, complianceTVal.TotalAuditedShipmentsCount);
+        Assert.Equal(1, complianceTVal.CompliantShipmentsCount);
+        Assert.Equal(0, complianceTVal.IndeterminateShipmentsCount);
+    }
+
+    [Fact]
+    public async Task Test_47_HistoricalValuation_TierModifiedAfterCutoff_RendersRatingIndeterminate()
+    {
+        // ARRANGE: Finding 1 - If a tier was modified after valuation cutoff (UpdatedAt > valuationTime),
+        // historical rating terms are untrusted and must throw ValidationException / return Indeterminate.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var t0 = new DateTime(2026, 11, 1, 10, 0, 0, DateTimeKind.Utc);
+        var tShipment = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var tValuation = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
+        var tTierModified = new DateTime(2026, 11, 10, 12, 0, 0, DateTimeKind.Utc);
+
+        var agreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-TIER-47", "Tiered Modified Agreement",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.AllUnits,
+            effectiveFromUtc: t0, facilityId: _facility1Id);
+        agreement.CreatedAt = t0;
+
+        var tier1 = agreement.AddTier(1, 0m, 10.0m, 5.00m);
+        tier1.CreatedAt = t0;
+        tier1.UpdatedAt = tTierModified; // Modified after valuation cutoff!
+
+        context.CarrierRateAgreements.Add(agreement);
+
+        // 1. Direct aggregate rating throws ValidationException
+        Assert.Throws<ValidationException>(() => agreement.CalculateRating(8.0m, valuationTime: tValuation));
+
+        // 2. Service level compliance analysis returns Indeterminate
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-TIER-47", "FEDEX", tShipment, weightKg: 8.0m);
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-TIER-47",
+            BaseTransportationCost = 40.00m,
+            TotalCarrierCost = 40.00m,
+            BilledWeightKg = 8.0m,
+            CostAssessedAtUtc = tShipment,
+            Status = CarrierCostStatus.Invoiced
+        };
+        context.Shipments.Add(shipment);
+        context.CarrierCostRecords.Add(cost);
+        await context.SaveChangesAsync();
+
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        var compliance = await varianceService.GetRateCardComplianceAnalysisAsync(
+            "FEDEX", tShipment.AddDays(-1), tShipment.AddDays(2), asOfUtc: tValuation);
+
+        Assert.NotNull(compliance);
+        Assert.Equal(1, compliance.IndeterminateShipmentsCount);
+        Assert.Equal(0, compliance.TotalAuditedShipmentsCount);
+    }
+
+    [Fact]
+    public async Task Test_48_ZoneMatching_DestinationAddress_MatchesZoneSpecificAgreementOverGeneric()
+    {
+        // ARRANGE: Finding 2 - Shipment destination address resolves to StateOrProvince "CA".
+        // Zone-specific agreement ("CA") @ $4.00/kg strictly supersedes generic agreement (null zone) @ $6.00/kg.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+
+        // Generic agreement: $6.00/kg
+        var genericAgreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-GEN-48", "Generic FedEx Agreement",
+            baseRate: 6.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
+        genericAgreement.ZoneOrLane = null;
+
+        // Zone-specific agreement for "CA": $4.00/kg
+        var zoneAgreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-ZONE-48", "California FedEx Agreement",
+            baseRate: 4.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
+        zoneAgreement.ZoneOrLane = "CA";
+
+        context.CarrierRateAgreements.AddRange(genericAgreement, zoneAgreement);
+
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-ZONE-48", "FEDEX", date, weightKg: 10.0m);
+        var pkg = shipment.Packages.First();
+
+        var outboundOrder = new OutboundOrder
+        {
+            Id = pkg.OutboundOrderId,
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            OrderNumber = "ORD-ZONE-48",
+            OrderDateUtc = date
+        };
+        outboundOrder.SetShippingAddress(new ShippingAddress
+        {
+            RecipientName = "Acme Corp",
+            AddressLine1 = "123 Ocean Blvd",
+            City = "Los Angeles",
+            StateOrProvince = "CA",
+            PostalCode = "90210",
+            CountryCode = "USA"
+        });
+        context.OutboundOrders.Add(outboundOrder);
+
+        // Billed $40.00 for 10.0 kg ($4.00/kg, matching zone agreement)
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-ZONE-48",
+            BaseTransportationCost = 40.00m,
+            TotalCarrierCost = 40.00m,
+            BilledWeightKg = 10.0m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+
+        context.Shipments.Add(shipment);
+        context.CarrierCostRecords.Add(cost);
+        await context.SaveChangesAsync();
+
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT
+        var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
+
+        // ASSERT: Audited and compliant against the California agreement ($40.00), not generic ($60.00)
+        Assert.NotNull(compliance);
+        Assert.Equal(1, compliance.TotalAuditedShipmentsCount);
+        Assert.Equal(1, compliance.CompliantShipmentsCount);
+        Assert.Equal(0, compliance.IndeterminateShipmentsCount);
+    }
+
+    [Fact]
+    public async Task Test_49_ZoneMatching_FailClosed_UnknownZoneReturnsIndeterminateWhenZoneContractsExist()
+    {
+        // ARRANGE: Finding 2 - When a carrier has zone-specific agreements, a shipment with an UNKNOWN zone
+        // must fail closed and return Indeterminate, rather than falsely defaulting to a generic agreement.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+
+        // Zone-specific agreement exists
+        var zoneAgreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-ZONE-49", "Zone 2 FedEx Agreement",
+            baseRate: 4.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
+        zoneAgreement.ZoneOrLane = "Zone 2";
+
+        // Generic agreement also exists
+        var genericAgreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-GEN-49", "Generic FedEx Agreement",
+            baseRate: 6.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
+        genericAgreement.ZoneOrLane = null;
+
+        context.CarrierRateAgreements.AddRange(zoneAgreement, genericAgreement);
+
+        // Shipment with NO address or order data (unknown zone)
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-UNKNOWN-49", "FEDEX", date, weightKg: 10.0m);
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-49",
+            BaseTransportationCost = 60.00m,
+            TotalCarrierCost = 60.00m,
+            BilledWeightKg = 10.0m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+
+        context.Shipments.Add(shipment);
+        context.CarrierCostRecords.Add(cost);
+        await context.SaveChangesAsync();
+
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT
+        var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
+
+        // ASSERT: Fails closed -> Indeterminate, NOT audited under generic contract
+        Assert.NotNull(compliance);
+        Assert.Equal(1, compliance.IndeterminateShipmentsCount);
+        Assert.Equal(0, compliance.TotalAuditedShipmentsCount);
+    }
+
+    [Fact]
+    public async Task Test_50_ContractualDimensionsAndUnits_DivisorAndRoundingInContractualUnits()
+    {
+        // ARRANGE: Finding 3 - Contractual dimensional divisor (4000) overrides package volumetric divisor (5000).
+        // Rounding increment is 1.0 LB. Missing dimensional evidence returns Indeterminate.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+
+        var lbAgreement = CarrierRateAgreement.Create(
+            "DHL", "CRA-DHL-50", "DHL Express Pounds Contract",
+            baseRate: 2.00m, currency: "USD", unitOfMeasure: "LB",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
+        lbAgreement.DimensionalWeightDivisor = 4000m; // Contractual divisor overrides package divisor
+        lbAgreement.WeightRoundingIncrement = 1.0m; // 1.0 LB increment
+
+        context.CarrierRateAgreements.Add(lbAgreement);
+
+        // Shipment 1: Dimensions 40x30x20 cm = 24,000 cm3.
+        // Volumetric kg with divisor 4000: 24,000 / 4000 = 6.0 kg.
+        // In pounds: 6.0 * 2.20462262 = 13.2277 lb.
+        // Rounded up by 1.0 lb increment = 14.0 lb.
+        // Contractual expected base cost = 14.0 * $2.00 = $28.00.
+        var shipment1 = CreateShipment(_clientAId, _facility1Id, "SHIP-DIM-50-1", "DHL", date, weightKg: 2.0m);
+        var pkg1 = shipment1.Packages.First();
+        pkg1.LengthCm = 40m;
+        pkg1.WidthCm = 30m;
+        pkg1.HeightCm = 20m;
+        pkg1.VolumetricDivisor = 5000m; // Contractual divisor 4000 will override this 5000!
+
+        var cost1 = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment1.Id,
+            CarrierCode = "DHL",
+            CarrierInvoiceNumber = "INV-50-1",
+            BaseTransportationCost = 28.00m,
+            TotalCarrierCost = 28.00m,
+            BilledWeightKg = 6.35m, // ~14 lb in kg
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+        context.Shipments.Add(shipment1);
+        context.CarrierCostRecords.Add(cost1);
+
+        // Shipment 2: Missing dimensional evidence (weight=0, dims=0) on weight-dependent agreement -> Indeterminate
+        var shipment2 = new Shipment
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentNumber = "SHIP-DIM-50-2",
+            CarrierCode = "DHL",
+            CarrierServiceLevel = CarrierServiceLevel.StandardGround,
+            Status = ShipmentStatus.Dispatched,
+            DispatchedAtUtc = date,
+            TotalPackagesCount = 0,
+            TotalWeightKg = 0m
+        };
+        var cost2 = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment2.Id,
+            CarrierCode = "DHL",
+            CarrierInvoiceNumber = "INV-50-2",
+            BaseTransportationCost = 28.00m,
+            TotalCarrierCost = 28.00m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+        context.Shipments.Add(shipment2);
+        context.CarrierCostRecords.Add(cost2);
+
+        await context.SaveChangesAsync();
+
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT
+        var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("DHL", date.AddDays(-1), date.AddDays(2));
+
+        // ASSERT: Shipment 1 is compliant; Shipment 2 is indeterminate due to missing dimensional evidence
+        Assert.NotNull(compliance);
+        Assert.Equal(1, compliance.TotalAuditedShipmentsCount);
+        Assert.Equal(1, compliance.CompliantShipmentsCount);
+        Assert.Equal(1, compliance.IndeterminateShipmentsCount);
+    }
+
+    [Fact]
+    public async Task Test_51_DiscrepancyQueue_MultiInvoiceAllocation_ConservesShipmentContractualBaseline()
+    {
+        // ARRANGE: Finding 4 - For shipments with multiple legitimate carrier invoices under weight-dependent contract,
+        // the single shipment contractual baseline ($100.00) is allocated deterministically across the two invoices
+        // ($60.00 and $40.00) in proportion to their billed share, conserving the contract with zero false discrepancy.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+
+        // Contract: $10.00/kg. For 10.0 kg shipment, contractual rate = $100.00.
+        var carrierAgreement = CarrierRateAgreement.Create(
+            "FEDEX", "CRA-MULTI-51", "FedEx Multi-Invoice Agreement",
+            baseRate: 10.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
+            effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
+        context.CarrierRateAgreements.Add(carrierAgreement);
+
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-MULTI-51", "FEDEX", date, weightKg: 10.0m);
+        context.Shipments.Add(shipment);
+
+        // Initial Quote: $100.00
+        var quote = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            BaseTransportationCost = 100.00m,
+            TotalCarrierCost = 100.00m,
+            CostAssessedAtUtc = date.AddHours(-2),
+            Status = CarrierCostStatus.Estimated
+        };
+
+        // Invoice 1: $60.00
+        var cost1 = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-51-A",
+            BaseTransportationCost = 60.00m,
+            TotalCarrierCost = 60.00m,
+            BilledWeightKg = 10.0m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+
+        // Invoice 2: $40.00
+        var cost2 = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-51-B",
+            BaseTransportationCost = 40.00m,
+            TotalCarrierCost = 40.00m,
+            BilledWeightKg = 10.0m,
+            CostAssessedAtUtc = date.AddMinutes(30),
+            Status = CarrierCostStatus.Invoiced
+        };
+
+        context.CarrierCostRecords.AddRange(quote, cost1, cost2);
+        await context.SaveChangesAsync();
+
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT: Minimum discrepancy threshold $1.00
+        var queue = await varianceService.GetDiscrepancyManagementQueueAsync(
+            "FEDEX", date.AddDays(-1), date.AddDays(2), minimumDiscrepancyUsd: 1.00m);
+
+        // ASSERT: Pro-rata allocation gives $60.00 to cost1 and $40.00 to cost2.
+        // Each record has discrepancy = $0.00 -> NOT falsely flagged as discrepancy in the queue!
+        Assert.NotNull(queue);
+        Assert.DoesNotContain(queue, q => q.ShipmentId == shipment.Id);
+    }
+
+    [Fact]
+    public void Test_52_CarrierRateAgreement_TierDomainValidation_RejectsInvalidTiersAndValidatesBoundaries()
+    {
+        // ARRANGE & ASSERT: Finding 6 - Comprehensive domain validation for CarrierRateAgreement and tiers:
+        var agreement = CarrierRateAgreement.Create(
+            "UPS", "CRA-VAL-52", "Validation Test Agreement",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.Graduated,
+            effectiveFromUtc: DateTime.UtcNow);
+
+        // 1. Rejects non-positive tier numbers
+        Assert.Throws<ValidationException>(() => agreement.AddTier(0, 0m, 5.0m, 4.00m));
+        Assert.Throws<ValidationException>(() => agreement.AddTier(-1, 0m, 5.0m, 4.00m));
+
+        // 2. Rejects negative rate or negative lower bound
+        Assert.Throws<ValidationException>(() => agreement.AddTier(1, -1.0m, 5.0m, 4.00m));
+        Assert.Throws<ValidationException>(() => agreement.AddTier(1, 0m, 5.0m, -4.00m));
+
+        // 3. Rejects upper bound <= lower bound
+        Assert.Throws<ValidationException>(() => agreement.AddTier(1, 5.0m, 5.0m, 4.00m));
+        Assert.Throws<ValidationException>(() => agreement.AddTier(1, 5.0m, 4.0m, 4.00m));
+
+        // 4. Rejects unsupported UnitOfMeasure
+        Assert.Throws<ValidationException>(() => CarrierRateAgreement.Create(
+            "UPS", "CRA-INV", "Invalid UOM", 5.00m, "USD", "TONS", RateModelType.PerUnit, PricingTierCalculationModel.FlatRate, DateTime.UtcNow));
+
+        // 5. Validates contiguous graduated bracket rating:
+        // Tier 1: 0 - 5.0 kg @ $4.00
+        // Tier 2: 5.0 - 10.0 kg @ $3.00
+        // Base rate for excess: $5.00
+        var agGraduated = CarrierRateAgreement.Create(
+            "UPS", "CRA-GRAD-52", "Graduated Agreement",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.Graduated,
+            effectiveFromUtc: DateTime.UtcNow);
+
+        agGraduated.AddTier(1, 0m, 5.0m, 4.00m);
+        agGraduated.AddTier(2, 5.0m, 10.0m, 3.00m);
+
+        // Rating at boundary: 5.0 kg = 5 * $4.00 = $20.00
+        var rating5 = agGraduated.CalculateRating(5.0m);
+        Assert.Equal(20.00m, rating5.TotalAmount);
+
+        // Rating in bracket 2: 8.0 kg = (5 * 4.00) + (3 * 3.00) = 20.00 + 9.00 = $29.00
+        var rating8 = agGraduated.CalculateRating(8.0m);
+        Assert.Equal(29.00m, rating8.TotalAmount);
+
+        // Rating in excess: 12.0 kg = (5 * 4.00) + (5 * 3.00) + (2 * 5.00 baseRate) = 20 + 15 + 10 = $45.00
+        var rating12 = agGraduated.CalculateRating(12.0m);
+        Assert.Equal(45.00m, rating12.TotalAmount);
+
+        // 6. Validates gap rejection:
+        var agGap = CarrierRateAgreement.Create(
+            "UPS", "CRA-GAP-52", "Gap Agreement",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.Graduated,
+            effectiveFromUtc: DateTime.UtcNow);
+        agGap.AddTier(1, 0m, 5.0m, 4.00m);
+        agGap.AddTier(2, 6.0m, 10.0m, 3.00m); // Gap of 1.0 kg!
+
+        Assert.Throws<ValidationException>(() => agGap.CalculateRating(8.0m));
+
+        // 7. Validates overlap rejection:
+        var agOverlap = CarrierRateAgreement.Create(
+            "UPS", "CRA-OVERLAP-52", "Overlap Agreement",
+            baseRate: 5.00m, currency: "USD", unitOfMeasure: "KG",
+            rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.Graduated,
+            effectiveFromUtc: DateTime.UtcNow);
+        agOverlap.AddTier(1, 0m, 5.0m, 4.00m);
+        agOverlap.AddTier(2, 4.0m, 10.0m, 3.00m); // Overlap of 1.0 kg!
+
+        Assert.Throws<ValidationException>(() => agOverlap.CalculateRating(8.0m));
     }
 }

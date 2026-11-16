@@ -79,6 +79,8 @@ public class CarrierRateAgreementConfiguration : IEntityTypeConfiguration<Carrie
             .HasColumnName("weight_rounding_increment_kg")
             .HasPrecision(18, 4);
 
+        builder.Ignore(a => a.WeightRoundingIncrement);
+
         builder.Property(a => a.Currency)
             .HasColumnName("currency")
             .HasMaxLength(3)
@@ -103,6 +105,7 @@ public class CarrierRateAgreementConfiguration : IEntityTypeConfiguration<Carrie
             .HasColumnName("notes")
             .HasMaxLength(1000);
 
+        // Auditing
         builder.Property(a => a.CreatedAt)
             .HasColumnName("created_at")
             .IsRequired();
@@ -116,11 +119,41 @@ public class CarrierRateAgreementConfiguration : IEntityTypeConfiguration<Carrie
         builder.Property(a => a.UpdatedBy)
             .HasColumnName("updated_by");
 
+        // Soft Delete
+        builder.Property(a => a.IsDeleted)
+            .HasColumnName("is_deleted")
+            .IsRequired();
+
+        builder.Property(a => a.DeletedAt)
+            .HasColumnName("deleted_at");
+
+        builder.Property(a => a.DeletedBy)
+            .HasColumnName("deleted_by");
+
+        // Relational Foreign Keys (Finding 5)
+        builder.HasOne(a => a.Client)
+            .WithMany()
+            .HasForeignKey(a => a.ClientId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne(a => a.Facility)
+            .WithMany()
+            .HasForeignKey(a => a.FacilityId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         builder.HasMany(a => a.Tiers)
             .WithOne(t => t.CarrierRateAgreement)
             .HasForeignKey(t => t.CarrierRateAgreementId)
             .OnDelete(DeleteBehavior.Cascade);
 
-        builder.HasIndex(a => new { a.CarrierCode, a.IsActive, a.EffectiveFromUtc });
+        // Indexes
+        builder.HasIndex(a => new { a.CarrierCode, a.IsActive, a.EffectiveFromUtc })
+            .HasDatabaseName("ix_carrier_rate_agreements_carrier_active");
+
+        builder.HasIndex(a => new { a.ClientId, a.CarrierCode, a.IsActive })
+            .HasDatabaseName("ix_carrier_rate_agreements_client_lookup");
+
+        builder.HasIndex(a => new { a.FacilityId, a.CarrierCode, a.IsActive })
+            .HasDatabaseName("ix_carrier_rate_agreements_facility_lookup");
     }
 }

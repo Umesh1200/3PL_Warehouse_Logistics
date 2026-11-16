@@ -35,6 +35,7 @@ public class AuditableEntityInterceptor : SaveChangesInterceptor
 
         var utcNow = _dateTime.UtcNow;
         var userId = _currentUser.UserId;
+        bool allowExplicit = context is IApplicationDbContext appDb && appDb.AllowExplicitAuditTimestamps;
 
         foreach (var entry in context.ChangeTracker.Entries())
         {
@@ -42,7 +43,7 @@ public class AuditableEntityInterceptor : SaveChangesInterceptor
             {
                 if (entry.Entity is AuditableEntity<Guid> auditableGuid)
                 {
-                    if (auditableGuid.CreatedAt == default)
+                    if (!allowExplicit || auditableGuid.CreatedAt == default)
                     {
                         auditableGuid.CreatedAt = utcNow;
                     }
@@ -50,7 +51,7 @@ public class AuditableEntityInterceptor : SaveChangesInterceptor
                 }
                 else if (entry.Entity is AuditableEntity<int> auditableInt)
                 {
-                    if (auditableInt.CreatedAt == default)
+                    if (!allowExplicit || auditableInt.CreatedAt == default)
                     {
                         auditableInt.CreatedAt = utcNow;
                     }
@@ -58,7 +59,7 @@ public class AuditableEntityInterceptor : SaveChangesInterceptor
                 }
                 else if (entry.Entity is AuditableEntity<long> auditableLong)
                 {
-                    if (auditableLong.CreatedAt == default)
+                    if (!allowExplicit || auditableLong.CreatedAt == default)
                     {
                         auditableLong.CreatedAt = utcNow;
                     }
@@ -69,7 +70,7 @@ public class AuditableEntityInterceptor : SaveChangesInterceptor
             {
                 if (entry.Entity is AuditableEntity<Guid> auditableGuid)
                 {
-                    if (!entry.Property(nameof(auditableGuid.UpdatedAt)).IsModified || auditableGuid.UpdatedAt == null)
+                    if (!allowExplicit || !entry.Property(nameof(auditableGuid.UpdatedAt)).IsModified || auditableGuid.UpdatedAt == null)
                     {
                         auditableGuid.UpdatedAt = utcNow;
                     }
@@ -77,7 +78,7 @@ public class AuditableEntityInterceptor : SaveChangesInterceptor
                 }
                 else if (entry.Entity is AuditableEntity<int> auditableInt)
                 {
-                    if (!entry.Property(nameof(auditableInt.UpdatedAt)).IsModified || auditableInt.UpdatedAt == null)
+                    if (!allowExplicit || !entry.Property(nameof(auditableInt.UpdatedAt)).IsModified || auditableInt.UpdatedAt == null)
                     {
                         auditableInt.UpdatedAt = utcNow;
                     }
@@ -85,7 +86,7 @@ public class AuditableEntityInterceptor : SaveChangesInterceptor
                 }
                 else if (entry.Entity is AuditableEntity<long> auditableLong)
                 {
-                    if (!entry.Property(nameof(auditableLong.UpdatedAt)).IsModified || auditableLong.UpdatedAt == null)
+                    if (!allowExplicit || !entry.Property(nameof(auditableLong.UpdatedAt)).IsModified || auditableLong.UpdatedAt == null)
                     {
                         auditableLong.UpdatedAt = utcNow;
                     }

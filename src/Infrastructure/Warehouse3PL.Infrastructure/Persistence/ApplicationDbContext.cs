@@ -38,6 +38,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
 
     public Guid? CurrentTenantId => _tenantProvider.TenantId;
     public bool BypassTenantFilter => _tenantProvider.BypassTenantFilter || _currentUser.IsStaff;
+    public bool AllowExplicitAuditTimestamps { get; set; } = false;
 
     public DbSet<Client> Clients => Set<Client>();
     public DbSet<ClientContact> ClientContacts => Set<ClientContact>();

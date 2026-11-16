@@ -183,4 +183,5 @@ public interface IApplicationDbContext
     Task RollbackTransactionAsync(CancellationToken cancellationToken = default);
     Task<TResult> ExecuteInTransactionAsync<TResult>(Func<Task<TResult>> action, CancellationToken cancellationToken = default);
     void ClearChangeTracker();
+    bool AllowExplicitAuditTimestamps { get; set; }
 }
