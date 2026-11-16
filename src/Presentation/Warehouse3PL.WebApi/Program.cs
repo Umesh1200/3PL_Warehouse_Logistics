@@ -79,9 +79,7 @@ app.UseSwaggerUI(options =>
 
 app.UseRouting();
 
-app.UseMiddleware<TenantResolutionMiddleware>();
-
-app.UseAuthentication();
+app.UseAuthenticatedTenantResolution();
 app.UseAuthorization();
 
 app.UseWarehouseHangfireDashboard(app.Configuration);

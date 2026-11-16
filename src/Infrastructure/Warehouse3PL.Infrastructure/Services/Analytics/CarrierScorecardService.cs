@@ -15,15 +15,18 @@ namespace Warehouse3PL.Infrastructure.Services.Analytics;
 public class CarrierScorecardService : ICarrierScorecardService
 {
     private readonly IApplicationDbContext _dbContext;
+    private readonly TransportationAnalyticsAuthorization _authorization;
     private readonly IDelayAttributionService _delayAttributionService;
     private readonly ILogger<CarrierScorecardService> _logger;
 
     public CarrierScorecardService(
         IApplicationDbContext dbContext,
         IDelayAttributionService delayAttributionService,
-        ILogger<CarrierScorecardService> logger)
+        ILogger<CarrierScorecardService> logger,
+        TransportationAnalyticsAuthorization authorization)
     {
         _dbContext = dbContext;
+        _authorization = authorization;
         _delayAttributionService = delayAttributionService;
         _logger = logger;
     }
@@ -40,6 +43,9 @@ public class CarrierScorecardService : ICarrierScorecardService
         if (string.IsNullOrWhiteSpace(carrierCode))
             throw new ValidationException(nameof(carrierCode), "Carrier code is required.");
 
+        var scope = await _authorization.ResolveAsync(clientId, facilityId, cancellationToken);
+        clientId = scope.ClientId;
+        facilityId = scope.FacilityId;
         var normalizedCarrier = carrierCode.Trim().ToUpperInvariant();
         var start = startDateUtc.Date;
         var end = endDateUtc.Date.AddDays(1).AddTicks(-1);
@@ -55,7 +61,7 @@ public class CarrierScorecardService : ICarrierScorecardService
         if (clientId.HasValue) complianceQuery = complianceQuery.Where(r => r.ClientId == clientId.Value);
         if (serviceLevel.HasValue) complianceQuery = complianceQuery.Where(r => r.CarrierServiceLevel == serviceLevel.Value);
 
-        var complianceRecords = await complianceQuery.ToListAsync(cancellationToken);
+        var complianceRecords = await scope.Apply(complianceQuery).ToListAsync(cancellationToken);
 
         // 2. Query daily performance summaries to capture aggregate volumes
         var dailyQuery = _dbContext.DailyCarrierPerformanceRecords
@@ -69,7 +75,7 @@ public class CarrierScorecardService : ICarrierScorecardService
         if (clientId.HasValue) dailyQuery = dailyQuery.Where(r => r.ClientId == clientId.Value);
         if (serviceLevel.HasValue) dailyQuery = dailyQuery.Where(r => r.CarrierServiceLevel == serviceLevel.Value);
 
-        var dailyRecords = await dailyQuery.ToListAsync(cancellationToken);
+        var dailyRecords = await scope.Apply(dailyQuery).ToListAsync(cancellationToken);
 
         int totalDispatched = dailyRecords.Sum(r => r.DispatchedShipmentsCount);
         if (totalDispatched == 0) totalDispatched = complianceRecords.Count;
@@ -178,6 +184,9 @@ public class CarrierScorecardService : ICarrierScorecardService
         if (string.IsNullOrWhiteSpace(carrierCode))
             throw new ValidationException(nameof(carrierCode), "Carrier code is required.");
 
+        var scope = await _authorization.ResolveAsync(clientId, facilityId, cancellationToken);
+        clientId = scope.ClientId;
+        facilityId = scope.FacilityId;
         var normalizedCarrier = carrierCode.Trim().ToUpperInvariant();
         var start = startDateUtc.Date;
         var end = endDateUtc.Date.AddDays(1).AddTicks(-1);
@@ -196,7 +205,7 @@ public class CarrierScorecardService : ICarrierScorecardService
         if (!string.IsNullOrWhiteSpace(destinationCountry)) query = query.Where(r => r.DestinationCountry == destinationCountry.Trim().ToUpperInvariant());
         if (!string.IsNullOrWhiteSpace(destinationState)) query = query.Where(r => r.DestinationStateOrRegion == destinationState.Trim().ToUpperInvariant());
 
-        var observations = await query
+        var observations = await scope.Apply(query)
             .Select(r => r.ActualTransitDays!.Value)
             .OrderBy(v => v)
             .ToListAsync(cancellationToken);
@@ -261,6 +270,9 @@ public class CarrierScorecardService : ICarrierScorecardService
         if (string.IsNullOrWhiteSpace(carrierCode))
             throw new ValidationException(nameof(carrierCode), "Carrier code is required.");
 
+        var scope = await _authorization.ResolveAsync(clientId, facilityId, cancellationToken);
+        clientId = scope.ClientId;
+        facilityId = scope.FacilityId;
         var normalizedCarrier = carrierCode.Trim().ToUpperInvariant();
         var start = startDateUtc.Date;
         var end = endDateUtc.Date.AddDays(1).AddTicks(-1);
@@ -275,7 +287,7 @@ public class CarrierScorecardService : ICarrierScorecardService
         if (facilityId.HasValue) complianceQuery = complianceQuery.Where(r => r.FacilityId == facilityId.Value);
         if (clientId.HasValue) complianceQuery = complianceQuery.Where(r => r.ClientId == clientId.Value);
 
-        var complianceRecords = await complianceQuery.ToListAsync(cancellationToken);
+        var complianceRecords = await scope.Apply(complianceQuery).ToListAsync(cancellationToken);
 
         int totalDispatched = complianceRecords.Count;
         var affectedRecords = complianceRecords.Where(r => r.HasDeliveryException).ToList();
@@ -295,7 +307,7 @@ public class CarrierScorecardService : ICarrierScorecardService
         if (facilityId.HasValue) exQuery = exQuery.Where(e => e.FacilityId == facilityId.Value);
         if (clientId.HasValue) exQuery = exQuery.Where(e => e.ClientId == clientId.Value);
 
-        var exceptions = await exQuery.ToListAsync(cancellationToken);
+        var exceptions = await scope.Apply(exQuery).ToListAsync(cancellationToken);
 
         var categoryBreakdown = new Dictionary<CanonicalDeliveryExceptionCategory, int>();
         var attributionBreakdown = new Dictionary<DelayAttributionCategory, int>();

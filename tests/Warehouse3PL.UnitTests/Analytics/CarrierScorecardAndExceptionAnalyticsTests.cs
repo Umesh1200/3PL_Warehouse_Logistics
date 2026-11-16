@@ -19,6 +19,19 @@ namespace Warehouse3PL.UnitTests.Analytics;
 /// </summary>
 public class CarrierScorecardAndExceptionAnalyticsTests
 {
+    private static TransportationAnalyticsAuthorization PlatformReader(Warehouse3PL.Application.Common.Interfaces.IApplicationDbContext db) =>
+        new(db, new TestCurrentUserContext { UserType = UserType.Staff, RolesList = ["SuperAdmin"] });
+
+    private static async Task SeedClaimShipmentsAsync(Warehouse3PL.Infrastructure.Persistence.ApplicationDbContext db)
+    {
+        var records = await db.CarrierSlaComplianceRecords.AsNoTracking().ToListAsync();
+        foreach (var row in records)
+            if (!await db.Shipments.AnyAsync(s => s.Id == row.ShipmentId))
+                db.Shipments.Add(new Shipment { Id = row.ShipmentId, ClientId = row.ClientId, FacilityId = row.FacilityId,
+                    ShipmentNumber = row.TrackingNumber, CarrierCode = row.CarrierCode });
+        await db.SaveChangesAsync();
+    }
+
     private readonly Guid _facilityId = Guid.NewGuid();
     private readonly Guid _otherFacilityId = Guid.NewGuid();
     private readonly Guid _clientId = Guid.NewGuid();
@@ -34,7 +47,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             dbName);
 
         var attributionService = new DelayAttributionService(context, NullLogger<DelayAttributionService>.Instance);
-        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance);
+        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance, PlatformReader(context));
 
         var startDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
         var endDate = new DateTime(2026, 11, 10, 23, 59, 59, DateTimeKind.Utc);
@@ -112,7 +125,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             dbName);
 
         var attributionService = new DelayAttributionService(context, NullLogger<DelayAttributionService>.Instance);
-        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance);
+        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance, PlatformReader(context));
 
         var startDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
         var endDate = new DateTime(2026, 11, 10, 23, 59, 59, DateTimeKind.Utc);
@@ -153,7 +166,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             dbName);
 
         var attributionService = new DelayAttributionService(context, NullLogger<DelayAttributionService>.Instance);
-        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance);
+        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance, PlatformReader(context));
 
         var startDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
         var endDate = new DateTime(2026, 11, 10, 23, 59, 59, DateTimeKind.Utc);
@@ -274,7 +287,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             dbName);
 
         var attributionService = new DelayAttributionService(context, NullLogger<DelayAttributionService>.Instance);
-        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance);
+        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance, PlatformReader(context));
 
         var startDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
         var endDate = new DateTime(2026, 11, 30, 23, 59, 59, DateTimeKind.Utc);
@@ -368,7 +381,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             dbName);
 
         var attributionService = new DelayAttributionService(context, NullLogger<DelayAttributionService>.Instance);
-        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance);
+        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance, PlatformReader(context));
 
         var startDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
         var endDate = new DateTime(2026, 11, 30, 23, 59, 59, DateTimeKind.Utc);
@@ -457,7 +470,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             dbName);
 
         var attributionService = new DelayAttributionService(context, NullLogger<DelayAttributionService>.Instance);
-        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance);
+        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance, PlatformReader(context));
 
         var startDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
         var endDate = new DateTime(2026, 11, 10, 23, 59, 59, DateTimeKind.Utc);
@@ -576,7 +589,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             new TestCurrentUserContext { UserType = UserType.Staff },
             dbName);
 
-        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance);
+        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance, PlatformReader(context));
 
         var shipmentIdIncomplete = Guid.NewGuid();
         var shipmentIdComplete = Guid.NewGuid();
@@ -681,6 +694,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
         await context.SaveChangesAsync();
 
         // Evaluate incomplete shipment
+        await SeedClaimShipmentsAsync(context);
         var incAssessment = await service.AssessShipmentClaimsReadinessAsync(shipmentIdIncomplete);
         Assert.NotNull(incAssessment);
         Assert.True(incAssessment.ReadinessScorePercent < 85.00m);
@@ -711,8 +725,8 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             dbName);
 
         var attributionService = new DelayAttributionService(context, NullLogger<DelayAttributionService>.Instance);
-        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance);
-        var claimsService = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance);
+        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance, PlatformReader(context));
+        var claimsService = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance, PlatformReader(context));
 
         var startDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
         var endDate = new DateTime(2026, 11, 10, 23, 59, 59, DateTimeKind.Utc);
@@ -806,6 +820,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
         Assert.Equal(2.0m, distA.MeanDays);
 
         // Query claims batch specifically for Client A
+        await SeedClaimShipmentsAsync(context);
         var claimsBatchA = await claimsService.GetFacilityClaimsReadinessBatchAsync(_facilityId, _clientId);
         Assert.Empty(claimsBatchA); // Client A has 0 lost alerts
     }
@@ -820,7 +835,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             dbName);
 
         var attributionService = new DelayAttributionService(context, NullLogger<DelayAttributionService>.Instance);
-        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance);
+        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance, PlatformReader(context));
 
         var startDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
         var endDate = new DateTime(2026, 11, 10, 23, 59, 59, DateTimeKind.Utc);
@@ -908,8 +923,8 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             dbName);
 
         var attributionService = new DelayAttributionService(context, NullLogger<DelayAttributionService>.Instance);
-        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance);
-        var claimsService = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance);
+        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance, PlatformReader(context));
+        var claimsService = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance, PlatformReader(context));
 
         var shipmentId = Guid.NewGuid();
 
@@ -1028,7 +1043,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             new TestCurrentUserContext { UserType = UserType.Staff },
             dbName);
 
-        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance);
+        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance, PlatformReader(context));
 
         // When evaluating completeness boundaries, assume all mandatory items and threshold breach are present
         // so that the boundary score itself determines the state transition.
@@ -1061,7 +1076,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             new TestCurrentUserContext { UserType = UserType.Staff },
             dbName);
 
-        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance);
+        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance, PlatformReader(context));
 
         // Scenario: Synthetic high score (95.0% or 100.0%), but missing declared valuation
         var assessmentMissingValuation = service.EvaluateReadinessCriteria(
@@ -1115,7 +1130,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             new TestCurrentUserContext { UserType = UserType.Staff },
             dbName);
 
-        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance);
+        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance, PlatformReader(context));
 
         // Case A: Missing disruption evidence altogether (no exception, no alert) -> InsufficientEvidence
         var noDisruption = service.EvaluateReadinessCriteria(
@@ -1168,7 +1183,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             new TestCurrentUserContext { UserType = UserType.Staff },
             dbName);
 
-        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance);
+        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance, PlatformReader(context));
 
         // 1. Lost Claim with clean POD: Proof of delivery contradicts lost parcel claim -> InsufficientEvidence
         var lostWithCleanPod = service.EvaluateReadinessCriteria(
@@ -1258,7 +1273,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             new TestCurrentUserContext { UserType = UserType.Staff },
             dbName);
 
-        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance);
+        var service = new ClaimsReadinessService(context, NullLogger<ClaimsReadinessService>.Instance, PlatformReader(context));
 
         var assessment = service.EvaluateReadinessCriteria(
             shipmentId: Guid.NewGuid(),
@@ -1337,7 +1352,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             dbName);
 
         var attributionService = new DelayAttributionService(context, NullLogger<DelayAttributionService>.Instance);
-        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance);
+        var scorecardService = new CarrierScorecardService(context, attributionService, NullLogger<CarrierScorecardService>.Instance, PlatformReader(context));
 
         var startDate = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
         var endDate = new DateTime(2026, 11, 30, 23, 59, 59, DateTimeKind.Utc);

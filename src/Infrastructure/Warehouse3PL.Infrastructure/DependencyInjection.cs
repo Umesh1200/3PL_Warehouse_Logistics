@@ -84,6 +84,7 @@ public static class DependencyInjection
         services.AddScoped<IRelocationRecommendationService, Warehouse3PL.Infrastructure.Services.Analytics.RelocationRecommendationService>();
         services.AddScoped<ITransportationProjectionService, Warehouse3PL.Infrastructure.Services.Analytics.TransportationProjectionService>();
         services.AddScoped<IDelayAttributionService, Warehouse3PL.Infrastructure.Services.Analytics.DelayAttributionService>();
+        services.AddScoped<Warehouse3PL.Infrastructure.Services.Analytics.TransportationAnalyticsAuthorization>();
         services.AddScoped<IClaimsReadinessService, Warehouse3PL.Infrastructure.Services.Analytics.ClaimsReadinessService>();
         services.AddScoped<ICarrierScorecardService, Warehouse3PL.Infrastructure.Services.Analytics.CarrierScorecardService>();
         services.AddSingleton<IFxRateProvider, Warehouse3PL.Infrastructure.Services.Analytics.FxRateProvider>();

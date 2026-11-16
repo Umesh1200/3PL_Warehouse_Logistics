@@ -743,7 +743,8 @@ public class FreightReconciliationService : IFreightReconciliationService
 
         // Staff Users: Fail-closed requirement
         // Staff user MUST have cross-facility permission OR an assigned facility matching the shipment.
-        bool hasCrossFacilityPermission = _currentUserContext.HasPermission("Analytics:CrossFacility")
+        bool hasCrossFacilityPermission = _currentUserContext.HasPermission(Warehouse3PL.Domain.Constants.Permissions.Analytics.MultiFacilityView)
+                                           || _currentUserContext.HasPermission("Analytics:CrossFacility")
                                        || _currentUserContext.HasPermission("Financial:CrossFacility");
 
         if (hasCrossFacilityPermission)
@@ -818,7 +819,8 @@ public class FreightReconciliationService : IFreightReconciliationService
         {
             effectiveClientId = requestedClientId;
 
-            bool hasCrossFacilityPermission = _currentUserContext.HasPermission("Analytics:CrossFacility")
+            bool hasCrossFacilityPermission = _currentUserContext.HasPermission(Warehouse3PL.Domain.Constants.Permissions.Analytics.MultiFacilityView)
+                                           || _currentUserContext.HasPermission("Analytics:CrossFacility")
                                            || _currentUserContext.HasPermission("Financial:CrossFacility");
 
             if (hasCrossFacilityPermission)

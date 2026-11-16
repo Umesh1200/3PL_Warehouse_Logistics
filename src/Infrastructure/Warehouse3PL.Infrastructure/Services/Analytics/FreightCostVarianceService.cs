@@ -869,6 +869,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         DateTime endDateUtc,
         Guid? facilityId = null,
         DateTime? asOfUtc = null,
+        Guid? clientId = null,
         CancellationToken cancellationToken = default)
     {
         if (string.IsNullOrWhiteSpace(carrierCode))
@@ -876,7 +877,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             throw new ArgumentException("Carrier code is required.", nameof(carrierCode));
         }
 
-        EnforceFilterAuthorization(null, facilityId, out var effectiveClientId, out var effectiveFacilityId, out var clientAuthorizedFacilities);
+        EnforceFilterAuthorization(clientId, facilityId, out var effectiveClientId, out var effectiveFacilityId, out var clientAuthorizedFacilities);
 
         var valuationTime = asOfUtc ?? DateTime.UtcNow;
         var normalizedCarrier = carrierCode.Trim().ToUpperInvariant();
@@ -1648,7 +1649,8 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         {
             effectiveClientId = requestedClientId;
 
-            bool hasCrossFacilityPermission = _currentUserContext.HasPermission("Analytics:CrossFacility")
+            bool hasCrossFacilityPermission = _currentUserContext.HasPermission(Warehouse3PL.Domain.Constants.Permissions.Analytics.MultiFacilityView)
+                                           || _currentUserContext.HasPermission("Analytics:CrossFacility")
                                            || _currentUserContext.HasPermission("Shipments:CrossFacility")
                                            || _currentUserContext.HasPermission("Financials:CrossFacility");
 

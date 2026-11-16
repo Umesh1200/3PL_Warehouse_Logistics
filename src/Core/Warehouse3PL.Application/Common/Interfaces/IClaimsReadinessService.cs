@@ -35,4 +35,8 @@ public interface IClaimsReadinessService
         Guid facilityId,
         Guid? clientId = null,
         CancellationToken cancellationToken = default);
+
+    Task<PagedResult<ClaimsReadinessAssessmentDto>> GetFacilityClaimsReadinessPageAsync(
+        Guid facilityId, Guid? clientId = null, int pageNumber = 1, int pageSize = 50,
+        CancellationToken cancellationToken = default);
 }

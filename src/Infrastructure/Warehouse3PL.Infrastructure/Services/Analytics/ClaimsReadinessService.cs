@@ -14,13 +14,16 @@ namespace Warehouse3PL.Infrastructure.Services.Analytics;
 public class ClaimsReadinessService : IClaimsReadinessService
 {
     private readonly IApplicationDbContext _dbContext;
+    private readonly TransportationAnalyticsAuthorization _authorization;
     private readonly ILogger<ClaimsReadinessService> _logger;
 
     public ClaimsReadinessService(
         IApplicationDbContext dbContext,
-        ILogger<ClaimsReadinessService> logger)
+        ILogger<ClaimsReadinessService> logger,
+        TransportationAnalyticsAuthorization authorization)
     {
         _dbContext = dbContext;
+        _authorization = authorization;
         _logger = logger;
     }
 
@@ -29,34 +32,36 @@ public class ClaimsReadinessService : IClaimsReadinessService
         ClaimType claimType = ClaimType.Lost,
         CancellationToken cancellationToken = default)
     {
-        var compliance = await _dbContext.CarrierSlaComplianceRecords
+        var shipment = await _authorization.RequireShipmentAsync(shipmentId, cancellationToken);
+        var scope = new TransportationQueryScope(shipment.ClientId, shipment.FacilityId, null);
+        var compliance = await scope.Apply(_dbContext.CarrierSlaComplianceRecords.AsNoTracking())
             .AsNoTracking()
             .FirstOrDefaultAsync(r => r.ShipmentId == shipmentId, cancellationToken);
 
-        var alert = await _dbContext.CarrierLostShipmentAlerts
+        var alert = await scope.Apply(_dbContext.CarrierLostShipmentAlerts.AsNoTracking())
             .AsNoTracking()
             .FirstOrDefaultAsync(a => a.ShipmentId == shipmentId, cancellationToken);
 
-        var trackingScansCount = await _dbContext.ShipmentTrackingEvents
+        var trackingScansCount = await scope.Apply(_dbContext.ShipmentTrackingEvents.AsNoTracking())
             .AsNoTracking()
             .CountAsync(t => t.ShipmentId == shipmentId, cancellationToken);
 
-        var exceptionsCount = await _dbContext.ShipmentDeliveryExceptions
+        var exceptionsCount = await scope.Apply(_dbContext.ShipmentDeliveryExceptions.AsNoTracking())
             .AsNoTracking()
             .CountAsync(e => e.ShipmentId == shipmentId, cancellationToken);
 
-        var costRecord = await _dbContext.CarrierCostRecords
+        var costRecord = await scope.Apply(_dbContext.CarrierCostRecords.AsNoTracking())
             .AsNoTracking()
             .FirstOrDefaultAsync(c => c.ShipmentId == shipmentId, cancellationToken);
 
-        var pod = await _dbContext.ProofOfDeliveries
+        var pod = await scope.Apply(_dbContext.ProofOfDeliveries.AsNoTracking())
             .AsNoTracking()
             .FirstOrDefaultAsync(p => p.ShipmentId == shipmentId, cancellationToken);
 
-        var carrierCode = compliance?.CarrierCode ?? alert?.CarrierCode ?? costRecord?.CarrierCode ?? "UNKNOWN";
+        var carrierCode = compliance?.CarrierCode ?? alert?.CarrierCode ?? costRecord?.CarrierCode ?? shipment.CarrierCode;
         var trackingNumber = compliance?.TrackingNumber ?? alert?.TrackingNumber ?? costRecord?.TrackingNumber ?? "UNKNOWN";
-        var facilityId = compliance?.FacilityId ?? alert?.FacilityId ?? costRecord?.FacilityId ?? Guid.Empty;
-        var clientId = compliance?.ClientId ?? alert?.ClientId ?? costRecord?.ClientId ?? Guid.Empty;
+        var facilityId = shipment.FacilityId;
+        var clientId = shipment.ClientId;
 
         // Evidence Dimension Checklist
         bool hasHandover = compliance != null && compliance.DispatchedAtUtc != default;
@@ -242,6 +247,8 @@ public class ClaimsReadinessService : IClaimsReadinessService
         Guid? clientId = null,
         CancellationToken cancellationToken = default)
     {
+        var scope = await _authorization.ResolveAsync(clientId, facilityId, cancellationToken);
+        clientId = scope.ClientId;
         // Query active lost shipment alerts as candidates for claims readiness
         var query = _dbContext.CarrierLostShipmentAlerts
             .AsNoTracking()
@@ -252,7 +259,7 @@ public class ClaimsReadinessService : IClaimsReadinessService
             query = query.Where(a => a.ClientId == clientId.Value);
         }
 
-        var alerts = await query.ToListAsync(cancellationToken);
+        var alerts = await scope.Apply(query).ToListAsync(cancellationToken);
         var assessments = new List<ClaimsReadinessAssessmentDto>(alerts.Count);
 
         foreach (var alert in alerts)
@@ -262,5 +269,24 @@ public class ClaimsReadinessService : IClaimsReadinessService
         }
 
         return assessments;
+    }
+
+    public async Task<PagedResult<ClaimsReadinessAssessmentDto>> GetFacilityClaimsReadinessPageAsync(
+        Guid facilityId, Guid? clientId = null, int pageNumber = 1, int pageSize = 50,
+        CancellationToken cancellationToken = default)
+    {
+        if (pageNumber is < 1 or > 1000000 || pageSize is < 1 or > 200)
+            throw new Warehouse3PL.Domain.Exceptions.ValidationException("Pagination", "Use pageNumber 1..1000000 and pageSize 1..200.");
+        var scope = await _authorization.ResolveAsync(clientId, facilityId, cancellationToken);
+        var shipments = scope.Apply(_dbContext.Shipments.AsNoTracking());
+        var candidates = scope.Apply(_dbContext.CarrierLostShipmentAlerts.AsNoTracking())
+            .Where(a => a.FacilityId == facilityId && a.AlertStatus == LostShipmentAlertStatus.Active &&
+                shipments.Any(s => s.Id == a.ShipmentId && s.ClientId == a.ClientId && s.FacilityId == a.FacilityId))
+            .Select(a => a.ShipmentId).Distinct();
+        var count = await candidates.CountAsync(cancellationToken);
+        var ids = await candidates.OrderBy(id => id).Skip((pageNumber - 1) * pageSize).Take(pageSize).ToListAsync(cancellationToken);
+        var results = new List<ClaimsReadinessAssessmentDto>(ids.Count);
+        foreach (var id in ids) results.Add(await AssessShipmentClaimsReadinessAsync(id, ClaimType.Lost, cancellationToken));
+        return new(results, count, pageNumber, pageSize);
     }
 }

@@ -71,5 +71,6 @@ public interface IFreightCostVarianceService
         DateTime endDateUtc,
         Guid? facilityId = null,
         DateTime? asOfUtc = null,
+        Guid? clientId = null,
         CancellationToken cancellationToken = default);
 }
