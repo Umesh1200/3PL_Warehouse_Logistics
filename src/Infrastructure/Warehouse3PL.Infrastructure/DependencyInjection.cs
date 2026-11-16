@@ -88,6 +88,7 @@ public static class DependencyInjection
         services.AddScoped<ICarrierScorecardService, Warehouse3PL.Infrastructure.Services.Analytics.CarrierScorecardService>();
         services.AddSingleton<IFxRateProvider, Warehouse3PL.Infrastructure.Services.Analytics.FxRateProvider>();
         services.AddScoped<IFreightReconciliationService, Warehouse3PL.Infrastructure.Services.Analytics.FreightReconciliationService>();
+        services.AddScoped<IFreightCostVarianceService, Warehouse3PL.Infrastructure.Services.Analytics.FreightCostVarianceService>();
 
         // Private Object Storage (Phase 4.5 Step 3A)
         services.Configure<Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions>(
