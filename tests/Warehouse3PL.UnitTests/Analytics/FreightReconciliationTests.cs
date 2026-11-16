@@ -2891,7 +2891,7 @@ public class FreightReconciliationTests
         {
             (new DateOnly(2026, 10, 30), 1.3397m, "BOE-20261030"),
             (new DateOnly(2026, 11, 2), 1.3416m, "BOE-20261102"),
-            (new DateOnly(2026, 11, 4), 1.3473m, "BOE-20261104"),
+            (new DateOnly(2026, 11, 4), 1.3471m, "BOE-20261104"),
             (new DateOnly(2026, 11, 6), 1.3360m, "BOE-20261106"),
             (new DateOnly(2026, 11, 13), 1.3234m, "BOE-20261113")
         };
@@ -2913,25 +2913,31 @@ public class FreightReconciliationTests
     {
         var provider = new FxRateProvider();
 
-        // Retrieve authentic metadata and raw bytes for FRB-20261109
+        // 1. Retrieve authentic metadata and raw bytes for FRB-20261109
         var meta = provider.GetBulletinMetadata("FRB-20261109");
         var authenticBytes = provider.GetRawBulletinBytes("FRB-20261109");
 
-        // Compute authentic digest
+        // Compute authentic digest and verify against independently pinned manifest entry
         byte[] authHash = System.Security.Cryptography.SHA256.HashData(authenticBytes);
         var expectedDigest = $"SHA256:{Convert.ToHexString(authHash).ToLowerInvariant()}";
         Assert.Equal(meta.Sha256Digest, expectedDigest);
+        Assert.Equal(FxBulletinManifest.Entries["FRB-20261109"].ExpectedSha256Digest, expectedDigest);
 
-        // Create a tampered payload by altering exactly one byte in the raw artifact
+        // Verify authentic bytes pass provider verifier
+        Assert.True(provider.VerifyBulletinIntegrity("FRB-20261109", authenticBytes, out var authComputed));
+        Assert.Equal(expectedDigest, authComputed);
+
+        // 2. Submit tampered bytes directly into provider verifier
         byte[] tamperedBytes = (byte[])authenticBytes.Clone();
         tamperedBytes[50] ^= 0xFF; // Flip all bits of byte 50
 
-        // Compute tampered digest
-        byte[] tamperedHash = System.Security.Cryptography.SHA256.HashData(tamperedBytes);
-        var tamperedDigest = $"SHA256:{Convert.ToHexString(tamperedHash).ToLowerInvariant()}";
+        // Provider MUST reject tampered input against the independently pinned trust anchor
+        Assert.False(provider.VerifyBulletinIntegrity("FRB-20261109", tamperedBytes, out var tamperedComputed));
+        Assert.NotEqual(expectedDigest, tamperedComputed);
 
-        // Assert cryptographic collision resistance: tampered payload CANNOT match official digest
-        Assert.NotEqual(expectedDigest, tamperedDigest);
+        // 3. Verify embedded artifact directly
+        Assert.True(provider.VerifyBulletinIntegrity("FRB-20261109", out var embeddedDigest));
+        Assert.Equal(expectedDigest, embeddedDigest);
     }
 
     [Fact]
@@ -2977,11 +2983,12 @@ public class FreightReconciliationTests
             idempotencyKey: Guid.NewGuid().ToString(),
             adjustedAtUtc: date);
 
+        Assert.Equal("CAD", explicitAdj.Currency);
         var expCurr = explicitAdj.ResolveEffectiveCurrency(cost.Currency, out var expInherited);
         Assert.Equal("CAD", expCurr);
         Assert.False(expInherited); // Not inherited
 
-        // 2. Inherited Currency Adjustment: Persisted with EMPTY currency (inherits CAD from parent)
+        // 2. Inherited Currency Adjustment: Created with NULL currency (must NOT default to USD!)
         var inheritedAdj = CarrierCostAdjustment.Create(
             clientId: _clientAId,
             facilityId: _facility1Id,
@@ -2991,15 +2998,22 @@ public class FreightReconciliationTests
             originalCarrierCost: 90.00m,
             adjustedCarrierCost: 95.00m,
             clientFreightDelta: 0m,
-            currency: "CAD", // Normal factory sets it, but test raw property below
+            currency: null, // Null currency: factory leaves it null!
             reason: "Inherited CAD late accessorial surcharge",
             idempotencyKey: Guid.NewGuid().ToString(),
             adjustedAtUtc: date);
-        inheritedAdj.Currency = ""; // Clear currency to simulate omitted/inherited adjustment
+
+        Assert.Null(inheritedAdj.Currency); // Proves no silent USD fallback in factory!
 
         var inhCurr = inheritedAdj.ResolveEffectiveCurrency(cost.Currency, out var inhInherited);
         Assert.Equal("CAD", inhCurr);
         Assert.True(inhInherited); // Explicitly verified as inherited!
+
+        // 3. Negative Case: Inheriting with invalid or null parent currency fails closed
+        var exNoParent = Assert.Throws<InvalidOperationException>(() =>
+            inheritedAdj.ResolveEffectiveCurrency(null, out _));
+        Assert.Contains("Cannot inherit currency", exNoParent.Message);
+        Assert.Contains("parent charge has no valid currency", exNoParent.Message);
 
         cost.Adjustments.Add(explicitAdj);
         cost.Adjustments.Add(inheritedAdj);
@@ -3026,24 +3040,68 @@ public class FreightReconciliationTests
     }
 
     [Fact]
-    public void Test_54_ValuationTimePrecedingPublication_RejectsRateBeforePublicationTime()
+    public async Task Test_54_ValuationTimePrecedingPublication_RejectsRateBeforePublicationTime()
     {
-        var provider = new FxRateProvider();
-
-        // Effective date Nov 4, 2026 was published in FRB-20261109 on Monday Nov 9, 2026 at 21:15 UTC
+        // 1. Direct provider test: Effective date Nov 4, 2026 was published in FRB-20261109 on Monday Nov 9, 2026 at 21:15 UTC
         var effectiveDate = new DateTime(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc);
-
-        // Valuation time on Nov 5, 2026 (prior to bulletin publication on Nov 9)
         var prematureValuationTime = new DateTime(2026, 11, 5, 12, 0, 0, DateTimeKind.Utc);
 
-        // ACT & ASSERT: Valuation time check enforces that fixing was published before transaction valuation
-        var ex = Assert.Throws<InvalidOperationException>(() =>
-            provider.GetHistoricalExchangeRate(
+        var exProv = Assert.Throws<InvalidOperationException>(() =>
+            _fxRateProvider.GetHistoricalExchangeRate(
                 "CAD", "USD", effectiveDate, prematureValuationTime,
                 out _, out _, out _, out _, out _));
 
-        Assert.Contains("which is after the requested valuation time", ex.Message);
-        Assert.Contains("Future fixings cannot be used before publication", ex.Message);
+        Assert.Contains("which is after the requested valuation time", exProv.Message);
+        Assert.Contains("Future fixings cannot be used before publication", exProv.Message);
+
+        // 2. Production FreightReconciliationService.NormalizeCurrency carries valuation cutoff
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var service = new FreightReconciliationService(
+            context,
+            tenantProvider,
+            currentUser,
+            _fxRateProvider,
+            NullLogger<FreightReconciliationService>.Instance);
+
+        var exNorm = Assert.Throws<InvalidOperationException>(() =>
+            service.NormalizeCurrency(100m, "CAD", "USD", effectiveDate, asOfUtc: prematureValuationTime));
+        Assert.Contains("which is after the requested valuation time", exNorm.Message);
+
+        // 3. Production GetShipmentFinancialReconciliationAsync carries valuation cutoff into financial reconciliation
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-VAL-54", "FEDEX", effectiveDate);
+        context.Shipments.Add(shipment);
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-VAL-54",
+            BaseTransportationCost = 100.00m,
+            TotalCarrierCost = 100.00m,
+            CostAssessedAtUtc = effectiveDate,
+            Status = CarrierCostStatus.Invoiced,
+            Currency = "CAD"
+        };
+        context.CarrierCostRecords.Add(cost);
+        await context.SaveChangesAsync();
+
+        var exRecon = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            service.GetShipmentFinancialReconciliationAsync(shipment.Id, asOfUtc: prematureValuationTime));
+        Assert.Contains("which is after the requested valuation time", exRecon.Message);
+
+        // 4. Valid valuation timestamp (after bulletin release: Nov 10, 2026) succeeds and persists ValuationTimeUtc
+        var validValuationTime = new DateTime(2026, 11, 10, 0, 0, 0, DateTimeKind.Utc);
+        var validResult = await service.GetShipmentFinancialReconciliationAsync(shipment.Id, asOfUtc: validValuationTime);
+
+        Assert.Equal(validValuationTime, validResult.ValuationTimeUtc);
+        Assert.NotNull(validResult.ConversionEvidence);
+        Assert.Equal(validValuationTime, validResult.ConversionEvidence.ValuationTimeUtc);
+        Assert.All(validResult.ConversionEvidenceAuditTrail, ev => Assert.Equal(validValuationTime, ev.ValuationTimeUtc));
     }
 
     [Fact]
@@ -3069,5 +3127,57 @@ public class FreightReconciliationTests
             var evidence = new CurrencyConversionEvidence(code, 100m, 1.0m, validDate, "Test", "1.0", "USD");
             Assert.Equal(code, evidence.OriginalCurrency);
         }
+    }
+
+    [Fact]
+    public void Test_56_RawArtifactParsingAndScheduleDerivation_CrossValidatedOnStartup()
+    {
+        var provider = new FxRateProvider();
+
+        // 1. Verify all registered bulletins match independent manifest metadata
+        var versions = provider.GetSupportedBulletinVersions();
+        Assert.Equal(FxBulletinManifest.Entries.Count, versions.Count);
+
+        foreach (var version in versions)
+        {
+            var meta = provider.GetBulletinMetadata(version);
+            Assert.True(FxBulletinManifest.TryGetEntry(version, out var manifestEntry));
+
+            Assert.Equal(manifestEntry.ArtifactFileName, meta.ArtifactFileName);
+            Assert.Equal(manifestEntry.BenchmarkSeriesId, meta.BenchmarkSeriesId);
+            Assert.Equal(manifestEntry.ExpectedSha256Digest, meta.Sha256Digest);
+            Assert.Equal(manifestEntry.ExpectedByteCount, meta.ByteCount);
+            Assert.Equal(manifestEntry.PublishedAtUtc, meta.PublishedAtUtc);
+            Assert.Equal(manifestEntry.QuotationConvention, meta.QuotationConvention);
+
+            // Raw byte count matches
+            var rawBytes = provider.GetRawBulletinBytes(version);
+            Assert.Equal(manifestEntry.ExpectedByteCount, rawBytes.Length);
+
+            // Cryptographic integrity verified against trust anchor
+            Assert.True(provider.VerifyBulletinIntegrity(version, out var hash));
+            Assert.Equal(manifestEntry.ExpectedSha256Digest, hash);
+
+            // Observations count matches
+            Assert.Equal(manifestEntry.ExpectedObservations.Count, meta.Observations.Count);
+            foreach (var (date, rate) in manifestEntry.ExpectedObservations)
+            {
+                Assert.True(meta.Observations.TryGetValue(date, out var obsRate));
+                Assert.Equal(rate, obsRate);
+            }
+        }
+
+        // 2. Cross-verify Bank of England Nov 4 observation is officially 1.3471m
+        var boeMeta = provider.GetBulletinMetadata("BOE-20261104");
+        Assert.Equal(1.3471m, boeMeta.Observations[new DateOnly(2026, 11, 4)]);
+
+        // 3. Verify schedule returns 1.3471m for GBP/USD on Nov 4, 2026
+        var boeRate = provider.GetHistoricalExchangeRate(
+            "GBP", "USD", new DateTime(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc),
+            out var src, out var ver, out var series, out _, out _);
+        Assert.Equal(1.3471m, boeRate);
+        Assert.Equal("BankOfEngland_Statistical", src);
+        Assert.Equal("BOE-20261104", ver);
+        Assert.Equal("XUDLUSS", series);
     }
 }

@@ -6,7 +6,7 @@ namespace Warehouse3PL.Application.Common.Models;
 /// <summary>
 /// Reconciled shipment financial analytical model establishing buy-side and sell-side amounts.
 /// Strict Invariant: Original charge plus signed adjustments equals net charge.
-/// DB-SPEC-3PL-2026 Phase 6.4.4.1 Buy-Side & Sell-Side Financial Reconciliation.
+/// DB-SPEC-3PL-2026 Phase 6.4.4.1 Buy-Side &amp; Sell-Side Financial Reconciliation.
 /// </summary>
 public record ReconciledShipmentFinancialsDto
 {
@@ -19,6 +19,7 @@ public record ReconciledShipmentFinancialsDto
     public Guid ClientId { get; init; }
     public DateTime? DispatchedAtUtc { get; init; }
     public DateTime? RatedAtUtc { get; init; }
+    public DateTime ValuationTimeUtc { get; init; }
 
     // Buy-Side Financial Evidence
     public decimal QuotedCarrierCostUsd { get; init; }
@@ -82,6 +83,7 @@ public record CarrierAdjustmentAuditDto
 public record ReconciliationBatchSummaryDto
 {
     public int TotalShipmentsCount { get; init; }
+    public DateTime ValuationTimeUtc { get; init; }
     public decimal TotalQuotedAmountUsd { get; init; }
     public decimal TotalEstimatedAmountUsd { get; init; }
     public decimal TotalInvoicedCarrierCostUsd { get; init; }

@@ -45,6 +45,11 @@ public record CurrencyConversionEvidence
     public DateTime EffectiveDateUtc { get; private init; }
 
     /// <summary>
+    /// Historical point-in-time valuation timestamp in UTC against which central bank publication cutoff was evaluated.
+    /// </summary>
+    public DateTime ValuationTimeUtc { get; private init; }
+
+    /// <summary>
     /// Authoritative source or rate provider (e.g., "FederalReserveBoard_H10", "EuropeanCentralBank_Reference", "BankOfEngland_SpotStatistical").
     /// </summary>
     public string RateSource { get; private init; } = "FederalReserveBoard_H10";
@@ -94,7 +99,7 @@ public record CurrencyConversionEvidence
 
     /// <summary>
     /// Authoritative validating constructor enforcing ISO 4217 currency syntax, positive rate bounds,
-    /// UTC date normalization, and deterministic rounding conservation.
+    /// UTC date normalization, point-in-time valuation timestamp, and deterministic rounding conservation.
     /// </summary>
     public CurrencyConversionEvidence(
         string originalCurrency,
@@ -108,7 +113,8 @@ public record CurrencyConversionEvidence
         MidpointRounding roundingMode = MidpointRounding.AwayFromZero,
         string? benchmarkSeriesId = null,
         string? integrityHash = null,
-        DateTime? publishedAtUtc = null)
+        DateTime? publishedAtUtc = null,
+        DateTime? valuationTimeUtc = null)
     {
         ValidateIso4217(originalCurrency, nameof(originalCurrency));
         ValidateIso4217(targetCurrency, nameof(targetCurrency));
@@ -123,12 +129,20 @@ public record CurrencyConversionEvidence
             throw new ArgumentException("Effective date cannot have DateTimeKind.Unspecified. Must be explicitly Utc or Local.", nameof(effectiveDateUtc));
         }
 
+        if (valuationTimeUtc.HasValue && valuationTimeUtc.Value.Kind == DateTimeKind.Unspecified)
+        {
+            throw new ArgumentException("Valuation date (valuationTimeUtc) cannot have DateTimeKind.Unspecified. Must be explicitly Utc or Local.", nameof(valuationTimeUtc));
+        }
+
         OriginalCurrency = originalCurrency.Trim();
         OriginalAmount = originalAmount;
         ExchangeRate = exchangeRate;
         TargetCurrency = targetCurrency.Trim();
         RateDirection = $"FROM_{OriginalCurrency}_TO_{TargetCurrency}";
         EffectiveDateUtc = effectiveDateUtc.Kind == DateTimeKind.Local ? effectiveDateUtc.ToUniversalTime() : effectiveDateUtc;
+        ValuationTimeUtc = valuationTimeUtc.HasValue
+            ? (valuationTimeUtc.Value.Kind == DateTimeKind.Local ? valuationTimeUtc.Value.ToUniversalTime() : valuationTimeUtc.Value)
+            : EffectiveDateUtc;
         RateSource = string.IsNullOrWhiteSpace(rateSource) ? "FederalReserveBoard_H10" : rateSource.Trim();
         RateVersion = string.IsNullOrWhiteSpace(rateVersion) ? "1.0.0" : rateVersion.Trim();
         RoundingDecimals = roundingDecimals;

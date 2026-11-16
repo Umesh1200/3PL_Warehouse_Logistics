@@ -27,7 +27,12 @@ public class CarrierCostAdjustment : AuditableEntity<Guid>, ITenantEntity
     public decimal CarrierCostDelta { get; set; }
     public decimal ClientFreightDelta { get; set; }
 
-    public string Currency { get; set; } = "USD";
+    /// <summary>
+    /// Explicit adjustment currency. If null or empty, this adjustment strictly inherits
+    /// the parent carrier cost record's currency under contractual reconciliation rules.
+    /// It must never silently default to USD.
+    /// </summary>
+    public string? Currency { get; set; }
     public string Reason { get; set; } = string.Empty;
     public DateTime AdjustedAtUtc { get; set; }
 
@@ -58,7 +63,7 @@ public class CarrierCostAdjustment : AuditableEntity<Guid>, ITenantEntity
         decimal originalCarrierCost,
         decimal adjustedCarrierCost,
         decimal clientFreightDelta,
-        string currency,
+        string? currency,
         string reason,
         string idempotencyKey,
         DateTime adjustedAtUtc,
@@ -72,7 +77,14 @@ public class CarrierCostAdjustment : AuditableEntity<Guid>, ITenantEntity
         if (string.IsNullOrWhiteSpace(reason)) throw new ValidationException(nameof(reason), "Adjustment reason is required.");
 
         var delta = decimal.Round(adjustedCarrierCost - originalCarrierCost, 4, MidpointRounding.AwayFromZero);
-        var normalizedCurrency = string.IsNullOrWhiteSpace(currency) ? "USD" : currency.Trim().ToUpperInvariant();
+        
+        string? normalizedCurrency = null;
+        if (!string.IsNullOrWhiteSpace(currency))
+        {
+            Iso4217Currencies.Validate(currency, nameof(currency));
+            normalizedCurrency = currency.Trim().ToUpperInvariant();
+        }
+
         var normalizedKey = idempotencyKey?.Trim() ?? string.Empty;
 
         return new CarrierCostAdjustment
@@ -100,8 +112,9 @@ public class CarrierCostAdjustment : AuditableEntity<Guid>, ITenantEntity
     /// Explicitly resolves the effective currency for this adjustment under contractual reconciliation rules.
     /// If an explicit currency was persisted, validates and returns it (isInherited = false).
     /// If omitted or blank, explicitly inherits the parent carrier charge's currency (isInherited = true) and validates it against ISO 4217.
+    /// An adjustment with unknown or unresolvable currency fails closed and is never defaulted to USD.
     /// </summary>
-    public string ResolveEffectiveCurrency(string parentChargeCurrency, out bool isInherited)
+    public string ResolveEffectiveCurrency(string? parentChargeCurrency, out bool isInherited)
     {
         if (!string.IsNullOrWhiteSpace(Currency))
         {
@@ -112,7 +125,7 @@ public class CarrierCostAdjustment : AuditableEntity<Guid>, ITenantEntity
 
         if (string.IsNullOrWhiteSpace(parentChargeCurrency))
         {
-            throw new InvalidOperationException($"Cannot inherit currency for adjustment '{Id}' because parent charge has no valid currency.");
+            throw new InvalidOperationException($"Cannot inherit currency for adjustment '{Id}' because parent charge has no valid currency. An adjustment with unknown currency cannot be processed or defaulted to USD.");
         }
 
         Iso4217Currencies.Validate(parentChargeCurrency, nameof(parentChargeCurrency));
@@ -120,4 +133,3 @@ public class CarrierCostAdjustment : AuditableEntity<Guid>, ITenantEntity
         return parentChargeCurrency.Trim().ToUpperInvariant();
     }
 }
-

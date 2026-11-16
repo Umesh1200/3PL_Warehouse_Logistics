@@ -65,9 +65,14 @@ public interface IFxRateProvider
         out DateTime publishedAtUtc);
 
     /// <summary>
-    /// Mathematically verifies the cryptographic SHA-256 digest of an official central bank bulletin against its raw canonical payload.
+    /// Mathematically verifies the cryptographic SHA-256 digest of an official central bank bulletin against an independently pinned trust anchor.
     /// </summary>
     bool VerifyBulletinIntegrity(string bulletinVersion, out string computedHash);
+
+    /// <summary>
+    /// Mathematically verifies the cryptographic SHA-256 digest of supplied raw bytes or an embedded bulletin against an independently pinned trust anchor.
+    /// </summary>
+    bool VerifyBulletinIntegrity(string bulletinVersion, byte[]? rawBytesToVerify, out string computedHash);
 
     /// <summary>
     /// Retrieves the raw byte payload of an archived central bank source bulletin.

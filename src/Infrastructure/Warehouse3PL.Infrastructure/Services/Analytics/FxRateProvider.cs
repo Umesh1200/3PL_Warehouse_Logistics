@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
+using System.Xml.Linq;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Domain.ValueObjects;
 
@@ -19,7 +21,8 @@ namespace Warehouse3PL.Infrastructure.Services.Analytics;
 /// - Bank of England (BOE) Daily Spot Bulletins:
 ///   * Official Series: XUDLUSS (USD per 1 GBP).
 ///   * Statistical benchmark reference; published daily at 16:00 London time.
-/// Cryptographic SHA-256 integrity digests are dynamically computed directly against authentic raw downloaded artifacts.
+/// Cryptographic integrity is verified against an independent trust anchor manifest (FxBulletinManifest).
+/// Source observations are parsed directly from raw embedded artifacts and cross-validated against the manifest.
 /// DB-SPEC-3PL-2026 Phase 6.4.4.1 Buy-Side &amp; Sell-Side Financial Reconciliation.
 /// </summary>
 public class FxRateProvider : IFxRateProvider
@@ -49,122 +52,192 @@ public class FxRateProvider : IFxRateProvider
 
     static FxRateProvider()
     {
-        // Register authoritative central bank bulletin metadata
-        RegisterBulletin(new BulletinProvenanceMetadata(
-            BulletinVersion: "FRB-20261102",
-            ArtifactFileName: "FRB_H10_20261102.txt",
-            SourceUrl: "https://www.federalreserve.gov/datadownload/Output.aspx?rel=H10&series=H10/H10/RXI_N.B.CA",
-            CentralBankAuthority: "FederalReserveBoard_H10",
-            BenchmarkSeriesId: "H10/H10/RXI_N.B.CA",
-            RetrievedAtUtc: new DateTime(2026, 11, 2, 21, 15, 0, DateTimeKind.Utc),
-            PublishedAtUtc: new DateTime(2026, 11, 2, 21, 15, 0, DateTimeKind.Utc),
-            HttpETag: "\"frb-h10-20261102-rxi-ca-v1\"",
-            Sha256Digest: string.Empty, // Computed dynamically from raw resource
-            ByteCount: 0,
-            QuotationConvention: "CAD_PER_USD",
-            Observations: new Dictionary<DateOnly, decimal>
+        // 1. Load, parse, verify, and register each bulletin from the independent trust anchor manifest
+        foreach (var (version, manifestEntry) in FxBulletinManifest.Entries)
+        {
+            var rawBytes = LoadRawArtifactBytes(manifestEntry.ArtifactFileName);
+
+            // Compute dynamic SHA-256 over raw artifact bytes
+            byte[] hash = SHA256.HashData(rawBytes);
+            var computedDigest = $"SHA256:{Convert.ToHexString(hash).ToLowerInvariant()}";
+
+            // Verify against independently pinned expected trust anchor digest
+            if (!string.Equals(computedDigest, manifestEntry.ExpectedSha256Digest, StringComparison.OrdinalIgnoreCase))
             {
-                [new DateOnly(2026, 10, 26)] = 1.4140m,
-                [new DateOnly(2026, 10, 27)] = 1.4037m,
-                [new DateOnly(2026, 10, 28)] = 1.4036m,
-                [new DateOnly(2026, 10, 29)] = 1.3975m,
-                [new DateOnly(2026, 10, 30)] = 1.3957m
-            }));
+                throw new CryptographicException(
+                    $"Cryptographic integrity failure for bulletin '{version}'. " +
+                    $"Raw artifact '{manifestEntry.ArtifactFileName}' computed digest '{computedDigest}' does not match " +
+                    $"independently pinned manifest digest '{manifestEntry.ExpectedSha256Digest}'.");
+            }
 
-        RegisterBulletin(new BulletinProvenanceMetadata(
-            BulletinVersion: "FRB-20261109",
-            ArtifactFileName: "FRB_H10_20261109.txt",
-            SourceUrl: "https://www.federalreserve.gov/datadownload/Output.aspx?rel=H10&series=H10/H10/RXI_N.B.CA",
-            CentralBankAuthority: "FederalReserveBoard_H10",
-            BenchmarkSeriesId: "H10/H10/RXI_N.B.CA",
-            RetrievedAtUtc: new DateTime(2026, 11, 9, 21, 15, 0, DateTimeKind.Utc),
-            PublishedAtUtc: new DateTime(2026, 11, 9, 21, 15, 0, DateTimeKind.Utc),
-            HttpETag: "\"frb-h10-20261109-rxi-ca-v1\"",
-            Sha256Digest: string.Empty,
-            ByteCount: 0,
-            QuotationConvention: "CAD_PER_USD",
-            Observations: new Dictionary<DateOnly, decimal>
+            // Parse raw artifact payload directly according to its authority format
+            var (parsedSeries, parsedObservations) = ParseArtifact(manifestEntry.ArtifactFileName, rawBytes);
+
+            // Cross-validate parsed series identifier
+            if (!string.Equals(parsedSeries, manifestEntry.BenchmarkSeriesId, StringComparison.OrdinalIgnoreCase))
             {
-                [new DateOnly(2026, 11, 2)] = 1.3974m,
-                [new DateOnly(2026, 11, 3)] = 1.3998m,
-                [new DateOnly(2026, 11, 4)] = 1.3973m,
-                [new DateOnly(2026, 11, 5)] = 1.3980m,
-                [new DateOnly(2026, 11, 6)] = 1.4106m
-            }));
+                throw new InvalidOperationException(
+                    $"Series identity mismatch in artifact '{manifestEntry.ArtifactFileName}'. " +
+                    $"Parsed '{parsedSeries}', expected benchmark '{manifestEntry.BenchmarkSeriesId}'.");
+            }
 
-        // ECB daily reference rates
-        RegisterEcbDaily("ECB-20261030", "ECB_EXR_20261030.xml", new DateOnly(2026, 10, 30), 1.1172m);
-        RegisterEcbDaily("ECB-20261102", "ECB_EXR_20261102.xml", new DateOnly(2026, 11, 2), 1.1216m);
-        RegisterEcbDaily("ECB-20261103", "ECB_EXR_20261103.xml", new DateOnly(2026, 11, 3), 1.1179m);
-        RegisterEcbDaily("ECB-20261104", "ECB_EXR_20261104.xml", new DateOnly(2026, 11, 4), 1.1267m);
-        RegisterEcbDaily("ECB-20261105", "ECB_EXR_20261105.xml", new DateOnly(2026, 11, 5), 1.1224m);
-        RegisterEcbDaily("ECB-20261106", "ECB_EXR_20261106.xml", new DateOnly(2026, 11, 6), 1.1165m);
-        RegisterEcbDaily("ECB-20261109", "ECB_EXR_20261109.xml", new DateOnly(2026, 11, 9), 1.1193m);
-        RegisterEcbDaily("ECB-20261110", "ECB_EXR_20261110.xml", new DateOnly(2026, 11, 10), 1.1214m);
-        RegisterEcbDaily("ECB-20261111", "ECB_EXR_20261111.xml", new DateOnly(2026, 11, 11), 1.1127m);
-        RegisterEcbDaily("ECB-20261112", "ECB_EXR_20261112.xml", new DateOnly(2026, 11, 12), 1.1081m);
-        RegisterEcbDaily("ECB-20261113", "ECB_EXR_20261113.xml", new DateOnly(2026, 11, 13), 1.1052m);
+            // Cross-validate parsed observations against manifest expectations
+            if (parsedObservations.Count != manifestEntry.ExpectedObservations.Count)
+            {
+                throw new InvalidOperationException(
+                    $"Observation count mismatch in artifact '{manifestEntry.ArtifactFileName}'. " +
+                    $"Parsed {parsedObservations.Count} observations, expected {manifestEntry.ExpectedObservations.Count}.");
+            }
 
-        // Bank of England daily spot benchmarks
-        RegisterBoeDaily("BOE-20261030", "BOE_XUDLUSS_20261030.csv", new DateOnly(2026, 10, 30), 1.3397m);
-        RegisterBoeDaily("BOE-20261102", "BOE_XUDLUSS_20261102.csv", new DateOnly(2026, 11, 2), 1.3416m);
-        RegisterBoeDaily("BOE-20261104", "BOE_XUDLUSS_20261104.csv", new DateOnly(2026, 11, 4), 1.3473m);
-        RegisterBoeDaily("BOE-20261106", "BOE_XUDLUSS_20261106.csv", new DateOnly(2026, 11, 6), 1.3360m);
-        RegisterBoeDaily("BOE-20261113", "BOE_XUDLUSS_20261113.csv", new DateOnly(2026, 11, 13), 1.3234m);
+            foreach (var (expectedDate, expectedRate) in manifestEntry.ExpectedObservations)
+            {
+                if (!parsedObservations.TryGetValue(expectedDate, out var actualRate))
+                {
+                    throw new InvalidOperationException(
+                        $"Missing observation date '{expectedDate:yyyy-MM-dd}' in parsed artifact '{manifestEntry.ArtifactFileName}'.");
+                }
 
-        // Build continuous effective schedule
+                if (actualRate != expectedRate)
+                {
+                    throw new InvalidOperationException(
+                        $"Rate mismatch for date '{expectedDate:yyyy-MM-dd}' in parsed artifact '{manifestEntry.ArtifactFileName}'. " +
+                        $"Parsed {actualRate}, expected {expectedRate}.");
+                }
+            }
+
+            // Register verified bulletin metadata with parsed observations and pinned digest
+            BulletinRegistry[version] = new BulletinProvenanceMetadata(
+                BulletinVersion: version,
+                ArtifactFileName: manifestEntry.ArtifactFileName,
+                SourceUrl: manifestEntry.SourceUrl,
+                CentralBankAuthority: manifestEntry.CentralBankAuthority,
+                BenchmarkSeriesId: manifestEntry.BenchmarkSeriesId,
+                RetrievedAtUtc: manifestEntry.RetrievedAtUtc,
+                PublishedAtUtc: manifestEntry.PublishedAtUtc,
+                HttpETag: manifestEntry.HttpETag,
+                Sha256Digest: computedDigest,
+                ByteCount: rawBytes.Length,
+                QuotationConvention: manifestEntry.QuotationConvention,
+                Observations: parsedObservations);
+        }
+
+        // 2. Build continuous effective schedule directly from verified and parsed bulletin records
         PublishedFixingSchedule = BuildPublishedSchedule();
     }
 
-    private static void RegisterEcbDaily(string version, string fileName, DateOnly date, decimal rate)
+    private static (string Series, IReadOnlyDictionary<DateOnly, decimal> Observations) ParseArtifact(string fileName, byte[] rawBytes)
     {
-        var pubUtc = date.ToDateTime(new TimeOnly(15, 0, 0), DateTimeKind.Utc);
-        RegisterBulletin(new BulletinProvenanceMetadata(
-            BulletinVersion: version,
-            ArtifactFileName: fileName,
-            SourceUrl: "https://data-api.ecb.europa.eu/service/data/EXR/D.EUR.USD.SP00.A",
-            CentralBankAuthority: "EuropeanCentralBank_Reference",
-            BenchmarkSeriesId: "EXR.D.EUR.USD.SP00.A",
-            RetrievedAtUtc: pubUtc,
-            PublishedAtUtc: pubUtc,
-            HttpETag: $"\"ecb-exr-{date:yyyyMMdd}-v1\"",
-            Sha256Digest: string.Empty,
-            ByteCount: 0,
-            QuotationConvention: "USD_PER_EUR",
-            Observations: new Dictionary<DateOnly, decimal> { [date] = rate }));
-    }
-
-    private static void RegisterBoeDaily(string version, string fileName, DateOnly date, decimal rate)
-    {
-        var pubUtc = date.ToDateTime(new TimeOnly(16, 0, 0), DateTimeKind.Utc);
-        RegisterBulletin(new BulletinProvenanceMetadata(
-            BulletinVersion: version,
-            ArtifactFileName: fileName,
-            SourceUrl: "https://www.bankofengland.co.uk/boeapps/database/fromshowcolumns.asp?SeriesCodes=XUDLUSS",
-            CentralBankAuthority: "BankOfEngland_Statistical",
-            BenchmarkSeriesId: "XUDLUSS",
-            RetrievedAtUtc: pubUtc,
-            PublishedAtUtc: pubUtc,
-            HttpETag: $"\"boe-xudluss-{date:yyyyMMdd}-v1\"",
-            Sha256Digest: string.Empty,
-            ByteCount: 0,
-            QuotationConvention: "USD_PER_GBP",
-            Observations: new Dictionary<DateOnly, decimal> { [date] = rate }));
-    }
-
-    private static void RegisterBulletin(BulletinProvenanceMetadata metadata)
-    {
-        var rawBytes = LoadRawArtifactBytes(metadata.ArtifactFileName);
-        byte[] hash = SHA256.HashData(rawBytes);
-        var digest = $"SHA256:{Convert.ToHexString(hash).ToLowerInvariant()}";
-
-        var finalized = metadata with
+        if (fileName.EndsWith(".txt", StringComparison.OrdinalIgnoreCase))
         {
-            Sha256Digest = digest,
-            ByteCount = rawBytes.Length
-        };
+            var text = Encoding.UTF8.GetString(rawBytes);
+            return ParseFrbTextArtifact(text);
+        }
+        else if (fileName.EndsWith(".xml", StringComparison.OrdinalIgnoreCase))
+        {
+            return ParseEcbXmlArtifact(rawBytes);
+        }
+        else if (fileName.EndsWith(".csv", StringComparison.OrdinalIgnoreCase))
+        {
+            var text = Encoding.UTF8.GetString(rawBytes);
+            return ParseBoeCsvArtifact(text);
+        }
 
-        BulletinRegistry[metadata.BulletinVersion] = finalized;
+        throw new NotSupportedException($"Unsupported artifact file extension for '{fileName}'.");
+    }
+
+    private static (string Series, IReadOnlyDictionary<DateOnly, decimal> Observations) ParseFrbTextArtifact(string text)
+    {
+        var lines = text.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.None);
+        string series = string.Empty;
+        var obs = new Dictionary<DateOnly, decimal>();
+        bool readingData = false;
+
+        foreach (var rawLine in lines)
+        {
+            var line = rawLine.Trim();
+            if (line.StartsWith("SERIES:", StringComparison.OrdinalIgnoreCase))
+            {
+                series = line.Substring("SERIES:".Length).Trim();
+            }
+            else if (line.StartsWith("WEEK ENDING", StringComparison.OrdinalIgnoreCase))
+            {
+                readingData = true;
+            }
+            else if (readingData)
+            {
+                if (line.StartsWith("SOURCE:", StringComparison.OrdinalIgnoreCase) ||
+                    line.StartsWith("HTTP_ETAG:", StringComparison.OrdinalIgnoreCase))
+                {
+                    break;
+                }
+                if (line.Contains('|'))
+                {
+                    var parts = line.Split('|');
+                    if (parts.Length >= 2 &&
+                        DateOnly.TryParseExact(parts[0].Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) &&
+                        decimal.TryParse(parts[1].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out var r))
+                    {
+                        obs[d] = r;
+                    }
+                }
+            }
+        }
+
+        return (series, obs);
+    }
+
+    private static (string Series, IReadOnlyDictionary<DateOnly, decimal> Observations) ParseEcbXmlArtifact(byte[] xmlBytes)
+    {
+        using var stream = new MemoryStream(xmlBytes);
+        var doc = XDocument.Load(stream);
+        var obs = new Dictionary<DateOnly, decimal>();
+        string series = string.Empty;
+
+        var seriesEl = doc.Descendants().FirstOrDefault(e => e.Name.LocalName == "Series");
+        if (seriesEl != null)
+        {
+            series = seriesEl.Attribute("KEY")?.Value ?? string.Empty;
+            foreach (var obsEl in seriesEl.Elements().Where(e => e.Name.LocalName == "Obs"))
+            {
+                var dateStr = obsEl.Attribute("OBS_DATE")?.Value;
+                var valStr = obsEl.Attribute("OBS_VALUE")?.Value;
+                if (DateOnly.TryParseExact(dateStr, "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d) &&
+                    decimal.TryParse(valStr, NumberStyles.Any, CultureInfo.InvariantCulture, out var r))
+                {
+                    obs[d] = r;
+                }
+            }
+        }
+
+        return (series, obs);
+    }
+
+    private static (string Series, IReadOnlyDictionary<DateOnly, decimal> Observations) ParseBoeCsvArtifact(string csvText)
+    {
+        var lines = csvText.Split(new[] { "\r\n", "\r", "\n" }, StringSplitOptions.RemoveEmptyEntries);
+        var obs = new Dictionary<DateOnly, decimal>();
+        string series = string.Empty;
+
+        // Skip CSV header
+        for (int i = 1; i < lines.Length; i++)
+        {
+            var line = lines[i].Trim();
+            if (string.IsNullOrWhiteSpace(line)) continue;
+            var parts = line.Split(',');
+            if (parts.Length >= 3)
+            {
+                if (DateOnly.TryParseExact(parts[0].Trim(), "yyyy-MM-dd", CultureInfo.InvariantCulture, DateTimeStyles.None, out var d))
+                {
+                    series = parts[1].Trim();
+                    if (decimal.TryParse(parts[2].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out var r))
+                    {
+                        obs[d] = r;
+                    }
+                }
+            }
+        }
+
+        return (series, obs);
     }
 
     private static byte[] LoadRawArtifactBytes(string fileName)
@@ -195,57 +268,77 @@ public class FxRateProvider : IFxRateProvider
     {
         var list = new List<PublishedFixing>();
 
-        // FRB-20261102
+        // --------------------------------------------------------------------------------------------------
+        // FRB-20261102 (Week Oct 26 - Oct 30)
+        // --------------------------------------------------------------------------------------------------
         var frb1 = BulletinRegistry["FRB-20261102"];
-        list.Add(CreateFrbFixing(frb1, new DateOnly(2026, 10, 26), new DateTime(2026, 10, 26, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 10, 27, 0, 0, 0, DateTimeKind.Utc), 1.4140m));
-        list.Add(CreateFrbFixing(frb1, new DateOnly(2026, 10, 27), new DateTime(2026, 10, 27, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 10, 28, 0, 0, 0, DateTimeKind.Utc), 1.4037m));
-        list.Add(CreateFrbFixing(frb1, new DateOnly(2026, 10, 28), new DateTime(2026, 10, 28, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 10, 29, 0, 0, 0, DateTimeKind.Utc), 1.4036m));
-        list.Add(CreateFrbFixing(frb1, new DateOnly(2026, 10, 29), new DateTime(2026, 10, 29, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 10, 30, 0, 0, 0, DateTimeKind.Utc), 1.3975m));
-        list.Add(CreateFrbFixing(frb1, new DateOnly(2026, 10, 30), new DateTime(2026, 10, 30, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), 1.3957m, "Covers weekend Oct 31-Nov 1."));
+        list.Add(CreateFrbFixing(frb1, new DateOnly(2026, 10, 26), new DateTime(2026, 10, 26, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 10, 27, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateFrbFixing(frb1, new DateOnly(2026, 10, 27), new DateTime(2026, 10, 27, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 10, 28, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateFrbFixing(frb1, new DateOnly(2026, 10, 28), new DateTime(2026, 10, 28, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 10, 29, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateFrbFixing(frb1, new DateOnly(2026, 10, 29), new DateTime(2026, 10, 29, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 10, 30, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateFrbFixing(frb1, new DateOnly(2026, 10, 30), new DateTime(2026, 10, 30, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), "Covers weekend Oct 31-Nov 1."));
 
-        // FRB-20261109
+        // --------------------------------------------------------------------------------------------------
+        // FRB-20261109 (Week Nov 2 - Nov 6)
+        // --------------------------------------------------------------------------------------------------
         var frb2 = BulletinRegistry["FRB-20261109"];
-        list.Add(CreateFrbFixing(frb2, new DateOnly(2026, 11, 2), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 3, 0, 0, 0, DateTimeKind.Utc), 1.3974m));
-        list.Add(CreateFrbFixing(frb2, new DateOnly(2026, 11, 3), new DateTime(2026, 11, 3, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc), 1.3998m));
-        list.Add(CreateFrbFixing(frb2, new DateOnly(2026, 11, 4), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 5, 0, 0, 0, DateTimeKind.Utc), 1.3973m));
-        list.Add(CreateFrbFixing(frb2, new DateOnly(2026, 11, 5), new DateTime(2026, 11, 5, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc), 1.3980m));
-        list.Add(CreateFrbFixing(frb2, new DateOnly(2026, 11, 6), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 9, 0, 0, 0, DateTimeKind.Utc), 1.4106m, "Covers weekend Nov 7-8."));
+        list.Add(CreateFrbFixing(frb2, new DateOnly(2026, 11, 2), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 3, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateFrbFixing(frb2, new DateOnly(2026, 11, 3), new DateTime(2026, 11, 3, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateFrbFixing(frb2, new DateOnly(2026, 11, 4), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 5, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateFrbFixing(frb2, new DateOnly(2026, 11, 5), new DateTime(2026, 11, 5, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateFrbFixing(frb2, new DateOnly(2026, 11, 6), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 9, 0, 0, 0, DateTimeKind.Utc), "Covers weekend Nov 7-8."));
 
-        // ECB daily
-        list.Add(CreateEcbFixing("ECB-20261030", new DateOnly(2026, 10, 30), new DateTime(2026, 10, 30, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), 1.1172m, "Covers weekend Oct 31-Nov 1."));
-        list.Add(CreateEcbFixing("ECB-20261102", new DateOnly(2026, 11, 2), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 3, 0, 0, 0, DateTimeKind.Utc), 1.1216m));
-        list.Add(CreateEcbFixing("ECB-20261103", new DateOnly(2026, 11, 3), new DateTime(2026, 11, 3, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc), 1.1179m));
-        list.Add(CreateEcbFixing("ECB-20261104", new DateOnly(2026, 11, 4), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 5, 0, 0, 0, DateTimeKind.Utc), 1.1267m));
-        list.Add(CreateEcbFixing("ECB-20261105", new DateOnly(2026, 11, 5), new DateTime(2026, 11, 5, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc), 1.1224m));
-        list.Add(CreateEcbFixing("ECB-20261106", new DateOnly(2026, 11, 6), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 9, 0, 0, 0, DateTimeKind.Utc), 1.1165m, "Covers weekend Nov 7-8."));
-        list.Add(CreateEcbFixing("ECB-20261109", new DateOnly(2026, 11, 9), new DateTime(2026, 11, 9, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 10, 0, 0, 0, DateTimeKind.Utc), 1.1193m));
-        list.Add(CreateEcbFixing("ECB-20261110", new DateOnly(2026, 11, 10), new DateTime(2026, 11, 10, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 11, 0, 0, 0, DateTimeKind.Utc), 1.1214m));
-        list.Add(CreateEcbFixing("ECB-20261111", new DateOnly(2026, 11, 11), new DateTime(2026, 11, 11, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 12, 0, 0, 0, DateTimeKind.Utc), 1.1127m));
-        list.Add(CreateEcbFixing("ECB-20261112", new DateOnly(2026, 11, 12), new DateTime(2026, 11, 12, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 13, 0, 0, 0, DateTimeKind.Utc), 1.1081m));
-        list.Add(CreateEcbFixing("ECB-20261113", new DateOnly(2026, 11, 13), new DateTime(2026, 11, 13, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 16, 0, 0, 0, DateTimeKind.Utc), 1.1052m, "Covers weekend Nov 14-15."));
+        // --------------------------------------------------------------------------------------------------
+        // ECB daily reference rates (series EXR.D.EUR.USD.SP00.A)
+        // --------------------------------------------------------------------------------------------------
+        list.Add(CreateEcbFixing("ECB-20261030", new DateOnly(2026, 10, 30), new DateTime(2026, 10, 30, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), "Covers weekend Oct 31-Nov 1."));
+        list.Add(CreateEcbFixing("ECB-20261102", new DateOnly(2026, 11, 2), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 3, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateEcbFixing("ECB-20261103", new DateOnly(2026, 11, 3), new DateTime(2026, 11, 3, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateEcbFixing("ECB-20261104", new DateOnly(2026, 11, 4), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 5, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateEcbFixing("ECB-20261105", new DateOnly(2026, 11, 5), new DateTime(2026, 11, 5, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateEcbFixing("ECB-20261106", new DateOnly(2026, 11, 6), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 9, 0, 0, 0, DateTimeKind.Utc), "Covers weekend Nov 7-8."));
+        list.Add(CreateEcbFixing("ECB-20261109", new DateOnly(2026, 11, 9), new DateTime(2026, 11, 9, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 10, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateEcbFixing("ECB-20261110", new DateOnly(2026, 11, 10), new DateTime(2026, 11, 10, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 11, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateEcbFixing("ECB-20261111", new DateOnly(2026, 11, 11), new DateTime(2026, 11, 11, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 12, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateEcbFixing("ECB-20261112", new DateOnly(2026, 11, 12), new DateTime(2026, 11, 12, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 13, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateEcbFixing("ECB-20261113", new DateOnly(2026, 11, 13), new DateTime(2026, 11, 13, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 16, 0, 0, 0, DateTimeKind.Utc), "Covers weekend Nov 14-15."));
 
-        // BOE daily spot
-        list.Add(CreateBoeFixing("BOE-20261030", new DateOnly(2026, 10, 30), new DateTime(2026, 10, 30, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), 1.3397m, "Covers weekend Oct 31-Nov 1."));
-        list.Add(CreateBoeFixing("BOE-20261102", new DateOnly(2026, 11, 2), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc), 1.3416m));
-        list.Add(CreateBoeFixing("BOE-20261104", new DateOnly(2026, 11, 4), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc), 1.3473m));
-        list.Add(CreateBoeFixing("BOE-20261106", new DateOnly(2026, 11, 6), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 13, 0, 0, 0, DateTimeKind.Utc), 1.3360m, "Covers week Nov 9-12."));
-        list.Add(CreateBoeFixing("BOE-20261113", new DateOnly(2026, 11, 13), new DateTime(2026, 11, 13, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 16, 0, 0, 0, DateTimeKind.Utc), 1.3234m, "Covers weekend Nov 14-15."));
+        // --------------------------------------------------------------------------------------------------
+        // Bank of England daily spot benchmarks (series XUDLUSS)
+        // --------------------------------------------------------------------------------------------------
+        list.Add(CreateBoeFixing("BOE-20261030", new DateOnly(2026, 10, 30), new DateTime(2026, 10, 30, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), "Covers weekend Oct 31-Nov 1."));
+        list.Add(CreateBoeFixing("BOE-20261102", new DateOnly(2026, 11, 2), new DateTime(2026, 11, 2, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateBoeFixing("BOE-20261104", new DateOnly(2026, 11, 4), new DateTime(2026, 11, 4, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc)));
+        list.Add(CreateBoeFixing("BOE-20261106", new DateOnly(2026, 11, 6), new DateTime(2026, 11, 6, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 13, 0, 0, 0, DateTimeKind.Utc), "Covers week Nov 9-12."));
+        list.Add(CreateBoeFixing("BOE-20261113", new DateOnly(2026, 11, 13), new DateTime(2026, 11, 13, 0, 0, 0, DateTimeKind.Utc), new DateTime(2026, 11, 16, 0, 0, 0, DateTimeKind.Utc), "Covers weekend Nov 14-15."));
 
         return list.AsReadOnly();
     }
 
-    private static PublishedFixing CreateFrbFixing(BulletinProvenanceMetadata b, DateOnly date, DateTime start, DateTime end, decimal quote, string note = "")
+    private static PublishedFixing CreateFrbFixing(BulletinProvenanceMetadata b, DateOnly date, DateTime start, DateTime end, string note = "")
     {
+        if (!b.Observations.TryGetValue(date, out var quote))
+        {
+            throw new InvalidOperationException($"Observation date '{date:yyyy-MM-dd}' not found in bulletin '{b.BulletinVersion}'.");
+        }
+
+        var multiplier = InvertQuote(quote);
+
         return new PublishedFixing(
-            "CAD", "USD", date, start, end, quote, "CAD_PER_USD", InvertQuote(quote),
+            "CAD", "USD", date, start, end, quote, "CAD_PER_USD", multiplier,
             b.PublishedAtUtc, b.CentralBankAuthority, b.BenchmarkSeriesId, b.BulletinVersion,
             b.ArtifactFileName, b.Sha256Digest,
-            $"Federal Reserve H.10 weekly release. Quoted CAD/USD: {quote}; reciprocal multiplier: {InvertQuote(quote)}. {note}".Trim());
+            $"Federal Reserve H.10 weekly release. Quoted CAD/USD: {quote}; reciprocal multiplier: {multiplier}. {note}".Trim());
     }
 
-    private static PublishedFixing CreateEcbFixing(string version, DateOnly date, DateTime start, DateTime end, decimal rate, string note = "")
+    private static PublishedFixing CreateEcbFixing(string version, DateOnly date, DateTime start, DateTime end, string note = "")
     {
         var b = BulletinRegistry[version];
+        if (!b.Observations.TryGetValue(date, out var rate))
+        {
+            throw new InvalidOperationException($"Observation date '{date:yyyy-MM-dd}' not found in bulletin '{version}'.");
+        }
+
         return new PublishedFixing(
             "EUR", "USD", date, start, end, rate, "USD_PER_EUR", rate,
             b.PublishedAtUtc, b.CentralBankAuthority, b.BenchmarkSeriesId, b.BulletinVersion,
@@ -253,9 +346,14 @@ public class FxRateProvider : IFxRateProvider
             $"ECB Euro foreign exchange reference rate. Direct USD/EUR rate: {rate}. {note}".Trim());
     }
 
-    private static PublishedFixing CreateBoeFixing(string version, DateOnly date, DateTime start, DateTime end, decimal rate, string note = "")
+    private static PublishedFixing CreateBoeFixing(string version, DateOnly date, DateTime start, DateTime end, string note = "")
     {
         var b = BulletinRegistry[version];
+        if (!b.Observations.TryGetValue(date, out var rate))
+        {
+            throw new InvalidOperationException($"Observation date '{date:yyyy-MM-dd}' not found in bulletin '{version}'.");
+        }
+
         return new PublishedFixing(
             "GBP", "USD", date, start, end, rate, "USD_PER_GBP", rate,
             b.PublishedAtUtc, b.CentralBankAuthority, b.BenchmarkSeriesId, b.BulletinVersion,
@@ -285,7 +383,6 @@ public class FxRateProvider : IFxRateProvider
         out string integrityHash,
         out DateTime publishedAtUtc)
     {
-        // Default valuation time is current UTC (or as of Nov 15, 2026)
         return GetHistoricalExchangeRate(
             sourceCurrency, targetCurrency, effectiveDateUtc, DateTime.UtcNow,
             out rateSource, out rateVersion, out benchmarkSeriesId, out integrityHash, out publishedAtUtc);
@@ -379,7 +476,12 @@ public class FxRateProvider : IFxRateProvider
 
     public bool VerifyBulletinIntegrity(string bulletinVersion, out string computedHash)
     {
-        if (!BulletinRegistry.TryGetValue(bulletinVersion, out var meta))
+        return VerifyBulletinIntegrity(bulletinVersion, null, out computedHash);
+    }
+
+    public bool VerifyBulletinIntegrity(string bulletinVersion, byte[]? rawBytesToVerify, out string computedHash)
+    {
+        if (!FxBulletinManifest.TryGetEntry(bulletinVersion, out var manifestEntry))
         {
             computedHash = string.Empty;
             return false;
@@ -387,10 +489,10 @@ public class FxRateProvider : IFxRateProvider
 
         try
         {
-            var rawBytes = LoadRawArtifactBytes(meta.ArtifactFileName);
-            byte[] hash = SHA256.HashData(rawBytes);
+            byte[] bytes = rawBytesToVerify ?? LoadRawArtifactBytes(manifestEntry.ArtifactFileName);
+            byte[] hash = SHA256.HashData(bytes);
             computedHash = $"SHA256:{Convert.ToHexString(hash).ToLowerInvariant()}";
-            return string.Equals(computedHash, meta.Sha256Digest, StringComparison.OrdinalIgnoreCase);
+            return string.Equals(computedHash, manifestEntry.ExpectedSha256Digest, StringComparison.OrdinalIgnoreCase);
         }
         catch
         {

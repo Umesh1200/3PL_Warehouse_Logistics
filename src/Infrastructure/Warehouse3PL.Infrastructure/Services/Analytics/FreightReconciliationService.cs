@@ -39,8 +39,16 @@ public class FreightReconciliationService : IFreightReconciliationService
 
     public async Task<ReconciledShipmentFinancialsDto> GetShipmentFinancialReconciliationAsync(
         Guid shipmentId,
+        DateTime? asOfUtc = null,
         CancellationToken cancellationToken = default)
     {
+        var valuationTime = asOfUtc ?? DateTime.UtcNow;
+        if (asOfUtc.HasValue && asOfUtc.Value.Kind == DateTimeKind.Unspecified)
+        {
+            throw new ArgumentException("Valuation date (asOfUtc) cannot have DateTimeKind.Unspecified. Must be explicitly Utc or Local.", nameof(asOfUtc));
+        }
+        var utcAsOf = valuationTime.Kind == DateTimeKind.Local ? valuationTime.ToUniversalTime() : valuationTime;
+
         var shipment = await _dbContext.Shipments
             .AsNoTracking()
             .Include(s => s.Packages)
@@ -78,7 +86,8 @@ public class FreightReconciliationService : IFreightReconciliationService
                 quotedRecord.TotalCarrierCost,
                 quotedRecord.Currency,
                 "USD",
-                quotedRecord.CostAssessedAtUtc);
+                quotedRecord.CostAssessedAtUtc,
+                utcAsOf);
             quotedCarrierCostUsd = qConv.ConvertedAmountUsd;
             conversionAuditTrail.Add(qConv);
         }
@@ -96,7 +105,8 @@ public class FreightReconciliationService : IFreightReconciliationService
                 confirmedRecord.TotalCarrierCost,
                 confirmedRecord.Currency,
                 "USD",
-                confirmedRecord.CostAssessedAtUtc);
+                confirmedRecord.CostAssessedAtUtc,
+                utcAsOf);
             estimatedCarrierCostUsd = eConv.ConvertedAmountUsd;
             conversionAuditTrail.Add(eConv);
         }
@@ -141,7 +151,7 @@ public class FreightReconciliationService : IFreightReconciliationService
                 }
 
                 // Currency Normalization for individual base charge
-                var baseConv = NormalizeCurrency(cost.BaseTransportationCost, cost.Currency, "USD", cost.CostAssessedAtUtc);
+                var baseConv = NormalizeCurrency(cost.BaseTransportationCost, cost.Currency, "USD", cost.CostAssessedAtUtc, utcAsOf);
                 invoicedBaseAmountUsd += baseConv.ConvertedAmountUsd;
                 conversionAuditTrail.Add(baseConv);
 
@@ -154,7 +164,7 @@ public class FreightReconciliationService : IFreightReconciliationService
 
                 decimal totalNonBaseSurcharges = cost.FuelSurcharge + cost.InsuranceCost + detailedAccessorials;
 
-                var accConv = NormalizeCurrency(totalNonBaseSurcharges, cost.Currency, "USD", cost.CostAssessedAtUtc);
+                var accConv = NormalizeCurrency(totalNonBaseSurcharges, cost.Currency, "USD", cost.CostAssessedAtUtc, utcAsOf);
                 invoicedAccessorialsAmountUsd += accConv.ConvertedAmountUsd;
                 conversionAuditTrail.Add(accConv);
             }
@@ -207,7 +217,7 @@ public class FreightReconciliationService : IFreightReconciliationService
                     _logger.LogInformation("Adjustment '{AdjId}' explicitly inherits currency '{Currency}' from parent carrier record '{ParentId}'.", adj.Id, adjCurrency, cost.Id);
                 }
                 var adjEffectiveDate = adj.AdjustedAtUtc == default ? cost.CostAssessedAtUtc : adj.AdjustedAtUtc;
-                var adjConv = NormalizeCurrency(adj.CarrierCostDelta, adjCurrency, "USD", adjEffectiveDate);
+                var adjConv = NormalizeCurrency(adj.CarrierCostDelta, adjCurrency, "USD", adjEffectiveDate, utcAsOf);
 
                 totalAdjustmentsAmountUsd += adjConv.ConvertedAmountUsd;
                 conversionAuditTrail.Add(adjConv);
@@ -320,7 +330,7 @@ public class FreightReconciliationService : IFreightReconciliationService
                     throw new InvalidOperationException($"Invoice line '{l.Id}' has missing currency code.");
                 }
                 var lineDate = l.Invoice?.InvoiceDate ?? (shipment.DispatchedAtUtc ?? DateTime.UtcNow);
-                var lineConv = NormalizeCurrency(l.TotalAmount, lineCurrency, "USD", lineDate);
+                var lineConv = NormalizeCurrency(l.TotalAmount, lineCurrency, "USD", lineDate, utcAsOf);
                 invoicedClientFreightUsd += lineConv.ConvertedAmountUsd;
                 conversionAuditTrail.Add(lineConv);
             }
@@ -360,7 +370,8 @@ public class FreightReconciliationService : IFreightReconciliationService
                 marginRecord.TotalClientFreight,
                 marginRecord.Currency,
                 "USD",
-                marginRecord.RatedAtUtc);
+                marginRecord.RatedAtUtc,
+                utcAsOf);
             estimatedClientFreightUsd = mConv.ConvertedAmountUsd;
             conversionAuditTrail.Add(mConv);
         }
@@ -402,6 +413,7 @@ public class FreightReconciliationService : IFreightReconciliationService
             ClientId = shipment.ClientId,
             DispatchedAtUtc = shipment.DispatchedAtUtc,
             RatedAtUtc = marginRecord?.RatedAtUtc,
+            ValuationTimeUtc = utcAsOf,
             QuotedCarrierCostUsd = quotedCarrierCostUsd,
             EstimatedCarrierCostUsd = estimatedCarrierCostUsd,
             InvoicedCarrierBaseCostUsd = invoicedBaseAmountUsd,
@@ -429,8 +441,16 @@ public class FreightReconciliationService : IFreightReconciliationService
         string? carrierCode = null,
         Guid? facilityId = null,
         Guid? clientId = null,
+        DateTime? asOfUtc = null,
         CancellationToken cancellationToken = default)
     {
+        var valuationTime = asOfUtc ?? DateTime.UtcNow;
+        if (asOfUtc.HasValue && asOfUtc.Value.Kind == DateTimeKind.Unspecified)
+        {
+            throw new ArgumentException("Valuation date (asOfUtc) cannot have DateTimeKind.Unspecified. Must be explicitly Utc or Local.", nameof(asOfUtc));
+        }
+        var utcAsOf = valuationTime.Kind == DateTimeKind.Local ? valuationTime.ToUniversalTime() : valuationTime;
+
         // 1. Boundary Authorization Enforcement (Fail-Closed)
         EnforceFilterAuthorization(clientId, facilityId, out var effectiveClientId, out var effectiveFacilityId, out var clientAuthorizedFacilities);
 
@@ -471,7 +491,7 @@ public class FreightReconciliationService : IFreightReconciliationService
         var shipmentDtos = new List<ReconciledShipmentFinancialsDto>(shipmentIds.Count);
         foreach (var sId in shipmentIds)
         {
-            var recon = await GetShipmentFinancialReconciliationAsync(sId, cancellationToken);
+            var recon = await GetShipmentFinancialReconciliationAsync(sId, utcAsOf, cancellationToken);
             shipmentDtos.Add(recon);
         }
 
@@ -501,6 +521,7 @@ public class FreightReconciliationService : IFreightReconciliationService
         return new ReconciliationBatchSummaryDto
         {
             TotalShipmentsCount = totalShipments,
+            ValuationTimeUtc = utcAsOf,
             TotalQuotedAmountUsd = totalQuoted,
             TotalEstimatedAmountUsd = totalEstimated,
             TotalInvoicedCarrierCostUsd = totalInvoicedCarrier,
@@ -620,7 +641,8 @@ public class FreightReconciliationService : IFreightReconciliationService
         decimal amount,
         string sourceCurrency,
         string targetCurrency,
-        DateTime effectiveDateUtc)
+        DateTime effectiveDateUtc,
+        DateTime? asOfUtc = null)
     {
         Iso4217Currencies.Validate(sourceCurrency, nameof(sourceCurrency));
         Iso4217Currencies.Validate(targetCurrency, nameof(targetCurrency));
@@ -630,10 +652,17 @@ public class FreightReconciliationService : IFreightReconciliationService
             throw new ArgumentException("Effective date cannot have DateTimeKind.Unspecified. Must be explicitly Utc or Local.", nameof(effectiveDateUtc));
         }
 
+        var valuationTime = asOfUtc ?? DateTime.UtcNow;
+        if (valuationTime.Kind == DateTimeKind.Unspecified)
+        {
+            throw new ArgumentException("Valuation date (asOfUtc) cannot have DateTimeKind.Unspecified. Must be explicitly Utc or Local.", nameof(asOfUtc));
+        }
+
         var src = sourceCurrency.Trim().ToUpperInvariant();
         var tgt = targetCurrency.Trim().ToUpperInvariant();
 
         var utcDate = effectiveDateUtc.Kind == DateTimeKind.Local ? effectiveDateUtc.ToUniversalTime() : effectiveDateUtc;
+        var utcAsOf = valuationTime.Kind == DateTimeKind.Local ? valuationTime.ToUniversalTime() : valuationTime;
 
         if (string.Equals(src, tgt, StringComparison.OrdinalIgnoreCase))
         {
@@ -649,13 +678,15 @@ public class FreightReconciliationService : IFreightReconciliationService
                 roundingMode: MidpointRounding.AwayFromZero,
                 benchmarkSeriesId: "IDENTITY",
                 integrityHash: "IDENTITY",
-                publishedAtUtc: utcDate);
+                publishedAtUtc: utcDate,
+                valuationTimeUtc: utcAsOf);
         }
 
         decimal rate = _fxRateProvider.GetHistoricalExchangeRate(
             src,
             tgt,
             utcDate,
+            utcAsOf,
             out var source,
             out var version,
             out var seriesId,
@@ -674,7 +705,8 @@ public class FreightReconciliationService : IFreightReconciliationService
             roundingMode: MidpointRounding.AwayFromZero,
             benchmarkSeriesId: seriesId,
             integrityHash: hash,
-            publishedAtUtc: publishedAt);
+            publishedAtUtc: publishedAt,
+            valuationTimeUtc: utcAsOf);
     }
 
     #region Private Authorization & Verification Helpers

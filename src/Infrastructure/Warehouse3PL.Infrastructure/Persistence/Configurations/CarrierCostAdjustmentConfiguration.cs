@@ -64,7 +64,7 @@ public class CarrierCostAdjustmentConfiguration : IEntityTypeConfiguration<Carri
         builder.Property(a => a.Currency)
             .HasColumnName("currency")
             .HasMaxLength(3)
-            .IsRequired();
+            .IsRequired(false);
 
         builder.Property(a => a.Reason)
             .HasColumnName("reason")

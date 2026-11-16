@@ -12,15 +12,18 @@ public interface IFreightReconciliationService
 {
     /// <summary>
     /// Reconciles buy-side carrier expenses and sell-side client billable freight for a specific shipment.
+    /// Accepts an explicit point-in-time valuation timestamp asOfUtc, evaluated against central bank publication cutoffs.
     /// Enforces tenant and facility authorization at the service boundary.
     /// </summary>
     Task<ReconciledShipmentFinancialsDto> GetShipmentFinancialReconciliationAsync(
         Guid shipmentId,
+        DateTime? asOfUtc = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Queries reconciled financials for a batch of shipments within a date range.
     /// Parameters facilityId and clientId act as query filters restricted to authenticated permissions.
+    /// Carries valuation cutoff asOfUtc to verify all historical rates prior to publication.
     /// </summary>
     Task<ReconciliationBatchSummaryDto> GetReconciledShipmentFinancialsBatchAsync(
         DateTime startDateUtc,
@@ -28,6 +31,7 @@ public interface IFreightReconciliationService
         string? carrierCode = null,
         Guid? facilityId = null,
         Guid? clientId = null,
+        DateTime? asOfUtc = null,
         CancellationToken cancellationToken = default);
 
     /// <summary>
@@ -42,10 +46,12 @@ public interface IFreightReconciliationService
     /// <summary>
     /// Performs reproducible currency normalization to USD, resolving exchange rate and source evidence strictly from IFxRateProvider.
     /// Explicit-rate bypasses are prohibited in authoritative financial reconciliation.
+    /// Evaluates point-in-time valuation timestamp asOfUtc against central bank publication time.
     /// </summary>
     CurrencyConversionEvidence NormalizeCurrency(
         decimal amount,
         string sourceCurrency,
         string targetCurrency,
-        DateTime effectiveDateUtc);
+        DateTime effectiveDateUtc,
+        DateTime? asOfUtc = null);
 }
