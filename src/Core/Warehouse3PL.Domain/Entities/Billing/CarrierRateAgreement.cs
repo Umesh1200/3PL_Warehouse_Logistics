@@ -40,6 +40,13 @@ public class CarrierRateAgreement : AuditableEntity<Guid>, ISoftDeletable
     /// </summary>
     public string? ZoneOrLane { get; set; }
 
+    // Explicit contract routing selectors. All populated selectors must match every package.
+    // A zone/lane label alone is not geographic evidence.
+    public string? DestinationCountryCode { get; set; }
+    public string? DestinationStateOrProvince { get; set; }
+    public string? DestinationPostalCodePrefix { get; set; }
+    public string? DestinationFacilityCode { get; set; }
+
     /// <summary>
     /// Contractual rating model: PerUnit (weight/count) or FlatFee.
     /// </summary>

@@ -47,11 +47,13 @@ public static class TestDbContextFactory
     public static ApplicationDbContext Create(
         TestTenantProvider tenantProvider,
         TestCurrentUserContext currentUser,
-        string? dbName = null)
+        string? dbName = null,
+        Microsoft.EntityFrameworkCore.Diagnostics.IInterceptor? queryInterceptor = null)
     {
-        var options = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseInMemoryDatabase(databaseName: dbName ?? Guid.NewGuid().ToString())
-            .Options;
+        var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseInMemoryDatabase(databaseName: dbName ?? Guid.NewGuid().ToString());
+        if (queryInterceptor != null) optionsBuilder.AddInterceptors(queryInterceptor);
+        var options = optionsBuilder.Options;
 
         var dateTimeProvider = new DateTimeProvider();
         var interceptor = new AuditableEntityInterceptor(currentUser, dateTimeProvider);

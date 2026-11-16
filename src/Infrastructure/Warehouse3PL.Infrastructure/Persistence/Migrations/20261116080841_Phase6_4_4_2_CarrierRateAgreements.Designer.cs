@@ -15,7 +15,6 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
     [Migration("20261116080841_Phase6_4_4_2_CarrierRateAgreements")]
     partial class Phase6_4_4_2_CarrierRateAgreements
     {
-        /// <inheritdoc />
         protected override void BuildTargetModel(ModelBuilder modelBuilder)
         {
 #pragma warning disable 612, 618
@@ -11766,6 +11765,26 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnName("changed_by_user_id");
 
                     b.Property<string>("FromStatus")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("from_status");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("notes");
+
+                    b.Property<Guid>("OutboundOrderId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("order_id");
+
+                    b.Property<string>("Reason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("reason");
+
+                    b.Property<string>("ToStatus")
                         .IsRequired()
                         .HasMaxLength(30)
                         .HasColumnType("character varying(30)")

@@ -549,7 +549,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         // to avoid EF InMemory ThenInclude materialisation failures on packages with mock OutboundOrderIds.
         var shipmentsWithPackages = await _dbContext.Shipments
             .AsNoTracking()
-            .Include(s => s.Packages)
+            .Include(s => s.Packages).ThenInclude(p => p.Lines)
             .Include(s => s.Facility)
             .Where(s => shipmentIds.Contains(s.Id))
             .ToListAsync(cancellationToken);
@@ -639,18 +639,15 @@ public class FreightCostVarianceService : IFreightCostVarianceService
 
             shipmentsById.TryGetValue(s.ShipmentId, out var shipmentEntity);
 
-            // Authoritative Zone / Lane Resolution (Finding 2)
-            var zoneOrLane = ResolveShipmentZoneOrLane(shipmentEntity);
-
             // Deterministic Agreement Resolution: Specific carrier, facility, service level & zone match precedes broader match (Findings 1, 2 & 6)
             var carrierAgreement = ResolveGoverningCarrierAgreement(
                 carrierAgreements,
                 s.ClientId,
                 s.FacilityId,
                 s.CarrierServiceLevel,
-                zoneOrLane,
+                shipmentEntity,
                 shipmentDate,
-                valuationTime);
+                valuationTime, out bool unresolvedCarrierAgreement);
 
             var clientAgreement = ResolveGoverningClientAgreement(
                 clientAgreements,
@@ -669,7 +666,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             if (shipmentEntity != null && TryResolveContractualExpectedBaseCost(
                 shipmentEntity,
                 carrierAgreement,
-                clientAgreement,
+                unresolvedCarrierAgreement ? null : clientAgreement,
                 expectedBillableWeight,
                 valuationTime,
                 out decimal contractualBaseCost,
@@ -730,7 +727,9 @@ public class FreightCostVarianceService : IFreightCostVarianceService
                 // across all invoice records (e.g., 10 kg @ $5/kg = $50, split proportionally).
                 // For non-weight-dependent fixed contracts: each invoice record is an independent billing event
                 // and is compared to the FULL shipment-level baseline independently (no pro-rata).
-                bool useIndependentBaseline = !isWeightDependentContract;
+                bool useIndependentBaseline = !isWeightDependentContract && !(carrierAgreement != null &&
+                    (carrierAgreement.RateModel == RateModelType.PerUnit || carrierAgreement.Tiers.Count > 0 ||
+                     carrierAgreement.TierModel != PricingTierCalculationModel.FlatRate));
                 decimal allocatedContractualSum = 0m;
                 decimal allocatedQuoteSum = 0m;
 
@@ -877,7 +876,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             throw new ArgumentException("Carrier code is required.", nameof(carrierCode));
         }
 
-        EnforceFilterAuthorization(null, facilityId, out _, out var effectiveFacilityId, out _);
+        EnforceFilterAuthorization(null, facilityId, out var effectiveClientId, out var effectiveFacilityId, out var clientAuthorizedFacilities);
 
         var valuationTime = asOfUtc ?? DateTime.UtcNow;
         var normalizedCarrier = carrierCode.Trim().ToUpperInvariant();
@@ -889,7 +888,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         // to avoid EF InMemory ThenInclude materialisation failures on packages with mock OutboundOrderIds.
         var query = _dbContext.Shipments
             .AsNoTracking()
-            .Include(s => s.Packages)
+            .Include(s => s.Packages).ThenInclude(p => p.Lines)
             .Include(s => s.Facility)
             .Where(s => s.DispatchedAtUtc >= start && s.DispatchedAtUtc <= end && s.CarrierCode == normalizedCarrier);
 
@@ -897,6 +896,11 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         {
             query = query.Where(s => s.FacilityId == effectiveFacilityId.Value);
         }
+
+        if (effectiveClientId.HasValue)
+            query = query.Where(s => s.ClientId == effectiveClientId.Value);
+        if (clientAuthorizedFacilities != null)
+            query = query.Where(s => clientAuthorizedFacilities.Contains(s.FacilityId));
 
         var shipments = await query.ToListAsync(cancellationToken);
         await PopulateOutboundOrderRoutingAsync(shipments, cancellationToken);
@@ -912,7 +916,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
 
         var costRecordsByShipment = costRecords.ToLookup(c => c.ShipmentId);
 
-        // Query active buy-side carrier rate agreements with facility scope (Findings 1 & 5)
+        // Query active buy-side carrier rate agreements with client and facility scope.
         var carrierAgreementQuery = _dbContext.CarrierRateAgreements
             .AsNoTracking()
             .Include(a => a.Tiers)
@@ -927,6 +931,12 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         {
             carrierAgreementQuery = carrierAgreementQuery.Where(a => a.FacilityId == null || a.FacilityId == effectiveFacilityId.Value);
         }
+
+        if (effectiveClientId.HasValue)
+            carrierAgreementQuery = carrierAgreementQuery.Where(a => a.ClientId == null || a.ClientId == effectiveClientId.Value);
+
+        if (clientAuthorizedFacilities != null)
+            carrierAgreementQuery = carrierAgreementQuery.Where(a => a.FacilityId == null || clientAuthorizedFacilities.Contains(a.FacilityId.Value));
 
         var carrierAgreements = await carrierAgreementQuery.ToListAsync(cancellationToken);
 
@@ -944,6 +954,11 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         {
             clientAgreementQuery = clientAgreementQuery.Where(a => a.FacilityId == null || a.FacilityId == effectiveFacilityId.Value);
         }
+
+        if (effectiveClientId.HasValue)
+            clientAgreementQuery = clientAgreementQuery.Where(a => a.ClientId == effectiveClientId.Value);
+        if (clientAuthorizedFacilities != null)
+            clientAgreementQuery = clientAgreementQuery.Where(a => a.FacilityId == null || clientAuthorizedFacilities.Contains(a.FacilityId.Value));
 
         var clientAgreements = await clientAgreementQuery.ToListAsync(cancellationToken);
 
@@ -969,18 +984,15 @@ public class FreightCostVarianceService : IFreightCostVarianceService
                 serviceLevel = shipmentCosts[0].CarrierServiceLevel;
             }
 
-            // Authoritative Zone / Lane Resolution (Finding 2)
-            var zoneOrLane = ResolveShipmentZoneOrLane(shipment);
-
             // Deterministic Agreement Resolution: Specific carrier & facility match precedes broader match; reject ambiguous conflicts (Findings 1, 2 & 6)
             var carrierAgreement = ResolveGoverningCarrierAgreement(
                 carrierAgreements,
                 shipment.ClientId,
                 shipment.FacilityId,
                 serviceLevel,
-                zoneOrLane,
+                shipment,
                 shipmentDate,
-                valuationTime);
+                valuationTime, out bool unresolvedCarrierAgreement);
 
             var clientAgreement = ResolveGoverningClientAgreement(
                 clientAgreements,
@@ -1001,7 +1013,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             bool hasContractualRate = TryResolveContractualExpectedBaseCost(
                 shipment,
                 carrierAgreement,
-                clientAgreement,
+                unresolvedCarrierAgreement ? null : clientAgreement,
                 expectedBillableWeight,
                 valuationTime,
                 out decimal contractualBaseCost,
@@ -1043,7 +1055,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
 
             // If the applicable rate card is weight-dependent (per-kg or tiered brackets) OR if a carrier weight discrepancy was assessed,
             // verified carrier-billed weight evidence is mandatory. Missing billed weight makes the shipment indeterminate, not compliant!
-            if ((isWeightDependent || hasWeightAdjustment) && !hasBilledWeight)
+            if ((isWeightDependent || hasWeightAdjustment) && (!hasBilledWeight || hasMissingDimensionalEvidence))
             {
                 indeterminateCount++;
                 continue;
@@ -1052,7 +1064,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             totalAudited++;
 
             bool hasWeightDiscrepancy = false;
-            if (hasBilledWeight)
+            if (hasBilledWeight && (isWeightDependent || hasWeightAdjustment))
             {
                 decimal expectedWeightInBilledUnits = string.Equals(carrierAgreement?.UnitOfMeasure, "LB", StringComparison.OrdinalIgnoreCase)
                     ? decimal.Round(expectedBillableWeight / 2.20462262m, 4, MidpointRounding.AwayFromZero)
@@ -1150,54 +1162,69 @@ public class FreightCostVarianceService : IFreightCostVarianceService
 
         if (orderIds.Count == 0) return;
 
+        var clientIds = shipments.Select(s => s.ClientId).Distinct().ToList();
+        var facilityIds = shipments.Select(s => s.FacilityId).Distinct().ToList();
+
         var orders = await _dbContext.OutboundOrders
             .AsNoTracking()
             .Include(o => o.ShippingAddress)
             .Include(o => o.DestinationFacility)
-            .Where(o => orderIds.Contains(o.Id))
+            .Where(o => orderIds.Contains(o.Id) && clientIds.Contains(o.ClientId) && facilityIds.Contains(o.FacilityId))
             .ToDictionaryAsync(o => o.Id, cancellationToken);
 
         foreach (var pkg in shipments.SelectMany(s => s.Packages))
         {
-            if (pkg.OutboundOrderId != Guid.Empty && pkg.OutboundOrder == null && orders.TryGetValue(pkg.OutboundOrderId, out var order))
+            if (pkg.OutboundOrderId != Guid.Empty && pkg.OutboundOrder == null && orders.TryGetValue(pkg.OutboundOrderId, out var order) &&
+                order.ClientId == pkg.ClientId && order.FacilityId == pkg.FacilityId)
             {
                 pkg.OutboundOrder = order;
             }
         }
     }
 
-    /// <summary>
-    /// Resolves the authoritative shipment destination zone or lane from shipment routing, destination address, and facility data (Finding 2).
-    /// </summary>
-    private static string? ResolveShipmentZoneOrLane(Shipment? shipment)
+    private static bool HasContractRouting(CarrierRateAgreement agreement) =>
+        !string.IsNullOrWhiteSpace(agreement.ZoneOrLane) ||
+        !string.IsNullOrWhiteSpace(agreement.DestinationCountryCode) ||
+        !string.IsNullOrWhiteSpace(agreement.DestinationStateOrProvince) ||
+        !string.IsNullOrWhiteSpace(agreement.DestinationPostalCodePrefix) ||
+        !string.IsNullOrWhiteSpace(agreement.DestinationFacilityCode);
+
+    // All configured selectors are contractual evidence; a zone label alone is insufficient.
+    private static bool? MatchesContractRouting(CarrierRateAgreement agreement, Shipment? shipment)
     {
-        if (shipment == null) return null;
-
-        if (shipment.Packages != null && shipment.Packages.Count > 0)
+        if (!HasContractRouting(agreement)) return true;
+        if (shipment == null || shipment.Packages.Count == 0) return null;
+        if (string.IsNullOrWhiteSpace(agreement.DestinationCountryCode) &&
+            string.IsNullOrWhiteSpace(agreement.DestinationStateOrProvince) &&
+            string.IsNullOrWhiteSpace(agreement.DestinationPostalCodePrefix) &&
+            string.IsNullOrWhiteSpace(agreement.DestinationFacilityCode)) return null;
+        bool anyMatch = false, anyNonMatch = false, anyUnknown = false;
+        foreach (var package in shipment.Packages)
         {
-            foreach (var pkg in shipment.Packages)
+            var order = package.OutboundOrder;
+            if (order == null || order.ClientId != shipment.ClientId || order.FacilityId != shipment.FacilityId) return null;
+            bool unknown = false, nonMatch = false;
+            var address = order.ShippingAddress;
+            var selectors = new (string? Expected, string? Actual, bool Prefix)[]
             {
-                var address = pkg.OutboundOrder?.ShippingAddress;
-                if (address != null)
-                {
-                    if (!string.IsNullOrWhiteSpace(address.StateOrProvince))
-                        return address.StateOrProvince.Trim();
-
-                    if (!string.IsNullOrWhiteSpace(address.PostalCode))
-                        return address.PostalCode.Trim();
-
-                    if (!string.IsNullOrWhiteSpace(address.CountryCode) && !string.Equals(address.CountryCode, "USA", StringComparison.OrdinalIgnoreCase))
-                        return address.CountryCode.Trim();
-                }
-
-                if (pkg.OutboundOrder?.DestinationFacility != null && !string.IsNullOrWhiteSpace(pkg.OutboundOrder.DestinationFacility.FacilityCode))
-                {
-                    return pkg.OutboundOrder.DestinationFacility.FacilityCode.Trim();
-                }
+                (agreement.DestinationCountryCode, address?.CountryCode, false),
+                (agreement.DestinationStateOrProvince, address?.StateOrProvince, false),
+                (agreement.DestinationPostalCodePrefix, address?.PostalCode, true),
+                (agreement.DestinationFacilityCode, order.DestinationFacility?.FacilityCode, false)
+            };
+            foreach (var (expected, actual, prefix) in selectors)
+            {
+                if (string.IsNullOrWhiteSpace(expected)) continue;
+                if (string.IsNullOrWhiteSpace(actual)) { unknown = true; continue; }
+                bool matches = prefix ? actual.Trim().StartsWith(expected.Trim(), StringComparison.OrdinalIgnoreCase)
+                    : string.Equals(actual.Trim(), expected.Trim(), StringComparison.OrdinalIgnoreCase);
+                if (!matches) nonMatch = true;
             }
+            if (nonMatch) anyNonMatch = true;
+            else if (unknown) anyUnknown = true;
+            else anyMatch = true;
         }
-
-        return null;
+        return anyUnknown || (anyMatch && anyNonMatch) ? null : anyMatch;
     }
 
     private static decimal ResolveContractualWeightIncrement(CarrierRateAgreement? carrierAgreement, ClientFreightAgreement? clientAgreement = null)
@@ -1230,84 +1257,40 @@ public class FreightCostVarianceService : IFreightCostVarianceService
     {
         hasMissingDimensionalEvidence = false;
         bool isLb = string.Equals(agreement?.UnitOfMeasure, "LB", StringComparison.OrdinalIgnoreCase);
-
-        decimal? explicitIncrement = agreement?.WeightRoundingIncrement ?? clientAgreement?.WeightRoundingIncrementKg;
-        decimal increment;
-        if (explicitIncrement.HasValue && explicitIncrement.Value > 0m)
-        {
-            increment = explicitIncrement.Value;
-        }
-        else if (!isLb)
-        {
-            // Default 0.5 kg increment for metric contracts when not explicitly specified
-            increment = 0.5m;
-        }
-        else
-        {
-            // For LB contracts without explicit increment, continuous weight (no rounding) to preserve exact monetary equivalence
-            increment = 0m;
-        }
-
-        decimal? contractualDivisor = agreement?.DimensionalWeightDivisor;
+        decimal conversion = isLb ? 2.20462262m : 1m;
+        decimal? explicitIncrement = agreement != null ? agreement.WeightRoundingIncrement : clientAgreement?.WeightRoundingIncrementKg;
+        decimal increment = explicitIncrement ?? (isLb ? 0m : 0.5m);
         decimal totalExpected = 0m;
         int packageCount = 0;
 
-        foreach (var p in packages)
+        foreach (var package in packages)
         {
             packageCount++;
-            decimal scaleKg = p.GrossWeightKg > 0m ? p.GrossWeightKg : p.NetWeightKg;
-            decimal dimDivisor = (contractualDivisor.HasValue && contractualDivisor.Value > 0m)
-                ? contractualDivisor.Value
-                : (p.VolumetricDivisor > 0m ? p.VolumetricDivisor : 5000m);
-
-            decimal dimKg = p.VolumetricWeightKg > 0m
-                ? p.VolumetricWeightKg
-                : ((p.LengthCm > 0m && p.WidthCm > 0m && p.HeightCm > 0m)
-                    ? (p.LengthCm * p.WidthCm * p.HeightCm) / dimDivisor
-                    : 0m);
-
-            if (isLb)
+            decimal scaleKg = package.GrossWeightKg > 0m ? package.GrossWeightKg : package.NetWeightKg;
+            if (scaleKg <= 0m || package.LengthCm <= 0m || package.WidthCm <= 0m || package.HeightCm <= 0m ||
+                agreement?.DimensionalWeightDivisor <= 0m)
             {
-                // Convert to pounds: 1 kg = 2.20462262 lb
-                decimal scaleLb = decimal.Round(scaleKg * 2.20462262m, 4, MidpointRounding.AwayFromZero);
-                decimal dimLb = decimal.Round(dimKg * 2.20462262m, 4, MidpointRounding.AwayFromZero);
-                decimal rawLb = Math.Max(scaleLb, dimLb);
-
-                if (rawLb <= 0m)
-                {
-                    hasMissingDimensionalEvidence = true;
-                }
-                else
-                {
-                    decimal rounded = increment > 0m
-                        ? Math.Ceiling(rawLb / increment) * increment
-                        : rawLb;
-                    totalExpected += rounded;
-                }
+                hasMissingDimensionalEvidence = true;
+                continue;
+            }
+            decimal volumeCm3 = package.LengthCm * package.WidthCm * package.HeightCm;
+            decimal dimensionalWeight;
+            if (agreement?.DimensionalWeightDivisor is decimal contractualDivisor)
+            {
+                // Contract divisor is cm^3/kg for KG, in^3/lb for LB. Never reuse quoted dim weight.
+                dimensionalWeight = isLb ? volumeCm3 / 16.387064m / contractualDivisor : volumeCm3 / contractualDivisor;
             }
             else
             {
-                decimal rawKg = Math.Max(scaleKg, dimKg);
-                if (rawKg <= 0m)
-                {
-                    hasMissingDimensionalEvidence = true;
-                }
-                else
-                {
-                    decimal rounded = increment > 0m
-                        ? Math.Ceiling(rawKg / increment) * increment
-                        : rawKg;
-                    totalExpected += rounded;
-                }
+                decimal packageDivisor = package.VolumetricDivisor > 0m ? package.VolumetricDivisor : 5000m;
+                dimensionalWeight = volumeCm3 / packageDivisor * conversion;
             }
+            decimal rawWeight = Math.Max(scaleKg * conversion, dimensionalWeight);
+            totalExpected += increment > 0m ? Math.Ceiling(rawWeight / increment) * increment : rawWeight;
         }
-
-        if (packageCount == 0)
-        {
-            hasMissingDimensionalEvidence = true;
-        }
-
-        return Math.Round(totalExpected, 4, MidpointRounding.AwayFromZero);
+        hasMissingDimensionalEvidence |= packageCount == 0;
+        // Never rate the known subset of an incompletely evidenced shipment.
+        return hasMissingDimensionalEvidence ? 0m : Math.Round(totalExpected, 4, MidpointRounding.AwayFromZero);
     }
 
     private static bool TryResolveCarrierBilledWeight(
@@ -1351,9 +1334,23 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         if (carrierAgreement != null)
         {
             currency = carrierAgreement.Currency ?? "USD";
-            isWeightDependent = carrierAgreement.RateModel == RateModelType.PerUnit
+            bool usesQuantity = carrierAgreement.RateModel == RateModelType.PerUnit
                              || carrierAgreement.TierModel != PricingTierCalculationModel.FlatRate
                              || carrierAgreement.Tiers.Count > 0;
+            var uom = carrierAgreement.UnitOfMeasure.ToUpperInvariant();
+            isWeightDependent = usesQuantity && (uom == "KG" || uom == "LB");
+            if (usesQuantity && uom != "SHIPMENT" && shipment.TotalPackagesCount > 0 &&
+                shipment.Packages.Count != shipment.TotalPackagesCount)
+                return false;
+            decimal quantity = expectedBillableWeight;
+            if (uom == "SHIPMENT") quantity = 1m;
+            else if (uom == "UNIT" || uom == "PIECE")
+            {
+                if (usesQuantity && (shipment.Packages.Count == 0 ||
+                    shipment.Packages.Any(p => p.Lines.Count == 0 || p.Lines.Any(l => l.Quantity <= 0m))))
+                    return false;
+                quantity = shipment.Packages.SelectMany(p => p.Lines).Sum(l => l.Quantity);
+            }
 
             if (isWeightDependent && expectedBillableWeight <= 0m)
             {
@@ -1364,7 +1361,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             {
                 // Enforce historical tier recorded-time rules (Finding 1)
                 // expectedBillableWeight is already in contractual units (CalculateExpectedBillableWeight converts to LB if needed)
-                var ratingResult = carrierAgreement.CalculateRating(expectedBillableWeight, valuationTime, isQuantityAlreadyInContractUom: true);
+                var ratingResult = carrierAgreement.CalculateRating(quantity, valuationTime, isQuantityAlreadyInContractUom: true);
                 contractualBaseCost = ratingResult.TotalAmount;
                 return true;
             }
@@ -1395,10 +1392,11 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         Guid? clientId,
         Guid? facilityId,
         CarrierServiceLevel? serviceLevel,
-        string? zoneOrLane,
+        Shipment? shipment,
         DateTime asOfDate,
-        DateTime valuationTime)
+        DateTime valuationTime, out bool unresolvedCarrierAgreement)
     {
+        unresolvedCarrierAgreement = false;
         var baseCandidates = agreements
             .Where(a =>
                 a.IsActive &&
@@ -1413,22 +1411,18 @@ public class FreightCostVarianceService : IFreightCostVarianceService
 
         if (baseCandidates.Count == 0) return null;
 
-        // Finding 2: Do not select a generic agreement when the shipment's zone is unknown and a zone-specific contract may govern it.
-        if (string.IsNullOrEmpty(zoneOrLane))
+        var routing = baseCandidates.ToDictionary(a => a.Id, a => MatchesContractRouting(a, shipment));
+        if (routing.Values.Any(match => !match.HasValue))
         {
-            bool hasZoneSpecificAgreements = baseCandidates.Any(a => !string.IsNullOrEmpty(a.ZoneOrLane));
-            if (hasZoneSpecificAgreements)
-            {
-                return null;
-            }
+            unresolvedCarrierAgreement = true;
+            return null;
         }
-
         var candidates = baseCandidates
-            .Where(a => string.IsNullOrEmpty(a.ZoneOrLane) || string.Equals(a.ZoneOrLane, zoneOrLane, StringComparison.OrdinalIgnoreCase))
+            .Where(a => routing[a.Id] == true)
             .OrderByDescending(a => a.ClientId.HasValue)
             .ThenByDescending(a => a.FacilityId.HasValue)
             .ThenByDescending(a => a.CarrierServiceLevel.HasValue)
-            .ThenByDescending(a => !string.IsNullOrEmpty(a.ZoneOrLane))
+            .ThenByDescending(a => HasContractRouting(a))
             .ThenByDescending(a => a.EffectiveFromUtc)
             .ThenByDescending(a => a.CreatedAt)
             .ToList();
@@ -1442,7 +1436,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             other.ClientId.HasValue == top.ClientId.HasValue &&
             other.FacilityId.HasValue == top.FacilityId.HasValue &&
             other.CarrierServiceLevel.HasValue == top.CarrierServiceLevel.HasValue &&
-            !string.IsNullOrEmpty(other.ZoneOrLane) == !string.IsNullOrEmpty(top.ZoneOrLane) &&
+            HasContractRouting(other) == HasContractRouting(top) &&
             other.EffectiveFromUtc == top.EffectiveFromUtc &&
             other.CreatedAt == top.CreatedAt).ToList();
 
@@ -1454,10 +1448,17 @@ public class FreightCostVarianceService : IFreightCostVarianceService
                 !string.Equals(other.UnitOfMeasure, top.UnitOfMeasure, StringComparison.OrdinalIgnoreCase) ||
                 other.RateModel != top.RateModel ||
                 other.TierModel != top.TierModel ||
-                other.MinimumCharge != top.MinimumCharge);
+                other.MinimumCharge != top.MinimumCharge ||
+                other.DimensionalWeightDivisor != top.DimensionalWeightDivisor ||
+                other.WeightRoundingIncrement != top.WeightRoundingIncrement ||
+                !other.Tiers.OrderBy(t => t.TierNumber)
+                    .Select(t => (t.TierNumber, t.LowerBound, t.UpperBound, t.Rate, t.CreatedAt, t.UpdatedAt))
+                    .SequenceEqual(top.Tiers.OrderBy(t => t.TierNumber)
+                        .Select(t => (t.TierNumber, t.LowerBound, t.UpperBound, t.Rate, t.CreatedAt, t.UpdatedAt))));
 
             if (hasFinancialConflict)
             {
+                unresolvedCarrierAgreement = true;
                 return null;
             }
         }

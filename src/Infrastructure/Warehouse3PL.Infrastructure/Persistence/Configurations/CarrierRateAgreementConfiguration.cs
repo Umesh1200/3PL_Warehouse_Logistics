@@ -45,6 +45,11 @@ public class CarrierRateAgreementConfiguration : IEntityTypeConfiguration<Carrie
             .HasColumnName("zone_or_lane")
             .HasMaxLength(100);
 
+        builder.Property(a => a.DestinationCountryCode).HasMaxLength(3);
+        builder.Property(a => a.DestinationStateOrProvince).HasMaxLength(100);
+        builder.Property(a => a.DestinationPostalCodePrefix).HasMaxLength(20);
+        builder.Property(a => a.DestinationFacilityCode).HasMaxLength(50);
+
         builder.Property(a => a.RateModel)
             .HasColumnName("rate_model")
             .HasConversion<string>()
@@ -139,7 +144,7 @@ public class CarrierRateAgreementConfiguration : IEntityTypeConfiguration<Carrie
         builder.HasOne(a => a.Facility)
             .WithMany()
             .HasForeignKey(a => a.FacilityId)
-            .OnDelete(DeleteBehavior.SetNull);
+            .OnDelete(DeleteBehavior.Restrict);
 
         builder.HasMany(a => a.Tiers)
             .WithOne(t => t.CarrierRateAgreement)

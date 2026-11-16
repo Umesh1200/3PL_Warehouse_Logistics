@@ -20,7 +20,7 @@ namespace Warehouse3PL.UnitTests.Analytics;
 /// Verifies the 24 specification invariants across variance reconciliation, multi-stage margins,
 /// accessorial leakage detection, rate card compliance, tenant isolation, and read-only ledger invariance.
 /// </summary>
-public class FreightCostVarianceAndAccessorialAnalyticsTests
+public partial class FreightCostVarianceAndAccessorialAnalyticsTests
 {
     private readonly Guid _clientAId = Guid.NewGuid();
     private readonly Guid _clientBId = Guid.NewGuid();
@@ -32,10 +32,11 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
     private async Task<(ApplicationDbContext Context, string DbName)> CreateSeededContextAsync(
         TestTenantProvider tenantProvider,
         TestCurrentUserContext currentUserContext,
-        string? dbName = null)
+        string? dbName = null,
+        Microsoft.EntityFrameworkCore.Diagnostics.IInterceptor? queryInterceptor = null)
     {
         var databaseName = dbName ?? Guid.NewGuid().ToString();
-        var context = TestDbContextFactory.Create(tenantProvider, currentUserContext, databaseName);
+        var context = TestDbContextFactory.Create(tenantProvider, currentUserContext, databaseName, queryInterceptor);
         context.AllowExplicitAuditTimestamps = true;
 
         var clientA = new Client
@@ -125,6 +126,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
             PackageNumber = $"PKG-{Guid.NewGuid():N}"[..10].ToUpperInvariant(),
             CartonSequence = 1,
             GrossWeightKg = weightKg,
+            LengthCm = 1m, WidthCm = 1m, HeightCm = 1m,
             CarrierCode = carrierCode,
             TrackingNumber = $"TRK-{Guid.NewGuid():N}"[..12].ToUpperInvariant(),
             Status = PackageStatus.Loaded
@@ -3055,7 +3057,10 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
             baseRate: 4.00m, currency: "USD", unitOfMeasure: "KG",
             rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
             effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
-        zoneAgreement.ZoneOrLane = "CA";
+        zoneAgreement.ZoneOrLane = "Zone 8";
+        zoneAgreement.DestinationCountryCode = "USA";
+        zoneAgreement.DestinationStateOrProvince = "CA";
+        zoneAgreement.DestinationPostalCodePrefix = "902";
 
         context.CarrierRateAgreements.AddRange(genericAgreement, zoneAgreement);
 
@@ -3190,7 +3195,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
             baseRate: 2.00m, currency: "USD", unitOfMeasure: "LB",
             rateModel: RateModelType.PerUnit, tierModel: PricingTierCalculationModel.FlatRate,
             effectiveFromUtc: date.AddDays(-10), facilityId: _facility1Id);
-        lbAgreement.DimensionalWeightDivisor = 4000m; // Contractual divisor overrides package divisor
+        lbAgreement.DimensionalWeightDivisor = 110.728m; // Contractual divisor overrides package divisor
         lbAgreement.WeightRoundingIncrement = 1.0m; // 1.0 LB increment
 
         context.CarrierRateAgreements.Add(lbAgreement);
@@ -3424,5 +3429,65 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         agOverlap.AddTier(2, 4.0m, 10.0m, 3.00m); // Overlap of 1.0 kg!
 
         Assert.Throws<ValidationException>(() => agOverlap.CalculateRating(8.0m));
+    }
+    [Theory]
+    [InlineData("UNIT", 30)]
+    [InlineData("PIECE", 30)]
+    [InlineData("SHIPMENT", 10)]
+    public async Task ContractQuantity_UsesContractUomInsteadOfPackageWeight(string uom, int expectedCost)
+    {
+        var tenant = new TestTenantProvider { BypassTenantFilter = true };
+        var user = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenant, user);
+        var date = DateTime.UtcNow.AddDays(-1);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "UOM-REGRESSION", dispatchedAt: date, weightKg: 99m);
+        shipment.Packages.First().Lines.Add(new PackageLine { Quantity = 3m });
+        context.Shipments.Add(shipment);
+        context.CarrierRateAgreements.Add(CarrierRateAgreement.Create(
+            "FEDEX", "UOM", "Quantity contract", 10m, "USD", uom,
+            RateModelType.PerUnit, PricingTierCalculationModel.FlatRate, date.AddDays(-1)));
+        context.CarrierCostRecords.Add(new CarrierCostRecord
+        {
+            ClientId = _clientAId, FacilityId = _facility1Id, ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX", BaseTransportationCost = expectedCost, TotalCarrierCost = expectedCost,
+            Status = CarrierCostStatus.Invoiced, CostAssessedAtUtc = date
+        });
+        await context.SaveChangesAsync();
+        var (_, service) = CreateServices(context, tenant, user);
+        var result = await service.GetRateCardComplianceAnalysisAsync("FEDEX", date.Date, date.Date.AddDays(1));
+        Assert.Equal(1, result.CompliantShipmentsCount);
+        Assert.Equal(0, result.IndeterminateShipmentsCount);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ContractDivisor_RecomputesStoredDimensionalWeight_AndRejectsMissingDimensions(bool missingDimensions)
+    {
+        var tenant = new TestTenantProvider { BypassTenantFilter = true };
+        var user = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenant, user);
+        var date = DateTime.UtcNow.AddDays(-1);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "DIM-REGRESSION", dispatchedAt: date, weightKg: 1m);
+        var package = shipment.Packages.First();
+        package.LengthCm = missingDimensions ? 0m : 40m;
+        package.WidthCm = 20m;
+        package.HeightCm = 10m;
+        package.VolumetricWeightKg = 1.6m; // Earlier quote used 5000; contract uses 4000 => 2 kg.
+        context.Shipments.Add(shipment);
+        context.CarrierRateAgreements.Add(CarrierRateAgreement.Create(
+            "FEDEX", "DIM", "Dimensional contract", 10m, "USD", "KG",
+            RateModelType.PerUnit, PricingTierCalculationModel.FlatRate, date.AddDays(-1), dimensionalWeightDivisor: 4000m));
+        context.CarrierCostRecords.Add(new CarrierCostRecord
+        {
+            ClientId = _clientAId, FacilityId = _facility1Id, ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX", BaseTransportationCost = 20m, TotalCarrierCost = 20m, BilledWeightKg = 2m,
+            Status = CarrierCostStatus.Invoiced, CostAssessedAtUtc = date
+        });
+        await context.SaveChangesAsync();
+        var (_, service) = CreateServices(context, tenant, user);
+        var result = await service.GetRateCardComplianceAnalysisAsync("FEDEX", date.Date, date.Date.AddDays(1));
+        Assert.Equal(missingDimensions ? 0 : 1, result.CompliantShipmentsCount);
+        Assert.Equal(missingDimensions ? 1 : 0, result.IndeterminateShipmentsCount);
     }
 }
