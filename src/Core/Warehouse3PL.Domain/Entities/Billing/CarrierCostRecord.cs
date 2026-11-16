@@ -30,7 +30,20 @@ public class CarrierCostRecord : AuditableEntity<Guid>, ITenantEntity
     public decimal InsuranceCost { get; set; }
     public decimal AccessorialCost { get; set; }
     public decimal TotalCarrierCost { get; set; }
-    public decimal? BilledWeightKg { get; set; }
+
+    private decimal? _billedWeightKg;
+    public decimal? BilledWeightKg
+    {
+        get => _billedWeightKg;
+        set
+        {
+            if (value.HasValue && value.Value < 0m)
+            {
+                throw new ValidationException(nameof(BilledWeightKg), "Carrier-billed weight cannot be negative.");
+            }
+            _billedWeightKg = value.HasValue ? decimal.Round(value.Value, 4, MidpointRounding.AwayFromZero) : null;
+        }
+    }
 
     public string Currency { get; set; } = "USD";
     public CarrierCostStatus Status { get; set; } = CarrierCostStatus.Estimated;

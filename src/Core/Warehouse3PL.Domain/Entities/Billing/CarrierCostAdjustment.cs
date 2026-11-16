@@ -26,7 +26,20 @@ public class CarrierCostAdjustment : AuditableEntity<Guid>, ITenantEntity
     public decimal AdjustedCarrierCost { get; set; }
     public decimal CarrierCostDelta { get; set; }
     public decimal ClientFreightDelta { get; set; }
-    public decimal? BilledWeightKg { get; set; }
+
+    private decimal? _billedWeightKg;
+    public decimal? BilledWeightKg
+    {
+        get => _billedWeightKg;
+        set
+        {
+            if (value.HasValue && value.Value < 0m)
+            {
+                throw new ValidationException(nameof(BilledWeightKg), "Carrier-billed weight cannot be negative.");
+            }
+            _billedWeightKg = value.HasValue ? decimal.Round(value.Value, 4, MidpointRounding.AwayFromZero) : null;
+        }
+    }
 
     /// <summary>
     /// Explicit adjustment currency. If null or empty, this adjustment strictly inherits

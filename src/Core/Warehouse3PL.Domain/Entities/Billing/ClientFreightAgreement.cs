@@ -50,7 +50,20 @@ public class ClientFreightAgreement : AuditableEntity<Guid>, ITenantEntity
     /// Fixed contractual shipping rate (used for FixedContractualRate model).
     /// </summary>
     public decimal? FixedFreightRate { get; set; }
-    public decimal? WeightRoundingIncrementKg { get; set; }
+
+    private decimal? _weightRoundingIncrementKg;
+    public decimal? WeightRoundingIncrementKg
+    {
+        get => _weightRoundingIncrementKg;
+        set
+        {
+            if (value.HasValue && value.Value <= 0m)
+            {
+                throw new ValidationException(nameof(WeightRoundingIncrementKg), "Weight rounding increment must be strictly positive (> 0).");
+            }
+            _weightRoundingIncrementKg = value.HasValue ? decimal.Round(value.Value, 4, MidpointRounding.AwayFromZero) : null;
+        }
+    }
 
     /// <summary>
     /// Minimum markup dollar floor applied to the calculated markup.
@@ -148,6 +161,11 @@ public class ClientFreightAgreement : AuditableEntity<Guid>, ITenantEntity
         if (minimumMarkupAmount.HasValue && maximumMarkupAmount.HasValue && maximumMarkupAmount.Value < minimumMarkupAmount.Value)
         {
             throw new ValidationException(nameof(maximumMarkupAmount), "Maximum markup amount cannot be less than minimum markup amount.");
+        }
+
+        if (weightRoundingIncrementKg.HasValue && weightRoundingIncrementKg.Value <= 0m)
+        {
+            throw new ValidationException(nameof(weightRoundingIncrementKg), "Weight rounding increment must be strictly positive (> 0).");
         }
 
         var normalizedCurrency = string.IsNullOrWhiteSpace(currency) ? "USD" : currency.Trim().ToUpperInvariant();
