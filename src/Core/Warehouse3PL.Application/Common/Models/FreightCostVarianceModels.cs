@@ -71,9 +71,10 @@ public record FreightProfitabilitySummaryDto
     public decimal? RealizedMarginPercent { get; init; }
 
     // Unit Economics ($ USD per shipment)
-    public decimal AverageRevenuePerShipmentUsd { get; init; }
-    public decimal AverageCostPerShipmentUsd { get; init; }
-    public decimal AverageMarginPerShipmentUsd { get; init; }
+    // Conforms to null-for-zero-denominator analytics rule: null when TotalShipmentsCount is 0.
+    public decimal? AverageRevenuePerShipmentUsd { get; init; }
+    public decimal? AverageCostPerShipmentUsd { get; init; }
+    public decimal? AverageMarginPerShipmentUsd { get; init; }
 }
 
 /// <summary>
@@ -133,6 +134,7 @@ public record AccessorialLeakageCategoryBreakdownDto
 /// <summary>
 /// Granular shipment-level discrepancy record in the controller audit queue.
 /// Quarantined disputed items are flagged to ensure they are excluded from reconciled costs.
+/// Tracks stable invoice-line identity and separates operational quote variances from contractual rate card variances.
 /// DB-SPEC-3PL-2026 Phase 6.4.4.2 Variance &amp; Accessorial Discrepancy Analytics.
 /// </summary>
 public record CarrierInvoiceDiscrepancyDto
@@ -141,11 +143,24 @@ public record CarrierInvoiceDiscrepancyDto
     public string ShipmentNumber { get; init; } = string.Empty;
     public string TrackingNumber { get; init; } = string.Empty;
     public string CarrierCode { get; init; } = string.Empty;
+
+    // Stable invoice-line identity (never collapsed)
     public string CarrierInvoiceNumber { get; init; } = string.Empty;
+    public IReadOnlyList<string> CarrierInvoiceNumbers { get; init; } = [];
+    public Guid? CarrierCostRecordId { get; init; }
+    public string InvoiceLineIdentifier { get; init; } = string.Empty;
+
     public decimal ExpectedCostUsd { get; init; }
     public decimal InvoicedCostUsd { get; init; }
     public decimal DiscrepancyAmountUsd { get; init; }
     public decimal? DiscrepancyPercent { get; init; }
+
+    // Separated variance dimensions (Gate E / F)
+    public decimal? OperationalQuoteVarianceUsd { get; init; }
+    public decimal? ContractualRateCardVarianceUsd { get; init; }
+    public decimal? InvoiceLineDiscrepancyUsd { get; init; }
+    public decimal? DisputedQuarantinedAmountUsd { get; init; }
+
     public FreightReconciliationStatus ReconciliationStatus { get; init; }
     public DiscrepancyRootCauseCategory RootCauseCategory { get; init; }
     public string DiscrepancyReason { get; init; } = string.Empty;
@@ -156,6 +171,7 @@ public record CarrierInvoiceDiscrepancyDto
 /// <summary>
 /// Contractual rate card and dimensional weight compliance analytical model.
 /// Audits carrier invoice lines against contractual expected billable weight (max(scale, dim)) and rate tables.
+/// Distinguishes audited shipments from indeterminate shipments with missing contractual inputs.
 /// DB-SPEC-3PL-2026 Phase 6.4.4.2 Variance &amp; Accessorial Discrepancy Analytics.
 /// </summary>
 public record RateCardComplianceAnalysisDto
@@ -168,6 +184,7 @@ public record RateCardComplianceAnalysisDto
 
     public int TotalAuditedShipmentsCount { get; init; }
     public int CompliantShipmentsCount { get; init; }
+    public int IndeterminateShipmentsCount { get; init; }
     public decimal? ComplianceRatePercent { get; init; }
 
     public int OverchargeDiscrepanciesCount { get; init; }
