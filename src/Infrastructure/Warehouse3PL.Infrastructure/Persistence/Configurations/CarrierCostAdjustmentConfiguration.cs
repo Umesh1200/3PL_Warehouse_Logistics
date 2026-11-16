@@ -61,6 +61,10 @@ public class CarrierCostAdjustmentConfiguration : IEntityTypeConfiguration<Carri
             .HasPrecision(18, 4)
             .IsRequired();
 
+        builder.Property(a => a.BilledWeightKg)
+            .HasColumnName("billed_weight_kg")
+            .HasPrecision(18, 4);
+
         builder.Property(a => a.Currency)
             .HasColumnName("currency")
             .HasMaxLength(3)

@@ -279,8 +279,9 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         var chargeIds = accessorialCharges.Select(a => a.Id).ToHashSet();
         var billableActivities = await _dbContext.BillableActivities
             .AsNoTracking()
-            .Where(b => (b.SourceId != Guid.Empty && shipmentIds.Contains(b.SourceId))
-                     || (b.SourceId != Guid.Empty && chargeIds.Contains(b.SourceId)))
+            .Where(b => b.SourceId != Guid.Empty && chargeIds.Contains(b.SourceId)
+                     && b.OccurredAtUtc <= valuationTime
+                     && b.CreatedAt <= valuationTime)
             .ToListAsync(cancellationToken);
 
         var activityIds = billableActivities.Select(b => b.Id).ToHashSet();
@@ -292,14 +293,14 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             .Where(l => l.ChargeCategory == InvoiceChargeCategory.Freight
                      && l.Invoice != null
                      && l.Invoice.InvoiceDate <= valuationTime
+                     && l.CreatedAt <= valuationTime
                      && (l.Invoice.Status == InvoiceStatus.Issued
                          || l.Invoice.Status == InvoiceStatus.Paid
                          || l.Invoice.Status == InvoiceStatus.PartiallyPaid
                          || l.Invoice.Status == InvoiceStatus.Disputed
                          || l.Invoice.Status == InvoiceStatus.Approved)
                      && ((l.BillableActivityId.HasValue && activityIds.Contains(l.BillableActivityId.Value))
-                         || (l.BillableActivity != null &&
-                             (shipmentIds.Contains(l.BillableActivity.SourceId) || chargeIds.Contains(l.BillableActivity.SourceId)))))
+                         || (l.BillableActivity != null && chargeIds.Contains(l.BillableActivity.SourceId))))
             .ToListAsync(cancellationToken);
 
         // Deduplicate invoice lines by identity
@@ -312,14 +313,12 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             .Where(l => l.BillableActivity != null && chargeIds.Contains(l.BillableActivity.SourceId))
             .ToLookup(l => l.BillableActivity!.SourceId);
 
-        var linesByShipmentId = deduplicatedLines
-            .Where(l => l.BillableActivity != null && shipmentIds.Contains(l.BillableActivity.SourceId))
-            .ToLookup(l => l.BillableActivity!.SourceId);
-
+        var allocatedInvoiceLineIds = new HashSet<Guid>();
         decimal totalCarrierAccessorials = 0m;
         decimal totalClientBilledAccessorials = 0m;
         decimal totalNetLeakage = 0m;
         decimal totalContractuallyAbsorbed = 0m;
+        decimal totalDisputedQuarantined = 0m;
 
         var typeBreakdowns = new Dictionary<AccessorialType, (decimal CarrierUsd, decimal ClientUsd, decimal LeakageUsd, decimal AbsorbedUsd, int Count)>();
         var categoryBreakdowns = new Dictionary<AccessorialLeakageCategory, (decimal AmountUsd, int Count)>();
@@ -335,42 +334,25 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             decimal carrierUsd = carrierConv.ConvertedAmountUsd;
 
             // Authoritative sell-side billed amount from qualifying Phase 5 InvoiceLine records (Gate A)
-            // charge.ClientAmount is strictly ignored as proof of billing
+            // charge.ClientAmount is strictly ignored as proof of billing.
+            // Surcharge client recovery is resolved strictly through explicit charge-to-line linkage,
+            // preventing description-matching misattribution and ensuring unique line allocation.
             decimal clientBilledUsd = 0m;
 
-            var directLines = linesByChargeId[charge.Id].ToList();
-            if (directLines.Count > 0)
-            {
-                foreach (var line in directLines)
-                {
-                    var lineConv = _reconciliationService.NormalizeCurrency(
-                        line.TotalAmount,
-                        "USD",
-                        "USD",
-                        line.Invoice?.InvoiceDate ?? charge.AssessedAtUtc,
-                        valuationTime);
-                    clientBilledUsd += lineConv.ConvertedAmountUsd;
-                }
-            }
-            else
-            {
-                // Match shipment-level invoice lines matching accessorial type or charge description
-                var matchedLines = linesByShipmentId[charge.ShipmentId]
-                    .Where(l => l.Description.Contains(charge.AccessorialType.ToString(), StringComparison.OrdinalIgnoreCase)
-                             || (!string.IsNullOrEmpty(charge.CarrierAccessorialCode) && l.Description.Contains(charge.CarrierAccessorialCode, StringComparison.OrdinalIgnoreCase))
-                             || (l.MetadataJson != null && l.MetadataJson.Contains(charge.Id.ToString())))
-                    .ToList();
+            var directLines = linesByChargeId[charge.Id]
+                .Where(l => !allocatedInvoiceLineIds.Contains(l.Id))
+                .ToList();
 
-                foreach (var line in matchedLines)
-                {
-                    var lineConv = _reconciliationService.NormalizeCurrency(
-                        line.TotalAmount,
-                        "USD",
-                        "USD",
-                        line.Invoice?.InvoiceDate ?? charge.AssessedAtUtc,
-                        valuationTime);
-                    clientBilledUsd += lineConv.ConvertedAmountUsd;
-                }
+            foreach (var line in directLines)
+            {
+                allocatedInvoiceLineIds.Add(line.Id);
+                var lineConv = _reconciliationService.NormalizeCurrency(
+                    line.TotalAmount,
+                    "USD",
+                    "USD",
+                    line.Invoice?.InvoiceDate ?? charge.AssessedAtUtc,
+                    valuationTime);
+                clientBilledUsd += lineConv.ConvertedAmountUsd;
             }
 
             totalCarrierAccessorials += carrierUsd;
@@ -380,15 +362,21 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             decimal itemAbsorbed = 0m;
             AccessorialLeakageCategory category;
 
-            // 4-Way Surcharge Classification:
-            // 1. Contractually Absorbed
-            if (charge.BillableTreatment == AccessorialBillableTreatment.AbsorbedByWarehouse)
+            // Dispute status evaluated FIRST to quarantine disputed charges from leakage & client under-recovery (Finding 5)
+            bool isDisputed = charge.CarrierCostRecord?.Status == CarrierCostStatus.Disputed;
+
+            if (isDisputed)
+            {
+                category = AccessorialLeakageCategory.CarrierOvercharge;
+                itemLeakage = 0m;
+                totalDisputedQuarantined += carrierUsd;
+            }
+            else if (charge.BillableTreatment == AccessorialBillableTreatment.AbsorbedByWarehouse)
             {
                 category = AccessorialLeakageCategory.AbsorbedByContract;
                 itemAbsorbed = carrierUsd;
                 totalContractuallyAbsorbed += itemAbsorbed;
             }
-            // 2. Unbilled Operational Leakage (Billable, but zero qualifying client invoice lines)
             else if (carrierUsd > 0m && clientBilledUsd == 0m)
             {
                 itemLeakage = carrierUsd;
@@ -402,19 +390,12 @@ public class FreightCostVarianceService : IFreightCostVarianceService
                     _ => AccessorialLeakageCategory.UnbilledOperationalCharge
                 };
             }
-            // 3. Client Under-Recovery (Client billed amount fell short of carrier cost)
             else if (carrierUsd > clientBilledUsd && clientBilledUsd > 0m)
             {
                 itemLeakage = carrierUsd - clientBilledUsd;
                 totalNetLeakage += itemLeakage;
                 category = AccessorialLeakageCategory.ClientUnderRecovery;
             }
-            // 4. Carrier Overcharge (Disputed carrier surcharge)
-            else if (charge.CarrierCostRecord?.Status == CarrierCostStatus.Disputed)
-            {
-                category = AccessorialLeakageCategory.CarrierOvercharge;
-            }
-            // 5. Fully Recovered
             else
             {
                 category = AccessorialLeakageCategory.UncontestedDiscrepancy;
@@ -433,9 +414,9 @@ public class FreightCostVarianceService : IFreightCostVarianceService
                 currentType.Count + 1);
 
             // Accumulate by AccessorialLeakageCategory
-            if (itemLeakage > 0m || itemAbsorbed > 0m)
+            if (itemLeakage > 0m || itemAbsorbed > 0m || isDisputed)
             {
-                decimal categoryAmount = itemLeakage > 0m ? itemLeakage : itemAbsorbed;
+                decimal categoryAmount = isDisputed ? carrierUsd : (itemLeakage > 0m ? itemLeakage : itemAbsorbed);
                 if (!categoryBreakdowns.TryGetValue(category, out var currentCat))
                 {
                     currentCat = (0m, 0);
@@ -481,6 +462,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             TotalClientBilledAccessorialsUsd = totalClientBilledAccessorials,
             TotalNetLeakageAmountUsd = totalNetLeakage,
             TotalContractuallyAbsorbedUsd = totalContractuallyAbsorbed,
+            TotalDisputedQuarantinedUsd = totalDisputedQuarantined,
             AccessorialRecoveryRatePercent = recoveryRate,
             BreakdownByType = typeList.AsReadOnly(),
             BreakdownByLeakageCategory = categoryList.AsReadOnly()
@@ -831,7 +813,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             // 5. Weight Audit Discrepancies: Compare against verified carrier-billed weight
             foreach (var cost in shipmentCosts)
             {
-                var weightAdj = cost.Adjustments.FirstOrDefault(a => a.AdjustmentType == CarrierCostAdjustmentType.WeightDiscrepancy);
+                var weightAdj = cost.Adjustments.FirstOrDefault(a => a.AdjustmentType == CarrierCostAdjustmentType.WeightDiscrepancy && a.AdjustedAtUtc <= valuationTime);
                 if (TryResolveCarrierBilledWeight(weightAdj, cost, out decimal billedWeight))
                 {
                     decimal drift = billedWeight - expectedBillableWeight;
@@ -914,6 +896,11 @@ public class FreightCostVarianceService : IFreightCostVarianceService
 
     private static decimal ResolveContractualWeightIncrement(ClientFreightAgreement? agreement)
     {
+        if (agreement?.WeightRoundingIncrementKg.HasValue == true && agreement.WeightRoundingIncrementKg.Value > 0m)
+        {
+            return agreement.WeightRoundingIncrementKg.Value;
+        }
+
         if (agreement != null && !string.IsNullOrWhiteSpace(agreement.Notes))
         {
             // Parse custom contractual increment (e.g. "Increment: 1.0" or "RoundingIncrement: 1.0" or "Step: 0.25")
@@ -964,49 +951,17 @@ public class FreightCostVarianceService : IFreightCostVarianceService
     {
         billedWeightKg = 0m;
 
-        // Check adjustment reason first (e.g. "Reweighed parcel from 2.5kg to 5.5kg" or "Reweighed to 5.5kg")
-        if (adjustment != null && !string.IsNullOrWhiteSpace(adjustment.Reason))
+        // Structured carrier-billed weight evidence (Gate D)
+        if (adjustment?.BilledWeightKg.HasValue == true && adjustment.BilledWeightKg.Value > 0m)
         {
-            var match = Regex.Match(
-                adjustment.Reason,
-                @"(?:to|re-?weighed(?:\s+to)?|billed)\s+([0-9]+(?:\.[0-9]+)?)\s*kg",
-                RegexOptions.IgnoreCase);
-
-            if (match.Success && decimal.TryParse(match.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsed) && parsed > 0m)
-            {
-                billedWeightKg = parsed;
-                return true;
-            }
-
-            var generalMatch = Regex.Matches(
-                adjustment.Reason,
-                @"([0-9]+(?:\.[0-9]+)?)\s*kg",
-                RegexOptions.IgnoreCase);
-
-            if (generalMatch.Count > 0)
-            {
-                var last = generalMatch[^1];
-                if (decimal.TryParse(last.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedLast) && parsedLast > 0m)
-                {
-                    billedWeightKg = parsedLast;
-                    return true;
-                }
-            }
+            billedWeightKg = adjustment.BilledWeightKg.Value;
+            return true;
         }
 
-        // Check cost record notes if present
-        if (!string.IsNullOrWhiteSpace(costRecord.Notes))
+        if (costRecord.BilledWeightKg.HasValue && costRecord.BilledWeightKg.Value > 0m)
         {
-            var noteMatch = Regex.Match(
-                costRecord.Notes,
-                @"(?:billedweight|weight)\s*[:=]?\s*([0-9]+(?:\.[0-9]+)?)\s*kg?",
-                RegexOptions.IgnoreCase);
-
-            if (noteMatch.Success && decimal.TryParse(noteMatch.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var parsedNote) && parsedNote > 0m)
-            {
-                billedWeightKg = parsedNote;
-                return true;
-            }
+            billedWeightKg = costRecord.BilledWeightKg.Value;
+            return true;
         }
 
         return false;
@@ -1023,42 +978,26 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         contractualBaseCost = 0m;
         currency = "USD";
 
-        // 1. Check ClientFreightAgreement
+        // 1. Check RateCardSchedule (commercial rate card line rating via CalculateRating)
+        if (rateCardSchedule != null)
+        {
+            var freightLine = rateCardSchedule.FindLine(BillableActivityType.CarrierFreight);
+            if (freightLine != null)
+            {
+                currency = rateCardSchedule.Currency ?? "USD";
+                var ratingResult = freightLine.CalculateRating(expectedBillableWeight);
+                contractualBaseCost = ratingResult.TotalAmount;
+                return true;
+            }
+        }
+
+        // 2. Check ClientFreightAgreement (fixed contractual rate)
         if (agreement != null)
         {
             currency = agreement.Currency ?? "USD";
             if (agreement.FixedFreightRate.HasValue && agreement.FixedFreightRate.Value > 0m)
             {
                 contractualBaseCost = agreement.FixedFreightRate.Value;
-                return true;
-            }
-
-            if (agreement.Notes != null && agreement.Notes.Contains("RatePerKg:"))
-            {
-                var match = Regex.Match(agreement.Notes, @"RatePerKg:\s*([0-9]+(?:\.[0-9]+)?)");
-                if (match.Success && decimal.TryParse(match.Groups[1].Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var ratePerKg))
-                {
-                    contractualBaseCost = Math.Round(ratePerKg * expectedBillableWeight, 2, MidpointRounding.AwayFromZero);
-                    return true;
-                }
-            }
-        }
-
-        // 2. Check RateCardSchedule (e.g. CarrierFreight activity line)
-        if (rateCardSchedule != null)
-        {
-            var freightLine = rateCardSchedule.FindLine(BillableActivityType.CarrierFreight);
-            if (freightLine != null && freightLine.BaseRate > 0m)
-            {
-                currency = rateCardSchedule.Currency ?? "USD";
-                if (string.Equals(freightLine.UnitOfMeasure, "KG", StringComparison.OrdinalIgnoreCase))
-                {
-                    contractualBaseCost = Math.Round(freightLine.BaseRate * expectedBillableWeight, 2, MidpointRounding.AwayFromZero);
-                }
-                else
-                {
-                    contractualBaseCost = freightLine.BaseRate;
-                }
                 return true;
             }
         }

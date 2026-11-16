@@ -42,12 +42,22 @@ public class FreightReconciliationService : IFreightReconciliationService
         DateTime? asOfUtc = null,
         CancellationToken cancellationToken = default)
     {
-        var valuationTime = asOfUtc ?? DateTime.UtcNow;
-        if (asOfUtc.HasValue && asOfUtc.Value.Kind == DateTimeKind.Unspecified)
+        DateTime? historicalCutoff = null;
+        DateTime utcValuationTime;
+
+        if (asOfUtc.HasValue)
         {
-            throw new ArgumentException("Valuation date (asOfUtc) cannot have DateTimeKind.Unspecified. Must be explicitly Utc or Local.", nameof(asOfUtc));
+            if (asOfUtc.Value.Kind == DateTimeKind.Unspecified)
+            {
+                throw new ArgumentException("Valuation date (asOfUtc) cannot have DateTimeKind.Unspecified. Must be explicitly Utc or Local.", nameof(asOfUtc));
+            }
+            historicalCutoff = asOfUtc.Value.Kind == DateTimeKind.Local ? asOfUtc.Value.ToUniversalTime() : asOfUtc.Value;
+            utcValuationTime = historicalCutoff.Value;
         }
-        var utcAsOf = valuationTime.Kind == DateTimeKind.Local ? valuationTime.ToUniversalTime() : valuationTime;
+        else
+        {
+            utcValuationTime = DateTime.UtcNow;
+        }
 
         var shipment = await _dbContext.Shipments
             .AsNoTracking()
@@ -67,7 +77,7 @@ public class FreightReconciliationService : IFreightReconciliationService
             .AsNoTracking()
             .Include(c => c.Adjustments)
             .Include(c => c.AccessorialCharges)
-            .Where(c => c.ShipmentId == shipmentId)
+            .Where(c => c.ShipmentId == shipmentId && (!historicalCutoff.HasValue || c.CostAssessedAtUtc <= historicalCutoff.Value))
             .OrderBy(c => c.CostAssessedAtUtc)
             .ToListAsync(cancellationToken);
 
@@ -87,7 +97,7 @@ public class FreightReconciliationService : IFreightReconciliationService
                 quotedRecord.Currency,
                 "USD",
                 quotedRecord.CostAssessedAtUtc,
-                utcAsOf);
+                utcValuationTime);
             quotedCarrierCostUsd = qConv.ConvertedAmountUsd;
             conversionAuditTrail.Add(qConv);
         }
@@ -106,7 +116,7 @@ public class FreightReconciliationService : IFreightReconciliationService
                 confirmedRecord.Currency,
                 "USD",
                 confirmedRecord.CostAssessedAtUtc,
-                utcAsOf);
+                utcValuationTime);
             estimatedCarrierCostUsd = eConv.ConvertedAmountUsd;
             conversionAuditTrail.Add(eConv);
         }
@@ -151,7 +161,7 @@ public class FreightReconciliationService : IFreightReconciliationService
                 }
 
                 // Currency Normalization for individual base charge
-                var baseConv = NormalizeCurrency(cost.BaseTransportationCost, cost.Currency, "USD", cost.CostAssessedAtUtc, utcAsOf);
+                var baseConv = NormalizeCurrency(cost.BaseTransportationCost, cost.Currency, "USD", cost.CostAssessedAtUtc, utcValuationTime);
                 invoicedBaseAmountUsd += baseConv.ConvertedAmountUsd;
                 conversionAuditTrail.Add(baseConv);
 
@@ -164,7 +174,7 @@ public class FreightReconciliationService : IFreightReconciliationService
 
                 decimal totalNonBaseSurcharges = cost.FuelSurcharge + cost.InsuranceCost + detailedAccessorials;
 
-                var accConv = NormalizeCurrency(totalNonBaseSurcharges, cost.Currency, "USD", cost.CostAssessedAtUtc, utcAsOf);
+                var accConv = NormalizeCurrency(totalNonBaseSurcharges, cost.Currency, "USD", cost.CostAssessedAtUtc, utcValuationTime);
                 invoicedAccessorialsAmountUsd += accConv.ConvertedAmountUsd;
                 conversionAuditTrail.Add(accConv);
             }
@@ -173,7 +183,7 @@ public class FreightReconciliationService : IFreightReconciliationService
             // If adjustments share an IdempotencyKey but differ in financial content (amounts, type, currency),
             // throw an exception rather than silently choosing one.
             var adjustmentsWithKeys = invoicedRecords
-                .SelectMany(c => c.Adjustments.Select(adj => new { Adjustment = adj, ParentCost = c }))
+                .SelectMany(c => c.Adjustments.Where(a => !historicalCutoff.HasValue || a.AdjustedAtUtc <= historicalCutoff.Value).Select(adj => new { Adjustment = adj, ParentCost = c }))
                 .Where(x => !string.IsNullOrWhiteSpace(x.Adjustment.IdempotencyKey))
                 .GroupBy(x => x.Adjustment.IdempotencyKey.Trim().ToUpperInvariant())
                 .ToList();
@@ -195,9 +205,9 @@ public class FreightReconciliationService : IFreightReconciliationService
                 }
             }
 
-            // Deduplicate adjustments globally across all invoiced records for this shipment
+            // Deduplicate adjustments globally across all invoiced records for this shipment (constrained by valuation cutoff)
             var allAdjustments = invoicedRecords
-                .SelectMany(c => c.Adjustments.Select(adj => new { Adjustment = adj, ParentCost = c }))
+                .SelectMany(c => c.Adjustments.Where(a => !historicalCutoff.HasValue || a.AdjustedAtUtc <= historicalCutoff.Value).Select(adj => new { Adjustment = adj, ParentCost = c }))
                 .GroupBy(x => !string.IsNullOrWhiteSpace(x.Adjustment.IdempotencyKey)
                     ? $"IDEM:{x.Adjustment.IdempotencyKey.Trim().ToUpperInvariant()}"
                     : $"KEY:{x.Adjustment.CarrierCostRecordId}:{x.Adjustment.AdjustmentType}:{x.Adjustment.OriginalCarrierCost}:{x.Adjustment.AdjustedCarrierCost}:{x.Adjustment.AdjustedAtUtc:O}")
@@ -217,7 +227,7 @@ public class FreightReconciliationService : IFreightReconciliationService
                     _logger.LogInformation("Adjustment '{AdjId}' explicitly inherits currency '{Currency}' from parent carrier record '{ParentId}'.", adj.Id, adjCurrency, cost.Id);
                 }
                 var adjEffectiveDate = adj.AdjustedAtUtc == default ? cost.CostAssessedAtUtc : adj.AdjustedAtUtc;
-                var adjConv = NormalizeCurrency(adj.CarrierCostDelta, adjCurrency, "USD", adjEffectiveDate, utcAsOf);
+                var adjConv = NormalizeCurrency(adj.CarrierCostDelta, adjCurrency, "USD", adjEffectiveDate, utcValuationTime);
 
                 totalAdjustmentsAmountUsd += adjConv.ConvertedAmountUsd;
                 conversionAuditTrail.Add(adjConv);
@@ -273,11 +283,11 @@ public class FreightReconciliationService : IFreightReconciliationService
         // Excludes Voided and Draft invoices, and excludes lines without an invoice.
         var marginRecord = await _dbContext.ShipmentFreightMarginRecords
             .AsNoTracking()
-            .FirstOrDefaultAsync(m => m.ShipmentId == shipmentId, cancellationToken);
+            .FirstOrDefaultAsync(m => m.ShipmentId == shipmentId && (!historicalCutoff.HasValue || m.RatedAtUtc <= historicalCutoff.Value), cancellationToken);
 
         var activityIds = await _dbContext.BillableActivities
             .AsNoTracking()
-            .Where(b => b.SourceId == shipmentId)
+            .Where(b => b.SourceId == shipmentId && (!historicalCutoff.HasValue || (b.OccurredAtUtc <= historicalCutoff.Value && b.CreatedAt <= historicalCutoff.Value)))
             .Select(b => b.Id)
             .ToListAsync(cancellationToken);
 
@@ -290,14 +300,16 @@ public class FreightReconciliationService : IFreightReconciliationService
                          || (l.BillableActivity != null && l.BillableActivity.SourceId == shipmentId)))
             .ToListAsync(cancellationToken);
 
-        // Authoritative qualifying invoice statuses
+        // Authoritative qualifying invoice statuses constrained by valuation cutoff
         var qualifyingInvoiceLines = rawInvoiceLines
-            .Where(l => l.Invoice != null && (
-                l.Invoice.Status == InvoiceStatus.Issued ||
-                l.Invoice.Status == InvoiceStatus.Paid ||
-                l.Invoice.Status == InvoiceStatus.PartiallyPaid ||
-                l.Invoice.Status == InvoiceStatus.Disputed ||
-                l.Invoice.Status == InvoiceStatus.Approved))
+            .Where(l => l.Invoice != null
+                     && (!historicalCutoff.HasValue || (l.Invoice.InvoiceDate <= historicalCutoff.Value && l.CreatedAt <= historicalCutoff.Value))
+                     && (
+                         l.Invoice.Status == InvoiceStatus.Issued ||
+                         l.Invoice.Status == InvoiceStatus.Paid ||
+                         l.Invoice.Status == InvoiceStatus.PartiallyPaid ||
+                         l.Invoice.Status == InvoiceStatus.Disputed ||
+                         l.Invoice.Status == InvoiceStatus.Approved))
             .ToList();
 
         // Enforce Sell-Side Line Uniqueness & Multi-Line Freight Conservation:
@@ -330,7 +342,7 @@ public class FreightReconciliationService : IFreightReconciliationService
                     throw new InvalidOperationException($"Invoice line '{l.Id}' has missing currency code.");
                 }
                 var lineDate = l.Invoice?.InvoiceDate ?? (shipment.DispatchedAtUtc ?? DateTime.UtcNow);
-                var lineConv = NormalizeCurrency(l.TotalAmount, lineCurrency, "USD", lineDate, utcAsOf);
+                var lineConv = NormalizeCurrency(l.TotalAmount, lineCurrency, "USD", lineDate, utcValuationTime);
                 invoicedClientFreightUsd += lineConv.ConvertedAmountUsd;
                 conversionAuditTrail.Add(lineConv);
             }
@@ -371,7 +383,7 @@ public class FreightReconciliationService : IFreightReconciliationService
                 marginRecord.Currency,
                 "USD",
                 marginRecord.RatedAtUtc,
-                utcAsOf);
+                utcValuationTime);
             estimatedClientFreightUsd = mConv.ConvertedAmountUsd;
             conversionAuditTrail.Add(mConv);
         }
@@ -413,7 +425,7 @@ public class FreightReconciliationService : IFreightReconciliationService
             ClientId = shipment.ClientId,
             DispatchedAtUtc = shipment.DispatchedAtUtc,
             RatedAtUtc = marginRecord?.RatedAtUtc,
-            ValuationTimeUtc = utcAsOf,
+            ValuationTimeUtc = utcValuationTime,
             QuotedCarrierCostUsd = quotedCarrierCostUsd,
             EstimatedCarrierCostUsd = estimatedCarrierCostUsd,
             InvoicedCarrierBaseCostUsd = invoicedBaseAmountUsd,
@@ -491,7 +503,7 @@ public class FreightReconciliationService : IFreightReconciliationService
         var shipmentDtos = new List<ReconciledShipmentFinancialsDto>(shipmentIds.Count);
         foreach (var sId in shipmentIds)
         {
-            var recon = await GetShipmentFinancialReconciliationAsync(sId, utcAsOf, cancellationToken);
+            var recon = await GetShipmentFinancialReconciliationAsync(sId, asOfUtc, cancellationToken);
             shipmentDtos.Add(recon);
         }
 

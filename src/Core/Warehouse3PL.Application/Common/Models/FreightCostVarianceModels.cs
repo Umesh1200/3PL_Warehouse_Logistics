@@ -95,6 +95,7 @@ public record AccessorialLeakageAnalysisDto
     public decimal TotalClientBilledAccessorialsUsd { get; init; }
     public decimal TotalNetLeakageAmountUsd { get; init; }
     public decimal TotalContractuallyAbsorbedUsd { get; init; }
+    public decimal TotalDisputedQuarantinedUsd { get; init; }
 
     /// <summary>
     /// Recovery Rate % = (TotalClientBilledAccessorialsUsd / TotalCarrierAccessorialsUsd) * 100.

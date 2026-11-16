@@ -30,6 +30,7 @@ public class CarrierCostRecord : AuditableEntity<Guid>, ITenantEntity
     public decimal InsuranceCost { get; set; }
     public decimal AccessorialCost { get; set; }
     public decimal TotalCarrierCost { get; set; }
+    public decimal? BilledWeightKg { get; set; }
 
     public string Currency { get; set; } = "USD";
     public CarrierCostStatus Status { get; set; } = CarrierCostStatus.Estimated;

@@ -50,6 +50,7 @@ public class ClientFreightAgreement : AuditableEntity<Guid>, ITenantEntity
     /// Fixed contractual shipping rate (used for FixedContractualRate model).
     /// </summary>
     public decimal? FixedFreightRate { get; set; }
+    public decimal? WeightRoundingIncrementKg { get; set; }
 
     /// <summary>
     /// Minimum markup dollar floor applied to the calculated markup.
@@ -101,7 +102,8 @@ public class ClientFreightAgreement : AuditableEntity<Guid>, ITenantEntity
         decimal? minimumMarkupAmount = null,
         decimal? maximumMarkupAmount = null,
         AccessorialBillableTreatment defaultAccessorialTreatment = AccessorialBillableTreatment.BillableWithMarkup,
-        string? notes = null)
+        string? notes = null,
+        decimal? weightRoundingIncrementKg = null)
     {
         if (clientId == Guid.Empty)
         {
@@ -171,7 +173,8 @@ public class ClientFreightAgreement : AuditableEntity<Guid>, ITenantEntity
             EffectiveFromUtc = effectiveFromUtc,
             EffectiveToUtc = effectiveToUtc,
             IsActive = true,
-            Notes = notes
+            Notes = notes,
+            WeightRoundingIncrementKg = weightRoundingIncrementKg
         };
     }
 

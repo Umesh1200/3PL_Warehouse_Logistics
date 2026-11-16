@@ -26,6 +26,7 @@ public class CarrierCostAdjustment : AuditableEntity<Guid>, ITenantEntity
     public decimal AdjustedCarrierCost { get; set; }
     public decimal CarrierCostDelta { get; set; }
     public decimal ClientFreightDelta { get; set; }
+    public decimal? BilledWeightKg { get; set; }
 
     /// <summary>
     /// Explicit adjustment currency. If null or empty, this adjustment strictly inherits

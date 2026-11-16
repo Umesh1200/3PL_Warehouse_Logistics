@@ -63,6 +63,10 @@ public class ClientFreightAgreementConfiguration : IEntityTypeConfiguration<Clie
             .HasColumnName("fixed_freight_rate")
             .HasPrecision(18, 4);
 
+        builder.Property(a => a.WeightRoundingIncrementKg)
+            .HasColumnName("weight_rounding_increment_kg")
+            .HasPrecision(18, 4);
+
         builder.Property(a => a.MinimumMarkupAmount)
             .HasColumnName("minimum_markup_amount")
             .HasPrecision(18, 4);

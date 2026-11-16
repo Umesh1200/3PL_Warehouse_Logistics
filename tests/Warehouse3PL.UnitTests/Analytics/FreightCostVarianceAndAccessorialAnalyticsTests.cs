@@ -802,6 +802,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
             CarrierInvoiceNumber = "INV-10",
             BaseTransportationCost = 30.00m,
             TotalCarrierCost = 45.00m,
+            BilledWeightKg = 5.5m,
             CostAssessedAtUtc = date,
             Status = CarrierCostStatus.Invoiced
         };
@@ -818,6 +819,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         var weightAdj = CarrierCostAdjustment.Create(
             _clientAId, _facility1Id, cost.Id, CarrierCostAdjustmentType.WeightDiscrepancy,
             "INV-10", 30.00m, 45.00m, 0m, "USD", "Reweighed parcel from 2.5kg to 5.5kg", "IDEM-10", date);
+        weightAdj.BilledWeightKg = 5.5m;
 
         cost.Adjustments.Add(weightAdj);
         context.CarrierCostRecords.AddRange(quote, cost);
@@ -1583,6 +1585,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
             _clientAId, "AGR-ROUND-29", "FedEx Custom Rounding Agreement",
             FreightPricingModel.FixedContractualRate, "USD", date.AddDays(-10), date.AddDays(10),
             _facility1Id, "FEDEX", CarrierServiceLevel.StandardGround, fixedFreightRate: 30.00m,
+            weightRoundingIncrementKg: 1.0m,
             notes: "Contractual billing weight increment: 1.0 kg");
         agreement.IsActive = true;
         context.ClientFreightAgreements.Add(agreement);
@@ -1597,6 +1600,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
             CarrierInvoiceNumber = "INV-29",
             BaseTransportationCost = 30.00m,
             TotalCarrierCost = 30.00m,
+            BilledWeightKg = 3.0m,
             CostAssessedAtUtc = date,
             Status = CarrierCostStatus.Invoiced
         };
@@ -1607,6 +1611,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         var weightAdj = CarrierCostAdjustment.Create(
             _clientAId, _facility1Id, cost.Id, CarrierCostAdjustmentType.WeightDiscrepancy,
             "INV-29", 30.00m, 30.00m, 0m, "USD", "Reweighed parcel to 3.0 kg", "IDEM-29", date);
+        weightAdj.BilledWeightKg = 3.0m;
         cost.Adjustments.Add(weightAdj);
 
         context.CarrierCostRecords.Add(cost);
@@ -1628,7 +1633,8 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
     [Fact]
     public async Task Test_30_DiscrepancyQueue_MultipleInvoiceLinesRetainedWithoutCollapsing()
     {
-        // ARRANGE: Gate E & F - Multiple carrier invoice lines for a single shipment are preserved with distinct stable identifiers.
+        // ARRANGE: Gate E & F - Multiple carrier invoice lines for a single shipment are preserved with distinct stable identifiers,
+        // and operational quote variance and contractual rate card variance demonstrate independent baselines.
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
         var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
         var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
@@ -1637,7 +1643,7 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-MULTI-30", "FEDEX", date);
         context.Shipments.Add(shipment);
 
-        // Initial Quote of $50
+        // Initial Quote of $45 (independent baseline)
         var quote = new CarrierCostRecord
         {
             Id = Guid.NewGuid(),
@@ -1645,13 +1651,13 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
             FacilityId = _facility1Id,
             ShipmentId = shipment.Id,
             CarrierCode = "FEDEX",
-            BaseTransportationCost = 50.00m,
-            TotalCarrierCost = 50.00m,
+            BaseTransportationCost = 45.00m,
+            TotalCarrierCost = 45.00m,
             CostAssessedAtUtc = date.AddHours(-2),
             Status = CarrierCostStatus.Estimated
         };
 
-        // Contractual agreement of $50 base rate
+        // Contractual agreement of $50 base rate (independent baseline)
         var agreement = ClientFreightAgreement.Create(
             _clientAId, "AGR-FEDEX-30", "FedEx Standard Agreement",
             FreightPricingModel.FixedContractualRate, "USD", date.AddDays(-10), date.AddDays(10),
@@ -1705,14 +1711,305 @@ public class FreightCostVarianceAndAccessorialAnalyticsTests
         Assert.Contains(cost1.Id.ToString(), item1.InvoiceLineIdentifier);
         Assert.Contains("INV-30A", item1.CarrierInvoiceNumbers);
         Assert.Equal(65.00m, item1.InvoicedCostUsd);
-        Assert.Equal(15.00m, item1.OperationalQuoteVarianceUsd);
-        Assert.Equal(15.00m, item1.ContractualRateCardVarianceUsd);
+        Assert.Equal(20.00m, item1.OperationalQuoteVarianceUsd); // 65 - 45 (quote) = +20
+        Assert.Equal(15.00m, item1.ContractualRateCardVarianceUsd); // 65 - 50 (contract) = +15
 
         var item2 = Assert.Single(queue, q => q.CarrierCostRecordId == cost2.Id);
         Assert.Contains(cost2.Id.ToString(), item2.InvoiceLineIdentifier);
         Assert.Contains("INV-30B", item2.CarrierInvoiceNumbers);
         Assert.Equal(30.00m, item2.InvoicedCostUsd);
-        Assert.Equal(-20.00m, item2.OperationalQuoteVarianceUsd);
-        Assert.Equal(-20.00m, item2.ContractualRateCardVarianceUsd);
+        Assert.Equal(-15.00m, item2.OperationalQuoteVarianceUsd); // 30 - 45 (quote) = -15
+        Assert.Equal(-20.00m, item2.ContractualRateCardVarianceUsd); // 30 - 50 (contract) = -20
+    }
+
+    [Fact]
+    public async Task Test_31_DiscrepancyQueue_MissingContract_ReturnsNullContractualVariance()
+    {
+        // ARRANGE: Gate F - When no contractual rate card or agreement is active for a shipment,
+        // OperationalQuoteVarianceUsd is computed against quote/estimate, while ContractualRateCardVarianceUsd is null.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-NOCONTRACT-31", "FEDEX", date);
+        context.Shipments.Add(shipment);
+
+        // Initial Quote of $45 (no ClientFreightAgreement created)
+        var quote = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            BaseTransportationCost = 45.00m,
+            TotalCarrierCost = 45.00m,
+            CostAssessedAtUtc = date.AddHours(-2),
+            Status = CarrierCostStatus.Estimated
+        };
+
+        // Carrier Invoice Record: Base freight invoice INV-31 ($65)
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-31",
+            BaseTransportationCost = 65.00m,
+            TotalCarrierCost = 65.00m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+
+        context.CarrierCostRecords.AddRange(quote, cost);
+        await context.SaveChangesAsync();
+
+        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT
+        var queue = await varianceService.GetDiscrepancyManagementQueueAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
+
+        // ASSERT: Operational quote variance is +$20, contractual rate card variance is strictly null
+        Assert.NotNull(queue);
+        var item = Assert.Single(queue, q => q.CarrierCostRecordId == cost.Id);
+        Assert.Equal(65.00m, item.InvoicedCostUsd);
+        Assert.Equal(45.00m, item.ExpectedCostUsd);
+        Assert.Equal(20.00m, item.OperationalQuoteVarianceUsd);
+        Assert.Null(item.ContractualRateCardVarianceUsd);
+        Assert.Equal(20.00m, item.DiscrepancyAmountUsd);
+    }
+
+    [Fact]
+    public async Task Test_32_ValuationCutoff_PostValuationAdjustmentExcludedUntilTimestampAdvances()
+    {
+        // ARRANGE: Gate B - Temporal isolation: Invoices exist at T0, post-valuation adjustments at T2.
+        // Evaluated at T1 (between T0 and T2), the T2 adjustment is strictly excluded.
+        // Evaluated at T3 (after T2), the adjustment is recognized.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var t0 = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var t1 = new DateTime(2026, 11, 4, 12, 0, 0, DateTimeKind.Utc); // Valuation cutoff before adjustment
+        var t2 = new DateTime(2026, 11, 4, 14, 0, 0, DateTimeKind.Utc); // Adjustment event
+        var t3 = new DateTime(2026, 11, 4, 16, 0, 0, DateTimeKind.Utc); // Valuation cutoff after adjustment
+
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-VAL-32", "FEDEX", t0);
+        context.Shipments.Add(shipment);
+
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-32",
+            BaseTransportationCost = 100.00m,
+            TotalCarrierCost = 100.00m,
+            CostAssessedAtUtc = t0,
+            Status = CarrierCostStatus.Invoiced
+        };
+
+        // Post-valuation credit adjustment at T2 (-$15.00)
+        var postValuationAdjustment = CarrierCostAdjustment.Create(
+            _clientAId, _facility1Id, cost.Id, CarrierCostAdjustmentType.DisputeCredit,
+            "INV-32", 100.00m, 85.00m, 0m, "USD", "Carrier billing correction credit note", "IDEM-VAL-32", t2);
+
+        cost.Adjustments.Add(postValuationAdjustment);
+        context.CarrierCostRecords.Add(cost);
+        await context.SaveChangesAsync();
+
+        var (reconService, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT 1: Evaluate at T1 (before adjustment at T2)
+        var summaryT1 = await varianceService.GetFreightProfitabilitySummaryAsync("FEDEX", t0.AddDays(-1), t0.AddDays(2), asOfUtc: t1);
+        var reconT1 = await reconService.GetShipmentFinancialReconciliationAsync(shipment.Id, t1);
+        var queueT1 = await varianceService.GetDiscrepancyManagementQueueAsync("FEDEX", t0.AddDays(-1), t0.AddDays(2), asOfUtc: t1);
+
+        // ASSERT 1: At T1, adjustment is excluded; net cost is $100.00
+        Assert.Equal(100.00m, summaryT1.TotalCarrierCostUsd);
+        Assert.Equal(100.00m, reconT1.NetInvoicedCarrierCostUsd);
+        Assert.Empty(reconT1.AdjustmentAuditTrail);
+        Assert.Equal(0m, reconT1.TotalCarrierAdjustmentsUsd);
+        var queueItemT1 = Assert.Single(queueT1);
+        Assert.Equal(100.00m, queueItemT1.InvoicedCostUsd);
+
+        // ACT 2: Evaluate at T3 (after adjustment at T2)
+        var summaryT3 = await varianceService.GetFreightProfitabilitySummaryAsync("FEDEX", t0.AddDays(-1), t0.AddDays(2), asOfUtc: t3);
+        var reconT3 = await reconService.GetShipmentFinancialReconciliationAsync(shipment.Id, t3);
+        var queueT3 = await varianceService.GetDiscrepancyManagementQueueAsync("FEDEX", t0.AddDays(-1), t0.AddDays(2), asOfUtc: t3);
+
+        // ASSERT 2: At T3, adjustment is recognized; net cost is $85.00
+        Assert.Equal(85.00m, summaryT3.TotalCarrierCostUsd);
+        Assert.Equal(85.00m, reconT3.NetInvoicedCarrierCostUsd);
+        Assert.Single(reconT3.AdjustmentAuditTrail);
+        Assert.Equal(-15.00m, reconT3.TotalCarrierAdjustmentsUsd);
+        var queueItemT3 = Assert.Single(queueT3);
+        Assert.Equal(85.00m, queueItemT3.InvoicedCostUsd);
+    }
+
+    [Fact]
+    public async Task Test_33_DisputedAccessorialCharge_QuarantinedBeforeUnderRecoveryCalculation()
+    {
+        // ARRANGE: Gate E & Finding 5 - Disputed accessorial charge with partial client billing
+        // must be quarantined under CarrierOvercharge, reported in TotalDisputedQuarantinedUsd,
+        // and excluded from TotalNetLeakageAmountUsd and ClientUnderRecovery category.
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-DISPUTE-33", "FEDEX", date);
+        context.Shipments.Add(shipment);
+
+        // Carrier cost record with Status = Disputed
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-33-DISPUTE",
+            BaseTransportationCost = 50.00m,
+            AccessorialCost = 100.00m,
+            TotalCarrierCost = 150.00m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Disputed
+        };
+
+        // Accessorial charge for $100.00
+        var charge = CarrierAccessorialCharge.Create(
+            cost.Id, _clientAId, _facility1Id, shipment.Id, AccessorialType.LiftgateService,
+            "LIFT", 100.00m, "USD", "IDEM-ACC-33", date, billableTreatment: AccessorialBillableTreatment.BillableWithMarkup);
+
+        cost.AddAccessorialCharge(charge);
+        context.CarrierCostRecords.Add(cost);
+        context.CarrierAccessorialCharges.Add(charge);
+
+        // Client billable activity and invoice line for partial recovery ($30.00)
+        var act = new BillableActivity
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ActivityType = BillableActivityType.CarrierFreight,
+            Status = BillableActivityStatus.Invoiced,
+            SourceType = "CarrierAccessorialCharge",
+            SourceId = charge.Id,
+            Quantity = 1m,
+            UnitPrice = 30.00m,
+            TotalAmount = 30.00m,
+            Currency = "USD",
+            OccurredAtUtc = date
+        };
+        context.BillableActivities.Add(act);
+
+        var clientInvoice = new Invoice
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            InvoiceNumber = "INV-CLI-33",
+            InvoiceDate = date,
+            Status = InvoiceStatus.Issued
+        };
+        var line = InvoiceLine.Create(1, InvoiceChargeCategory.Freight, "Liftgate recovery", 1m, "UNIT", 30.00m, 30.00m, act.Id, BillableActivityType.CarrierFreight, _facility1Id);
+        line.InvoiceId = clientInvoice.Id;
+        line.Invoice = clientInvoice;
+        line.BillableActivity = act;
+        clientInvoice.Lines.Add(line);
+        context.Invoices.Add(clientInvoice);
+        context.InvoiceLines.Add(line);
+
+        await context.SaveChangesAsync();
+
+        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT
+        var leakage = await varianceService.GetAccessorialLeakageAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
+
+        // ASSERT: Quarantined under CarrierOvercharge, NOT ClientUnderRecovery; TotalNetLeakageAmountUsd is 0.00
+        Assert.NotNull(leakage);
+        Assert.Equal(100.00m, leakage.TotalCarrierAccessorialsUsd);
+        Assert.Equal(30.00m, leakage.TotalClientBilledAccessorialsUsd);
+        Assert.Equal(100.00m, leakage.TotalDisputedQuarantinedUsd);
+        Assert.Equal(0.00m, leakage.TotalNetLeakageAmountUsd); // Disputed charge excluded from net leakage
+
+        var overchargeCat = Assert.Single(leakage.BreakdownByLeakageCategory, c => c.Category == AccessorialLeakageCategory.CarrierOvercharge);
+        Assert.Equal(100.00m, overchargeCat.AmountUsd);
+
+        // Confirm NO ClientUnderRecovery category exists for this disputed charge
+        Assert.DoesNotContain(leakage.BreakdownByLeakageCategory, c => c.Category == AccessorialLeakageCategory.ClientUnderRecovery);
+    }
+
+    [Fact]
+    public async Task Test_34_RateCardScheduleTiers_AuditsContractualRatingCalculation()
+    {
+        // ARRANGE: Gate D - RateCardSchedule with tiered volume brackets evaluated via CalculateRating(W_expected).
+        // 0-5 kg @ $5.00/kg; 5-10 kg @ $4.00/kg (AllUnits model).
+        // Shipment has gross weight 6.0 kg (billable weight = 6.0 kg under 0.5 kg increment).
+        // Expected base cost = 6.0 kg * $4.00 = $24.00.
+        // Invoiced base cost = $24.00 -> Compliant!
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = _staffUserId, UserType = UserType.Staff, FacilityId = _facility1Id, PermissionsList = ["Analytics:CrossFacility"] };
+        var (context, _) = await CreateSeededContextAsync(tenantProvider, currentUser);
+
+        var date = new DateTime(2026, 11, 4, 10, 0, 0, DateTimeKind.Utc);
+        var shipment = CreateShipment(_clientAId, _facility1Id, "SHIP-TIER-34", "FEDEX", date, weightKg: 6.0m);
+        context.Shipments.Add(shipment);
+
+        // Rate Card and RateCardSchedule with AllUnits tier model on BillableActivityType.CarrierFreight
+        var rateCard = RateCard.Create(_clientAId, "RC-FEDEX-34", "Commercial FedEx Rate Card", "USD");
+        context.RateCards.Add(rateCard);
+
+        var schedule = RateCardSchedule.Create(_clientAId, rateCard.Id, _facility1Id, 1, date.AddDays(-10), null, "USD");
+        schedule.Status = RateCardStatus.Active;
+        context.RateCardSchedules.Add(schedule);
+
+        var line = RateCardLine.Create(
+            _clientAId, schedule.Id, BillableActivityType.CarrierFreight, "KG",
+            RateModelType.PerUnit, PricingTierCalculationModel.AllUnits, baseRate: 5.00m);
+
+        line.AddTier(1, 0m, 5.0m, 5.00m);
+        line.AddTier(2, 5.0001m, 10.0m, 4.00m);
+        schedule.Lines.Add(line);
+        context.RateCardLines.Add(line);
+
+        var cost = new CarrierCostRecord
+        {
+            Id = Guid.NewGuid(),
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
+            ShipmentId = shipment.Id,
+            CarrierCode = "FEDEX",
+            CarrierInvoiceNumber = "INV-34",
+            BaseTransportationCost = 24.00m,
+            TotalCarrierCost = 24.00m,
+            BilledWeightKg = 6.0m,
+            CostAssessedAtUtc = date,
+            Status = CarrierCostStatus.Invoiced
+        };
+        context.CarrierCostRecords.Add(cost);
+
+        await context.SaveChangesAsync();
+
+        var (_, varianceService) = CreateServices(context, tenantProvider, currentUser);
+
+        // ACT
+        var compliance = await varianceService.GetRateCardComplianceAnalysisAsync("FEDEX", date.AddDays(-1), date.AddDays(2));
+
+        // ASSERT: Exactly 1 audited shipment, 1 compliant shipment, 0 overcharge, 0 undercharge
+        Assert.NotNull(compliance);
+        Assert.Equal(1, compliance.TotalAuditedShipmentsCount);
+        Assert.Equal(1, compliance.CompliantShipmentsCount);
+        Assert.Equal(0, compliance.IndeterminateShipmentsCount);
+        Assert.Equal(100.00m, compliance.ComplianceRatePercent);
+        Assert.Equal(0.00m, compliance.TotalOverchargeAmountUsd);
+        Assert.Equal(0.00m, compliance.TotalUnderchargeAmountUsd);
     }
 }
