@@ -15,6 +15,8 @@ using Warehouse3PL.Infrastructure.Persistence.Interceptors;
 var connection = new NpgsqlConnectionStringBuilder(Environment.GetEnvironmentVariable("PHASE6_VERIFICATION_CONNECTION")
     ?? throw new InvalidOperationException("Set PHASE6_VERIFICATION_CONNECTION to a disposable local server."));
 if (connection.Host is not ("127.0.0.1" or "localhost")) throw new InvalidOperationException("Local PostgreSQL required.");
+if(args.Contains("--replay")){await JournalPostgresVerification.Run(connection.ConnectionString);return;}
+if(args.Contains("--benchmark")){await ProfitabilityBenchmark.Run(connection.ConnectionString,args.Contains("--large")?200:20);return;}
 connection.Database="postgres";
 await using var admin=new NpgsqlConnection(connection.ConnectionString);
 await admin.OpenAsync();

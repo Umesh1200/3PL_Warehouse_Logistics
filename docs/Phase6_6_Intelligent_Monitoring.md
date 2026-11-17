@@ -8,7 +8,7 @@ Comparisons are strict GreaterThan/LessThan with configurable nonnegative thresh
 
 GET rules lists up to 1,000 ordered scoped rules. GET alerts accepts page 1..1,000,000 and size 1..200 and orders by lifecycle, descending severity, observation time and ID. POST rules creates, PUT rules/{id} configures, PUT rules/{id}/enabled controls evaluation, POST rules/{id}/evaluate evaluates, POST alerts/{id}/acknowledge and /resolve manage advisory state.
 
-With `Monitoring:Enabled=true`, a hosted worker evaluates enabled rules every five minutes, paging persisted rules in batches of 100. Source queries carry the persisted rule's exact client/facility constraints. A failed cycle is logged and retried on the next interval; rules after the failed rule may wait for that retry. No outbound notification integration is enabled.
+With `Monitoring:Enabled=true`, a hosted worker evaluates enabled rules every five minutes, paging persisted rules in batches of 100. Source queries carry the persisted rule's exact client/facility constraints. Individual rule failures are logged, failed tracked state is cleared, and subsequent exact scopes continue; cancellation still stops the cycle. Failed rules retry on the next interval. No outbound notification integration is enabled.
 
 The additive migration creates monitoring tables with unique rule/evidence keys, a composite rule/client/facility foreign key, indexes and PostgreSQL xmin alert concurrency. Rule mutations and evaluation serialize through bounded process semaphore stripes and PostgreSQL transaction advisory locks. The transaction uses the configured EF execution strategy; retries clear and reload state. Migration and live PostgreSQL concurrency verification are recorded below after completion.
 

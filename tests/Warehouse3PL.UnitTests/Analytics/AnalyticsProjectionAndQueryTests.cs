@@ -407,12 +407,12 @@ public class AnalyticsProjectionAndQueryTests
     }
 
     [Fact]
-    public async Task Test_14_AnalyticsProjectionService_Replay_FromBeginning_Resets_Cleanly()
+    public async Task Test_14_AnalyticsProjectionService_Replay_FromBeginning_Restores_Journal()
     {
         var fix = await SeedTestEnvironmentAsync();
         using var context = TestDbContextFactory.Create(
             new TestTenantProvider { BypassTenantFilter = true },
-            new TestCurrentUserContext { UserType = UserType.Staff },
+            new TestCurrentUserContext { UserType = UserType.Staff, RolesList = ["SuperAdmin"] },
             fix.DbName);
 
         var service = new AnalyticsProjectionService(context, NullLogger<AnalyticsProjectionService>.Instance);
@@ -428,12 +428,12 @@ public class AnalyticsProjectionAndQueryTests
         await service.ReplayProjectionsAsync(AnalyticsProjectionService.FacilityProductivityProjection, ProjectionReplayMode.FromBeginning);
 
         var replayedCheckpoint = await service.GetOrCreateCheckpointAsync(AnalyticsProjectionService.FacilityProductivityProjection);
-        Assert.Equal(0, replayedCheckpoint.LastProcessedSequenceNumber);
+        Assert.Equal(10, replayedCheckpoint.LastProcessedSequenceNumber);
         Assert.Equal(ProjectionStatus.Active, replayedCheckpoint.Status);
 
-        // Previous records purged for clean replay
+        // Complete journal effect restored
         var summariesCount = await context.DailyFacilityProductivitySummaries.CountAsync();
-        Assert.Equal(0, summariesCount);
+        Assert.Equal(1, summariesCount);
     }
 
     #endregion

@@ -261,6 +261,75 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.ToTable("analytics_event_deduplications", (string)null);
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Analytics.AnalyticsIngestionJournal", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<string>("ArgumentsJson")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("arguments_json");
+
+                    b.Property<DateTime>("EffectiveAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("effective_at_utc");
+
+                    b.Property<string>("EffectsJson")
+                        .IsRequired()
+                        .HasColumnType("text")
+                        .HasColumnName("effects_json");
+
+                    b.Property<Guid>("EventId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("event_id");
+
+                    b.Property<string>("EventKind")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("event_kind");
+
+                    b.Property<long>("IngestionOrdinal")
+                        .HasColumnType("bigint")
+                        .HasColumnName("ingestion_ordinal");
+
+                    b.Property<string>("PayloadHash")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("payload_hash");
+
+                    b.Property<string>("ProjectionName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("projection_name");
+
+                    b.Property<int>("SchemaVersion")
+                        .HasColumnType("integer")
+                        .HasColumnName("schema_version");
+
+                    b.Property<long>("SequenceNumber")
+                        .HasColumnType("bigint")
+                        .HasColumnName("sequence_number");
+
+                    b.HasKey("Id")
+                        .HasName("pk_analytics_ingestion_journal");
+
+                    b.HasIndex("ProjectionName", "EventId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_analytics_ingestion_journal_projection_name_event_id");
+
+                    b.HasIndex("ProjectionName", "IngestionOrdinal")
+                        .IsUnique()
+                        .HasDatabaseName("ix_analytics_ingestion_journal_projection_name_ingestion_ordin");
+
+                    b.ToTable("analytics_ingestion_journal", (string)null);
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Analytics.CarrierContractualSlaPolicy", b =>
                 {
                     b.Property<Guid>("Id")

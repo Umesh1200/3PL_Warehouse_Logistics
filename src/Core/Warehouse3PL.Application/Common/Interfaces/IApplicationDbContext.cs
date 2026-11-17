@@ -165,6 +165,7 @@ public interface IApplicationDbContext
 
     DbSet<MonitoringRule> MonitoringRules { get; }
     DbSet<MonitoringAlert> MonitoringAlerts { get; }
+    DbSet<AnalyticsIngestionJournal> AnalyticsIngestionJournals { get; }
     // Phase 6.4 Transportation & Carrier SLA Analytics
     DbSet<CarrierContractualSlaPolicy> CarrierContractualSlaPolicies { get; }
     DbSet<CarrierSlaComplianceRecord> CarrierSlaComplianceRecords { get; }

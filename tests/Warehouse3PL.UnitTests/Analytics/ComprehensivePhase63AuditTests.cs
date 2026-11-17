@@ -1475,9 +1475,9 @@ public class ComprehensivePhase63AuditTests
         // 7. Verify Checkpoint Watermark Reset and Projections Purged by Replay Engine
         var checkpointAfterReplay = await projectionService.GetOrCreateCheckpointAsync(AnalyticsProjectionService.InventoryAgingProjection);
         Assert.Equal(ProjectionStatus.Active, checkpointAfterReplay.Status);
-        Assert.Equal(0L, checkpointAfterReplay.LastProcessedSequenceNumber);
-        Assert.Equal(0, await context.DailyInventoryAgingSnapshots.CountAsync(s => s.FacilityId == fix.FacilityId));
-        Assert.False(await projectionService.HasEventBeenProcessedAsync(AnalyticsProjectionService.InventoryAgingProjection, eventLog1.EventId));
+        Assert.Equal(100L, checkpointAfterReplay.LastProcessedSequenceNumber);
+        Assert.Equal(3, await context.DailyInventoryAgingSnapshots.CountAsync(s => s.FacilityId == fix.FacilityId));
+        Assert.True(await projectionService.HasEventBeenProcessedAsync(AnalyticsProjectionService.InventoryAgingProjection, eventLog1.EventId));
 
         // 8. Invoke Production Replay Worker: Component retrieves and consumes durable event stream itself
         // ReplayInventoryAgingFromEventStreamAsync queries the durable database event stream directly,

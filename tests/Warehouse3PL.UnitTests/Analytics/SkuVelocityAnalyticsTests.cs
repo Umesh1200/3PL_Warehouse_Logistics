@@ -716,12 +716,12 @@ public class SkuVelocityAnalyticsTests
     }
 
     [Fact]
-    public async Task ProjectionReplay_IdempotentlyWipesAndRebuildsFromScratch()
+    public async Task ProjectionReplay_RestoresClassificationsAndPreservesSourceLogs()
     {
         var fix = await SeedTestEnvironmentAsync();
         using var context = TestDbContextFactory.Create(
             new TestTenantProvider { BypassTenantFilter = true },
-            new TestCurrentUserContext { UserType = UserType.Staff },
+            new TestCurrentUserContext { UserType = UserType.Staff, RolesList = ["SuperAdmin"] },
             fix.DbName);
 
         var projectionService = new AnalyticsProjectionService(context, NullLogger<AnalyticsProjectionService>.Instance);
@@ -746,12 +746,12 @@ public class SkuVelocityAnalyticsTests
             AnalyticsProjectionService.SkuVelocityProjection,
             ProjectionReplayMode.FromBeginning);
 
-        Assert.Equal(0, await context.InventoryMovementEventLogs.CountAsync());
-        Assert.Equal(0, await context.SkuVelocityClassificationRecords.CountAsync());
+        Assert.Equal(1, await context.InventoryMovementEventLogs.CountAsync());
+        Assert.Equal(1, await context.SkuVelocityClassificationRecords.CountAsync());
 
         var checkpoint = await projectionService.GetOrCreateCheckpointAsync(AnalyticsProjectionService.SkuVelocityProjection);
         Assert.Equal(ProjectionStatus.Active, checkpoint.Status);
-        Assert.Equal(0, checkpoint.LastProcessedSequenceNumber);
+        Assert.Equal(2, checkpoint.LastProcessedSequenceNumber);
     }
 
     [Fact]

@@ -611,13 +611,13 @@ public class WorkforceProductivityAnalyticsTests
     }
 
     [Fact]
-    public async Task ReplayProjections_PurgesWorkforceReadModelsCleanly()
+    public async Task ReplayProjections_RestoresWorkforceReadModels()
     {
         // Arrange
         var fix = await SeedTestEnvironmentAsync();
         using var context = TestDbContextFactory.Create(
             new TestTenantProvider { BypassTenantFilter = true },
-            new TestCurrentUserContext { UserType = UserType.Staff },
+            new TestCurrentUserContext { UserType = UserType.Staff, RolesList = ["SuperAdmin"] },
             fix.DbName);
 
         var projectionService = new AnalyticsProjectionService(context, NullLogger<AnalyticsProjectionService>.Instance);
@@ -646,9 +646,9 @@ public class WorkforceProductivityAnalyticsTests
             ProjectionReplayMode.FromBeginning);
 
         // Assert: All models purged
-        Assert.Equal(0, await context.WorkerTaskExecutionLogs.CountAsync());
-        Assert.Equal(0, await context.WorkerIdleIntervalRecords.CountAsync());
-        Assert.Equal(0, await context.DailyWorkerProductivitySummaries.CountAsync());
+        Assert.Equal(1, await context.WorkerTaskExecutionLogs.CountAsync());
+        Assert.Equal(1, await context.WorkerIdleIntervalRecords.CountAsync());
+        Assert.Equal(1, await context.DailyWorkerProductivitySummaries.CountAsync());
     }
 
     [Fact]

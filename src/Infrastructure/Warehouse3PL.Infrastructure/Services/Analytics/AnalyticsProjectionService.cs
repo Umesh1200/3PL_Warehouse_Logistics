@@ -14,7 +14,7 @@ namespace Warehouse3PL.Infrastructure.Services.Analytics;
 /// Decouples analytical intelligence from operational OLTP tables.
 /// DB-SPEC-3PL-2026 Phase 6.0 Analytics Foundation &amp; Phase 6.1 Executive Control Tower.
 /// </summary>
-public class AnalyticsProjectionService : IAnalyticsProjectionService
+public partial class AnalyticsProjectionService : IAnalyticsProjectionService
 {
     private readonly IApplicationDbContext _dbContext;
     private readonly ILogger<AnalyticsProjectionService> _logger;
@@ -152,7 +152,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
 
     #region Operational Throughput Projections (Daily & Hourly)
 
-    public async Task ProcessOrderReceivedAsync(
+    private async Task ProcessOrderReceivedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -179,7 +179,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessOrderAllocatedAsync(
+    private async Task ProcessOrderAllocatedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -206,7 +206,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessPickCompletedAsync(
+    private async Task ProcessPickCompletedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -235,7 +235,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessPackCompletedAsync(
+    private async Task ProcessPackCompletedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -262,7 +262,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessOrderDispatchedAsync(
+    private async Task ProcessOrderDispatchedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -292,7 +292,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessInboundReceivedAsync(
+    private async Task ProcessInboundReceivedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -319,7 +319,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessPutawayCompletedAsync(
+    private async Task ProcessPutawayCompletedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -347,7 +347,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessReturnInspectedAsync(
+    private async Task ProcessReturnInspectedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -378,7 +378,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
 
     #region Commercial & Billing Projections
 
-    public async Task ProcessCommercialActivityRatedAsync(
+    private async Task ProcessCommercialActivityRatedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid clientId,
@@ -439,7 +439,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessInvoiceIssuedAsync(
+    private async Task ProcessInvoiceIssuedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid clientId,
@@ -468,7 +468,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessPaymentCollectedAsync(
+    private async Task ProcessPaymentCollectedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid clientId,
@@ -495,7 +495,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessCreditAppliedAsync(
+    private async Task ProcessCreditAppliedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid clientId,
@@ -526,7 +526,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
 
     #region Carrier Performance Projections
 
-    public async Task ProcessCarrierDispatchedAsync(
+    private async Task ProcessCarrierDispatchedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         string carrierCode,
@@ -551,7 +551,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessCarrierDeliveredAsync(
+    private async Task ProcessCarrierDeliveredAsyncCore(
         Guid eventId,
         long sequenceNumber,
         string carrierCode,
@@ -578,7 +578,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessCarrierExceptionAsync(
+    private async Task ProcessCarrierExceptionAsyncCore(
         Guid eventId,
         long sequenceNumber,
         string carrierCode,
@@ -607,7 +607,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
 
     #region Inventory Utilization Snapshot Ingestion
 
-    public async Task ProcessInventorySnapshotAsync(
+    private async Task ProcessInventorySnapshotAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -653,7 +653,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
 
     #region Dock & Yard Operational Events Ingestion
 
-    public async Task ProcessTruckCheckedInAsync(
+    private async Task ProcessTruckCheckedInAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -675,7 +675,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessTruckSpottedAtDockAsync(
+    private async Task ProcessTruckSpottedAtDockAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -698,7 +698,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessDockReleasedAsync(
+    private async Task ProcessDockReleasedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -721,7 +721,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessTruckDepartedAsync(
+    private async Task ProcessTruckDepartedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -744,7 +744,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessDockYardCapacityUpdatedAsync(
+    private async Task ProcessDockYardCapacityUpdatedAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -773,7 +773,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
 
     #region Workforce & Labor Productivity Events Ingestion
 
-    public async Task ProcessWorkerTaskExecutionAsync(
+    private async Task ProcessWorkerTaskExecutionAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid taskId,
@@ -889,7 +889,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessWorkerIdleIntervalAsync(
+    private async Task ProcessWorkerIdleIntervalAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid workerUserId,
@@ -1019,7 +1019,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessDailyInventoryAgingSnapshotAsync(
+    private async Task ProcessDailyInventoryAgingSnapshotAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid clientId,
@@ -1099,7 +1099,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessLocationSpaceUtilizationAsync(
+    private async Task ProcessLocationSpaceUtilizationAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -1196,7 +1196,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessInventoryMovementEventAsync(
+    private async Task ProcessInventoryMovementEventAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid facilityId,
@@ -1279,7 +1279,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task ProcessSkuVelocityClassificationAsync(
+    private async Task ProcessSkuVelocityClassificationAsyncCore(
         Guid eventId,
         long sequenceNumber,
         Guid clientId,
@@ -1366,7 +1366,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         await _dbContext.SaveChangesAsync(cancellationToken);
     }
 
-    public async Task<SkuVelocityClassificationRecord> CalculateSkuVelocityAsync(
+    private async Task<SkuVelocityClassificationRecord> CalculateSkuVelocityAsyncCore(
         Guid facilityId,
         Guid clientId,
         Guid itemId,
@@ -1653,7 +1653,7 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
         };
     }
 
-    public async Task<AbcClassificationBatchResultDto> CalculateAbcClassificationBatchAsync(
+    private async Task<AbcClassificationBatchResultDto> CalculateAbcClassificationBatchAsyncCore(
         Guid facilityId,
         Guid? clientId = null,
         Guid? policyId = null,
@@ -1987,19 +1987,8 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
                 });
             }
 
-            await _dbContext.BeginTransactionAsync(cancellationToken);
-            try
-            {
-                await _dbContext.SkuVelocityClassificationRecords.AddRangeAsync(recordsToPersist, cancellationToken);
-                await _dbContext.SaveChangesAsync(cancellationToken);
-                await _dbContext.CommitTransactionAsync(cancellationToken);
-            }
-            catch
-            {
-                await _dbContext.RollbackTransactionAsync(cancellationToken);
-                _dbContext.ClearChangeTracker();
-                throw;
-            }
+            await _dbContext.SkuVelocityClassificationRecords.AddRangeAsync(recordsToPersist, cancellationToken);
+            await _dbContext.SaveChangesAsync(cancellationToken);
 
             // Step 5: Summary Rollup
             int totalSkus = rankedCandidateList.Count;
@@ -2111,174 +2100,10 @@ public class AnalyticsProjectionService : IAnalyticsProjectionService
 
     #region Replay & Rebuild Engine
 
-    public async Task<int> ReplayProjectionsAsync(
-        string projectionName,
-        ProjectionReplayMode replayMode,
-        DateTime? fromDateUtc = null,
-        DateTime? toDateUtc = null,
-        CancellationToken cancellationToken = default)
-    {
-        var normalizedName = projectionName.Trim();
-        var checkpoint = await GetOrCreateCheckpointAsync(normalizedName, cancellationToken);
-        checkpoint.MarkReplaying();
-        await _dbContext.SaveChangesAsync(cancellationToken);
-
-        int replayedCount = 0;
-
-        try
-        {
-            if (replayMode == ProjectionReplayMode.FromBeginning)
-            {
-                var deduplications = await _dbContext.AnalyticsEventDeduplicationRecords
-                    .Where(d => d.ProjectionName == normalizedName)
-                    .ToListAsync(cancellationToken);
-                _dbContext.AnalyticsEventDeduplicationRecords.RemoveRange(deduplications);
-
-                if (normalizedName == FacilityProductivityProjection)
-                {
-                    var summaries = await _dbContext.DailyFacilityProductivitySummaries.ToListAsync(cancellationToken);
-                    _dbContext.DailyFacilityProductivitySummaries.RemoveRange(summaries);
-                    var hourly = await _dbContext.HourlyFacilityThroughputSnapshots.ToListAsync(cancellationToken);
-                    _dbContext.HourlyFacilityThroughputSnapshots.RemoveRange(hourly);
-                }
-                else if (normalizedName == ClientProfitabilityProjection)
-                {
-                    var summaries = await _dbContext.DailyClientProfitabilitySummaries.ToListAsync(cancellationToken);
-                    _dbContext.DailyClientProfitabilitySummaries.RemoveRange(summaries);
-                }
-                else if (normalizedName == InventoryUtilizationProjection)
-                {
-                    var snapshots = await _dbContext.DailyInventoryUtilizationSnapshots.ToListAsync(cancellationToken);
-                    _dbContext.DailyInventoryUtilizationSnapshots.RemoveRange(snapshots);
-                }
-                else if (normalizedName == CarrierPerformanceProjection)
-                {
-                    var records = await _dbContext.DailyCarrierPerformanceRecords.ToListAsync(cancellationToken);
-                    _dbContext.DailyCarrierPerformanceRecords.RemoveRange(records);
-                }
-                else if (normalizedName == DockYardProjection)
-                {
-                    var snapshots = await _dbContext.FacilityDockYardSnapshots.ToListAsync(cancellationToken);
-                    _dbContext.FacilityDockYardSnapshots.RemoveRange(snapshots);
-                }
-                else if (normalizedName == WorkforceProductivityProjection)
-                {
-                    var logs = await _dbContext.WorkerTaskExecutionLogs.ToListAsync(cancellationToken);
-                    _dbContext.WorkerTaskExecutionLogs.RemoveRange(logs);
-                    var idles = await _dbContext.WorkerIdleIntervalRecords.ToListAsync(cancellationToken);
-                    _dbContext.WorkerIdleIntervalRecords.RemoveRange(idles);
-                    var summaries = await _dbContext.DailyWorkerProductivitySummaries.ToListAsync(cancellationToken);
-                    _dbContext.DailyWorkerProductivitySummaries.RemoveRange(summaries);
-                }
-                else if (normalizedName == InventoryAgingProjection)
-                {
-                    var snapshots = await _dbContext.DailyInventoryAgingSnapshots.ToListAsync(cancellationToken);
-                    _dbContext.DailyInventoryAgingSnapshots.RemoveRange(snapshots);
-                }
-                else if (normalizedName == LocationSpaceUtilizationProjection)
-                {
-                    var records = await _dbContext.DailyLocationSpaceUtilizationRecords.ToListAsync(cancellationToken);
-                    _dbContext.DailyLocationSpaceUtilizationRecords.RemoveRange(records);
-                }
-                else if (normalizedName == SkuVelocityProjection)
-                {
-                    var logs = await _dbContext.InventoryMovementEventLogs.ToListAsync(cancellationToken);
-                    _dbContext.InventoryMovementEventLogs.RemoveRange(logs);
-                    var records = await _dbContext.SkuVelocityClassificationRecords.ToListAsync(cancellationToken);
-                    _dbContext.SkuVelocityClassificationRecords.RemoveRange(records);
-                }
-
-                await _dbContext.SaveChangesAsync(cancellationToken);
-                checkpoint.ResetToBeginning();
-            }
-
-            checkpoint.MarkActive();
-            await _dbContext.SaveChangesAsync(cancellationToken);
-        }
-        catch (Exception ex)
-        {
-            checkpoint.Fail($"Replay failed: {ex.Message}");
-            await _dbContext.SaveChangesAsync(cancellationToken);
-            throw;
-        }
-
-        return replayedCount;
-    }
-
-    /// <summary>
-    /// Production replay worker that queries the durable event stream from InventoryMovementEventLogs
-    /// and reconstructs the DailyInventoryAgingSnapshots projection, enforcing checkpoint watermark
-    /// updates and event deduplication strictly from the stored sequence numbers and event payloads.
-    /// </summary>
-    public async Task<int> ReplayInventoryAgingFromEventStreamAsync(
-        Guid facilityId,
-        DateTime? asOfDateUtc = null,
-        DateTime? fromDateUtc = null,
-        DateTime? toDateUtc = null,
-        CancellationToken cancellationToken = default)
-    {
-        var query = _dbContext.InventoryMovementEventLogs
-            .AsNoTracking()
-            .Where(e => e.FacilityId == facilityId);
-
-        if (fromDateUtc.HasValue)
-            query = query.Where(e => e.TimestampUtc >= fromDateUtc.Value);
-        if (toDateUtc.HasValue)
-            query = query.Where(e => e.TimestampUtc <= toDateUtc.Value);
-
-        // Retrieve the durable event stream ordered strictly by authoritative sequence number ascending
-        var eventStream = await query
-            .OrderBy(e => e.SequenceNumber)
-            .ThenBy(e => e.TimestampUtc)
-            .ToListAsync(cancellationToken);
-
-        var locIds = eventStream.Where(e => e.DestinationLocationId.HasValue).Select(e => e.DestinationLocationId!.Value).Distinct().ToList();
-        var locations = await _dbContext.Locations
-            .AsNoTracking()
-            .Where(l => locIds.Contains(l.Id))
-            .ToDictionaryAsync(l => l.Id, l => l.LocationCode, cancellationToken);
-
-        int replayedCount = 0;
-        foreach (var ev in eventStream)
-        {
-            long seq = ev.SequenceNumber > 0L ? ev.SequenceNumber : (long.TryParse(ev.ReferenceNumber.Replace("SEQ-", ""), out var s) ? s : 0L);
-            string locCode = ev.DestinationLocationId.HasValue && locations.TryGetValue(ev.DestinationLocationId.Value, out var lc)
-                ? lc
-                : (ev.DestinationLocationId == Guid.Empty ? "UNKNOWN" : "DEFAULT");
-
-            var snapshotDate = asOfDateUtc ?? ev.TimestampUtc;
-            var receiptDate = ev.ReferenceNumber switch
-            {
-                "SEQ-098" => snapshotDate.AddDays(-10),
-                "SEQ-099" => snapshotDate.AddDays(-45),
-                "SEQ-100" => snapshotDate.AddDays(-75),
-                _ => snapshotDate
-            };
-
-            await ProcessDailyInventoryAgingSnapshotAsync(
-                eventId: ev.EventId,
-                sequenceNumber: seq,
-                clientId: ev.ClientId,
-                facilityId: ev.FacilityId,
-                locationId: ev.DestinationLocationId ?? Guid.Empty,
-                locationCode: locCode,
-                itemId: ev.ItemId,
-                sku: ev.Sku,
-                snapshotDateUtc: snapshotDate,
-                quantityOnHand: ev.Quantity,
-                receivedAtUtc: receiptDate,
-                lastMovedAtUtc: snapshotDate.AddDays(-2),
-                lastDemandedAtUtc: snapshotDate.AddDays(-1),
-                expirationDateUtc: null,
-                unitCost: ev.UnitCost,
-                qtyAvailable: ev.Quantity,
-                cancellationToken: cancellationToken);
-
-            replayedCount++;
-        }
-
-        return replayedCount;
-    }
+    public Task<int> ReplayProjectionsAsync(string projectionName, ProjectionReplayMode replayMode, DateTime? fromDateUtc=null, DateTime? toDateUtc=null, CancellationToken cancellationToken=default)
+        => RestoreJournalAsync(projectionName,replayMode,fromDateUtc,toDateUtc,null,cancellationToken);
+    public Task<int> ReplayInventoryAgingFromEventStreamAsync(Guid facilityId,DateTime? asOfDateUtc=null,DateTime? fromDateUtc=null,DateTime? toDateUtc=null,CancellationToken cancellationToken=default)
+        => RestoreJournalAsync(InventoryAgingProjection,ProjectionReplayMode.DateRange,fromDateUtc,toDateUtc,facilityId,cancellationToken);
 
     #endregion
 

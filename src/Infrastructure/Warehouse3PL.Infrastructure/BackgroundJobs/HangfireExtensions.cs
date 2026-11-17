@@ -56,12 +56,7 @@ public class HangfireDashboardAuthorizationFilter : IDashboardAuthorizationFilte
     {
         var httpContext = context.GetHttpContext();
 
-        // Allow authenticated SuperAdmins or local development
-        if (httpContext.Request.Host.Host == "localhost" || httpContext.Request.Host.Host == "127.0.0.1")
-        {
-            return true;
-        }
-
+        // Host is caller-controlled, including through proxies; it cannot establish authorization.
         return httpContext.User.Identity?.IsAuthenticated == true &&
                httpContext.User.IsInRole(SystemRoles.SuperAdmin);
     }

@@ -564,7 +564,7 @@ public class InventoryAgingAndDeadStockTests
         var fix = await SeedTestEnvironmentAsync();
         using var context = TestDbContextFactory.Create(
             new TestTenantProvider { BypassTenantFilter = true },
-            new TestCurrentUserContext { UserType = UserType.Staff },
+            new TestCurrentUserContext { UserType = UserType.Staff, RolesList = ["SuperAdmin"] },
             fix.DbName);
 
         var projService = new AnalyticsProjectionService(context, NullLogger<AnalyticsProjectionService>.Instance);
@@ -597,9 +597,9 @@ public class InventoryAgingAndDeadStockTests
         var replayed = await projService.ReplayProjectionsAsync(
             AnalyticsProjectionService.InventoryAgingProjection,
             ProjectionReplayMode.FromBeginning);
-        Assert.Equal(0, replayed); // Read-model reset completed cleanly
+        Assert.Equal(1, replayed); // Complete original effect restored
         var postReplayCount = await context.DailyInventoryAgingSnapshots.CountAsync();
-        Assert.Equal(0, postReplayCount);
+        Assert.Equal(1, postReplayCount);
     }
 
     [Fact]

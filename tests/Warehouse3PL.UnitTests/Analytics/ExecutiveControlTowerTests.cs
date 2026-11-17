@@ -609,7 +609,7 @@ public class ExecutiveControlTowerTests
         var fix = await SeedTestEnvironmentAsync();
         using var context = TestDbContextFactory.Create(
             new TestTenantProvider { BypassTenantFilter = true },
-            new TestCurrentUserContext { UserType = UserType.Staff },
+            new TestCurrentUserContext { UserType = UserType.Staff, RolesList = ["SuperAdmin"] },
             fix.DbName);
 
         var projService = new AnalyticsProjectionService(context, NullLogger<AnalyticsProjectionService>.Instance);
@@ -625,11 +625,11 @@ public class ExecutiveControlTowerTests
 
         // Replay FacilityProductivity (purges hourly snapshots)
         await projService.ReplayProjectionsAsync(AnalyticsProjectionService.FacilityProductivityProjection, ProjectionReplayMode.FromBeginning);
-        Assert.Equal(0, await context.HourlyFacilityThroughputSnapshots.CountAsync());
+        Assert.Equal(1, await context.HourlyFacilityThroughputSnapshots.CountAsync());
 
         // Replay DockYard (purges dock snapshots)
         await projService.ReplayProjectionsAsync(AnalyticsProjectionService.DockYardProjection, ProjectionReplayMode.FromBeginning);
-        Assert.Equal(0, await context.FacilityDockYardSnapshots.CountAsync());
+        Assert.Equal(1, await context.FacilityDockYardSnapshots.CountAsync());
     }
 
     #endregion

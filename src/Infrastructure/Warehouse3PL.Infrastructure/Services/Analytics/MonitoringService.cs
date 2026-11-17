@@ -1,10 +1,11 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.Logging;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Domain.Entities.Analytics;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
 namespace Warehouse3PL.Infrastructure.Services.Analytics;
-public sealed class MonitoringService(IApplicationDbContext db,TransportationAnalyticsAuthorization authorization,ICurrentUserContext user) : IMonitoringService
+public sealed class MonitoringService(IApplicationDbContext db,TransportationAnalyticsAuthorization authorization,ICurrentUserContext user,ILogger<MonitoringService>? logger=null) : IMonitoringService
 {
     private static readonly SemaphoreSlim[] Gates=Enumerable.Range(0,256).Select(_=>new SemaphoreSlim(1,1)).ToArray();
     public async Task<MonitoringRule> CreateRuleAsync(MonitoringRuleRequest r,CancellationToken ct=default)
@@ -41,7 +42,7 @@ public sealed class MonitoringService(IApplicationDbContext db,TransportationAna
     internal async Task EvaluateScheduledAsync(CancellationToken ct)
     {
         Guid? after=null;
-        while(true){var query=db.MonitoringRules.IgnoreQueryFilters().Where(x=>x.Enabled);if(after.HasValue)query=query.Where(x=>x.Id.CompareTo(after.Value)>0);var rules=await query.OrderBy(x=>x.Id).Take(100).ToListAsync(ct);if(rules.Count==0)break;foreach(var rule in rules)await EvaluateScopedAsync(rule,ct);after=rules[^1].Id;db.ClearChangeTracker();}
+        while(true){var query=db.MonitoringRules.IgnoreQueryFilters().Where(x=>x.Enabled);if(after.HasValue)query=query.Where(x=>x.Id.CompareTo(after.Value)>0);var rules=await query.OrderBy(x=>x.Id).Take(100).ToListAsync(ct);if(rules.Count==0)break;foreach(var rule in rules){try{await EvaluateScopedAsync(rule,ct);}catch(OperationCanceledException)when(ct.IsCancellationRequested){throw;}catch(Exception ex){logger?.LogError(ex,"Monitoring rule {RuleId} evaluation failed; continuing other exact scopes.",rule.Id);db.ClearChangeTracker();}}after=rules[^1].Id;db.ClearChangeTracker();}
     }
     private Task<MonitoringEvaluationResult> EvaluateScopedAsync(MonitoringRule rule,CancellationToken ct)=>WithRuleLock(rule,()=>EvaluateCoreAsync(rule,ct),ct);
     private async Task<T> WithRuleLock<T>(MonitoringRule rule,Func<Task<T>> action,CancellationToken ct)

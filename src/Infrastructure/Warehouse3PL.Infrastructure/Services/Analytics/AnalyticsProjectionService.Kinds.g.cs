@@ -1,0 +1,33 @@
+#nullable enable
+namespace Warehouse3PL.Infrastructure.Services.Analytics;
+public partial class AnalyticsProjectionService { private static readonly Dictionary<string,string> JournalKinds = new() {
+[nameof(CalculateSkuVelocityAsync)]=SkuVelocityProjection,
+[nameof(CalculateAbcClassificationBatchAsync)]=SkuVelocityProjection,
+[nameof(ProcessOrderReceivedAsync)]=FacilityProductivityProjection,
+[nameof(ProcessOrderAllocatedAsync)]=FacilityProductivityProjection,
+[nameof(ProcessPickCompletedAsync)]=FacilityProductivityProjection,
+[nameof(ProcessPackCompletedAsync)]=FacilityProductivityProjection,
+[nameof(ProcessOrderDispatchedAsync)]=FacilityProductivityProjection,
+[nameof(ProcessInboundReceivedAsync)]=FacilityProductivityProjection,
+[nameof(ProcessPutawayCompletedAsync)]=FacilityProductivityProjection,
+[nameof(ProcessReturnInspectedAsync)]=FacilityProductivityProjection,
+[nameof(ProcessCommercialActivityRatedAsync)]=ClientProfitabilityProjection,
+[nameof(ProcessInvoiceIssuedAsync)]=ClientProfitabilityProjection,
+[nameof(ProcessPaymentCollectedAsync)]=ClientProfitabilityProjection,
+[nameof(ProcessCreditAppliedAsync)]=ClientProfitabilityProjection,
+[nameof(ProcessCarrierDispatchedAsync)]=CarrierPerformanceProjection,
+[nameof(ProcessCarrierDeliveredAsync)]=CarrierPerformanceProjection,
+[nameof(ProcessCarrierExceptionAsync)]=CarrierPerformanceProjection,
+[nameof(ProcessInventorySnapshotAsync)]=InventoryUtilizationProjection,
+[nameof(ProcessTruckCheckedInAsync)]=DockYardProjection,
+[nameof(ProcessTruckSpottedAtDockAsync)]=DockYardProjection,
+[nameof(ProcessDockReleasedAsync)]=DockYardProjection,
+[nameof(ProcessTruckDepartedAsync)]=DockYardProjection,
+[nameof(ProcessDockYardCapacityUpdatedAsync)]=DockYardProjection,
+[nameof(ProcessWorkerTaskExecutionAsync)]=WorkforceProductivityProjection,
+[nameof(ProcessWorkerIdleIntervalAsync)]=WorkforceProductivityProjection,
+[nameof(ProcessDailyInventoryAgingSnapshotAsync)]=InventoryAgingProjection,
+[nameof(ProcessLocationSpaceUtilizationAsync)]=LocationSpaceUtilizationProjection,
+[nameof(ProcessInventoryMovementEventAsync)]=SkuVelocityProjection,
+[nameof(ProcessSkuVelocityClassificationAsync)]=SkuVelocityProjection
+}; }

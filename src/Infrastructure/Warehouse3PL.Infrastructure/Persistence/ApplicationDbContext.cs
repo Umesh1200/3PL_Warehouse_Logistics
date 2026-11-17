@@ -39,6 +39,15 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public Guid? CurrentTenantId => _tenantProvider.TenantId;
     public bool BypassTenantFilter => _tenantProvider.BypassTenantFilter || _currentUser.IsStaff;
     public bool AllowExplicitAuditTimestamps { get; set; } = false;
+    internal bool IsPrivilegedAnalyticsMaintenance => _currentUser.IsAuthenticated && _currentUser.IsSuperAdmin;
+    private void EnforceJournalImmutability()
+    {
+        ChangeTracker.DetectChanges();
+        if(ChangeTracker.Entries<AnalyticsIngestionJournal>().Any(x=>x.State==EntityState.Modified||x.State==EntityState.Deleted))
+            throw new InvalidOperationException("Analytics ingestion journal entries are immutable.");
+    }
+    public override int SaveChanges(bool acceptAllChangesOnSuccess){EnforceJournalImmutability();return base.SaveChanges(acceptAllChangesOnSuccess);}
+    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess,CancellationToken cancellationToken=default){EnforceJournalImmutability();return base.SaveChangesAsync(acceptAllChangesOnSuccess,cancellationToken);}
 
     public DbSet<Client> Clients => Set<Client>();
     public DbSet<ClientContact> ClientContacts => Set<ClientContact>();
@@ -191,6 +200,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
 
     public DbSet<MonitoringRule> MonitoringRules => Set<MonitoringRule>();
     public DbSet<MonitoringAlert> MonitoringAlerts => Set<MonitoringAlert>();
+    public DbSet<AnalyticsIngestionJournal> AnalyticsIngestionJournals => Set<AnalyticsIngestionJournal>();
     // Phase 6.4 Transportation & Carrier SLA Analytics
     public DbSet<CarrierContractualSlaPolicy> CarrierContractualSlaPolicies => Set<CarrierContractualSlaPolicy>();
     public DbSet<CarrierSlaComplianceRecord> CarrierSlaComplianceRecords => Set<CarrierSlaComplianceRecord>();

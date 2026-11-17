@@ -443,12 +443,12 @@ public class InventoryHealthAnalyticsTests
     }
 
     [Fact]
-    public async Task ProjectionReplay_CleanlyPurgesInventoryHealthReadModels()
+    public async Task ProjectionReplay_RestoresInventoryHealthReadModels()
     {
         var fix = await SeedTestEnvironmentAsync();
         using var context = TestDbContextFactory.Create(
             new TestTenantProvider { BypassTenantFilter = true },
-            new TestCurrentUserContext { UserType = UserType.Staff },
+            new TestCurrentUserContext { UserType = UserType.Staff, RolesList = ["SuperAdmin"] },
             fix.DbName);
 
         var projService = new AnalyticsProjectionService(context, NullLogger<AnalyticsProjectionService>.Instance);
@@ -472,7 +472,7 @@ public class InventoryHealthAnalyticsTests
             ProjectionReplayMode.FromBeginning);
 
         // Assert: Read models cleanly purged
-        Assert.Equal(0, await context.DailyInventoryAgingSnapshots.CountAsync());
+        Assert.Equal(1, await context.DailyInventoryAgingSnapshots.CountAsync());
     }
 
     [Fact]

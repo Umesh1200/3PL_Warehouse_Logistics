@@ -453,7 +453,7 @@ public class SpaceUtilizationAnalyticsTests
         var fix = await SeedTestEnvironmentAsync();
         using var context = TestDbContextFactory.Create(
             new TestTenantProvider { BypassTenantFilter = true },
-            new TestCurrentUserContext { UserType = UserType.Staff },
+            new TestCurrentUserContext { UserType = UserType.Staff, RolesList = ["SuperAdmin"] },
             fix.DbName);
 
         var projService = new AnalyticsProjectionService(context, NullLogger<AnalyticsProjectionService>.Instance);
@@ -482,8 +482,8 @@ public class SpaceUtilizationAnalyticsTests
         var replayed = await projService.ReplayProjectionsAsync(
             AnalyticsProjectionService.LocationSpaceUtilizationProjection,
             ProjectionReplayMode.FromBeginning);
-        Assert.Equal(0, replayed);
-        Assert.Equal(0, await context.DailyLocationSpaceUtilizationRecords.CountAsync());
+        Assert.Equal(1, replayed);
+        Assert.Equal(1, await context.DailyLocationSpaceUtilizationRecords.CountAsync());
     }
 
     [Fact]
