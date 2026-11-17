@@ -89,6 +89,7 @@ public static class DependencyInjection
         services.AddScoped<ICarrierScorecardService, Warehouse3PL.Infrastructure.Services.Analytics.CarrierScorecardService>();
         services.AddSingleton<IFxRateProvider, Warehouse3PL.Infrastructure.Services.Analytics.FxRateProvider>();
         services.AddScoped<IFreightReconciliationService, Warehouse3PL.Infrastructure.Services.Analytics.FreightReconciliationService>();
+        services.AddScoped<IProfitabilityIntelligenceService, Warehouse3PL.Infrastructure.Services.Analytics.ProfitabilityIntelligenceService>();
         services.AddScoped<IFreightCostVarianceService, Warehouse3PL.Infrastructure.Services.Analytics.FreightCostVarianceService>();
 
         // Private Object Storage (Phase 4.5 Step 3A)
@@ -181,4 +182,3 @@ public static class DependencyInjection
         return services;
     }
 }
-

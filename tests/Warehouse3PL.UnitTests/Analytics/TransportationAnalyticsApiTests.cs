@@ -37,6 +37,33 @@ namespace Warehouse3PL.UnitTests.Analytics;
 
 public class TransportationAnalyticsApiTests(TransportationApiFixture fixture) : IClassFixture<TransportationApiFixture>
 {
+    [Fact]
+    public async Task Profitability_HttpContract_RequiresIndependentPermissionAndScope_AndNeverSaves()
+    {
+        const string root = "/api/v1/analytics/profitability/";
+        var range = $"contributions?startDateUtc={DateTime.UtcNow.AddDays(-2):yyyy-MM-dd}&endDateUtc={DateTime.UtcNow:yyyy-MM-dd}";
+        var before = await fixture.Fingerprint();
+        using var anonymous = await fixture.Get(root+range,null);
+        Assert.Equal(HttpStatusCode.Unauthorized,anonymous.StatusCode);
+        using var otherPermission = await fixture.Get(root+range,"client");
+        Assert.Equal(HttpStatusCode.Forbidden,otherPermission.StatusCode);
+        using var valid = await fixture.Get(root+range,"client-profit");
+        Assert.Equal(HttpStatusCode.OK,valid.StatusCode);
+        var contributionRows = (await valid.Content.ReadFromJson()).GetProperty("current");
+        Assert.Equal(2,contributionRows.GetArrayLength());
+        Assert.All(contributionRows.EnumerateArray(), row => Assert.Equal(TransportationApiFixture.ClientA,row.GetProperty("clientId").GetGuid()));
+        using var foreign = await fixture.Get(root+range+$"&clientId={TransportationApiFixture.ClientB}","client-profit");
+        Assert.Equal(HttpStatusCode.Forbidden,foreign.StatusCode);
+        using var facility = await fixture.Get(root+range+$"&facilityId={TransportationApiFixture.Facility3}","client-profit");
+        Assert.Equal(HttpStatusCode.Forbidden,facility.StatusCode);
+        using var invalid = await fixture.Get(root+"contributions?startDateUtc=2026-11-10&endDateUtc=2026-11-01","client-profit");
+        Assert.Equal(HttpStatusCode.BadRequest,invalid.StatusCode);
+        using var shipment = await fixture.Get(root+$"shipments/{TransportationApiFixture.ShipmentA}","client-profit");
+        Assert.Equal(HttpStatusCode.OK,shipment.StatusCode);
+        using var foreignShipment = await fixture.Get(root+$"shipments/{TransportationApiFixture.ShipmentB}","client-profit");
+        Assert.Equal(HttpStatusCode.NotFound,foreignShipment.StatusCode);
+        Assert.Equal(before,await fixture.Fingerprint());
+    }
     public static IEnumerable<object[]> Endpoints => TransportationApiFixture.Endpoints.Select(path => new object[] { path });
 
     [Theory, MemberData(nameof(Endpoints))]
@@ -252,6 +279,7 @@ public sealed class TransportationApiFixture : IAsyncLifetime
         services.AddScoped<IDelayAttributionService, DelayAttributionService>();
         services.AddScoped<IFreightReconciliationService, FreightReconciliationService>();
         services.AddScoped<IFreightCostVarianceService, FreightCostVarianceService>();
+        services.AddScoped<IProfitabilityIntelligenceService, ProfitabilityIntelligenceService>();
         services.AddSingleton<IFxRateProvider, FxRateProvider>();
         _app = builder.Build();
         _app.UseMiddleware<ExceptionHandlingMiddleware>();
@@ -273,6 +301,7 @@ public sealed class TransportationApiFixture : IAsyncLifetime
             (Guid.NewGuid(), ClientA, Facility2, 22m), (ShipmentInactive, ClientA, Facility3, 33m) })
         {
             db.Shipments.Add(new Shipment { Id = id, ClientId = client, FacilityId = facility, CarrierCode = "FEDEX", ShipmentNumber = id.ToString(), DispatchedAtUtc = date, Status = ShipmentStatus.Dispatched });
+            db.DailyClientProfitabilitySummaries.Add(new DailyClientProfitabilitySummary { ClientId=client,FacilityId=facility,DateUtc=date.Date,BilledHandlingRevenue=cost,TimeGrain=TimeGrain.Daily });
             var compliance = CarrierSlaComplianceRecord.Create(id, id.ToString(), "FEDEX", CarrierServiceLevel.StandardGround, facility, client, date, date.AddDays(1), 2, "v1");
             compliance.DeliveredAtUtc = date.AddHours(2); compliance.ActualTransitDays = 1m; compliance.IsOnTime = true;
             db.CarrierSlaComplianceRecords.Add(compliance);
@@ -339,7 +368,7 @@ public sealed class TransportationApiFixture : IAsyncLifetime
 
     public Task<HttpResponseMessage> Get(string path, string? actor = "client", Guid? tenantHeader = null)
     {
-        var request = new HttpRequestMessage(HttpMethod.Get, "/api/v1/analytics/transportation/" + path);
+        var request = new HttpRequestMessage(HttpMethod.Get, path.StartsWith("/") ? path : "/api/v1/analytics/transportation/" + path);
         if (actor != null) request.Headers.Add("X-Test-Actor", actor);
         if (tenantHeader.HasValue) request.Headers.Add("X-Tenant-Id", tenantHeader.ToString());
         return _http.SendAsync(request);
@@ -403,6 +432,7 @@ public sealed class TransportationTestAuthentication(IOptionsMonitor<Authenticat
         if (!staff && actor != "missingtenant") claims.Add(new("tenant_id", TransportationApiFixture.ClientA.ToString()));
         if (actor is "staff" or "client-assigned") claims.Add(new("facility_id", TransportationApiFixture.Facility1.ToString()));
         if (actor == "admin") claims.Add(new(ClaimTypes.Role, "SuperAdmin"));
+        if (actor == "client-profit") claims.Add(new("permissions", Permissions.Analytics.ProfitabilityView));
         if (actor != "nopermission")
         {
             if (actor != "client-finance") claims.Add(new("permissions", Permissions.Analytics.TransportationView));
