@@ -163,6 +163,8 @@ public interface IApplicationDbContext
     DbSet<ProductAffinityCluster> ProductAffinityClusters { get; }
     DbSet<ProductAffinityClusterMember> ProductAffinityClusterMembers { get; }
 
+    DbSet<MonitoringRule> MonitoringRules { get; }
+    DbSet<MonitoringAlert> MonitoringAlerts { get; }
     // Phase 6.4 Transportation & Carrier SLA Analytics
     DbSet<CarrierContractualSlaPolicy> CarrierContractualSlaPolicies { get; }
     DbSet<CarrierSlaComplianceRecord> CarrierSlaComplianceRecords { get; }

@@ -2859,6 +2859,184 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.ToTable("lane_transit_summaries", (string)null);
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Analytics.MonitoringAlert", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<DateTime?>("AcknowledgedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("acknowledged_at_utc");
+
+                    b.Property<Guid?>("AcknowledgedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("acknowledged_by");
+
+                    b.Property<Guid>("ClientId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("client_id");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<string>("EvidenceKey")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("evidence_key");
+
+                    b.Property<string>("Explanation")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("explanation");
+
+                    b.Property<Guid>("FacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_id");
+
+                    b.Property<DateTime>("FirstObservedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("first_observed_at_utc");
+
+                    b.Property<DateTime>("LastObservedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_observed_at_utc");
+
+                    b.Property<decimal>("ObservedValue")
+                        .HasPrecision(28, 8)
+                        .HasColumnType("numeric(28,8)")
+                        .HasColumnName("observed_value");
+
+                    b.Property<string>("ResolutionNotes")
+                        .IsRequired()
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("resolution_notes");
+
+                    b.Property<DateTime?>("ResolvedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("resolved_at_utc");
+
+                    b.Property<Guid>("RuleId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("rule_id");
+
+                    b.Property<int>("Severity")
+                        .HasColumnType("integer")
+                        .HasColumnName("severity");
+
+                    b.Property<int>("Status")
+                        .HasColumnType("integer")
+                        .HasColumnName("status");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.Property<uint>("xmin")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAddOrUpdate()
+                        .HasColumnType("xid")
+                        .HasColumnName("xmin");
+
+                    b.HasKey("Id")
+                        .HasName("pk_monitoring_alerts");
+
+                    b.HasIndex("RuleId", "EvidenceKey")
+                        .IsUnique()
+                        .HasDatabaseName("ix_monitoring_alerts_rule_id_evidence_key");
+
+                    b.HasIndex("RuleId", "ClientId", "FacilityId")
+                        .HasDatabaseName("ix_monitoring_alerts_rule_id_client_id_facility_id");
+
+                    b.HasIndex("ClientId", "FacilityId", "Status", "Severity")
+                        .HasDatabaseName("ix_monitoring_alerts_client_id_facility_id_status_severity");
+
+                    b.ToTable("monitoring_alerts", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Analytics.MonitoringRule", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("id");
+
+                    b.Property<Guid>("ClientId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("client_id");
+
+                    b.Property<int>("Comparison")
+                        .HasColumnType("integer")
+                        .HasColumnName("comparison");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<bool>("Enabled")
+                        .HasColumnType("boolean")
+                        .HasColumnName("enabled");
+
+                    b.Property<Guid>("FacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_id");
+
+                    b.Property<int>("Metric")
+                        .HasColumnType("integer")
+                        .HasColumnName("metric");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)")
+                        .HasColumnName("name");
+
+                    b.Property<int>("Severity")
+                        .HasColumnType("integer")
+                        .HasColumnName("severity");
+
+                    b.Property<decimal>("Threshold")
+                        .HasPrecision(28, 8)
+                        .HasColumnType("numeric(28,8)")
+                        .HasColumnName("threshold");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_monitoring_rules");
+
+                    b.HasAlternateKey("Id", "ClientId", "FacilityId")
+                        .HasName("ak_monitoring_rules_id_client_id_facility_id");
+
+                    b.HasIndex("ClientId", "FacilityId", "Enabled")
+                        .HasDatabaseName("ix_monitoring_rules_client_id_facility_id_enabled");
+
+                    b.ToTable("monitoring_rules", (string)null);
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Analytics.ProductAffinityCluster", b =>
                 {
                     b.Property<Guid>("Id")
@@ -15700,6 +15878,17 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasDatabaseName("ix_user_roles_user_id_role_id");
 
                     b.ToTable("user_roles", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Analytics.MonitoringAlert", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Analytics.MonitoringRule", null)
+                        .WithMany()
+                        .HasForeignKey("RuleId", "ClientId", "FacilityId")
+                        .HasPrincipalKey("Id", "ClientId", "FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_monitoring_alerts_monitoring_rules_rule_id_client_id_facili");
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Analytics.ProductAffinityClusterMember", b =>

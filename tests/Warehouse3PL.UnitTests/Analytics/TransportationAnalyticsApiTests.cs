@@ -1,3 +1,4 @@
+using System.Net.Http.Json;
 using System.Net;
 using System.Security.Claims;
 using System.Text.Encodings.Web;
@@ -280,6 +281,7 @@ public sealed class TransportationApiFixture : IAsyncLifetime
         services.AddScoped<IFreightReconciliationService, FreightReconciliationService>();
         services.AddScoped<IFreightCostVarianceService, FreightCostVarianceService>();
         services.AddScoped<IProfitabilityIntelligenceService, ProfitabilityIntelligenceService>();
+        services.AddScoped<IMonitoringService, MonitoringService>();
         services.AddSingleton<IFxRateProvider, FxRateProvider>();
         _app = builder.Build();
         _app.UseMiddleware<ExceptionHandlingMiddleware>();
@@ -374,6 +376,13 @@ public sealed class TransportationApiFixture : IAsyncLifetime
         return _http.SendAsync(request);
     }
 
+    public Task<HttpResponseMessage> SendMonitoring(HttpMethod method,string path,object? body=null,string actor="client-monitor")
+    {
+        var request=new HttpRequestMessage(method,path);
+        request.Headers.Add("X-Test-Actor",actor);
+        if(body!=null) request.Content=JsonContent.Create(body);
+        return _http.SendAsync(request);
+    }
     public async Task<string> Fingerprint()
     {
         using var scope = _app.Services.CreateScope();
@@ -391,12 +400,12 @@ public sealed class TransportationReadOnlyGuard(IHttpContextAccessor accessor) :
     public bool ReadOnly { get; set; }
     public override InterceptionResult<int> SavingChanges(DbContextEventData eventData, InterceptionResult<int> result)
     {
-        if (ReadOnly) throw new InvalidOperationException("Analytics must not save financial or operational records.");
+        if (ReadOnly && eventData.Context!.ChangeTracker.Entries().Any(e => (e.State is EntityState.Added or EntityState.Modified or EntityState.Deleted) && e.Entity is not MonitoringRule && e.Entity is not MonitoringAlert)) throw new InvalidOperationException("Analytics must not save financial or operational records.");
         return result;
     }
     public override ValueTask<InterceptionResult<int>> SavingChangesAsync(DbContextEventData eventData, InterceptionResult<int> result, CancellationToken cancellationToken = default)
     {
-        if (ReadOnly) throw new InvalidOperationException("Analytics must not save financial or operational records.");
+        if (ReadOnly && eventData.Context!.ChangeTracker.Entries().Any(e => (e.State is EntityState.Added or EntityState.Modified or EntityState.Deleted) && e.Entity is not MonitoringRule && e.Entity is not MonitoringAlert)) throw new InvalidOperationException("Analytics must not save financial or operational records.");
         return ValueTask.FromResult(result);
     }
 
@@ -432,6 +441,7 @@ public sealed class TransportationTestAuthentication(IOptionsMonitor<Authenticat
         if (!staff && actor != "missingtenant") claims.Add(new("tenant_id", TransportationApiFixture.ClientA.ToString()));
         if (actor is "staff" or "client-assigned") claims.Add(new("facility_id", TransportationApiFixture.Facility1.ToString()));
         if (actor == "admin") claims.Add(new(ClaimTypes.Role, "SuperAdmin"));
+        if (actor == "client-monitor") { claims.Add(new("permissions", Permissions.Analytics.MonitoringView)); claims.Add(new("permissions", Permissions.Analytics.MonitoringManage)); }
         if (actor == "client-profit") claims.Add(new("permissions", Permissions.Analytics.ProfitabilityView));
         if (actor != "nopermission")
         {

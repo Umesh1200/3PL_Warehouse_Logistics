@@ -189,6 +189,8 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<ProductAffinityCluster> ProductAffinityClusters => Set<ProductAffinityCluster>();
     public DbSet<ProductAffinityClusterMember> ProductAffinityClusterMembers => Set<ProductAffinityClusterMember>();
 
+    public DbSet<MonitoringRule> MonitoringRules => Set<MonitoringRule>();
+    public DbSet<MonitoringAlert> MonitoringAlerts => Set<MonitoringAlert>();
     // Phase 6.4 Transportation & Carrier SLA Analytics
     public DbSet<CarrierContractualSlaPolicy> CarrierContractualSlaPolicies => Set<CarrierContractualSlaPolicy>();
     public DbSet<CarrierSlaComplianceRecord> CarrierSlaComplianceRecords => Set<CarrierSlaComplianceRecord>();

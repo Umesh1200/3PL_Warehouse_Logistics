@@ -89,6 +89,9 @@ public static class DependencyInjection
         services.AddScoped<ICarrierScorecardService, Warehouse3PL.Infrastructure.Services.Analytics.CarrierScorecardService>();
         services.AddSingleton<IFxRateProvider, Warehouse3PL.Infrastructure.Services.Analytics.FxRateProvider>();
         services.AddScoped<IFreightReconciliationService, Warehouse3PL.Infrastructure.Services.Analytics.FreightReconciliationService>();
+        services.AddScoped<Warehouse3PL.Infrastructure.Services.Analytics.MonitoringService>();
+        services.AddScoped<IMonitoringService>(sp => sp.GetRequiredService<Warehouse3PL.Infrastructure.Services.Analytics.MonitoringService>());
+        if (configuration.GetValue<bool>("Monitoring:Enabled")) services.AddHostedService<Warehouse3PL.Infrastructure.BackgroundJobs.MonitoringEvaluationWorker>();
         services.AddScoped<IProfitabilityIntelligenceService, Warehouse3PL.Infrastructure.Services.Analytics.ProfitabilityIntelligenceService>();
         services.AddScoped<IFreightCostVarianceService, Warehouse3PL.Infrastructure.Services.Analytics.FreightCostVarianceService>();
 
