@@ -282,6 +282,7 @@ public sealed class TransportationApiFixture : IAsyncLifetime
         services.AddScoped<IFreightCostVarianceService, FreightCostVarianceService>();
         services.AddScoped<IProfitabilityIntelligenceService, ProfitabilityIntelligenceService>();
         services.AddScoped<IMonitoringService, MonitoringService>();
+        services.AddScoped<IDecisionIntelligenceService, DecisionIntelligenceService>();
         services.AddSingleton<IFxRateProvider, FxRateProvider>();
         _app = builder.Build();
         _app.UseMiddleware<ExceptionHandlingMiddleware>();
@@ -439,8 +440,9 @@ public sealed class TransportationTestAuthentication(IOptionsMonitor<Authenticat
         bool staff = actor.StartsWith("staff") || actor == "admin";
         var claims = new List<Claim> { new(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()), new("user_type", staff ? "Staff" : "Client") };
         if (!staff && actor != "missingtenant") claims.Add(new("tenant_id", TransportationApiFixture.ClientA.ToString()));
-        if (actor is "staff" or "client-assigned") claims.Add(new("facility_id", TransportationApiFixture.Facility1.ToString()));
+        if (actor is "staff" or "staff-decisions" or "client-assigned") claims.Add(new("facility_id", TransportationApiFixture.Facility1.ToString()));
         if (actor == "admin") claims.Add(new(ClaimTypes.Role, "SuperAdmin"));
+        if (actor is "client-decisions" or "staff-decisions") { claims.Add(new("permissions", Permissions.Analytics.DecisionLaborView)); claims.Add(new("permissions", Permissions.Analytics.DecisionTransportationView)); }
         if (actor == "client-monitor") { claims.Add(new("permissions", Permissions.Analytics.MonitoringView)); claims.Add(new("permissions", Permissions.Analytics.MonitoringManage)); }
         if (actor == "client-profit") claims.Add(new("permissions", Permissions.Analytics.ProfitabilityView));
         if (actor != "nopermission")

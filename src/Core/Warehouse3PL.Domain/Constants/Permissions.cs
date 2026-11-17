@@ -150,6 +150,8 @@ public static class Permissions
         public const string WarehouseHeatmapView = "analytics:warehouse-heatmap:view";
         public const string SlottingView = "analytics:slotting:view";
         public const string SlottingManage = "analytics:slotting:manage";
+        public const string DecisionLaborView = "analytics:decisions:labor:view";
+        public const string DecisionTransportationView = "analytics:decisions:transportation:view";
         public const string MonitoringView = "analytics:monitoring:view";
         public const string MonitoringManage = "analytics:monitoring:manage";
         public const string TransportationView = "analytics:transportation:view";
@@ -186,8 +188,7 @@ public static class Permissions
         Analytics.WorkforceView, Analytics.WorkforceManageStandards, Analytics.WorkforceSelfView, Analytics.WorkforceCostView,
         Analytics.InventoryHealthView, Analytics.InventoryAgingManage, Analytics.AbcPolicyManage, Analytics.WarehouseHeatmapView,
         Analytics.SlottingView, Analytics.SlottingManage,
-        Analytics.MonitoringView, Analytics.MonitoringManage,
+        Analytics.MonitoringView, Analytics.MonitoringManage, Analytics.DecisionLaborView, Analytics.DecisionTransportationView,
         Analytics.TransportationView, Analytics.TransportationClaimsView, Analytics.TransportationFinancialView
     ];
 }
-

@@ -92,6 +92,7 @@ public static class DependencyInjection
         services.AddScoped<Warehouse3PL.Infrastructure.Services.Analytics.MonitoringService>();
         services.AddScoped<IMonitoringService>(sp => sp.GetRequiredService<Warehouse3PL.Infrastructure.Services.Analytics.MonitoringService>());
         if (configuration.GetValue<bool>("Monitoring:Enabled")) services.AddHostedService<Warehouse3PL.Infrastructure.BackgroundJobs.MonitoringEvaluationWorker>();
+        services.AddScoped<IDecisionIntelligenceService, Warehouse3PL.Infrastructure.Services.Analytics.DecisionIntelligenceService>();
         services.AddScoped<IProfitabilityIntelligenceService, Warehouse3PL.Infrastructure.Services.Analytics.ProfitabilityIntelligenceService>();
         services.AddScoped<IFreightCostVarianceService, Warehouse3PL.Infrastructure.Services.Analytics.FreightCostVarianceService>();
 
