@@ -19,4 +19,3 @@ public sealed class ProfitabilityIntelligenceController(IProfitabilityIntelligen
     public async Task<IActionResult> Shipment(Guid shipmentId, [FromQuery] DateTimeOffset? asOfUtc, CancellationToken ct)
         { await authorization.RequireShipmentAsync(shipmentId,ct); return Ok(await reconciliation.GetShipmentFinancialReconciliationAsync(shipmentId,asOfUtc?.UtcDateTime,ct)); }
 }
-
