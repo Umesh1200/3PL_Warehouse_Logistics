@@ -2216,6 +2216,8 @@ public class FreightReconciliationTests
         {
             Id = Guid.NewGuid(),
             CarrierCostRecordId = parent1.Id,
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
             AdjustmentType = CarrierCostAdjustmentType.DisputeCredit,
             Reason = "Shared dispute credit",
             OriginalCarrierCost = 100.00m,
@@ -2230,6 +2232,8 @@ public class FreightReconciliationTests
         {
             Id = Guid.NewGuid(),
             CarrierCostRecordId = parent2.Id,
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
             AdjustmentType = CarrierCostAdjustmentType.DisputeCredit,
             Reason = "Shared dispute credit",
             OriginalCarrierCost = 100.00m,
@@ -2531,6 +2535,8 @@ public class FreightReconciliationTests
             CarrierCostRecordId = cost.Id,
             AdjustmentType = CarrierCostAdjustmentType.DisputeCredit,
             Reason = "Initial credit",
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
             OriginalCarrierCost = 100.00m,
             AdjustedCarrierCost = 90.00m,
             CarrierCostDelta = -10.00m,
@@ -2544,6 +2550,8 @@ public class FreightReconciliationTests
             CarrierCostRecordId = cost.Id,
             AdjustmentType = CarrierCostAdjustmentType.DisputeCredit,
             Reason = "Conflicting larger credit",
+            ClientId = _clientAId,
+            FacilityId = _facility1Id,
             OriginalCarrierCost = 100.00m,
             AdjustedCarrierCost = 75.00m,
             CarrierCostDelta = -25.00m, // Conflicting delta!

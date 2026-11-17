@@ -61,7 +61,6 @@ public class FreightReconciliationService : IFreightReconciliationService
 
         var shipment = await _dbContext.Shipments
             .AsNoTracking()
-            .Include(s => s.Packages)
             .FirstOrDefaultAsync(s => s.Id == shipmentId, cancellationToken);
 
         if (shipment == null)
@@ -72,12 +71,19 @@ public class FreightReconciliationService : IFreightReconciliationService
         // 1. Enforce Fail-Closed Tenant and Facility Authorization
         EnforceShipmentAuthorization(shipment);
 
+        // Scope every related ledger row independently: separate foreign keys do not prove
+        // that a row's tenant/facility agrees with its referenced shipment.
+        shipment.Packages = await _dbContext.Packages.AsNoTracking()
+            .Where(p => p.ShipmentId == shipmentId && p.ClientId == shipment.ClientId && p.FacilityId == shipment.FacilityId)
+            .ToListAsync(cancellationToken);
+
         // 2. Canonical Buy-Side Cost Retrieval & Deduplication
         var costRecords = await _dbContext.CarrierCostRecords
             .AsNoTracking()
-            .Include(c => c.Adjustments)
-            .Include(c => c.AccessorialCharges)
-            .Where(c => c.ShipmentId == shipmentId && (!historicalCutoff.HasValue || c.CostAssessedAtUtc <= historicalCutoff.Value))
+            .Include(c => c.Adjustments.Where(a => a.ClientId == shipment.ClientId && a.FacilityId == shipment.FacilityId))
+            .Include(c => c.AccessorialCharges.Where(a => a.ClientId == shipment.ClientId && a.FacilityId == shipment.FacilityId && a.ShipmentId == shipmentId))
+            .Where(c => c.ShipmentId == shipmentId && c.ClientId == shipment.ClientId && c.FacilityId == shipment.FacilityId
+                && (!historicalCutoff.HasValue || c.CostAssessedAtUtc <= historicalCutoff.Value))
             .OrderBy(c => c.CostAssessedAtUtc)
             .ToListAsync(cancellationToken);
 
@@ -283,11 +289,13 @@ public class FreightReconciliationService : IFreightReconciliationService
         // Excludes Voided and Draft invoices, and excludes lines without an invoice.
         var marginRecord = await _dbContext.ShipmentFreightMarginRecords
             .AsNoTracking()
-            .FirstOrDefaultAsync(m => m.ShipmentId == shipmentId && (!historicalCutoff.HasValue || m.RatedAtUtc <= historicalCutoff.Value), cancellationToken);
+            .FirstOrDefaultAsync(m => m.ShipmentId == shipmentId && m.ClientId == shipment.ClientId && m.FacilityId == shipment.FacilityId
+                && (!historicalCutoff.HasValue || m.RatedAtUtc <= historicalCutoff.Value), cancellationToken);
 
         var activityIds = await _dbContext.BillableActivities
             .AsNoTracking()
-            .Where(b => b.SourceId == shipmentId && (!historicalCutoff.HasValue || (b.OccurredAtUtc <= historicalCutoff.Value && b.CreatedAt <= historicalCutoff.Value)))
+            .Where(b => b.SourceId == shipmentId && b.ClientId == shipment.ClientId && b.FacilityId == shipment.FacilityId
+                && (!historicalCutoff.HasValue || (b.OccurredAtUtc <= historicalCutoff.Value && b.CreatedAt <= historicalCutoff.Value)))
             .Select(b => b.Id)
             .ToListAsync(cancellationToken);
 
@@ -296,8 +304,10 @@ public class FreightReconciliationService : IFreightReconciliationService
             .Include(l => l.Invoice)
             .Include(l => l.BillableActivity)
             .Where(l => l.ChargeCategory == InvoiceChargeCategory.Freight
-                     && ((l.BillableActivityId.HasValue && activityIds.Contains(l.BillableActivityId.Value))
-                         || (l.BillableActivity != null && l.BillableActivity.SourceId == shipmentId)))
+                     && l.Invoice != null && l.Invoice.ClientId == shipment.ClientId
+                     && (!l.Invoice.FacilityId.HasValue || l.Invoice.FacilityId == shipment.FacilityId)
+                     && (!l.FacilityId.HasValue || l.FacilityId == shipment.FacilityId)
+                     && l.BillableActivityId.HasValue && activityIds.Contains(l.BillableActivityId.Value))
             .ToListAsync(cancellationToken);
 
         // Authoritative qualifying invoice statuses constrained by valuation cutoff

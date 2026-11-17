@@ -39,8 +39,14 @@ public class ClaimsReadinessService : IClaimsReadinessService
             .FirstOrDefaultAsync(r => r.ShipmentId == shipmentId, cancellationToken);
 
         var alert = await scope.Apply(_dbContext.CarrierLostShipmentAlerts.AsNoTracking())
-            .AsNoTracking()
+            .OrderByDescending(a => a.TriggeredAtUtc).ThenBy(a => a.Id)
             .FirstOrDefaultAsync(a => a.ShipmentId == shipmentId, cancellationToken);
+
+        // Historical alerts remain obstruction evidence, but resolved/dismissed alerts cannot
+        // establish a current inactivity breach for a new lost-shipment assessment.
+        var hasThresholdBreach = await scope.Apply(_dbContext.CarrierLostShipmentAlerts.AsNoTracking())
+            .AnyAsync(a => a.ShipmentId == shipmentId && a.AlertStatus == LostShipmentAlertStatus.Active
+                && a.PolicyThresholdHours > 0m && a.HoursWithoutScanMovement >= a.PolicyThresholdHours, cancellationToken);
 
         var trackingScansCount = await scope.Apply(_dbContext.ShipmentTrackingEvents.AsNoTracking())
             .AsNoTracking()
@@ -48,15 +54,16 @@ public class ClaimsReadinessService : IClaimsReadinessService
 
         var exceptionsCount = await scope.Apply(_dbContext.ShipmentDeliveryExceptions.AsNoTracking())
             .AsNoTracking()
-            .CountAsync(e => e.ShipmentId == shipmentId, cancellationToken);
+            .CountAsync(e => e.ShipmentId == shipmentId && e.Status != DeliveryExceptionStatus.Voided
+                && (claimType != ClaimType.Damaged || e.ExceptionType == DeliveryExceptionType.PackageDamagedInTransit), cancellationToken);
 
-        var costRecord = await scope.Apply(_dbContext.CarrierCostRecords.AsNoTracking())
-            .AsNoTracking()
+        var costQuery = scope.Apply(_dbContext.CarrierCostRecords.AsNoTracking())
+            .Where(c => c.ShipmentId == shipmentId);
+        var costRecord = await costQuery.OrderByDescending(c => c.CostAssessedAtUtc).ThenBy(c => c.Id)
             .FirstOrDefaultAsync(c => c.ShipmentId == shipmentId, cancellationToken);
 
-        var pod = await scope.Apply(_dbContext.ProofOfDeliveries.AsNoTracking())
-            .AsNoTracking()
-            .FirstOrDefaultAsync(p => p.ShipmentId == shipmentId, cancellationToken);
+        var hasPod = await scope.Apply(_dbContext.ProofOfDeliveries.AsNoTracking())
+            .AnyAsync(p => p.ShipmentId == shipmentId && !p.IsSuperseded && p.IsStorageFinalized, cancellationToken);
 
         var carrierCode = compliance?.CarrierCode ?? alert?.CarrierCode ?? costRecord?.CarrierCode ?? shipment.CarrierCode;
         var trackingNumber = compliance?.TrackingNumber ?? alert?.TrackingNumber ?? costRecord?.TrackingNumber ?? "UNKNOWN";
@@ -66,11 +73,12 @@ public class ClaimsReadinessService : IClaimsReadinessService
         // Evidence Dimension Checklist
         bool hasHandover = compliance != null && compliance.DispatchedAtUtc != default;
         bool hasTracking = trackingScansCount > 0;
-        bool hasDisruption = exceptionsCount > 0 || alert != null;
-        bool hasThresholdBreach = alert != null && alert.HoursWithoutScanMovement >= alert.PolicyThresholdHours;
-        bool hasFreightCost = costRecord != null && costRecord.TotalCarrierCost > 0m;
-        bool hasValuation = costRecord != null && (costRecord.TotalCarrierCost > 0m || costRecord.InsuranceCost > 0m);
-        bool hasPod = pod != null;
+        bool hasDisruption = exceptionsCount > 0 || (claimType != ClaimType.Damaged && alert != null);
+        bool hasFreightCost = await costQuery.AnyAsync(c => c.TotalCarrierCost > 0m, cancellationToken);
+        // Freight charges and insurance premiums do not establish the value of the goods.
+        // No authoritative declared/replacement valuation is persisted in the current model;
+        // leave this mandatory evidence missing instead of claiming it was verified.
+        bool hasValuation = false;
 
         return EvaluateReadinessCriteria(
             shipmentId,

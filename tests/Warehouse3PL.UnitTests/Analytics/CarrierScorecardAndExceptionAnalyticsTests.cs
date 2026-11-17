@@ -669,7 +669,7 @@ public class CarrierScorecardAndExceptionAnalyticsTests
             slaPolicyVersion: "1.0.0");
         context.CarrierLostShipmentAlerts.Add(alert);
 
-        // Add carrier cost record with invoice and declared valuation
+        // Freight and insurance charges are cost evidence, not a declared goods valuation.
         var cost = new CarrierCostRecord
         {
             Id = Guid.NewGuid(),
@@ -701,18 +701,19 @@ public class CarrierScorecardAndExceptionAnalyticsTests
         Assert.Equal(ClaimsReadinessStatus.InsufficientEvidence, incAssessment.ReadinessStatus);
         Assert.NotEmpty(incAssessment.MissingEvidenceItems);
 
-        // Evaluate complete shipment
+        // Operational evidence is complete, but no authoritative goods valuation is persisted.
         var compAssessment = await service.AssessShipmentClaimsReadinessAsync(shipmentIdComplete);
         Assert.NotNull(compAssessment);
-        Assert.True(compAssessment.ReadinessScorePercent >= 85.00m);
-        Assert.Equal(ClaimsReadinessStatus.ReadyForReview, compAssessment.ReadinessStatus);
+        Assert.Equal(80m, compAssessment.ReadinessScorePercent);
+        Assert.Equal(ClaimsReadinessStatus.InsufficientEvidence, compAssessment.ReadinessStatus);
         Assert.True(compAssessment.HasHandoverEvidence);
         Assert.True(compAssessment.HasTransitScanHistory);
         Assert.True(compAssessment.HasObstructionEvidence);
         Assert.True(compAssessment.HasThresholdBreach);
         Assert.True(compAssessment.HasFreightCostEvidence);
-        Assert.True(compAssessment.HasValuationEvidence);
-        Assert.Empty(compAssessment.MissingEvidenceItems);
+        Assert.False(compAssessment.HasValuationEvidence);
+        Assert.Single(compAssessment.MissingEvidenceItems);
+        Assert.Contains("valuation", compAssessment.MissingEvidenceItems[0]);
     }
 
     [Fact]

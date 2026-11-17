@@ -186,6 +186,20 @@ public class TransportationAnalyticsApiTests(TransportationApiFixture fixture) :
         }
         Assert.Equal(before, await fixture.Fingerprint());
     }
+
+    [Fact]
+    public async Task FinancialEvidence_RejectsInconsistentChildScopeBeforeMaterialization()
+    {
+        // Fixture includes foreign tenant/facility records linked to this authorized shipment,
+        // with tenant-filter bypass enabled and a materialization guard rejecting foreign rows.
+        using var response = await fixture.Get($"shipments/{TransportationApiFixture.ShipmentA}/financial-reconciliation");
+        Assert.Equal(HttpStatusCode.OK, response.StatusCode);
+        var json = await response.Content.ReadFromJson();
+        Assert.Equal(11m, json.GetProperty("netInvoicedCarrierCostUsd").GetDecimal());
+        Assert.Equal(0m, json.GetProperty("invoicedClientFreightUsd").GetDecimal());
+        Assert.Equal(0m, json.GetProperty("estimatedClientFreightUsd").GetDecimal());
+        Assert.Empty(json.GetProperty("adjustmentAuditTrail").EnumerateArray());
+    }
 }
 
 public sealed class TransportationApiFixture : IAsyncLifetime
@@ -271,6 +285,54 @@ public sealed class TransportationApiFixture : IAsyncLifetime
             ClientId = null, DateUtc = date.Date, DispatchedShipmentsCount = 999 });
         db.CarrierRateAgreements.Add(CarrierRateAgreement.Create("FEDEX", "API", "API test flat fee", 11m, "USD", "SHIPMENT", RateModelType.FlatFee,
             PricingTierCalculationModel.FlatRate, date.AddDays(-1)));
+
+        // Separate foreign keys do not guarantee matching tenant/facility values on child records.
+        // Poison valid shipment references deliberately to verify explicit query confinement.
+        db.Packages.Add(new Package { ShipmentId = ShipmentA, ClientId = ClientB, FacilityId = Facility1,
+            PackageNumber = "FOREIGN", GrossWeightKg = 999 });
+        var validCost = db.CarrierCostRecords.Local.Single(c => c.ShipmentId == ShipmentA);
+        validCost.BaseTransportationCost -= 1m;
+        var validCharge = new CarrierAccessorialCharge { ClientId = ClientA, FacilityId = Facility1,
+            ShipmentId = ShipmentA, CarrierCostRecordId = validCost.Id, CarrierAmount = 1, Currency = "USD", AssessedAtUtc = date };
+        db.CarrierAccessorialCharges.Add(validCharge);
+        foreach (var (client, facility) in new[] { (ClientB, Facility1), (ClientA, Facility3) })
+        {
+            db.CarrierCostRecords.Add(new CarrierCostRecord { ClientId = client, FacilityId = facility, ShipmentId = ShipmentA,
+                CarrierCode = "FEDEX", BaseTransportationCost = 999, TotalCarrierCost = 999, Currency = "USD",
+                Status = CarrierCostStatus.Invoiced, CostAssessedAtUtc = date });
+            db.CarrierCostAdjustments.Add(new CarrierCostAdjustment { ClientId = client, FacilityId = facility,
+                CarrierCostRecordId = validCost.Id, CarrierCostDelta = 999, Currency = "USD", AdjustedAtUtc = date });
+            db.CarrierAccessorialCharges.Add(new CarrierAccessorialCharge { ClientId = client, FacilityId = facility,
+                ShipmentId = ShipmentA, CarrierCostRecordId = validCost.Id, CarrierAmount = 999, Currency = "USD", AssessedAtUtc = date });
+            db.ShipmentFreightMarginRecords.Add(new ShipmentFreightMarginRecord { ClientId = client, FacilityId = facility,
+                ShipmentId = ShipmentA, TotalClientFreight = 999, Currency = "USD", RatedAtUtc = date });
+            var activity = new BillableActivity { ClientId = client, FacilityId = facility, SourceId = ShipmentA,
+                Currency = "USD", OccurredAtUtc = date };
+            var invoice = new Invoice { ClientId = client, FacilityId = facility, InvoiceNumber = "FOREIGN-" + client + facility,
+                Status = InvoiceStatus.Issued, InvoiceDate = date, Currency = "USD" };
+            db.BillableActivities.Add(activity);
+            db.Invoices.Add(invoice);
+            db.InvoiceLines.Add(new InvoiceLine { InvoiceId = invoice.Id, BillableActivityId = activity.Id,
+                ChargeCategory = InvoiceChargeCategory.Freight, FacilityId = facility, TotalAmount = 999 });
+        }
+        var validActivity = new BillableActivity { ClientId = ClientA, FacilityId = Facility1, SourceId = ShipmentA,
+            Currency = "USD", OccurredAtUtc = date };
+        var foreignInvoice = new Invoice { ClientId = ClientB, FacilityId = Facility1, InvoiceNumber = "FOREIGN-INVOICE",
+            Status = InvoiceStatus.Issued, InvoiceDate = date, Currency = "USD" };
+        db.BillableActivities.Add(validActivity);
+        db.Invoices.Add(foreignInvoice);
+        db.InvoiceLines.Add(new InvoiceLine { InvoiceId = foreignInvoice.Id, BillableActivityId = validActivity.Id,
+            ChargeCategory = InvoiceChargeCategory.Freight, FacilityId = Facility1, TotalAmount = 999 });
+        var validChargeActivity = new BillableActivity { ClientId = ClientA, FacilityId = Facility1, SourceId = validCharge.Id,
+            Currency = "USD", OccurredAtUtc = date };
+        db.BillableActivities.Add(validChargeActivity);
+        db.InvoiceLines.Add(new InvoiceLine { InvoiceId = foreignInvoice.Id, BillableActivityId = validChargeActivity.Id,
+            ChargeCategory = InvoiceChargeCategory.Freight, FacilityId = Facility1, TotalAmount = 999 });
+        var foreignChargeActivity = new BillableActivity { ClientId = ClientB, FacilityId = Facility1, SourceId = validCharge.Id,
+            Currency = "USD", OccurredAtUtc = date };
+        db.BillableActivities.Add(foreignChargeActivity);
+        db.InvoiceLines.Add(new InvoiceLine { InvoiceId = foreignInvoice.Id, BillableActivityId = foreignChargeActivity.Id,
+            ChargeCategory = InvoiceChargeCategory.Freight, FacilityId = Facility1, TotalAmount = 999 });
         await db.SaveChangesAsync();
         scope.ServiceProvider.GetRequiredService<TransportationReadOnlyGuard>().ReadOnly = true;
     }

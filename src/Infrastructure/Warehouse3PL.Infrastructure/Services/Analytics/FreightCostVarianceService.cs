@@ -266,8 +266,11 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             .AsNoTracking()
             .Include(a => a.CarrierCostRecord)
             .Where(a => shipmentIds.Contains(a.ShipmentId)
+                     && a.ClientId == a.Shipment.ClientId && a.FacilityId == a.Shipment.FacilityId
                      && a.AssessedAtUtc <= valuationTime
                      && a.CarrierCostRecord != null
+                     && a.CarrierCostRecord.ShipmentId == a.ShipmentId
+                     && a.CarrierCostRecord.ClientId == a.ClientId && a.CarrierCostRecord.FacilityId == a.FacilityId
                      && (a.CarrierCostRecord.Status == CarrierCostStatus.Invoiced
                          || a.CarrierCostRecord.Status == CarrierCostStatus.Reconciled
                          || a.CarrierCostRecord.Status == CarrierCostStatus.Disputed
@@ -280,6 +283,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         var billableActivities = await _dbContext.BillableActivities
             .AsNoTracking()
             .Where(b => b.SourceId != Guid.Empty && chargeIds.Contains(b.SourceId)
+                     && _dbContext.CarrierAccessorialCharges.Any(a => a.Id == b.SourceId && a.ClientId == b.ClientId && a.FacilityId == b.FacilityId)
                      && b.OccurredAtUtc <= valuationTime
                      && b.CreatedAt <= valuationTime)
             .ToListAsync(cancellationToken);
@@ -293,6 +297,10 @@ public class FreightCostVarianceService : IFreightCostVarianceService
             .Include(l => l.BillableActivity)
             .Where(l => l.ChargeCategory == InvoiceChargeCategory.Freight
                      && l.Invoice != null
+                     && l.BillableActivity != null
+                     && l.Invoice.ClientId == l.BillableActivity.ClientId
+                     && (!l.Invoice.FacilityId.HasValue || l.Invoice.FacilityId == l.BillableActivity.FacilityId)
+                     && (!l.FacilityId.HasValue || l.FacilityId == l.BillableActivity.FacilityId)
                      && l.Invoice.InvoiceDate <= valuationTime
                      && l.CreatedAt <= valuationTime
                      && (l.Invoice.Status == InvoiceStatus.Issued
@@ -301,8 +309,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
                          || l.Invoice.Status == InvoiceStatus.Disputed
                          || l.Invoice.Status == InvoiceStatus.Approved)
                      && !l.Invoice.ReplacementInvoiceId.HasValue
-                     && ((l.BillableActivityId.HasValue && activityIds.Contains(l.BillableActivityId.Value))
-                         || (l.BillableActivity != null && chargeIds.Contains(l.BillableActivity.SourceId))))
+                     && l.BillableActivityId.HasValue && activityIds.Contains(l.BillableActivityId.Value))
             .ToListAsync(cancellationToken);
 
         // Deduplicate invoice lines by identity
@@ -549,7 +556,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         // to avoid EF InMemory ThenInclude materialisation failures on packages with mock OutboundOrderIds.
         var shipmentsWithPackages = await _dbContext.Shipments
             .AsNoTracking()
-            .Include(s => s.Packages).ThenInclude(p => p.Lines)
+            .Include(s => s.Packages.Where(p => p.ClientId == p.Shipment!.ClientId && p.FacilityId == p.Shipment.FacilityId)).ThenInclude(p => p.Lines)
             .Include(s => s.Facility)
             .Where(s => shipmentIds.Contains(s.Id))
             .ToListAsync(cancellationToken);
@@ -561,8 +568,9 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         // Query all carrier cost records with adjustments for these shipments (constrained by valuation cutoff)
         var allCostRecords = await _dbContext.CarrierCostRecords
             .AsNoTracking()
-            .Include(c => c.Adjustments)
-            .Where(c => shipmentIds.Contains(c.ShipmentId) && c.CostAssessedAtUtc <= valuationTime)
+            .Include(c => c.Adjustments.Where(a => a.ClientId == a.CarrierCostRecord.ClientId && a.FacilityId == a.CarrierCostRecord.FacilityId))
+            .Where(c => shipmentIds.Contains(c.ShipmentId) && c.ClientId == c.Shipment.ClientId && c.FacilityId == c.Shipment.FacilityId
+                && c.CostAssessedAtUtc <= valuationTime)
             .ToListAsync(cancellationToken);
 
         var costRecordsByShipment = allCostRecords.ToLookup(c => c.ShipmentId);
@@ -889,7 +897,7 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         // to avoid EF InMemory ThenInclude materialisation failures on packages with mock OutboundOrderIds.
         var query = _dbContext.Shipments
             .AsNoTracking()
-            .Include(s => s.Packages).ThenInclude(p => p.Lines)
+            .Include(s => s.Packages.Where(p => p.ClientId == p.Shipment!.ClientId && p.FacilityId == p.Shipment.FacilityId)).ThenInclude(p => p.Lines)
             .Include(s => s.Facility)
             .Where(s => s.DispatchedAtUtc >= start && s.DispatchedAtUtc <= end && s.CarrierCode == normalizedCarrier);
 
@@ -910,8 +918,9 @@ public class FreightCostVarianceService : IFreightCostVarianceService
         // Retrieve carrier cost records constrained by valuation cutoff
         var costRecords = await _dbContext.CarrierCostRecords
             .AsNoTracking()
-            .Include(c => c.Adjustments)
-            .Where(c => shipmentIds.Contains(c.ShipmentId) && c.CostAssessedAtUtc <= valuationTime &&
+            .Include(c => c.Adjustments.Where(a => a.ClientId == a.CarrierCostRecord.ClientId && a.FacilityId == a.CarrierCostRecord.FacilityId))
+            .Where(c => shipmentIds.Contains(c.ShipmentId) && c.ClientId == c.Shipment.ClientId && c.FacilityId == c.Shipment.FacilityId
+                && c.CostAssessedAtUtc <= valuationTime &&
                        (c.Status == CarrierCostStatus.Invoiced || c.Status == CarrierCostStatus.Reconciled || c.Status == CarrierCostStatus.Disputed))
             .ToListAsync(cancellationToken);
 
