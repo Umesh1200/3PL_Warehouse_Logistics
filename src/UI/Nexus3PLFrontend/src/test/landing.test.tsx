@@ -61,7 +61,7 @@ describe('Nexus3PL Brand & Landing Page Tests', () => {
     expect(screen.getByText(/No simulated record found for "UNKNOWN-123"/i)).toBeDefined();
   });
 
-  it('provides modal focus trapping, Escape dismissal, and focus restoration', async () => {
+  it('provides modal focus trapping with explicit Tab and Shift+Tab wrapping, Escape dismissal, and focus restoration', async () => {
     render(<App />);
     const launchBtn = screen.getByRole('button', { name: /Open Enterprise Portal/i });
     launchBtn.focus();
@@ -72,11 +72,28 @@ describe('Nexus3PL Brand & Landing Page Tests', () => {
 
     expect(screen.getByText('Enterprise Operations Portal Unavailable')).toBeDefined();
     const closeBtn = screen.getByRole('button', { name: /Understood, close dialog/i });
+    const headerDismissBtn = screen.getByRole('button', { name: /Dismiss notice/i });
 
-    // Focus moves to close button inside modal
+    // Focus moves initially to primary close button inside modal
     await waitFor(() => {
       expect(document.activeElement).toBe(closeBtn);
     });
+
+    // 1. Explicit Tab keydown: wraps from last element (closeBtn) to first element (headerDismissBtn)
+    fireEvent.keyDown(document.activeElement!, { key: 'Tab', code: 'Tab' });
+    expect(document.activeElement).toBe(headerDismissBtn);
+
+    // 2. Explicit Tab keydown: advances from first element (headerDismissBtn) to last element (closeBtn)
+    fireEvent.keyDown(document.activeElement!, { key: 'Tab', code: 'Tab' });
+    expect(document.activeElement).toBe(closeBtn);
+
+    // 3. Explicit Shift+Tab keydown: moves backward from last element (closeBtn) to headerDismissBtn
+    fireEvent.keyDown(document.activeElement!, { key: 'Tab', code: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(headerDismissBtn);
+
+    // 4. Explicit Shift+Tab keydown: wraps backward from first element (headerDismissBtn) to closeBtn
+    fireEvent.keyDown(document.activeElement!, { key: 'Tab', code: 'Tab', shiftKey: true });
+    expect(document.activeElement).toBe(closeBtn);
 
     // Press Escape to dismiss modal
     fireEvent.keyDown(window, { key: 'Escape', code: 'Escape' });
@@ -86,6 +103,52 @@ describe('Nexus3PL Brand & Landing Page Tests', () => {
 
     // Focus restored to the trigger button
     expect(document.activeElement).toBe(launchBtn);
+  });
+
+  it('verifies modal responsiveness and close button reachability at 320x568 and 568x320 viewports', async () => {
+    const viewports = [
+      { width: 320, height: 568, orientation: '320x568 portrait' },
+      { width: 568, height: 320, orientation: '568x320 landscape' }
+    ];
+
+    for (const vp of viewports) {
+      // Emulate mobile viewport dimensions
+      window.innerWidth = vp.width;
+      window.innerHeight = vp.height;
+      window.dispatchEvent(new Event('resize'));
+
+      const { unmount } = render(<App />);
+      const launchBtn = screen.getByRole('button', { name: /Open Enterprise Portal/i });
+      fireEvent.click(launchBtn);
+
+      // Verify modal dialog is rendered
+      const modal = screen.getByRole('dialog', { name: /Enterprise Operations Portal Unavailable/i });
+      expect(modal).toBeDefined();
+
+      const closeBtn = screen.getByRole('button', { name: /Understood, close dialog/i });
+      const headerDismissBtn = screen.getByRole('button', { name: /Dismiss notice/i });
+
+      expect(closeBtn).toBeDefined();
+      expect(headerDismissBtn).toBeDefined();
+
+      // Verify reachability by keyboard focus
+      closeBtn.focus();
+      expect(document.activeElement).toBe(closeBtn);
+      headerDismissBtn.focus();
+      expect(document.activeElement).toBe(headerDismissBtn);
+
+      // Verify reachability by user pointer interaction: footer button dismisses dialog
+      fireEvent.click(closeBtn);
+      expect(screen.queryByRole('dialog')).toBeNull();
+
+      // Re-open and verify reachability by header dismiss button
+      fireEvent.click(launchBtn);
+      const reHeaderDismissBtn = screen.getByRole('button', { name: /Dismiss notice/i });
+      fireEvent.click(reHeaderDismissBtn);
+      expect(screen.queryByRole('dialog')).toBeNull();
+
+      unmount();
+    }
   });
 
   it('verifies all navigation links have matching in-page targets', () => {
