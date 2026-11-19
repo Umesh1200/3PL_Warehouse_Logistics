@@ -80,11 +80,31 @@ for (const vp of viewports) {
 
       expect(bodyScrollInfo).not.toBeNull();
       if (bodyScrollInfo && bodyScrollInfo.canScroll) {
-        // Verify scrolling inside modal body while dismiss buttons remain reachable
-        await page.evaluate(() => {
+        // Verify scrolling inside modal body actually changes scrollTop
+        const scrolledTop = await page.evaluate(() => {
           const modalBody = document.querySelector('.modal-body');
-          if (modalBody) modalBody.scrollTop = 50;
+          if (modalBody) {
+            modalBody.scrollTop = 50;
+            return modalBody.scrollTop;
+          }
+          return 0;
         });
+        expect(scrolledTop).toBeGreaterThan(0);
+
+        // Recheck dismissal-button visibility and on-screen coordinates after scrolling
+        await expect(headerDismissBtn).toBeVisible();
+        await expect(footerCloseBtn).toBeVisible();
+
+        const postScrollHeaderBox = await headerDismissBtn.boundingBox();
+        const postScrollFooterBox = await footerCloseBtn.boundingBox();
+        expect(postScrollHeaderBox).not.toBeNull();
+        expect(postScrollFooterBox).not.toBeNull();
+        if (postScrollHeaderBox && postScrollFooterBox) {
+          expect(postScrollHeaderBox.y).toBeGreaterThanOrEqual(0);
+          expect(postScrollHeaderBox.y + postScrollHeaderBox.height).toBeLessThanOrEqual(vp.height);
+          expect(postScrollFooterBox.y).toBeGreaterThanOrEqual(0);
+          expect(postScrollFooterBox.y + postScrollFooterBox.height).toBeLessThanOrEqual(vp.height);
+        }
       }
 
       // Assert dismissal via real pointer click on footer close button

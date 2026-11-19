@@ -1,11 +1,29 @@
 import React from 'react';
 import logoFull from '../assets/logo-full.svg';
+import { useRouter } from '../context/RouterContext';
 
 interface NavbarProps {
   onSignInClick?: () => void;
 }
 
 export const Navbar: React.FC<NavbarProps> = ({ onSignInClick }) => {
+  let navigate: ((to: string) => void) | undefined;
+  try {
+    const router = useRouter();
+    navigate = router.navigate;
+  } catch (_) {
+    // If rendered outside RouterProvider in isolated unit test
+  }
+
+  const handleSignIn = (e: React.MouseEvent) => {
+    e.preventDefault();
+    if (navigate) {
+      navigate('/login');
+    } else if (typeof window !== 'undefined') {
+      window.location.pathname = '/login';
+    }
+  };
+
   return (
     <header className="navbar-wrapper">
       <div className="container navbar-inner">
@@ -24,6 +42,14 @@ export const Navbar: React.FC<NavbarProps> = ({ onSignInClick }) => {
           <span className="badge badge-info status-pill">
             <span className="pulse-dot"></span> .NET 10 API
           </span>
+          <a
+            href="/login"
+            className="btn btn-secondary btn-signin-nav"
+            onClick={handleSignIn}
+            aria-label="Sign In to Portal"
+          >
+            Sign In
+          </a>
           <button 
             type="button" 
             className="btn btn-primary"
