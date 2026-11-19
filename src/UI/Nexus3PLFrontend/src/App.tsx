@@ -11,6 +11,9 @@ import { UsersPage } from './pages/admin/UsersPage';
 import { RolesPage } from './pages/admin/RolesPage';
 import { ClientsPage } from './pages/admin/ClientsPage';
 import { FacilitiesPage } from './pages/admin/FacilitiesPage';
+import { ReceivingPage } from './pages/inbound/ReceivingPage';
+import { PutawayPage } from './pages/inbound/PutawayPage';
+import { StockOnHandPage } from './pages/inventory/StockOnHandPage';
 import './styles/base.css';
 
 const AppRoutes: React.FC = () => {
@@ -45,9 +48,19 @@ const AppRoutes: React.FC = () => {
       content = <FacilitiesPage />;
       pageTitle = 'Authorized Warehouse Facilities';
       breadcrumb = 'ADMINISTRATION & RBAC / FACILITIES';
+    } else if (path === '/app/inbound' || path === '/app/inbound/receiving') {
+      content = <ReceivingPage />;
+      pageTitle = 'Inbound Goods Receiving';
+      breadcrumb = 'OPERATIONAL WORKFLOWS / INBOUND RECEIVING';
+    } else if (path === '/app/inbound/putaway') {
+      content = <PutawayPage />;
+      pageTitle = 'Directed Putaway & Relocation';
+      breadcrumb = 'OPERATIONAL WORKFLOWS / DIRECTED PUTAWAY';
+    } else if (path === '/app/inventory' || path === '/app/inventory/stock') {
+      content = <StockOnHandPage />;
+      pageTitle = 'Stock on Hand & Inventory Ledger';
+      breadcrumb = 'OPERATIONAL WORKFLOWS / INVENTORY BALANCES';
     } else if (
-      path === '/app/inbound' ||
-      path === '/app/inventory' ||
       path === '/app/outbound' ||
       path === '/app/transportation' ||
       path === '/app/billing'

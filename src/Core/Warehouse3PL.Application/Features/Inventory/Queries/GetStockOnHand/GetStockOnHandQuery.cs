@@ -39,10 +39,15 @@ public class GetStockOnHandQueryHandler : IRequestHandler<GetStockOnHandQuery, P
             .Include(s => s.Lot)
             .AsQueryable();
 
-        var effectiveTenant = request.ClientId ?? _tenantProvider.TenantId ?? _currentUser.TenantId;
-        if (!_currentUser.IsStaff && effectiveTenant.HasValue)
+        if (!_currentUser.IsStaff)
         {
-            query = query.Where(s => s.ClientId == effectiveTenant.Value);
+            var callerTenant = _currentUser.TenantId ?? _tenantProvider.TenantId;
+            if (!callerTenant.HasValue || callerTenant.Value == Guid.Empty)
+            {
+                // Non-staff callers must have a valid tenant; fail closed if absent
+                return PagedResult<StockOnHandDto>.Create([], 0, request.PageNumber, request.PageSize);
+            }
+            query = query.Where(s => s.ClientId == callerTenant.Value);
         }
         else if (request.ClientId.HasValue)
         {

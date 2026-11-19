@@ -6,6 +6,7 @@ using Warehouse3PL.Application.Features.Putaway.Tasks.Commands.ConfirmPutawayTas
 using Warehouse3PL.Application.Features.Putaway.Tasks.Commands.GeneratePutawayTasks;
 using Warehouse3PL.Application.Features.Putaway.Tasks.Commands.ReportPutawayException;
 using Warehouse3PL.Application.Features.Putaway.Tasks.Queries.GetNextPutawayTask;
+using Warehouse3PL.Application.Features.Putaway.Tasks.Queries.GetPutawayTasks;
 using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Infrastructure.Authorization;
 
@@ -15,6 +16,18 @@ namespace Warehouse3PL.WebApi.Controllers;
 [Route("api/v1/putaway/tasks")]
 public class PutawayTasksController : BaseApiController
 {
+    /// <summary>
+    /// Lists putaway tasks with pagination, facility, status, and tenant confinement.
+    /// </summary>
+    [HttpGet]
+    [HasPermission(Permissions.Inbound.View)]
+    [ProducesResponseType(typeof(PagedResult<PutawayTaskDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetTasks([FromQuery] GetPutawayTasksQuery query, CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
+        return Ok(result);
+    }
+
     /// <summary>
     /// Generates directed putaway tasks for all unassigned LPNs in transient staging.
     /// </summary>

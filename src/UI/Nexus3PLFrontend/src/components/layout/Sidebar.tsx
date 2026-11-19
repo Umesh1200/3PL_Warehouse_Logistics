@@ -40,6 +40,11 @@ export const Sidebar: React.FC = () => {
           permissions: ['inbound:view', 'inbound:asn:view', 'inbound:receive'],
         },
         {
+          label: 'Directed Putaway',
+          path: '/app/inbound/putaway',
+          permissions: ['inbound:putaway', 'inbound:putaway:execute', 'inbound:putaway:manage'],
+        },
+        {
           label: 'Inventory Balances',
           path: '/app/inventory',
           permission: 'inventory:view',
