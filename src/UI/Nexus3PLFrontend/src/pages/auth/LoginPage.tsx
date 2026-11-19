@@ -14,6 +14,7 @@ export const LoginPage: React.FC = () => {
 
   const isExpired = queryParams.get('expired') === 'true';
   const redirectTarget = queryParams.get('redirect') || '/app/dashboard';
+  const showDemoCredentials = Boolean(import.meta.env.DEV || import.meta.env.VITE_APP_MODE === 'demo');
 
   // If already authenticated, redirect
   React.useEffect(() => {
@@ -117,36 +118,38 @@ export const LoginPage: React.FC = () => {
             </button>
           </form>
 
-          {/* Quick-Fill Sandbox Credentials for Verification */}
-          <div className="sandbox-panel">
-            <div className="sandbox-header">
-              <span className="sandbox-badge">DEMO & QA CREDENTIALS</span>
-              <span className="sandbox-note">Click to populate synthetic test account</span>
+          {/* Quick-Fill Sandbox Credentials for Development / Demo Mode */}
+          {showDemoCredentials && (
+            <div className="sandbox-panel">
+              <div className="sandbox-header">
+                <span className="sandbox-badge">DEMO & QA CREDENTIALS</span>
+                <span className="sandbox-note">Click to populate synthetic test account</span>
+              </div>
+              <div className="sandbox-buttons">
+                <button
+                  type="button"
+                  className="btn-sandbox"
+                  onClick={() => fillSyntheticCredentials('superadmin@3pl.local', 'SuperAdmin123!')}
+                >
+                  SuperAdmin (All Perms)
+                </button>
+                <button
+                  type="button"
+                  className="btn-sandbox"
+                  onClick={() => fillSyntheticCredentials('ops@3pl.local', 'OpsStaff123!')}
+                >
+                  Ops Staff (Warehouse)
+                </button>
+                <button
+                  type="button"
+                  className="btn-sandbox"
+                  onClick={() => fillSyntheticCredentials('client@tenant.local', 'ClientTenant123!')}
+                >
+                  Client Tenant (Scoped)
+                </button>
+              </div>
             </div>
-            <div className="sandbox-buttons">
-              <button
-                type="button"
-                className="btn-sandbox"
-                onClick={() => fillSyntheticCredentials('superadmin@3pl.local', 'SuperAdmin123!')}
-              >
-                SuperAdmin (All Perms)
-              </button>
-              <button
-                type="button"
-                className="btn-sandbox"
-                onClick={() => fillSyntheticCredentials('ops@3pl.local', 'OpsStaff123!')}
-              >
-                Ops Staff (Warehouse)
-              </button>
-              <button
-                type="button"
-                className="btn-sandbox"
-                onClick={() => fillSyntheticCredentials('client@tenant.local', 'ClientTenant123!')}
-              >
-                Client Tenant (Scoped)
-              </button>
-            </div>
-          </div>
+          )}
 
           <div className="login-footer">
             <Link to="/" className="back-link">

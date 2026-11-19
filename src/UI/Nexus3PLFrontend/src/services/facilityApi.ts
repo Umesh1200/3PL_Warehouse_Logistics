@@ -12,4 +12,14 @@ export const facilityApi = {
       signal,
     });
   },
+
+  /**
+   * Retrieve a specific authorized facility by ID with server-side tenant boundary validation.
+   */
+  getFacilityById: async (facilityId: string, signal?: AbortSignal): Promise<FacilityDto> => {
+    return apiClient<FacilityDto>(`/api/v1/facilities/${facilityId}`, {
+      method: 'GET',
+      signal,
+    });
+  },
 };

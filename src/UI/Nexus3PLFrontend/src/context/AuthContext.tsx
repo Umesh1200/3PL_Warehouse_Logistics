@@ -22,6 +22,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const fetchProfile = useCallback(async () => {
     const token = tokenManager.getAccessToken();
+    const gen = tokenManager.getSessionGeneration();
     if (!token) {
       setUser(null);
       setIsLoading(false);
@@ -30,12 +31,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     try {
       const profile = await authApi.getCurrentUser();
-      setUser(profile);
+      if (tokenManager.getSessionGeneration() === gen) {
+        setUser(profile);
+      }
     } catch (err) {
-      tokenManager.clearSession();
-      setUser(null);
+      if (tokenManager.getSessionGeneration() === gen) {
+        tokenManager.clearSession();
+        setUser(null);
+      }
     } finally {
-      setIsLoading(false);
+      if (tokenManager.getSessionGeneration() === gen) {
+        setIsLoading(false);
+      }
     }
   }, []);
 
@@ -53,13 +60,18 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
   const login = async (request: LoginRequest) => {
     setIsLoading(true);
+    const gen = tokenManager.getSessionGeneration();
     try {
       const authResponse = await authApi.login(request);
+      if (tokenManager.getSessionGeneration() !== gen) return;
       tokenManager.setTokens(authResponse.accessToken, authResponse.refreshToken);
       const profile = await authApi.getCurrentUser();
+      if (tokenManager.getSessionGeneration() !== gen) return;
       setUser(profile);
     } finally {
-      setIsLoading(false);
+      if (tokenManager.getSessionGeneration() === gen) {
+        setIsLoading(false);
+      }
     }
   };
 

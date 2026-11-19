@@ -1,4 +1,5 @@
 import React, { createContext, useContext, useEffect, useState, useMemo } from 'react';
+import { requestManager } from '../services/apiClient';
 
 interface RouterContextType {
   path: string;
@@ -29,6 +30,7 @@ export const RouterProvider: React.FC<{ children: React.ReactNode; initialPath?:
 
   useEffect(() => {
     const handlePopState = () => {
+      requestManager.abortScope('route');
       setPath(window.location.pathname || '/');
       setSearch(window.location.search || '');
     };
@@ -38,6 +40,9 @@ export const RouterProvider: React.FC<{ children: React.ReactNode; initialPath?:
   }, []);
 
   const navigate = (to: string, options?: { replace?: boolean }) => {
+    // Abort pending route-scoped requests when transitioning routes
+    requestManager.abortScope('route');
+
     const [targetPath, targetSearch] = to.split('?');
     const newSearch = targetSearch ? `?${targetSearch}` : '';
 

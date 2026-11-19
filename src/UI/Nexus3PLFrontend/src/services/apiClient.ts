@@ -77,6 +77,7 @@ class TokenManager {
   private inMemoryRefreshToken: string | null = null;
   private inMemoryFacilityId: string | null = null;
   private authStateListeners: Set<(isAuth: boolean) => void> = new Set();
+  private sessionGeneration: number = 0;
 
   constructor() {
     try {
@@ -84,6 +85,10 @@ class TokenManager {
       this.inMemoryRefreshToken = localStorage.getItem(REFRESH_KEY);
       this.inMemoryFacilityId = localStorage.getItem(FACILITY_KEY);
     } catch (_) {}
+  }
+
+  getSessionGeneration(): number {
+    return this.sessionGeneration;
   }
 
   getAccessToken(): string | null {
@@ -120,6 +125,7 @@ class TokenManager {
   }
 
   clearSession() {
+    this.sessionGeneration++;
     this.inMemoryAccessToken = null;
     this.inMemoryRefreshToken = null;
     this.inMemoryFacilityId = null;
@@ -149,11 +155,26 @@ class TokenManager {
 export const tokenManager = new TokenManager();
 
 /**
- * Single-Flight Refresh Mutex
+ * Single-Flight Refresh Mutex and Late-401 Cache
  */
 let singleFlightRefreshPromise: Promise<string> | null = null;
+let lastRefreshedOldToken: string | null = null;
+let lastRefreshedNewToken: string | null = null;
 
-async function executeSingleFlightRefresh(): Promise<string> {
+export async function executeSingleFlightRefresh(failedToken?: string | null): Promise<string> {
+  const currentGen = tokenManager.getSessionGeneration();
+
+  // Late-401 Deduplication Check:
+  // If the failed token was ALREADY refreshed in the current session, return the new token immediately
+  if (
+    failedToken &&
+    lastRefreshedOldToken === failedToken &&
+    lastRefreshedNewToken &&
+    tokenManager.getAccessToken() === lastRefreshedNewToken
+  ) {
+    return lastRefreshedNewToken;
+  }
+
   if (singleFlightRefreshPromise) {
     return singleFlightRefreshPromise;
   }
@@ -166,6 +187,9 @@ async function executeSingleFlightRefresh(): Promise<string> {
     throw new AuthExpiredError();
   }
 
+  const refreshCtrl = new AbortController();
+  const unregister = requestManager.register('session', refreshCtrl);
+
   singleFlightRefreshPromise = (async () => {
     try {
       const response = await fetch('/api/v1/auth/refresh-token', {
@@ -177,7 +201,13 @@ async function executeSingleFlightRefresh(): Promise<string> {
           accessToken: currentAccessToken,
           refreshToken: currentRefreshToken,
         } as RefreshTokenRequest),
+        signal: refreshCtrl.signal,
       });
+
+      // Verify session generation has NOT changed during network turnaround (e.g. user logged out)
+      if (tokenManager.getSessionGeneration() !== currentGen) {
+        throw new AuthExpiredError();
+      }
 
       if (!response.ok) {
         tokenManager.clearSession();
@@ -185,12 +215,24 @@ async function executeSingleFlightRefresh(): Promise<string> {
       }
 
       const data: AuthResponseDto = await response.json();
+
+      // Check again after body parse:
+      if (tokenManager.getSessionGeneration() !== currentGen) {
+        throw new AuthExpiredError();
+      }
+
+      lastRefreshedOldToken = currentAccessToken;
+      lastRefreshedNewToken = data.accessToken;
+
       tokenManager.setTokens(data.accessToken, data.refreshToken);
       return data.accessToken;
-    } catch (err) {
-      tokenManager.clearSession();
+    } catch (err: any) {
+      if (tokenManager.getSessionGeneration() === currentGen) {
+        tokenManager.clearSession();
+      }
       throw err instanceof ApiError ? err : new AuthExpiredError();
     } finally {
+      unregister();
       singleFlightRefreshPromise = null;
     }
   })();
@@ -207,13 +249,31 @@ export interface RequestOptions extends RequestInit {
  * Core Typed API Client
  */
 export async function apiClient<T>(endpoint: string, options: RequestOptions = {}): Promise<T> {
-  const { scope, skipAuth = false, headers: customHeaders, ...fetchOptions } = options;
+  const { scope: explicitScope, skipAuth = false, headers: customHeaders, ...fetchOptions } = options;
+
+  // Default scope to 'route' for normal operational requests, unless explicitly overridden
+  const scope = explicitScope !== undefined ? explicitScope : 'route';
 
   let cleanupRegistration: (() => void) | undefined;
-  if (scope) {
-    const ctrl = new AbortController();
-    fetchOptions.signal = ctrl.signal;
-    cleanupRegistration = requestManager.register(scope, ctrl);
+  let activeCtrl: AbortController | undefined;
+
+  if (scope && scope !== 'none') {
+    activeCtrl = new AbortController();
+    cleanupRegistration = requestManager.register(scope, activeCtrl);
+
+    // If caller provided an external signal, propagate abort to our active controller
+    if (fetchOptions.signal) {
+      const externalSignal = fetchOptions.signal;
+      if (externalSignal.aborted) {
+        activeCtrl.abort((externalSignal as any).reason);
+      } else {
+        externalSignal.addEventListener('abort', () => activeCtrl?.abort((externalSignal as any).reason), {
+          once: true,
+        });
+      }
+    }
+
+    fetchOptions.signal = activeCtrl.signal;
   }
 
   const buildHeaders = (token: string | null): HeadersInit => {
@@ -241,14 +301,42 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
       headers: buildHeaders(token),
     });
 
+    // Check if aborted immediately after fetch returns
+    if (activeCtrl?.signal.aborted) {
+      throw new DOMException('Request aborted', 'AbortError');
+    }
+
     // Handle 401 Unauthorized via Single-Flight Mutex
-    if (response.status === 401 && !skipAuth && !endpoint.includes('/auth/login') && !endpoint.includes('/auth/refresh-token')) {
-      const newToken = await executeSingleFlightRefresh();
-      // Replay original request with refreshed token
-      response = await fetch(endpoint, {
-        ...fetchOptions,
-        headers: buildHeaders(newToken),
-      });
+    if (
+      response.status === 401 &&
+      !skipAuth &&
+      !endpoint.includes('/auth/login') &&
+      !endpoint.includes('/auth/refresh-token')
+    ) {
+      const currentToken = tokenManager.getAccessToken();
+
+      // Late-401 Check: if the access token in tokenManager already changed while this request was running,
+      // a concurrent refresh has already succeeded! Replay immediately with the new token.
+      if (token && currentToken && currentToken !== token) {
+        response = await fetch(endpoint, {
+          ...fetchOptions,
+          headers: buildHeaders(currentToken),
+        });
+      } else {
+        const newToken = await executeSingleFlightRefresh(token);
+        if (activeCtrl?.signal.aborted) {
+          throw new DOMException('Request aborted', 'AbortError');
+        }
+        // Replay original request with refreshed token
+        response = await fetch(endpoint, {
+          ...fetchOptions,
+          headers: buildHeaders(newToken),
+        });
+      }
+    }
+
+    if (activeCtrl?.signal.aborted) {
+      throw new DOMException('Request aborted', 'AbortError');
     }
 
     if (!response.ok) {
@@ -258,7 +346,11 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
       } catch (_) {
         errorBody = await response.text();
       }
-      throw new ApiError(response.status, errorBody?.detail || errorBody?.message || `HTTP ${response.status}: Request failed`, errorBody);
+      throw new ApiError(
+        response.status,
+        errorBody?.detail || errorBody?.message || `HTTP ${response.status}: Request failed`,
+        errorBody
+      );
     }
 
     if (response.status === 204) {

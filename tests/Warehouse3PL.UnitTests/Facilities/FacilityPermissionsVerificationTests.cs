@@ -2,6 +2,7 @@ using System.Security.Claims;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Features.Facilities.Queries.GetAuthorizedFacilities;
+using Warehouse3PL.Application.Features.Facilities.Queries.GetFacilityById;
 using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Security;
@@ -280,6 +281,189 @@ public class FacilityPermissionsVerificationTests
 
             // Assert
             Assert.Empty(result);
+        }
+    }
+
+    [Fact]
+    public async Task GetAuthorizedFacilities_WhenClientUserLacksTenantId_FailsClosedReturnsEmpty()
+    {
+        // Arrange - Nonstaff caller with facilities:view but NO tenant ID
+        var dbName = Guid.NewGuid().ToString();
+        var clientWithoutTenant = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            TenantId = null, // Missing Tenant
+            UserType = UserType.Client,
+            PermissionsList = [Permissions.Facilities.View]
+        };
+
+        var fac = new Facility { Id = Guid.NewGuid(), FacilityCode = "FAC-CHI", Name = "Chicago Hub", IsActive = true };
+
+        using (var seedContext = TestDbContextFactory.Create(new TestTenantProvider(), clientWithoutTenant, dbName))
+        {
+            seedContext.Facilities.Add(fac);
+            await seedContext.SaveChangesAsync();
+        }
+
+        using (var testContext = TestDbContextFactory.Create(new TestTenantProvider(), clientWithoutTenant, dbName))
+        {
+            var handler = new GetAuthorizedFacilitiesQueryHandler(testContext, clientWithoutTenant);
+
+            // Act
+            var result = await handler.Handle(new GetAuthorizedFacilitiesQuery(), CancellationToken.None);
+
+            // Assert: Must fail closed and return empty, NEVER return facilities to tenant-less caller
+            Assert.Empty(result);
+        }
+    }
+
+    [Fact]
+    public async Task GetAuthorizedFacilities_WhenUnsupportedNonstaffCaller_FailsClosedReturnsEmpty()
+    {
+        // Arrange - Driver or unknown identity without tenant access
+        var dbName = Guid.NewGuid().ToString();
+        var driverUser = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            TenantId = null,
+            UserType = UserType.Driver,
+            PermissionsList = [Permissions.Facilities.View]
+        };
+
+        var fac = new Facility { Id = Guid.NewGuid(), FacilityCode = "FAC-CHI", Name = "Chicago Hub", IsActive = true };
+
+        using (var seedContext = TestDbContextFactory.Create(new TestTenantProvider(), driverUser, dbName))
+        {
+            seedContext.Facilities.Add(fac);
+            await seedContext.SaveChangesAsync();
+        }
+
+        using (var testContext = TestDbContextFactory.Create(new TestTenantProvider(), driverUser, dbName))
+        {
+            var handler = new GetAuthorizedFacilitiesQueryHandler(testContext, driverUser);
+
+            // Act
+            var result = await handler.Handle(new GetAuthorizedFacilitiesQuery(), CancellationToken.None);
+
+            // Assert
+            Assert.Empty(result);
+        }
+    }
+
+    [Fact]
+    public async Task GetFacilityById_ForStaff_ReturnsFacility()
+    {
+        // Arrange
+        var dbName = Guid.NewGuid().ToString();
+        var facilityId = Guid.NewGuid();
+        var staffUser = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            UserType = UserType.Staff,
+            PermissionsList = [Permissions.Facilities.View]
+        };
+
+        var fac = new Facility { Id = facilityId, FacilityCode = "FAC-STAFF", Name = "Staff Hub", IsActive = true };
+
+        using (var seedContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            seedContext.Facilities.Add(fac);
+            await seedContext.SaveChangesAsync();
+        }
+
+        using (var testContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            var handler = new GetFacilityByIdQueryHandler(testContext, staffUser);
+
+            // Act
+            var result = await handler.Handle(new GetFacilityByIdQuery(facilityId), CancellationToken.None);
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.Equal("FAC-STAFF", result.FacilityCode);
+        }
+    }
+
+    [Fact]
+    public async Task GetFacilityById_ForClientUser_WhenAuthorized_ReturnsFacility()
+    {
+        // Arrange
+        var dbName = Guid.NewGuid().ToString();
+        var clientId = Guid.NewGuid();
+        var facilityId = Guid.NewGuid();
+        var clientUser = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            TenantId = clientId,
+            UserType = UserType.Client,
+            PermissionsList = [Permissions.Facilities.View]
+        };
+
+        var fac = new Facility { Id = facilityId, FacilityCode = "FAC-CLIENT", Name = "Client Hub", IsActive = true };
+
+        using (var seedContext = TestDbContextFactory.Create(new TestTenantProvider { TenantId = clientId }, clientUser, dbName))
+        {
+            seedContext.Facilities.Add(fac);
+            seedContext.ClientFacilityAccesses.Add(new ClientFacilityAccess
+            {
+                ClientId = clientId,
+                FacilityId = facilityId,
+                Status = FacilityAccessStatus.Active
+            });
+            await seedContext.SaveChangesAsync();
+        }
+
+        using (var testContext = TestDbContextFactory.Create(new TestTenantProvider { TenantId = clientId }, clientUser, dbName))
+        {
+            var handler = new GetFacilityByIdQueryHandler(testContext, clientUser);
+
+            // Act
+            var result = await handler.Handle(new GetFacilityByIdQuery(facilityId), CancellationToken.None);
+
+            // Assert
+            Assert.NotNull(result);
+            Assert.Equal("FAC-CLIENT", result.FacilityCode);
+        }
+    }
+
+    [Fact]
+    public async Task GetFacilityById_ForClientUser_WhenUnauthorizedOrRevoked_ReturnsNull()
+    {
+        // Arrange
+        var dbName = Guid.NewGuid().ToString();
+        var clientId = Guid.NewGuid();
+        var facilityId = Guid.NewGuid();
+        var clientUser = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            TenantId = clientId,
+            UserType = UserType.Client,
+            PermissionsList = [Permissions.Facilities.View]
+        };
+
+        var fac = new Facility { Id = facilityId, FacilityCode = "FAC-UNAUTH", Name = "Unauthorized Hub", IsActive = true };
+
+        using (var seedContext = TestDbContextFactory.Create(new TestTenantProvider { TenantId = clientId }, clientUser, dbName))
+        {
+            seedContext.Facilities.Add(fac);
+            seedContext.ClientFacilityAccesses.Add(new ClientFacilityAccess
+            {
+                ClientId = clientId,
+                FacilityId = facilityId,
+                Status = FacilityAccessStatus.Revoked // Revoked access
+            });
+            await seedContext.SaveChangesAsync();
+        }
+
+        using (var testContext = TestDbContextFactory.Create(new TestTenantProvider { TenantId = clientId }, clientUser, dbName))
+        {
+            var handler = new GetFacilityByIdQueryHandler(testContext, clientUser);
+
+            // Act
+            var result = await handler.Handle(new GetFacilityByIdQuery(facilityId), CancellationToken.None);
+
+            // Assert
+            Assert.Null(result);
         }
     }
 }

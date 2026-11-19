@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { adminApi } from '../../services/adminApi';
-import { ClientDto } from '../../types/auth';
+import { ClientDto, formatSlaTier, formatClientStatus } from '../../types/auth';
 import { PermissionGuard } from '../../components/auth/PermissionGuard';
 
 export const ClientsPage: React.FC = () => {
@@ -72,28 +72,36 @@ export const ClientsPage: React.FC = () => {
                       </td>
                     </tr>
                   ) : (
-                    clients.map((c) => (
-                      <tr key={c.id}>
-                        <td>
-                          <span className="code-badge">{c.clientCode}</span>
-                        </td>
-                        <td>
-                          <span className="client-company-name">{c.companyName}</span>
-                        </td>
-                        <td>
-                          <span className="account-num">{c.accountNumber}</span>
-                        </td>
-                        <td>
-                          <span className="badge badge-info">{c.serviceLevelAgreementTier || 'Standard'}</span>
-                        </td>
-                        <td>
-                          <span className="currency-pill">{c.billingCurrency || 'USD'}</span>
-                        </td>
-                        <td>
-                          <span className="badge badge-success">{c.status || 'Active'}</span>
-                        </td>
-                      </tr>
-                    ))
+                    clients.map((c) => {
+                      const displayCode = c.accountCode || c.clientCode || c.accountNumber || c.id.slice(0, 8);
+                      const displayAccount = c.accountCode || c.accountNumber || '—';
+                      const slaTierText = formatSlaTier(c.slaTier ?? c.serviceLevelAgreementTier);
+                      const currencyText = c.currency || c.billingCurrency || '—';
+                      const statusText = formatClientStatus(c.status);
+
+                      return (
+                        <tr key={c.id}>
+                          <td>
+                            <span className="code-badge">{displayCode}</span>
+                          </td>
+                          <td>
+                            <span className="client-company-name">{c.companyName}</span>
+                          </td>
+                          <td>
+                            <span className="account-num">{displayAccount}</span>
+                          </td>
+                          <td>
+                            <span className="badge badge-info">{slaTierText}</span>
+                          </td>
+                          <td>
+                            <span className="currency-pill">{currencyText}</span>
+                          </td>
+                          <td>
+                            <span className="badge badge-success">{statusText}</span>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>

@@ -2,8 +2,12 @@ import React, { useEffect, useState } from 'react';
 import { adminApi } from '../../services/adminApi';
 import { UserDto, RoleDto, UserStatus, UserType } from '../../types/auth';
 import { PermissionGuard } from '../../components/auth/PermissionGuard';
+import { useAuth } from '../../context/AuthContext';
 
 export const UsersPage: React.FC = () => {
+  const { hasPermission } = useAuth();
+  const canViewRoles = hasPermission('roles:view') || hasPermission('roles:manage-permissions');
+
   const [users, setUsers] = useState<UserDto[]>([]);
   const [availableRoles, setAvailableRoles] = useState<RoleDto[]>([]);
   const [isLoading, setIsLoading] = useState<boolean>(true);
@@ -18,28 +22,45 @@ export const UsersPage: React.FC = () => {
   const loadData = async () => {
     setIsLoading(true);
     setErrorMessage(null);
+
+    // 1. Load users independently so users:view callers never fail even if roles returns 403
     try {
-      const [usersResult, rolesResult] = await Promise.all([
-        adminApi.getUsers({ pageNumber: 1, pageSize: 50 }),
-        adminApi.getRoles(),
-      ]);
+      const usersResult = await adminApi.getUsers({ pageNumber: 1, pageSize: 50 });
       setUsers(usersResult.items || []);
-      setAvailableRoles(rolesResult || []);
     } catch (err: any) {
       setErrorMessage(err?.message || 'Failed to load users directory');
     } finally {
       setIsLoading(false);
     }
+
+    // 2. Conditionally fetch roles only if caller has role permissions
+    if (canViewRoles) {
+      try {
+        const rolesResult = await adminApi.getRoles();
+        setAvailableRoles(rolesResult || []);
+      } catch (err: any) {
+        console.warn('Roles fetch omitted or failed for current caller:', err);
+      }
+    }
   };
 
   useEffect(() => {
     loadData();
-  }, []);
+  }, [canViewRoles]);
 
-  const openRoleModal = (user: UserDto) => {
+  const openRoleModal = async (user: UserDto) => {
     setEditingUser(user);
     setSelectedRoles([...user.roles]);
     setModalError(null);
+
+    if (availableRoles.length === 0 && canViewRoles) {
+      try {
+        const rolesResult = await adminApi.getRoles();
+        setAvailableRoles(rolesResult || []);
+      } catch (err: any) {
+        setModalError(err?.message || 'Unable to retrieve system roles');
+      }
+    }
   };
 
   const closeRoleModal = () => {
@@ -225,17 +246,18 @@ export const UsersPage: React.FC = () => {
                 <fieldset className="role-checkbox-group">
                   <legend className="sr-only">Available System Roles</legend>
                   {availableRoles.map((role) => {
-                    const isChecked = selectedRoles.includes(role.name);
+                    const roleName = role.roleName || role.name || `Role #${role.id}`;
+                    const isChecked = selectedRoles.includes(roleName);
                     return (
                       <label key={role.id} className="role-checkbox-label">
                         <input
                           type="checkbox"
                           checked={isChecked}
-                          onChange={() => handleToggleRole(role.name)}
+                          onChange={() => handleToggleRole(roleName)}
                           disabled={isSavingRoles}
                         />
                         <div className="role-meta">
-                          <span className="role-name">{role.name}</span>
+                          <span className="role-name">{roleName}</span>
                           <span className="role-desc">{role.description}</span>
                         </div>
                       </label>

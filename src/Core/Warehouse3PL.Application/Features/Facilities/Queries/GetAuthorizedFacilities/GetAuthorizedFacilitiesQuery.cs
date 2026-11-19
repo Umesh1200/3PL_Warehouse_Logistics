@@ -21,12 +21,28 @@ public class GetAuthorizedFacilitiesQueryHandler : IRequestHandler<GetAuthorized
 
     public async Task<List<FacilityDto>> Handle(GetAuthorizedFacilitiesQuery request, CancellationToken cancellationToken)
     {
-        var query = _context.Facilities
-            .AsNoTracking()
-            .Where(f => !f.IsDeleted && f.IsActive);
+        // 1. Explicitly allow authorized staff and superadmin cases (global facility access)
+        if (_currentUser.IsSuperAdmin || _currentUser.IsStaff)
+        {
+            return await _context.Facilities
+                .AsNoTracking()
+                .Where(f => !f.IsDeleted && f.IsActive)
+                .OrderBy(f => f.FacilityCode)
+                .Select(f => new FacilityDto
+                {
+                    Id = f.Id,
+                    FacilityCode = f.FacilityCode,
+                    Name = f.Name,
+                    AddressLine1 = f.AddressLine1,
+                    City = f.City,
+                    Timezone = f.Timezone,
+                    IsActive = f.IsActive
+                })
+                .ToListAsync(cancellationToken);
+        }
 
-        // If client user with specific tenant ID, restrict to facilities authorized for that tenant
-        if (!_currentUser.IsSuperAdmin && !_currentUser.IsStaff && _currentUser.TenantId.HasValue)
+        // 2. Client callers must have a valid TenantId; filter to active authorized facilities for that tenant
+        if (_currentUser.UserType == UserType.Client && _currentUser.TenantId.HasValue)
         {
             var tenantId = _currentUser.TenantId.Value;
             var authorizedFacilityIds = _context.ClientFacilityAccesses
@@ -34,23 +50,24 @@ public class GetAuthorizedFacilitiesQueryHandler : IRequestHandler<GetAuthorized
                 .Where(a => a.ClientId == tenantId && a.Status == FacilityAccessStatus.Active)
                 .Select(a => a.FacilityId);
 
-            query = query.Where(f => authorizedFacilityIds.Contains(f.Id));
+            return await _context.Facilities
+                .AsNoTracking()
+                .Where(f => !f.IsDeleted && f.IsActive && authorizedFacilityIds.Contains(f.Id))
+                .OrderBy(f => f.FacilityCode)
+                .Select(f => new FacilityDto
+                {
+                    Id = f.Id,
+                    FacilityCode = f.FacilityCode,
+                    Name = f.Name,
+                    AddressLine1 = f.AddressLine1,
+                    City = f.City,
+                    Timezone = f.Timezone,
+                    IsActive = f.IsActive
+                })
+                .ToListAsync(cancellationToken);
         }
 
-        var facilities = await query
-            .OrderBy(f => f.FacilityCode)
-            .Select(f => new FacilityDto
-            {
-                Id = f.Id,
-                FacilityCode = f.FacilityCode,
-                Name = f.Name,
-                AddressLine1 = f.AddressLine1,
-                City = f.City,
-                Timezone = f.Timezone,
-                IsActive = f.IsActive
-            })
-            .ToListAsync(cancellationToken);
-
-        return facilities;
+        // 3. Deny missing-tenant callers, unsupported nonstaff identities (e.g. Driver), or unauthenticated callers (Fail closed)
+        return [];
     }
 }

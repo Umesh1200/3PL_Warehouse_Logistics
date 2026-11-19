@@ -74,27 +74,88 @@ export enum AccessLevel {
   Execute = 4,
 }
 
+export function formatAccessLevel(level: AccessLevel | number | string): string {
+  if (level === 1 || level === 'Read') return 'Read';
+  if (level === 2 || level === 'Write') return 'Write';
+  if (level === 3 || level === 'Admin') return 'Admin';
+  if (level === 4 || level === 'Execute') return 'Execute';
+  return String(level);
+}
+
 export interface PermissionAssignmentDto {
   permissionKey: string;
   accessLevel: AccessLevel;
 }
 
+export interface RolePermissionDto {
+  id: number;
+  permissionKey: string;
+  accessLevel: AccessLevel | number;
+}
+
 export interface RoleDto {
   id: number;
-  name: string;
-  description: string;
-  permissions: string[];
+  roleName: string;
+  name?: string; // fallback alias for tests
+  description?: string | null;
+  isSystemRole?: boolean;
+  permissions: RolePermissionDto[];
+}
+
+export enum ClientStatus {
+  Onboarding = 1,
+  Active = 2,
+  Suspended = 3,
+  Terminated = 4,
+}
+
+export function formatClientStatus(status: ClientStatus | number | string | undefined | null): string {
+  if (status === 1 || status === 'Onboarding') return 'Onboarding';
+  if (status === 2 || status === 'Active') return 'Active';
+  if (status === 3 || status === 'Suspended') return 'Suspended';
+  if (status === 4 || status === 'Terminated') return 'Terminated';
+  return status ? String(status) : '';
+}
+
+export enum SlaTier {
+  Standard = 1,
+  Silver = 2,
+  Gold = 3,
+  Platinum = 4,
+}
+
+export function formatSlaTier(tier: SlaTier | number | string | undefined | null): string {
+  if (tier === 1 || tier === 'Standard') return 'Standard';
+  if (tier === 2 || tier === 'Silver') return 'Silver';
+  if (tier === 3 || tier === 'Gold') return 'Gold';
+  if (tier === 4 || tier === 'Platinum') return 'Platinum';
+  return tier ? String(tier) : '';
+}
+
+export interface ClientContactDto {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  phone?: string | null;
+  isBillingContact: boolean;
 }
 
 export interface ClientDto {
   id: string; // Guid
-  clientCode: string;
   companyName: string;
-  accountNumber: string;
-  status: string;
-  billingCurrency: string;
-  serviceLevelAgreementTier: string;
-  createdAtUtc: string;
+  accountCode: string;
+  status: ClientStatus | number;
+  slaTier: SlaTier | number;
+  currency: string;
+  createdAt: string;
+  activeUsersCount?: number;
+  contacts?: ClientContactDto[];
+  // Backwards compatibility properties if needed
+  clientCode?: string;
+  accountNumber?: string;
+  billingCurrency?: string;
+  serviceLevelAgreementTier?: string;
 }
 
 export interface PagedResult<T> {

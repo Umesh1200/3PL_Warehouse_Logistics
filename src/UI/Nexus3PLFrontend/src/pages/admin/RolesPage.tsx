@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { adminApi } from '../../services/adminApi';
-import { RoleDto, AccessLevel, PermissionAssignmentDto } from '../../types/auth';
+import { RoleDto, AccessLevel, PermissionAssignmentDto, formatAccessLevel } from '../../types/auth';
 import { PermissionGuard } from '../../components/auth/PermissionGuard';
 
 export const RolesPage: React.FC = () => {
@@ -39,7 +39,10 @@ export const RolesPage: React.FC = () => {
 
   const openPermissionModal = (role: RoleDto) => {
     setEditingRole(role);
-    setSelectedPermissions([...role.permissions]);
+    const existingPermKeys = (role.permissions || []).map((p: any) =>
+      typeof p === 'string' ? p : p.permissionKey
+    );
+    setSelectedPermissions(existingPermKeys);
     setSelectedAccessLevel(AccessLevel.Read);
     setModalError(null);
   };
@@ -71,7 +74,16 @@ export const RolesPage: React.FC = () => {
       await adminApi.assignRolePermissions(editingRole.id, assignments);
       setRoles((prev) =>
         prev.map((r) =>
-          r.id === editingRole.id ? { ...r, permissions: selectedPermissions } : r
+          r.id === editingRole.id
+            ? {
+                ...r,
+                permissions: assignments.map((a, idx) => ({
+                  id: idx + 1,
+                  permissionKey: a.permissionKey,
+                  accessLevel: a.accessLevel,
+                })),
+              }
+            : r
         )
       );
       closePermissionModal();
@@ -128,42 +140,52 @@ export const RolesPage: React.FC = () => {
                       </td>
                     </tr>
                   ) : (
-                    roles.map((role) => (
-                      <tr key={role.id}>
-                        <td>
-                          <span className="role-title">{role.name}</span>
-                        </td>
-                        <td>
-                          <span className="role-desc-text">{role.description}</span>
-                        </td>
-                        <td>
-                          <span className="badge badge-info">{role.permissions?.length || 0}</span>
-                        </td>
-                        <td>
-                          <div className="perms-chip-wrap">
-                            {role.permissions && role.permissions.length > 0 ? (
-                              role.permissions.map((p) => (
-                                <span key={p} className="perm-chip">
-                                  {p}
-                                </span>
-                              ))
-                            ) : (
-                              <span className="no-perms">No explicit grants</span>
-                            )}
-                          </div>
-                        </td>
-                        <td>
-                          <button
-                            type="button"
-                            className="btn-action"
-                            onClick={() => openPermissionModal(role)}
-                            aria-label={`Configure permissions for ${role.name}`}
-                          >
-                            Configure
-                          </button>
-                        </td>
-                      </tr>
-                    ))
+                    roles.map((role) => {
+                      const displayRoleName = role.roleName || role.name || `Role #${role.id}`;
+                      return (
+                        <tr key={role.id}>
+                          <td>
+                            <span className="role-title">{displayRoleName}</span>
+                          </td>
+                          <td>
+                            <span className="role-desc-text">{role.description}</span>
+                          </td>
+                          <td>
+                            <span className="badge badge-info">{role.permissions?.length || 0}</span>
+                          </td>
+                          <td>
+                            <div className="perms-chip-wrap">
+                              {role.permissions && role.permissions.length > 0 ? (
+                                role.permissions.map((p: any, idx) => {
+                                  const permKey = typeof p === 'string' ? p : p.permissionKey;
+                                  const accessLabel =
+                                    typeof p === 'object' && p.accessLevel
+                                      ? ` (${formatAccessLevel(p.accessLevel)})`
+                                      : '';
+                                  return (
+                                    <span key={`${permKey}-${idx}`} className="perm-chip">
+                                      {permKey}{accessLabel}
+                                    </span>
+                                  );
+                                })
+                              ) : (
+                                <span className="no-perms">No explicit grants</span>
+                              )}
+                            </div>
+                          </td>
+                          <td>
+                            <button
+                              type="button"
+                              className="btn-action"
+                              onClick={() => openPermissionModal(role)}
+                              aria-label={`Configure permissions for ${displayRoleName}`}
+                            >
+                              Configure
+                            </button>
+                          </td>
+                        </tr>
+                      );
+                    })
                   )}
                 </tbody>
               </table>
@@ -177,7 +199,9 @@ export const RolesPage: React.FC = () => {
             <div className="modal-card modal-card-wide" onClick={(e) => e.stopPropagation()}>
               <div className="modal-header">
                 <div>
-                  <h3 className="modal-title">Configure Permissions &mdash; {editingRole.name}</h3>
+                  <h3 className="modal-title">
+                    Configure Permissions &mdash; {editingRole.roleName || editingRole.name}
+                  </h3>
                   <p className="modal-sub">{editingRole.description}</p>
                 </div>
                 <button
