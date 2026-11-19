@@ -151,6 +151,69 @@ public class TransportationAnalyticsApiTests(TransportationApiFixture fixture) :
     }
 
     [Fact]
+    public async Task StaffFacilityHeaderSpoofing_CannotAccessUnauthorizedFacilityViaHeader()
+    {
+        // Restricted staff member assigned to Facility 1 attempts to query with X-Facility-Id: Facility 2
+        using var spoofResponse = await fixture.Get(
+            TransportationApiFixture.Scorecard,
+            actor: "staff",
+            facilityHeader: TransportationApiFixture.Facility2);
+
+        // Header must NOT override trusted assignment; must fail closed with 403 Forbidden
+        Assert.Equal(HttpStatusCode.Forbidden, spoofResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task StaffFacilityHeaderSpoofing_UnassignedStaff_FailsClosedViaHeader()
+    {
+        // Unassigned staff without multi-facility permission attempts to supply X-Facility-Id: Facility 1
+        using var unassignedResponse = await fixture.Get(
+            TransportationApiFixture.Scorecard,
+            actor: "staff-unassigned",
+            facilityHeader: TransportationApiFixture.Facility1);
+
+        // Unassigned staff must fail closed with 403 Forbidden
+        Assert.Equal(HttpStatusCode.Forbidden, unassignedResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task StaffFacilityHeader_MatchingAssignedFacility_Succeeds()
+    {
+        // Restricted staff member assigned to Facility 1 queries with matching X-Facility-Id: Facility 1
+        using var matchResponse = await fixture.Get(
+            TransportationApiFixture.Scorecard,
+            actor: "staff",
+            facilityHeader: TransportationApiFixture.Facility1);
+
+        Assert.Equal(HttpStatusCode.OK, matchResponse.StatusCode);
+    }
+
+    [Fact]
+    public async Task ClientFacilityHeaderSpoofing_UnauthorizedFacility_FailsClosedViaHeader()
+    {
+        // Client caller attempts to supply X-Facility-Id: Facility 3 (revoked/unauthorized facility)
+        using var clientSpoof = await fixture.Get(
+            TransportationApiFixture.Scorecard,
+            actor: "client",
+            facilityHeader: TransportationApiFixture.Facility3);
+
+        // Must reject spoofing with 403 Forbidden
+        Assert.Equal(HttpStatusCode.Forbidden, clientSpoof.StatusCode);
+    }
+
+    [Fact]
+    public async Task StaffCrossFacility_CanUseRequestedFacilityHeader()
+    {
+        // Staff member with MultiFacilityView queries Facility 2 using X-Facility-Id header
+        using var crossResponse = await fixture.Get(
+            TransportationApiFixture.Scorecard,
+            actor: "staff-cross",
+            facilityHeader: TransportationApiFixture.Facility2);
+
+        Assert.Equal(HttpStatusCode.OK, crossResponse.StatusCode);
+    }
+
+    [Fact]
     public async Task FinancialAndClaimsPermissions_AreSeparateFromOperationalView()
     {
         using var finance = await fixture.Get(TransportationApiFixture.Carrier("freight/variance"), "client-view");
@@ -369,11 +432,12 @@ public sealed class TransportationApiFixture : IAsyncLifetime
         scope.ServiceProvider.GetRequiredService<TransportationReadOnlyGuard>().ReadOnly = true;
     }
 
-    public Task<HttpResponseMessage> Get(string path, string? actor = "client", Guid? tenantHeader = null)
+    public Task<HttpResponseMessage> Get(string path, string? actor = "client", Guid? tenantHeader = null, Guid? facilityHeader = null)
     {
         var request = new HttpRequestMessage(HttpMethod.Get, path.StartsWith("/") ? path : "/api/v1/analytics/transportation/" + path);
         if (actor != null) request.Headers.Add("X-Test-Actor", actor);
         if (tenantHeader.HasValue) request.Headers.Add("X-Tenant-Id", tenantHeader.ToString());
+        if (facilityHeader.HasValue) request.Headers.Add("X-Facility-Id", facilityHeader.ToString());
         return _http.SendAsync(request);
     }
 
@@ -447,6 +511,7 @@ public sealed class TransportationTestAuthentication(IOptionsMonitor<Authenticat
         if (actor == "client-profit") claims.Add(new("permissions", Permissions.Analytics.ProfitabilityView));
         if (actor != "nopermission")
         {
+            claims.Add(new("permissions", Permissions.Facilities.View));
             if (actor != "client-finance") claims.Add(new("permissions", Permissions.Analytics.TransportationView));
             if (actor != "client-view")
             {

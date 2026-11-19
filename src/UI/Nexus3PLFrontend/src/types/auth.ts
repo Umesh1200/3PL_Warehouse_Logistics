@@ -4,15 +4,35 @@
  */
 
 export enum UserType {
-  Staff = 1,
-  ClientUser = 2,
-  Driver = 3,
+  Staff = 'Staff',
+  Client = 'Client',
+  Driver = 'Driver',
 }
 
 export enum UserStatus {
-  Active = 1,
-  Suspended = 2,
-  PendingActivation = 3,
+  Active = 'Active',
+  Inactive = 'Inactive',
+  Locked = 'Locked',
+  PendingActivation = 'PendingActivation',
+}
+
+export function normalizeUserType(val: any): UserType {
+  if (!val) return UserType.Staff;
+  const str = String(val).trim().toLowerCase();
+  if (val === 1 || str === 'staff') return UserType.Staff;
+  if (val === 2 || str === 'client' || str === 'clientuser') return UserType.Client;
+  if (val === 3 || str === 'driver') return UserType.Driver;
+  return UserType.Staff;
+}
+
+export function normalizeUserStatus(val: any): UserStatus {
+  if (!val) return UserStatus.Active;
+  const str = String(val).trim().toLowerCase();
+  if (val === 1 || str === 'active') return UserStatus.Active;
+  if (val === 2 || str === 'inactive' || str === 'suspended') return UserStatus.Inactive;
+  if (val === 3 || str === 'locked') return UserStatus.Locked;
+  if (val === 4 || str === 'pendingactivation' || str === 'pending') return UserStatus.PendingActivation;
+  return UserStatus.Active;
 }
 
 export interface UserDto {

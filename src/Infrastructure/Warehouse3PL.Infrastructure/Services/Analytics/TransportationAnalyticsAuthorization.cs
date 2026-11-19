@@ -14,7 +14,8 @@ public sealed class TransportationAnalyticsAuthorization(IApplicationDbContext d
     public async Task<TransportationQueryScope> ResolveAsync(Guid? clientId, Guid? facilityId, CancellationToken ct = default)
     {
         if (!user.IsAuthenticated) throw new UnauthorizedException("Authentication is required for transportation analytics.");
-        if (user.IsSuperAdmin) return new(clientId, facilityId, null);
+        var requestedFacility = facilityId ?? user.RequestedFacilityId;
+        if (user.IsSuperAdmin) return new(clientId, requestedFacility, null);
         if (user.UserType == UserType.Client)
         {
             // A request header/provider value is never a substitute for authenticated tenant identity.
@@ -26,16 +27,16 @@ public sealed class TransportationAnalyticsAuthorization(IApplicationDbContext d
                 .Select(a => a.FacilityId).ToListAsync(ct);
             if (user.FacilityId is Guid assigned && assigned != Guid.Empty)
                 facilities = facilities.Where(f => f == assigned).ToList();
-            if (facilities.Count == 0 || (facilityId.HasValue && !facilities.Contains(facilityId.Value)))
+            if (facilities.Count == 0 || (requestedFacility.HasValue && !facilities.Contains(requestedFacility.Value)))
                 throw new ForbiddenException("Client has no access to the requested facility scope.");
-            var effectiveFacility = facilityId ?? (user.FacilityId != Guid.Empty ? user.FacilityId : null);
+            var effectiveFacility = requestedFacility ?? (user.FacilityId != Guid.Empty ? user.FacilityId : null);
             return new(tenantId, effectiveFacility, facilities);
         }
         if (user.UserType != UserType.Staff) throw new ForbiddenException("Transportation analytics access is forbidden.");
         if (user.HasPermission(Permissions.Analytics.MultiFacilityView) || user.HasPermission("Analytics:CrossFacility") ||
             user.HasPermission("Shipments:CrossFacility") || user.HasPermission("Financial:CrossFacility") || user.HasPermission("Financials:CrossFacility"))
-            return new(clientId, facilityId, null);
-        if (user.FacilityId is not Guid staffFacility || staffFacility == Guid.Empty || (facilityId.HasValue && facilityId != staffFacility))
+            return new(clientId, requestedFacility, null);
+        if (user.FacilityId is not Guid staffFacility || staffFacility == Guid.Empty || (requestedFacility.HasValue && requestedFacility != staffFacility))
             throw new ForbiddenException("Staff must use their assigned facility or have multi-facility permission.");
         return new(clientId, staffFacility, null);
     }

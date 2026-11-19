@@ -12,6 +12,7 @@ export const RolesPage: React.FC = () => {
   // Manage Permissions Modal State
   const [editingRole, setEditingRole] = useState<RoleDto | null>(null);
   const [selectedPermissions, setSelectedPermissions] = useState<string[]>([]);
+  const [permissionLevels, setPermissionLevels] = useState<Record<string, AccessLevel>>({});
   const [selectedAccessLevel, setSelectedAccessLevel] = useState<AccessLevel>(AccessLevel.Read);
   const [isSaving, setIsSaving] = useState<boolean>(false);
   const [modalError, setModalError] = useState<string | null>(null);
@@ -39,10 +40,18 @@ export const RolesPage: React.FC = () => {
 
   const openPermissionModal = (role: RoleDto) => {
     setEditingRole(role);
-    const existingPermKeys = (role.permissions || []).map((p: any) =>
-      typeof p === 'string' ? p : p.permissionKey
-    );
+    const existingPermKeys: string[] = [];
+    const initialLevels: Record<string, AccessLevel> = {};
+    (role.permissions || []).forEach((p: any) => {
+      const key = typeof p === 'string' ? p : p?.permissionKey;
+      const level = typeof p === 'object' && p?.accessLevel ? p.accessLevel : AccessLevel.Read;
+      if (key) {
+        existingPermKeys.push(key);
+        initialLevels[key] = level;
+      }
+    });
     setSelectedPermissions(existingPermKeys);
+    setPermissionLevels(initialLevels);
     setSelectedAccessLevel(AccessLevel.Read);
     setModalError(null);
   };
@@ -50,13 +59,29 @@ export const RolesPage: React.FC = () => {
   const closePermissionModal = () => {
     setEditingRole(null);
     setSelectedPermissions([]);
+    setPermissionLevels({});
     setModalError(null);
   };
 
   const togglePermission = (perm: string) => {
-    setSelectedPermissions((prev) =>
-      prev.includes(perm) ? prev.filter((p) => p !== perm) : [...prev, perm]
-    );
+    setSelectedPermissions((prev) => {
+      if (prev.includes(perm)) {
+        return prev.filter((p) => p !== perm);
+      } else {
+        setPermissionLevels((lvl) => ({
+          ...lvl,
+          [perm]: lvl[perm] ?? selectedAccessLevel,
+        }));
+        return [...prev, perm];
+      }
+    });
+  };
+
+  const updatePermissionLevel = (perm: string, level: AccessLevel) => {
+    setPermissionLevels((prev) => ({
+      ...prev,
+      [perm]: level,
+    }));
   };
 
   const handleSavePermissions = async () => {
@@ -64,10 +89,10 @@ export const RolesPage: React.FC = () => {
     setIsSaving(true);
     setModalError(null);
 
-    // Map selected permissions to PermissionAssignmentDto with AccessLevel
+    // Map selected permissions to PermissionAssignmentDto preserving their exact accessLevel
     const assignments: PermissionAssignmentDto[] = selectedPermissions.map((p) => ({
       permissionKey: p,
-      accessLevel: selectedAccessLevel,
+      accessLevel: permissionLevels[p] ?? selectedAccessLevel ?? AccessLevel.Read,
     }));
 
     try {
@@ -239,16 +264,35 @@ export const RolesPage: React.FC = () => {
                 <div className="perms-grid">
                   {allPermissions.map((perm) => {
                     const isChecked = selectedPermissions.includes(perm);
+                    const currentLevel = permissionLevels[perm] ?? selectedAccessLevel;
                     return (
-                      <label key={perm} className={`perm-card-check ${isChecked ? 'selected' : ''}`}>
-                        <input
-                          type="checkbox"
-                          checked={isChecked}
-                          onChange={() => togglePermission(perm)}
-                          disabled={isSaving}
-                        />
-                        <span className="perm-key-text">{perm}</span>
-                      </label>
+                      <div key={perm} className={`perm-card-check ${isChecked ? 'selected' : ''}`}>
+                        <label className="perm-card-label">
+                          <input
+                            type="checkbox"
+                            checked={isChecked}
+                            onChange={() => togglePermission(perm)}
+                            disabled={isSaving}
+                          />
+                          <span className="perm-key-text">{perm}</span>
+                        </label>
+                        {isChecked && (
+                          <div className="perm-level-inline" onClick={(e) => e.stopPropagation()}>
+                            <select
+                              aria-label={`Access level for ${perm}`}
+                              className="form-control access-level-mini-select"
+                              value={currentLevel}
+                              onChange={(e) => updatePermissionLevel(perm, Number(e.target.value) as AccessLevel)}
+                              disabled={isSaving}
+                            >
+                              <option value={AccessLevel.Read}>Read (1)</option>
+                              <option value={AccessLevel.Write}>Write (2)</option>
+                              <option value={AccessLevel.Admin}>Admin (3)</option>
+                              <option value={AccessLevel.Execute}>Execute (4)</option>
+                            </select>
+                          </div>
+                        )}
+                      </div>
                     );
                   })}
                 </div>
@@ -345,12 +389,34 @@ export const RolesPage: React.FC = () => {
           .perm-card-check {
             display: flex;
             align-items: center;
+            justify-content: space-between;
             gap: 8px;
             padding: 8px 10px;
             border: 1px solid var(--border-subtle);
             border-radius: var(--radius-xs);
             cursor: pointer;
             transition: all var(--transition-fast);
+          }
+          .perm-card-label {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            cursor: pointer;
+            flex: 1;
+            margin: 0;
+          }
+          .perm-level-inline {
+            display: flex;
+            align-items: center;
+          }
+          .access-level-mini-select {
+            height: 26px;
+            padding: 2px 6px;
+            font-size: 11.5px;
+            width: auto;
+            border-radius: 4px;
+            border: 1px solid var(--border-subtle);
+            background: #fff;
           }
           .perm-card-check:hover {
             background: #f8fafc;

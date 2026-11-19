@@ -61,7 +61,7 @@ internal static class ProfitabilityBenchmark
     private sealed class BenchmarkIdentity:ICurrentUserContext
     {
         public Guid? Tenant;public Guid? Assigned;
-        public Guid? UserId=>null;public string? Email=>null;public Guid? TenantId=>Tenant;public Guid? FacilityId=>Assigned;
+        public Guid? UserId=>null;public string? Email=>null;public Guid? TenantId=>Tenant;public Guid? FacilityId=>Assigned;public Guid? RequestedFacilityId=>null;
         public Warehouse3PL.Domain.Enums.UserType? UserType=>Tenant.HasValue?Warehouse3PL.Domain.Enums.UserType.Client:Warehouse3PL.Domain.Enums.UserType.Staff;
         public IReadOnlyList<string> Roles=>Tenant.HasValue?[]:["SuperAdmin"];public IReadOnlyList<string> Permissions=>[];
         public bool IsAuthenticated=>true;public bool IsStaff=>!Tenant.HasValue;public bool IsSuperAdmin=>!Tenant.HasValue;

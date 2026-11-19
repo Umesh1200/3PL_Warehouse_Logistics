@@ -43,6 +43,7 @@ public class ApplicationDbContextFactory : IDesignTimeDbContextFactory<Applicati
         public string? Email => null;
         public Guid? TenantId => null;
         public Guid? FacilityId => null;
+        public Guid? RequestedFacilityId => null;
         public UserType? UserType => Warehouse3PL.Domain.Enums.UserType.Staff;
         public IReadOnlyList<string> Roles => Array.Empty<string>();
         public IReadOnlyList<string> Permissions => Array.Empty<string>();

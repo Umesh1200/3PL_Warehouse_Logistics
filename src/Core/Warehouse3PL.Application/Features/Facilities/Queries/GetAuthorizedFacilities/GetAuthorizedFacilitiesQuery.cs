@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Application.Features.Facilities.Queries.GetAuthorizedFacilities;
@@ -21,8 +22,13 @@ public class GetAuthorizedFacilitiesQueryHandler : IRequestHandler<GetAuthorized
 
     public async Task<List<FacilityDto>> Handle(GetAuthorizedFacilitiesQuery request, CancellationToken cancellationToken)
     {
-        // 1. Explicitly allow authorized staff and superadmin cases (global facility access)
-        if (_currentUser.IsSuperAdmin || _currentUser.IsStaff)
+        // 1. Explicitly allow SuperAdmin or staff callers with multi-facility view (global facility access)
+        if (_currentUser.IsSuperAdmin ||
+            _currentUser.HasPermission(Permissions.Analytics.MultiFacilityView) ||
+            _currentUser.HasPermission("Analytics:CrossFacility") ||
+            _currentUser.HasPermission("Shipments:CrossFacility") ||
+            _currentUser.HasPermission("Financial:CrossFacility") ||
+            _currentUser.HasPermission("Financials:CrossFacility"))
         {
             return await _context.Facilities
                 .AsNoTracking()
@@ -41,7 +47,34 @@ public class GetAuthorizedFacilitiesQueryHandler : IRequestHandler<GetAuthorized
                 .ToListAsync(cancellationToken);
         }
 
-        // 2. Client callers must have a valid TenantId; filter to active authorized facilities for that tenant
+        // 2. Staff without cross-facility permissions: confined to assigned facility if present
+        if (_currentUser.IsStaff)
+        {
+            if (_currentUser.FacilityId.HasValue && _currentUser.FacilityId.Value != Guid.Empty)
+            {
+                var assignedId = _currentUser.FacilityId.Value;
+                return await _context.Facilities
+                    .AsNoTracking()
+                    .Where(f => !f.IsDeleted && f.IsActive && f.Id == assignedId)
+                    .OrderBy(f => f.FacilityCode)
+                    .Select(f => new FacilityDto
+                    {
+                        Id = f.Id,
+                        FacilityCode = f.FacilityCode,
+                        Name = f.Name,
+                        AddressLine1 = f.AddressLine1,
+                        City = f.City,
+                        Timezone = f.Timezone,
+                        IsActive = f.IsActive
+                    })
+                    .ToListAsync(cancellationToken);
+            }
+
+            // Unassigned staff without cross-facility permissions fail closed
+            return [];
+        }
+
+        // 3. Client callers must have a valid TenantId; filter to active authorized facilities for that tenant
         if (_currentUser.UserType == UserType.Client && _currentUser.TenantId.HasValue)
         {
             var tenantId = _currentUser.TenantId.Value;
@@ -49,6 +82,12 @@ public class GetAuthorizedFacilitiesQueryHandler : IRequestHandler<GetAuthorized
                 .AsNoTracking()
                 .Where(a => a.ClientId == tenantId && a.Status == FacilityAccessStatus.Active)
                 .Select(a => a.FacilityId);
+
+            if (_currentUser.FacilityId.HasValue && _currentUser.FacilityId.Value != Guid.Empty)
+            {
+                var assignedId = _currentUser.FacilityId.Value;
+                authorizedFacilityIds = authorizedFacilityIds.Where(id => id == assignedId);
+            }
 
             return await _context.Facilities
                 .AsNoTracking()
@@ -67,7 +106,7 @@ public class GetAuthorizedFacilitiesQueryHandler : IRequestHandler<GetAuthorized
                 .ToListAsync(cancellationToken);
         }
 
-        // 3. Deny missing-tenant callers, unsupported nonstaff identities (e.g. Driver), or unauthenticated callers (Fail closed)
+        // 4. Deny missing-tenant callers, unsupported nonstaff identities (e.g. Driver), or unauthenticated callers (Fail closed)
         return [];
     }
 }

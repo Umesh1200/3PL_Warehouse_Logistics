@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { adminApi } from '../../services/adminApi';
-import { UserDto, RoleDto, UserStatus, UserType } from '../../types/auth';
+import { UserDto, RoleDto, UserStatus, UserType, normalizeUserType, normalizeUserStatus } from '../../types/auth';
 import { PermissionGuard } from '../../components/auth/PermissionGuard';
 import { useAuth } from '../../context/AuthContext';
 
@@ -93,11 +93,12 @@ export const UsersPage: React.FC = () => {
     }
   };
 
-  const getUserTypeLabel = (type: UserType) => {
-    switch (type) {
+  const getUserTypeLabel = (type: any) => {
+    const t = normalizeUserType(type);
+    switch (t) {
       case UserType.Staff:
         return 'Staff';
-      case UserType.ClientUser:
+      case UserType.Client:
         return 'Client User';
       case UserType.Driver:
         return 'Driver';
@@ -106,12 +107,15 @@ export const UsersPage: React.FC = () => {
     }
   };
 
-  const getUserStatusBadge = (status: UserStatus) => {
-    switch (status) {
+  const getUserStatusBadge = (status: any) => {
+    const s = normalizeUserStatus(status);
+    switch (s) {
       case UserStatus.Active:
         return <span className="badge badge-success">Active</span>;
-      case UserStatus.Suspended:
-        return <span className="badge badge-danger">Suspended</span>;
+      case UserStatus.Inactive:
+        return <span className="badge badge-secondary">Inactive</span>;
+      case UserStatus.Locked:
+        return <span className="badge badge-danger">Locked</span>;
       case UserStatus.PendingActivation:
         return <span className="badge badge-warning">Pending</span>;
       default:

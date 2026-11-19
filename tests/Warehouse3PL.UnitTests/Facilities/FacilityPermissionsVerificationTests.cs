@@ -165,7 +165,7 @@ public class FacilityPermissionsVerificationTests
     }
 
     [Fact]
-    public async Task GetAuthorizedFacilities_ForStaff_ReturnsAllActiveFacilities()
+    public async Task GetAuthorizedFacilities_ForStaff_WithMultiFacilityView_ReturnsAllActiveFacilities()
     {
         // Arrange
         var dbName = Guid.NewGuid().ToString();
@@ -173,7 +173,7 @@ public class FacilityPermissionsVerificationTests
         {
             UserId = Guid.NewGuid(),
             UserType = UserType.Staff,
-            PermissionsList = [Permissions.Facilities.View]
+            PermissionsList = [Permissions.Facilities.View, Permissions.Analytics.MultiFacilityView]
         };
 
         var fac1 = new Facility { Id = Guid.NewGuid(), FacilityCode = "FAC-CHI", Name = "Chicago Hub", IsActive = true };
@@ -198,6 +198,75 @@ public class FacilityPermissionsVerificationTests
             Assert.Contains(result, f => f.FacilityCode == "FAC-CHI");
             Assert.Contains(result, f => f.FacilityCode == "FAC-DAL");
             Assert.DoesNotContain(result, f => f.FacilityCode == "FAC-INACT");
+        }
+    }
+
+    [Fact]
+    public async Task GetAuthorizedFacilities_ForStaff_AssignedToSpecificFacility_ReturnsOnlyAssignedFacility()
+    {
+        // Arrange
+        var dbName = Guid.NewGuid().ToString();
+        var fac1 = new Facility { Id = Guid.NewGuid(), FacilityCode = "FAC-CHI", Name = "Chicago Hub", IsActive = true };
+        var fac2 = new Facility { Id = Guid.NewGuid(), FacilityCode = "FAC-DAL", Name = "Dallas Hub", IsActive = true };
+
+        var staffUser = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            UserType = UserType.Staff,
+            FacilityId = fac1.Id, // Assigned to CHI only
+            PermissionsList = [Permissions.Facilities.View] // No cross-facility permission
+        };
+
+        using (var seedContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            seedContext.Facilities.AddRange(fac1, fac2);
+            await seedContext.SaveChangesAsync();
+        }
+
+        using (var testContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            var handler = new GetAuthorizedFacilitiesQueryHandler(testContext, staffUser);
+
+            // Act
+            var result = await handler.Handle(new GetAuthorizedFacilitiesQuery(), CancellationToken.None);
+
+            // Assert
+            Assert.Single(result);
+            Assert.Equal("FAC-CHI", result[0].FacilityCode);
+            Assert.DoesNotContain(result, f => f.FacilityCode == "FAC-DAL");
+        }
+    }
+
+    [Fact]
+    public async Task GetAuthorizedFacilities_ForStaff_UnassignedWithoutCrossFacility_FailsClosedReturnsEmpty()
+    {
+        // Arrange
+        var dbName = Guid.NewGuid().ToString();
+        var fac1 = new Facility { Id = Guid.NewGuid(), FacilityCode = "FAC-CHI", Name = "Chicago Hub", IsActive = true };
+
+        var staffUser = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            UserType = UserType.Staff,
+            FacilityId = null, // Unassigned
+            PermissionsList = [Permissions.Facilities.View] // No cross-facility permission
+        };
+
+        using (var seedContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            seedContext.Facilities.Add(fac1);
+            await seedContext.SaveChangesAsync();
+        }
+
+        using (var testContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            var handler = new GetAuthorizedFacilitiesQueryHandler(testContext, staffUser);
+
+            // Act
+            var result = await handler.Handle(new GetAuthorizedFacilitiesQuery(), CancellationToken.None);
+
+            // Assert: Must fail closed
+            Assert.Empty(result);
         }
     }
 
@@ -351,7 +420,7 @@ public class FacilityPermissionsVerificationTests
     }
 
     [Fact]
-    public async Task GetFacilityById_ForStaff_ReturnsFacility()
+    public async Task GetFacilityById_ForStaff_WhenAssigned_ReturnsFacility()
     {
         // Arrange
         var dbName = Guid.NewGuid().ToString();
@@ -360,6 +429,7 @@ public class FacilityPermissionsVerificationTests
         {
             UserId = Guid.NewGuid(),
             UserType = UserType.Staff,
+            FacilityId = facilityId,
             PermissionsList = [Permissions.Facilities.View]
         };
 
@@ -381,6 +451,110 @@ public class FacilityPermissionsVerificationTests
             // Assert
             Assert.NotNull(result);
             Assert.Equal("FAC-STAFF", result.FacilityCode);
+        }
+    }
+
+    [Fact]
+    public async Task GetFacilityById_ForStaff_WhenAssignedToDifferentFacility_ReturnsNull()
+    {
+        // Arrange
+        var dbName = Guid.NewGuid().ToString();
+        var assignedFacilityId = Guid.NewGuid();
+        var requestedFacilityId = Guid.NewGuid();
+        var staffUser = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            UserType = UserType.Staff,
+            FacilityId = assignedFacilityId,
+            PermissionsList = [Permissions.Facilities.View] // No cross-facility permission
+        };
+
+        var fac = new Facility { Id = requestedFacilityId, FacilityCode = "FAC-OTHER", Name = "Other Hub", IsActive = true };
+
+        using (var seedContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            seedContext.Facilities.Add(fac);
+            await seedContext.SaveChangesAsync();
+        }
+
+        using (var testContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            var handler = new GetFacilityByIdQueryHandler(testContext, staffUser);
+
+            // Act: Staff attempts to query facility other than assigned
+            var result = await handler.Handle(new GetFacilityByIdQuery(requestedFacilityId), CancellationToken.None);
+
+            // Assert: Must fail closed (null)
+            Assert.Null(result);
+        }
+    }
+
+    [Fact]
+    public async Task GetFacilityById_ForStaff_WhenUnassignedWithoutCrossFacility_ReturnsNull()
+    {
+        // Arrange
+        var dbName = Guid.NewGuid().ToString();
+        var facilityId = Guid.NewGuid();
+        var staffUser = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            UserType = UserType.Staff,
+            FacilityId = null, // Unassigned
+            PermissionsList = [Permissions.Facilities.View]
+        };
+
+        var fac = new Facility { Id = facilityId, FacilityCode = "FAC-STAFF", Name = "Staff Hub", IsActive = true };
+
+        using (var seedContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            seedContext.Facilities.Add(fac);
+            await seedContext.SaveChangesAsync();
+        }
+
+        using (var testContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            var handler = new GetFacilityByIdQueryHandler(testContext, staffUser);
+
+            // Act
+            var result = await handler.Handle(new GetFacilityByIdQuery(facilityId), CancellationToken.None);
+
+            // Assert: Unassigned staff fails closed
+            Assert.Null(result);
+        }
+    }
+
+    [Fact]
+    public async Task GetFacilityById_ForStaff_WhenMultiFacilityView_ReturnsFacility()
+    {
+        // Arrange
+        var dbName = Guid.NewGuid().ToString();
+        var facilityId = Guid.NewGuid();
+        var staffUser = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            UserType = UserType.Staff,
+            FacilityId = null, // Unassigned or different
+            PermissionsList = [Permissions.Facilities.View, Permissions.Analytics.MultiFacilityView]
+        };
+
+        var fac = new Facility { Id = facilityId, FacilityCode = "FAC-MULTI", Name = "Multi Hub", IsActive = true };
+
+        using (var seedContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            seedContext.Facilities.Add(fac);
+            await seedContext.SaveChangesAsync();
+        }
+
+        using (var testContext = TestDbContextFactory.Create(new TestTenantProvider(), staffUser, dbName))
+        {
+            var handler = new GetFacilityByIdQueryHandler(testContext, staffUser);
+
+            // Act
+            var result = await handler.Handle(new GetFacilityByIdQuery(facilityId), CancellationToken.None);
+
+            // Assert: Permitted by multi-facility permission
+            Assert.NotNull(result);
+            Assert.Equal("FAC-MULTI", result.FacilityCode);
         }
     }
 

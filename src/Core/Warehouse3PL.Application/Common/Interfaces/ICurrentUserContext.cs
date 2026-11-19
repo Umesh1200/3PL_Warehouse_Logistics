@@ -8,6 +8,7 @@ public interface ICurrentUserContext
     string? Email { get; }
     Guid? TenantId { get; }
     Guid? FacilityId { get; }
+    Guid? RequestedFacilityId { get; }
     UserType? UserType { get; }
     IReadOnlyList<string> Roles { get; }
     IReadOnlyList<string> Permissions { get; }

@@ -10,9 +10,10 @@ import { Header } from '../components/layout/Header';
 import { RolesPage } from '../pages/admin/RolesPage';
 import { UsersPage } from '../pages/admin/UsersPage';
 import { ClientsPage } from '../pages/admin/ClientsPage';
+import { ProtectedRoute } from '../components/auth/ProtectedRoute';
 import { tokenManager, requestManager, apiClient, executeSingleFlightRefresh, AuthExpiredError } from '../services/apiClient';
 import { adminApi } from '../services/adminApi';
-import { AccessLevel, UserType, UserStatus, SlaTier, ClientStatus } from '../types/auth';
+import { AccessLevel, UserType, UserStatus, SlaTier, ClientStatus, normalizeUserType, normalizeUserStatus } from '../types/auth';
 
 describe('Phase 7.2: Authentication, Session Management & RBAC Shell Tests', () => {
   beforeEach(() => {
@@ -599,5 +600,177 @@ describe('Phase 7.2: Authentication, Session Management & RBAC Shell Tests', () 
       expect(screen.getByText('EUR')).toBeDefined();
       expect(screen.getByText('Active')).toBeDefined();
     });
+  });
+
+  it('expired session does not hang: settles loading state and redirects to login', async () => {
+    // Stored tokens are present initially
+    tokenManager.setTokens('expired-tok', 'invalid-ref');
+
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url.endsWith('/api/v1/auth/me')) {
+        // Return 401 Unauthorized
+        return { ok: false, status: 401, json: async () => ({ detail: 'Token expired' }) } as Response;
+      }
+      if (url.endsWith('/api/v1/auth/refresh-token')) {
+        // Refresh token fails as well
+        return { ok: false, status: 401, json: async () => ({ detail: 'Refresh expired' }) } as Response;
+      }
+      return { ok: false, status: 404 } as Response;
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    render(
+      <RouterProvider initialPath="/app/dashboard">
+        <AuthProvider>
+          <ProtectedRoute>
+            <div>Sensitive Enterprise Dashboard</div>
+          </ProtectedRoute>
+        </AuthProvider>
+      </RouterProvider>
+    );
+
+    // Assert that loading state settles and user is transitioned to /login (no indefinite hang)
+    await waitFor(() => {
+      expect(screen.queryByText('Verifying enterprise security credentials...')).toBeNull();
+      expect(screen.queryByText('Sensitive Enterprise Dashboard')).toBeNull();
+    });
+  });
+
+  it('saving an existing role without changes preserves each original per-permission access level', async () => {
+    const mockRoles = [
+      {
+        id: 1,
+        roleName: 'CustomManager',
+        description: 'Multi-level operational role',
+        permissions: [
+          { id: 1, permissionKey: 'users:view', accessLevel: AccessLevel.Admin }, // 3
+          { id: 2, permissionKey: 'inventory:view', accessLevel: AccessLevel.Read }, // 1
+        ],
+      },
+    ];
+    const mockAllPerms = ['users:view', 'inventory:view', 'reports:view'];
+
+    let capturedPayload: any = null;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.endsWith('/api/v1/roles/permissions')) {
+        return { ok: true, status: 200, json: async () => mockAllPerms, text: async () => '' } as Response;
+      }
+      if (url.endsWith('/api/v1/roles')) {
+        return { ok: true, status: 200, json: async () => mockRoles, text: async () => '' } as Response;
+      }
+      if (url.includes('/api/v1/roles/1/permissions') && init?.method === 'POST') {
+        capturedPayload = JSON.parse(init.body as string);
+        return { ok: true, status: 200, json: async () => ({}), text: async () => '' } as Response;
+      }
+      if (url.endsWith('/api/v1/auth/me')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            userId: 'u-admin',
+            roles: ['SuperAdmin'],
+            permissions: ['roles:view', 'roles:manage-permissions'],
+          }),
+          text: async () => '',
+        } as Response;
+      }
+      return { ok: false, status: 404, json: async () => ({}), text: async () => '' } as Response;
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    tokenManager.setTokens('tok', 'ref');
+
+    render(
+      <RouterProvider initialPath="/app/admin/roles">
+        <AuthProvider>
+          <RolesPage />
+        </AuthProvider>
+      </RouterProvider>
+    );
+
+    // Wait for roles page to load
+    await waitFor(() => {
+      expect(screen.getByText('CustomManager')).toBeDefined();
+    });
+
+    // Open configure permissions modal
+    const configureBtn = screen.getByRole('button', { name: /configure/i });
+    fireEvent.click(configureBtn);
+
+    // Modal opens, showing existing permissions
+    await waitFor(() => {
+      expect(screen.getByText(/Configure Permissions/i)).toBeDefined();
+    });
+
+    // Save without changing permissions (no-op save)
+    const saveBtn = screen.getByRole('button', { name: /save.*grant/i });
+    fireEvent.click(saveBtn);
+
+    await waitFor(() => {
+      expect(capturedPayload).not.toBeNull();
+    });
+
+    // Assert that users:view preserved AccessLevel.Admin (3) and inventory:view preserved AccessLevel.Read (1)
+    const usersPerm = capturedPayload.find((p: any) => p.permissionKey === 'users:view');
+    const invPerm = capturedPayload.find((p: any) => p.permissionKey === 'inventory:view');
+    expect(usersPerm).toBeDefined();
+    expect(usersPerm.accessLevel).toBe(AccessLevel.Admin); // 3
+    expect(invPerm).toBeDefined();
+    expect(invPerm.accessLevel).toBe(AccessLevel.Read); // 1
+  });
+
+  it('rejects in-flight request and aborts scope when active facility is switched', async () => {
+    tokenManager.setActiveFacilityId('fac-chicago');
+
+    let resolveFetch: (val: any) => void;
+    const pendingPromise = new Promise((resolve) => {
+      resolveFetch = resolve;
+    });
+
+    const fetchSpy = vi.fn(async () => {
+      return pendingPromise as Promise<Response>;
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    // Start request for fac-chicago
+    const requestPromise = apiClient('/api/v1/analytics/transportation/carriers/FEDEX/scorecard');
+
+    // Switch active facility while request is in flight
+    tokenManager.setActiveFacilityId('fac-dallas');
+
+    // Complete the original fetch response
+    resolveFetch!({
+      ok: true,
+      status: 200,
+      json: async () => ({ data: 'stale chicago data' }),
+    });
+
+    // The in-flight request must reject with AbortError due to facility change
+    await expect(requestPromise).rejects.toThrow(/facility context changed/i);
+  });
+
+  it('normalizes UserType and UserStatus wire values accurately', () => {
+    // UserType string and numeric variants
+    expect(normalizeUserType('Staff')).toBe(UserType.Staff);
+    expect(normalizeUserType(1)).toBe(UserType.Staff);
+    expect(normalizeUserType('Client')).toBe(UserType.Client);
+    expect(normalizeUserType(2)).toBe(UserType.Client);
+    expect(normalizeUserType('ClientUser')).toBe(UserType.Client);
+    expect(normalizeUserType('Driver')).toBe(UserType.Driver);
+    expect(normalizeUserType(3)).toBe(UserType.Driver);
+
+    // UserStatus string and numeric variants
+    expect(normalizeUserStatus('Active')).toBe(UserStatus.Active);
+    expect(normalizeUserStatus(1)).toBe(UserStatus.Active);
+    expect(normalizeUserStatus('Inactive')).toBe(UserStatus.Inactive);
+    expect(normalizeUserStatus(2)).toBe(UserStatus.Inactive);
+    expect(normalizeUserStatus('Suspended')).toBe(UserStatus.Inactive);
+    expect(normalizeUserStatus('Locked')).toBe(UserStatus.Locked);
+    expect(normalizeUserStatus(3)).toBe(UserStatus.Locked);
+    expect(normalizeUserStatus('PendingActivation')).toBe(UserStatus.PendingActivation);
+    expect(normalizeUserStatus(4)).toBe(UserStatus.PendingActivation);
+    expect(normalizeUserStatus('Pending')).toBe(UserStatus.PendingActivation);
   });
 });

@@ -296,6 +296,7 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
 
   try {
     let token = tokenManager.getAccessToken();
+    const requestFacilityId = tokenManager.getActiveFacilityId();
     let response = await fetch(endpoint, {
       ...fetchOptions,
       headers: buildHeaders(token),
@@ -304,6 +305,11 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
     // Check if aborted immediately after fetch returns
     if (activeCtrl?.signal.aborted) {
       throw new DOMException('Request aborted', 'AbortError');
+    }
+
+    // Check if active facility changed while request was in-flight
+    if (requestFacilityId && tokenManager.getActiveFacilityId() !== requestFacilityId) {
+      throw new DOMException('Facility context changed during request', 'AbortError');
     }
 
     // Handle 401 Unauthorized via Single-Flight Mutex
@@ -327,6 +333,9 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
         if (activeCtrl?.signal.aborted) {
           throw new DOMException('Request aborted', 'AbortError');
         }
+        if (requestFacilityId && tokenManager.getActiveFacilityId() !== requestFacilityId) {
+          throw new DOMException('Facility context changed during request', 'AbortError');
+        }
         // Replay original request with refreshed token
         response = await fetch(endpoint, {
           ...fetchOptions,
@@ -337,6 +346,10 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
 
     if (activeCtrl?.signal.aborted) {
       throw new DOMException('Request aborted', 'AbortError');
+    }
+
+    if (requestFacilityId && tokenManager.getActiveFacilityId() !== requestFacilityId) {
+      throw new DOMException('Facility context changed during request', 'AbortError');
     }
 
     if (!response.ok) {

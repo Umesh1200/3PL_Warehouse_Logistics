@@ -25,6 +25,7 @@ public class TestCurrentUserContext : ICurrentUserContext
     public string? Email { get; set; } = "test@example.com";
     public Guid? TenantId { get; set; }
     public Guid? FacilityId { get; set; }
+    public Guid? RequestedFacilityId { get; set; }
     public UserType? UserType { get; set; } = Domain.Enums.UserType.Client;
     public List<string> RolesList { get; set; } = [];
     public List<string> PermissionsList { get; set; } = [];

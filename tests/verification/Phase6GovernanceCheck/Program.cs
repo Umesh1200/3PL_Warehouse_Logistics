@@ -63,7 +63,7 @@ sealed class VerificationTenant : ITenantProvider
 sealed class VerificationClock : IDateTimeProvider {public DateTime UtcNow=>DateTime.UtcNow;}
 sealed class VerificationIdentity : ICurrentUserContext
 {
- public Guid? UserId=>null;public string? Email=>null;public Guid? TenantId=>null;public Guid? FacilityId=>null;
+ public Guid? UserId=>null;public string? Email=>null;public Guid? TenantId=>null;public Guid? FacilityId=>null;public Guid? RequestedFacilityId=>null;
  public UserType? UserType=>Warehouse3PL.Domain.Enums.UserType.Staff;
  public IReadOnlyList<string> Roles=>["SuperAdmin"];public IReadOnlyList<string> Permissions=>[];
  public bool IsAuthenticated=>true;public bool IsStaff=>true;public bool IsSuperAdmin=>true;

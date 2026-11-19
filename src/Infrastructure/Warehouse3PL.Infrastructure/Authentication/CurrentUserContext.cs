@@ -47,14 +47,16 @@ public class CurrentUserContext : ICurrentUserContext
         get
         {
             var claim = User?.FindFirst("facility_id")?.Value;
-            if (Guid.TryParse(claim, out var facilityId))
-                return facilityId;
+            return Guid.TryParse(claim, out var facilityId) ? facilityId : null;
+        }
+    }
 
+    public Guid? RequestedFacilityId
+    {
+        get
+        {
             var header = _httpContextAccessor.HttpContext?.Request.Headers["X-Facility-Id"].FirstOrDefault();
-            if (Guid.TryParse(header, out var headerFacilityId))
-                return headerFacilityId;
-
-            return null;
+            return Guid.TryParse(header, out var headerFacilityId) ? headerFacilityId : null;
         }
     }
 

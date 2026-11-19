@@ -40,7 +40,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         setUser(null);
       }
     } finally {
-      if (tokenManager.getSessionGeneration() === gen) {
+      if (tokenManager.getSessionGeneration() === gen || !tokenManager.getAccessToken()) {
         setIsLoading(false);
       }
     }
@@ -52,6 +52,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const unsubscribe = tokenManager.subscribeAuth((isAuth) => {
       if (!isAuth) {
         setUser(null);
+        setIsLoading(false);
       }
     });
 
@@ -79,6 +80,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     requestManager.abortAll();
     tokenManager.clearSession();
     setUser(null);
+    setIsLoading(false);
   };
 
   const hasRole = (role: string): boolean => {

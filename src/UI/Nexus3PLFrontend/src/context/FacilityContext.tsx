@@ -60,6 +60,7 @@ export const FacilityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
 
   const setActiveFacility = (facility: FacilityDto) => {
     requestManager.abortScope('facility');
+    requestManager.abortScope('route');
     setActiveFacilityState(facility);
     tokenManager.setActiveFacilityId(facility.id);
   };
