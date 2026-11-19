@@ -13,7 +13,7 @@ import { ClientsPage } from '../pages/admin/ClientsPage';
 import { ProtectedRoute } from '../components/auth/ProtectedRoute';
 import { tokenManager, requestManager, apiClient, executeSingleFlightRefresh, AuthExpiredError } from '../services/apiClient';
 import { adminApi } from '../services/adminApi';
-import { AccessLevel, UserType, UserStatus, SlaTier, ClientStatus, normalizeUserType, normalizeUserStatus } from '../types/auth';
+import { AccessLevel, UserType, UserStatus, SlaTier, ClientStatus, normalizeUserType, normalizeUserStatus, normalizeAccessLevel } from '../types/auth';
 
 describe('Phase 7.2: Authentication, Session Management & RBAC Shell Tests', () => {
   beforeEach(() => {
@@ -637,19 +637,20 @@ describe('Phase 7.2: Authentication, Session Management & RBAC Shell Tests', () 
     });
   });
 
-  it('saving an existing role without changes preserves each original per-permission access level', async () => {
+  it('saving an existing role without changes preserves each original per-permission access level with wire string DTOs', async () => {
+    // API returns wire-shaped string enums for accessLevel: 'Admin' and 'Execute'
     const mockRoles = [
       {
         id: 1,
         roleName: 'CustomManager',
         description: 'Multi-level operational role',
         permissions: [
-          { id: 1, permissionKey: 'users:view', accessLevel: AccessLevel.Admin }, // 3
-          { id: 2, permissionKey: 'inventory:view', accessLevel: AccessLevel.Read }, // 1
+          { id: 1, permissionKey: 'users:view', accessLevel: 'Admin' }, // wire string
+          { id: 2, permissionKey: 'reports:manage', accessLevel: 'Execute' }, // wire string
         ],
       },
     ];
-    const mockAllPerms = ['users:view', 'inventory:view', 'reports:view'];
+    const mockAllPerms = ['users:view', 'reports:manage', 'inventory:view'];
 
     let capturedPayload: any = null;
     const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
@@ -690,9 +691,11 @@ describe('Phase 7.2: Authentication, Session Management & RBAC Shell Tests', () 
       </RouterProvider>
     );
 
-    // Wait for roles page to load
+    // Wait for roles page to load and display formatted levels in table
     await waitFor(() => {
       expect(screen.getByText('CustomManager')).toBeDefined();
+      expect(screen.getByText(/users:view \(Admin\)/i)).toBeDefined();
+      expect(screen.getByText(/reports:manage \(Execute\)/i)).toBeDefined();
     });
 
     // Open configure permissions modal
@@ -704,6 +707,15 @@ describe('Phase 7.2: Authentication, Session Management & RBAC Shell Tests', () 
       expect(screen.getByText(/Configure Permissions/i)).toBeDefined();
     });
 
+    // Assert that the dropdowns for users:view and reports:manage display the actual normalized values (Admin (3) and Execute (4))
+    const usersSelect = screen.getByLabelText(/access level for users:view/i) as HTMLSelectElement;
+    expect(usersSelect.value).toBe(String(AccessLevel.Admin)); // "3"
+    expect(usersSelect.options[usersSelect.selectedIndex].text).toBe('Admin (3)');
+
+    const reportsSelect = screen.getByLabelText(/access level for reports:manage/i) as HTMLSelectElement;
+    expect(reportsSelect.value).toBe(String(AccessLevel.Execute)); // "4"
+    expect(reportsSelect.options[reportsSelect.selectedIndex].text).toBe('Execute (4)');
+
     // Save without changing permissions (no-op save)
     const saveBtn = screen.getByRole('button', { name: /save.*grant/i });
     fireEvent.click(saveBtn);
@@ -712,13 +724,13 @@ describe('Phase 7.2: Authentication, Session Management & RBAC Shell Tests', () 
       expect(capturedPayload).not.toBeNull();
     });
 
-    // Assert that users:view preserved AccessLevel.Admin (3) and inventory:view preserved AccessLevel.Read (1)
+    // Assert that users:view preserved AccessLevel.Admin (3) and reports:manage preserved AccessLevel.Execute (4)
     const usersPerm = capturedPayload.find((p: any) => p.permissionKey === 'users:view');
-    const invPerm = capturedPayload.find((p: any) => p.permissionKey === 'inventory:view');
+    const reportsPerm = capturedPayload.find((p: any) => p.permissionKey === 'reports:manage');
     expect(usersPerm).toBeDefined();
     expect(usersPerm.accessLevel).toBe(AccessLevel.Admin); // 3
-    expect(invPerm).toBeDefined();
-    expect(invPerm.accessLevel).toBe(AccessLevel.Read); // 1
+    expect(reportsPerm).toBeDefined();
+    expect(reportsPerm.accessLevel).toBe(AccessLevel.Execute); // 4
   });
 
   it('rejects in-flight request and aborts scope when active facility is switched', async () => {
@@ -772,5 +784,16 @@ describe('Phase 7.2: Authentication, Session Management & RBAC Shell Tests', () 
     expect(normalizeUserStatus('PendingActivation')).toBe(UserStatus.PendingActivation);
     expect(normalizeUserStatus(4)).toBe(UserStatus.PendingActivation);
     expect(normalizeUserStatus('Pending')).toBe(UserStatus.PendingActivation);
+  });
+
+  it('normalizes string and numeric wire access levels accurately', () => {
+    expect(normalizeAccessLevel('Admin')).toBe(AccessLevel.Admin);
+    expect(normalizeAccessLevel('Execute')).toBe(AccessLevel.Execute);
+    expect(normalizeAccessLevel('Write')).toBe(AccessLevel.Write);
+    expect(normalizeAccessLevel('Read')).toBe(AccessLevel.Read);
+    expect(normalizeAccessLevel(3)).toBe(AccessLevel.Admin);
+    expect(normalizeAccessLevel(4)).toBe(AccessLevel.Execute);
+    expect(normalizeAccessLevel(2)).toBe(AccessLevel.Write);
+    expect(normalizeAccessLevel(1)).toBe(AccessLevel.Read);
   });
 });

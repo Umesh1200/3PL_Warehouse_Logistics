@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import { adminApi } from '../../services/adminApi';
-import { RoleDto, AccessLevel, PermissionAssignmentDto, formatAccessLevel } from '../../types/auth';
+import { RoleDto, AccessLevel, PermissionAssignmentDto, formatAccessLevel, normalizeAccessLevel } from '../../types/auth';
 import { PermissionGuard } from '../../components/auth/PermissionGuard';
 
 export const RolesPage: React.FC = () => {
@@ -44,10 +44,10 @@ export const RolesPage: React.FC = () => {
     const initialLevels: Record<string, AccessLevel> = {};
     (role.permissions || []).forEach((p: any) => {
       const key = typeof p === 'string' ? p : p?.permissionKey;
-      const level = typeof p === 'object' && p?.accessLevel ? p.accessLevel : AccessLevel.Read;
+      const rawLevel = typeof p === 'object' && p?.accessLevel !== undefined ? p.accessLevel : AccessLevel.Read;
       if (key) {
         existingPermKeys.push(key);
-        initialLevels[key] = level;
+        initialLevels[key] = normalizeAccessLevel(rawLevel);
       }
     });
     setSelectedPermissions(existingPermKeys);
@@ -70,17 +70,17 @@ export const RolesPage: React.FC = () => {
       } else {
         setPermissionLevels((lvl) => ({
           ...lvl,
-          [perm]: lvl[perm] ?? selectedAccessLevel,
+          [perm]: lvl[perm] !== undefined ? normalizeAccessLevel(lvl[perm]) : selectedAccessLevel,
         }));
         return [...prev, perm];
       }
     });
   };
 
-  const updatePermissionLevel = (perm: string, level: AccessLevel) => {
+  const updatePermissionLevel = (perm: string, level: any) => {
     setPermissionLevels((prev) => ({
       ...prev,
-      [perm]: level,
+      [perm]: normalizeAccessLevel(level),
     }));
   };
 
@@ -89,10 +89,10 @@ export const RolesPage: React.FC = () => {
     setIsSaving(true);
     setModalError(null);
 
-    // Map selected permissions to PermissionAssignmentDto preserving their exact accessLevel
+    // Map selected permissions to PermissionAssignmentDto preserving their exact normalized accessLevel
     const assignments: PermissionAssignmentDto[] = selectedPermissions.map((p) => ({
       permissionKey: p,
-      accessLevel: permissionLevels[p] ?? selectedAccessLevel ?? AccessLevel.Read,
+      accessLevel: normalizeAccessLevel(permissionLevels[p] ?? selectedAccessLevel),
     }));
 
     try {
@@ -251,8 +251,8 @@ export const RolesPage: React.FC = () => {
                   <select
                     id="access-level-select"
                     className="form-control access-select"
-                    value={selectedAccessLevel}
-                    onChange={(e) => setSelectedAccessLevel(Number(e.target.value) as AccessLevel)}
+                    value={normalizeAccessLevel(selectedAccessLevel)}
+                    onChange={(e) => setSelectedAccessLevel(normalizeAccessLevel(Number(e.target.value)))}
                   >
                     <option value={AccessLevel.Read}>Read (1)</option>
                     <option value={AccessLevel.Write}>Write (2)</option>
@@ -264,7 +264,7 @@ export const RolesPage: React.FC = () => {
                 <div className="perms-grid">
                   {allPermissions.map((perm) => {
                     const isChecked = selectedPermissions.includes(perm);
-                    const currentLevel = permissionLevels[perm] ?? selectedAccessLevel;
+                    const currentLevel = normalizeAccessLevel(permissionLevels[perm] ?? selectedAccessLevel);
                     return (
                       <div key={perm} className={`perm-card-check ${isChecked ? 'selected' : ''}`}>
                         <label className="perm-card-label">
@@ -282,7 +282,7 @@ export const RolesPage: React.FC = () => {
                               aria-label={`Access level for ${perm}`}
                               className="form-control access-level-mini-select"
                               value={currentLevel}
-                              onChange={(e) => updatePermissionLevel(perm, Number(e.target.value) as AccessLevel)}
+                              onChange={(e) => updatePermissionLevel(perm, normalizeAccessLevel(Number(e.target.value)))}
                               disabled={isSaving}
                             >
                               <option value={AccessLevel.Read}>Read (1)</option>

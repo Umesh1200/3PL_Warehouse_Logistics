@@ -94,12 +94,27 @@ export enum AccessLevel {
   Execute = 4,
 }
 
+export function normalizeAccessLevel(level: any): AccessLevel {
+  if (!level) return AccessLevel.Read;
+  if (typeof level === 'number') {
+    if (level >= 1 && level <= 4) return level as AccessLevel;
+    return AccessLevel.Read;
+  }
+  const str = String(level).trim().toLowerCase();
+  if (str === 'read' || str === '1') return AccessLevel.Read;
+  if (str === 'write' || str === '2') return AccessLevel.Write;
+  if (str === 'admin' || str === '3') return AccessLevel.Admin;
+  if (str === 'execute' || str === '4') return AccessLevel.Execute;
+  return AccessLevel.Read;
+}
+
 export function formatAccessLevel(level: AccessLevel | number | string): string {
-  if (level === 1 || level === 'Read') return 'Read';
-  if (level === 2 || level === 'Write') return 'Write';
-  if (level === 3 || level === 'Admin') return 'Admin';
-  if (level === 4 || level === 'Execute') return 'Execute';
-  return String(level);
+  const norm = normalizeAccessLevel(level);
+  if (norm === AccessLevel.Read) return 'Read';
+  if (norm === AccessLevel.Write) return 'Write';
+  if (norm === AccessLevel.Admin) return 'Admin';
+  if (norm === AccessLevel.Execute) return 'Execute';
+  return 'Read';
 }
 
 export interface PermissionAssignmentDto {
@@ -110,7 +125,7 @@ export interface PermissionAssignmentDto {
 export interface RolePermissionDto {
   id: number;
   permissionKey: string;
-  accessLevel: AccessLevel | number;
+  accessLevel: AccessLevel | number | string;
 }
 
 export interface RoleDto {

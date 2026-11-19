@@ -24,11 +24,12 @@ public class GetFacilityByIdQueryHandler : IRequestHandler<GetFacilityByIdQuery,
     {
         // 1. Explicitly allow SuperAdmin or staff callers with multi-facility view (global facility access)
         if (_currentUser.IsSuperAdmin ||
-            _currentUser.HasPermission(Permissions.Analytics.MultiFacilityView) ||
-            _currentUser.HasPermission("Analytics:CrossFacility") ||
-            _currentUser.HasPermission("Shipments:CrossFacility") ||
-            _currentUser.HasPermission("Financial:CrossFacility") ||
-            _currentUser.HasPermission("Financials:CrossFacility"))
+            (_currentUser.IsStaff && (
+                _currentUser.HasPermission(Permissions.Analytics.MultiFacilityView) ||
+                _currentUser.HasPermission("Analytics:CrossFacility") ||
+                _currentUser.HasPermission("Shipments:CrossFacility") ||
+                _currentUser.HasPermission("Financial:CrossFacility") ||
+                _currentUser.HasPermission("Financials:CrossFacility"))))
         {
             var facility = await _context.Facilities
                 .AsNoTracking()
