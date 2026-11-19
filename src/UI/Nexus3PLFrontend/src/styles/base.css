@@ -141,3 +141,9 @@ button:focus-visible, input:focus-visible, select:focus-visible {
   margin: 0 auto;
   padding: 0 24px;
 }
+
+@media (max-width: 640px) {
+  .container {
+    padding: 0 16px;
+  }
+}

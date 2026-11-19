@@ -1,11 +1,12 @@
 import React from 'react';
+import logoFull from '../assets/logo-full.svg';
 
 export const Footer: React.FC = () => {
   return (
     <footer className="footer-wrap">
       <div className="container footer-inner">
         <div className="footer-brand">
-          <img src="/src/assets/logo-full.svg" alt="Nexus3PL Logo" className="footer-logo" />
+          <img src={logoFull} alt="Nexus3PL Logo" className="footer-logo" />
           <p className="footer-tagline">
             Next-Generation 3PL Warehouse Logistics &amp; Courier Transportation Operating System.
           </p>
@@ -37,10 +38,10 @@ export const Footer: React.FC = () => {
         <div className="footer-links-col">
           <h4 className="footer-heading">Architecture &amp; Standards</h4>
           <ul className="footer-list">
-            <li><span className="tech-badge">.NET 10 WebApi</span></li>
-            <li><span className="tech-badge">Vite 7 + React 19 SPA</span></li>
-            <li><span className="tech-badge">WCAG 2.2 Level AA</span></li>
-            <li><span className="tech-badge">EF Core Multi-Tenant</span></li>
+            <li><a href="#architecture" className="tech-link"><span className="tech-badge">.NET 10 WebApi</span></a></li>
+            <li><a href="#architecture" className="tech-link"><span className="tech-badge">Vite 7 + React 19 SPA</span></a></li>
+            <li><a href="#architecture" className="tech-link"><span className="tech-badge">WCAG 2.2 Level AA</span></a></li>
+            <li><a href="#architecture" className="tech-link"><span className="tech-badge">EF Core Multi-Tenant</span></a></li>
           </ul>
         </div>
       </div>
@@ -55,7 +56,7 @@ export const Footer: React.FC = () => {
       <style>{`
         .footer-wrap {
           background: #0f172a;
-          color: #94a3b8;
+          color: #cbd5e1;
           padding: 60px 0 0;
           border-top: 1px solid var(--brand-navy-700);
         }
@@ -75,12 +76,13 @@ export const Footer: React.FC = () => {
           line-height: 1.6;
           margin-bottom: 16px;
           max-width: 320px;
+          color: #cbd5e1;
         }
         .footer-heading {
           font-size: 13px;
           font-weight: 700;
           text-transform: uppercase;
-          color: #f8fafc;
+          color: #ffffff;
           letter-spacing: 0.8px;
           margin-bottom: 16px;
         }
@@ -91,28 +93,37 @@ export const Footer: React.FC = () => {
           gap: 10px;
         }
         .footer-list a {
-          color: #94a3b8;
+          color: #e2e8f0;
           font-size: 13.5px;
           text-decoration: none;
           transition: color var(--transition-fast);
         }
         .footer-list a:hover {
           color: #38bdf8;
+          text-decoration: underline;
+        }
+        .tech-link {
+          display: inline-block;
+          text-decoration: none !important;
         }
         .tech-badge {
           font-size: 12px;
-          color: #cbd5e1;
+          color: #f1f5f9;
           background: #1e293b;
           padding: 3px 8px;
           border-radius: var(--radius-xs);
           border: 1px solid var(--brand-navy-700);
           display: inline-block;
+          transition: border-color var(--transition-fast);
+        }
+        .tech-badge:hover {
+          border-color: #38bdf8;
         }
         .footer-bottom {
           border-top: 1px solid #1e293b;
           padding: 20px 0;
           font-size: 12.5px;
-          color: #64748b;
+          color: #cbd5e1;
         }
         .bottom-inner {
           display: flex;
@@ -120,6 +131,9 @@ export const Footer: React.FC = () => {
           align-items: center;
           flex-wrap: wrap;
           gap: 12px;
+        }
+        .subtext {
+          color: #94a3b8;
         }
         @media (max-width: 850px) {
           .footer-inner { grid-template-columns: 1fr 1fr; }

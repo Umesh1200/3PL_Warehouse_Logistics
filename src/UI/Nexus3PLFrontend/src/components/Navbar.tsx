@@ -1,4 +1,5 @@
 import React from 'react';
+import logoFull from '../assets/logo-full.svg';
 
 interface NavbarProps {
   onSignInClick?: () => void;
@@ -9,7 +10,7 @@ export const Navbar: React.FC<NavbarProps> = ({ onSignInClick }) => {
     <header className="navbar-wrapper">
       <div className="container navbar-inner">
         <div className="brand-lockup">
-          <img src="/src/assets/logo-full.svg" alt="Nexus3PL Logo" className="brand-logo" />
+          <img src={logoFull} alt="Nexus3PL Logo" className="brand-logo" />
         </div>
 
         <nav className="nav-links" aria-label="Main Navigation">
@@ -86,6 +87,12 @@ export const Navbar: React.FC<NavbarProps> = ({ onSignInClick }) => {
         }
         @media (max-width: 768px) {
           .nav-links { display: none; }
+        }
+        @media (max-width: 480px) {
+          .status-pill { display: none; }
+          .brand-logo { height: 28px; }
+          .btn-primary { padding: 7px 12px; font-size: 12px; }
+          .navbar-inner { height: 60px; }
         }
       `}</style>
     </header>

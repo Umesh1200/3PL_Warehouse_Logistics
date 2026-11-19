@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Navbar } from '../components/Navbar';
 import { HeroSection } from '../components/HeroSection';
 import { TrackingSimulator } from '../components/TrackingSimulator';
@@ -7,14 +7,70 @@ import { Footer } from '../components/Footer';
 
 export const LandingPage: React.FC = () => {
   const [isPortalModalOpen, setIsPortalModalOpen] = useState(false);
+  const triggerRef = useRef<HTMLElement | null>(null);
+  const modalRef = useRef<HTMLDivElement | null>(null);
+  const closeBtnRef = useRef<HTMLButtonElement | null>(null);
 
-  const handleOpenPortalNotice = () => {
+  const handleOpenPortalNotice = (e?: React.MouseEvent) => {
+    triggerRef.current = (e?.currentTarget as HTMLElement) || (document.activeElement as HTMLElement);
     setIsPortalModalOpen(true);
   };
 
   const handleCloseModal = () => {
     setIsPortalModalOpen(false);
   };
+
+  // Keyboard accessibility: Escape to close, focus trapping, and focus restoration
+  useEffect(() => {
+    if (!isPortalModalOpen) {
+      // Focus restoration when modal closes
+      if (triggerRef.current && typeof triggerRef.current.focus === 'function') {
+        triggerRef.current.focus();
+      }
+      return;
+    }
+
+    // Set initial focus to the close button inside modal
+    const focusTimer = setTimeout(() => {
+      closeBtnRef.current?.focus();
+    }, 50);
+
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') {
+        e.preventDefault();
+        handleCloseModal();
+        return;
+      }
+
+      if (e.key === 'Tab' && modalRef.current) {
+        const focusableElements = modalRef.current.querySelectorAll<HTMLElement>(
+          'button, [href], input, select, textarea, [tabindex]:not([tabindex="-1"])'
+        );
+        if (focusableElements.length === 0) return;
+
+        const firstElement = focusableElements[0];
+        const lastElement = focusableElements[focusableElements.length - 1];
+
+        if (e.shiftKey) {
+          if (document.activeElement === firstElement) {
+            e.preventDefault();
+            lastElement.focus();
+          }
+        } else {
+          if (document.activeElement === lastElement) {
+            e.preventDefault();
+            firstElement.focus();
+          }
+        }
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => {
+      clearTimeout(focusTimer);
+      window.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [isPortalModalOpen]);
 
   const scrollToTracking = () => {
     const el = document.getElementById('tracking');
@@ -41,40 +97,52 @@ export const LandingPage: React.FC = () => {
 
       <Footer />
 
-      {/* Portal Launch / Auth Contract Holding Modal */}
+      {/* Accessible Portal Launch Notice Modal */}
       {isPortalModalOpen && (
-        <div className="modal-backdrop" onClick={handleCloseModal} role="dialog" aria-modal="true" aria-labelledby="modalTitle">
-          <div className="modal-card" onClick={(e) => e.stopPropagation()}>
+        <div 
+          className="modal-backdrop" 
+          onClick={handleCloseModal} 
+          role="dialog" 
+          aria-modal="true" 
+          aria-labelledby="modalTitle"
+          aria-describedby="modalDesc"
+        >
+          <div 
+            ref={modalRef}
+            className="modal-card" 
+            onClick={(e) => e.stopPropagation()}
+            tabIndex={-1}
+          >
             <div className="modal-header">
-              <span className="badge badge-warning">Phase 7.1 Architecture Gate</span>
-              <h3 id="modalTitle" className="modal-title">Enterprise Portal Authentication Notice</h3>
+              <span className="badge badge-warning">Portal Notice</span>
+              <h3 id="modalTitle" className="modal-title">Enterprise Operations Portal Unavailable</h3>
             </div>
-            <div className="modal-body">
-              <p>
-                In accordance with the <strong>Phase 7 Engineering Review</strong>, operational authentication integration 
-                is intentionally held behind the verified security contract:
+            
+            <div id="modalDesc" className="modal-body">
+              <p className="notice-main-text">
+                The Enterprise Operations Portal is currently unavailable for direct user sign-in 
+                while multi-tenant security verification and system integration audits are in progress.
               </p>
-              <ul className="modal-rules-list">
-                <li>
-                  <strong>Direct Body Contract:</strong> <code>POST /api/v1/auth/refresh-token</code> takes 
-                  <code>{`{ token, refreshToken }`}</code> directly in request payload.
-                </li>
-                <li>
-                  <strong>Scope Independence:</strong> <code>/api/v1/auth/me</code> supplies authenticated user roles &amp; permissions; 
-                  authorized facilities are retrieved independently via <code>/api/v1/locations/facilities</code>.
-                </li>
-                <li>
-                  <strong>Server-Side OWASP Enforcement:</strong> UI element hiding serves as affordance only; 
-                  all mutations require server policy checks and tenant boundary validation.
-                </li>
-              </ul>
+              <div className="notice-info-box">
+                <p>
+                  Operational warehouse workflows, facility configurations, and financial management panels 
+                  will become accessible upon formal technical gate authorization.
+                </p>
+              </div>
               <p className="modal-sub">
-                The public branding, design system tokens, and interactive courier tracking simulator are fully operational.
+                In the interim, you can freely test the public AWB tracking simulator and review platform capabilities on this page.
               </p>
             </div>
+
             <div className="modal-footer">
-              <button type="button" className="btn btn-primary" onClick={handleCloseModal}>
-                Understood &bull; Close
+              <button 
+                ref={closeBtnRef}
+                type="button" 
+                className="btn btn-primary" 
+                onClick={handleCloseModal}
+                aria-label="Understood, close dialog"
+              >
+                Understood &bull; Return to Platform
               </button>
             </div>
           </div>
@@ -104,11 +172,12 @@ export const LandingPage: React.FC = () => {
         .modal-card {
           background: #ffffff;
           border-radius: var(--radius-lg);
-          max-width: 540px;
+          max-width: 520px;
           width: 100%;
           box-shadow: 0 20px 40px rgba(15, 23, 42, 0.25);
-          padding: 28px;
+          padding: 30px;
           border: 1px solid var(--border-subtle);
+          outline: none;
         }
         .modal-header {
           margin-bottom: 16px;
@@ -120,28 +189,25 @@ export const LandingPage: React.FC = () => {
           margin-top: 8px;
         }
         .modal-body {
-          font-size: 14px;
-          color: var(--text-muted);
+          font-size: 14.5px;
+          color: var(--text-main);
           line-height: 1.6;
         }
-        .modal-rules-list {
-          margin: 14px 0;
-          padding-left: 20px;
-          display: flex;
-          flex-direction: column;
-          gap: 8px;
-          color: var(--text-main);
+        .notice-main-text {
+          margin-bottom: 14px;
         }
-        .modal-rules-list code {
-          background: #f1f5f9;
-          padding: 2px 5px;
-          border-radius: 4px;
-          font-size: 12.5px;
+        .notice-info-box {
+          background: #f8fafc;
+          border-left: 3px solid var(--brand-primary);
+          padding: 12px 16px;
+          border-radius: var(--radius-xs);
+          font-size: 13.5px;
+          color: var(--text-muted);
+          margin-bottom: 14px;
         }
         .modal-sub {
-          font-size: 12.5px;
+          font-size: 13px;
           color: var(--text-muted);
-          margin-top: 12px;
           border-top: 1px solid var(--border-subtle);
           padding-top: 12px;
         }
@@ -149,6 +215,11 @@ export const LandingPage: React.FC = () => {
           margin-top: 24px;
           display: flex;
           justify-content: flex-end;
+        }
+        @media (max-width: 640px) {
+          .modal-card {
+            padding: 22px;
+          }
         }
       `}</style>
     </div>

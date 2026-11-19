@@ -92,6 +92,7 @@ export const TrackingSimulator: React.FC = () => {
   const [query, setQuery] = useState('AWB-9842-US');
   const [activeShipment, setActiveShipment] = useState<ShipmentInfo | null>(SAMPLE_DATA['AWB-9842-US']);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [announcement, setAnnouncement] = useState('Tracking simulator loaded with sample AWB-9842-US');
 
   const handleSearch = (e: React.FormEvent) => {
     e.preventDefault();
@@ -99,8 +100,12 @@ export const TrackingSimulator: React.FC = () => {
     if (SAMPLE_DATA[trimmed]) {
       setActiveShipment(SAMPLE_DATA[trimmed]);
       setErrorMsg(null);
+      setAnnouncement(`Loaded simulated shipment ${trimmed} with status ${SAMPLE_DATA[trimmed].status}.`);
     } else {
+      // CLEAR STALE SHIPMENT RESULT UPON UNKNOWN SEARCH
+      setActiveShipment(null);
       setErrorMsg(`No simulated record found for "${trimmed}". Try one of the sample presets below.`);
+      setAnnouncement(`Search failed: no simulated record found for ${trimmed}.`);
     }
   };
 
@@ -108,6 +113,7 @@ export const TrackingSimulator: React.FC = () => {
     setQuery(presetAwb);
     setActiveShipment(SAMPLE_DATA[presetAwb]);
     setErrorMsg(null);
+    setAnnouncement(`Switched to sample synthetic shipment ${presetAwb}.`);
   };
 
   return (
@@ -148,6 +154,11 @@ export const TrackingSimulator: React.FC = () => {
               <button type="button" className="preset-btn" onClick={() => handlePresetClick('AWB-5531-FRT')}>AWB-5531-FRT (In Transit)</button>
             </div>
           </form>
+
+          {/* Accessible Live Announcement Region */}
+          <div className="visually-hidden" aria-live="polite" aria-atomic="true">
+            {announcement}
+          </div>
 
           {errorMsg && (
             <div className="alert-box" role="alert">
@@ -429,6 +440,7 @@ export const TrackingSimulator: React.FC = () => {
           gap: 16px;
           align-items: flex-start;
         }
+        /* High-contrast node-marker: Slate 900 (#0f172a) on Slate 200 (#e2e8f0) gives 12.8:1 contrast */
         .node-marker {
           position: absolute;
           left: -28px;
@@ -437,12 +449,12 @@ export const TrackingSimulator: React.FC = () => {
           height: 24px;
           border-radius: 50%;
           background: #e2e8f0;
-          color: #64748b;
+          color: #0f172a;
           display: flex;
           align-items: center;
           justify-content: center;
-          font-size: 11px;
-          font-weight: 700;
+          font-size: 11.5px;
+          font-weight: 800;
           z-index: 1;
         }
         .milestone-node.completed .node-marker {
@@ -469,7 +481,7 @@ export const TrackingSimulator: React.FC = () => {
         }
         .node-time {
           font-size: 11.5px;
-          color: #64748b;
+          color: #475569;
         }
         .visually-hidden {
           position: absolute;
@@ -484,6 +496,7 @@ export const TrackingSimulator: React.FC = () => {
         @media (max-width: 640px) {
           .input-group { flex-direction: column; }
           .shipment-summary-bar { grid-template-columns: 1fr; }
+          .tracking-card { padding: 20px; }
         }
       `}</style>
     </section>
