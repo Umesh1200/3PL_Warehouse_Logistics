@@ -927,7 +927,7 @@ try
     client.DefaultRequestHeaders.Add("X-Facility-Id", facilityId.ToString());
 
     // 0. Query initial stock and ledger count before HTTP operations
-    var initialStockResponse = await client.GetAsync($"/api/v1/inventory/stock-on-hand?facilityId={facilityId}");
+    var initialStockResponse = await client.GetAsync($"/api/v1/inventory/stock?facilityId={facilityId}");
     if (initialStockResponse.StatusCode != HttpStatusCode.OK)
         throw new InvalidOperationException($"Initial stock query failed: {initialStockResponse.StatusCode}");
     var initialStockBody = await initialStockResponse.Content.ReadAsStringAsync();
@@ -962,7 +962,7 @@ try
     }
 
     // Assert exact stock and ledger effects immediately after receiving completion
-    var postRxStockResponse = await client.GetAsync($"/api/v1/inventory/stock-on-hand?facilityId={facilityId}");
+    var postRxStockResponse = await client.GetAsync($"/api/v1/inventory/stock?facilityId={facilityId}");
     var postRxStockBody = await postRxStockResponse.Content.ReadAsStringAsync();
     using (var doc = JsonDocument.Parse(postRxStockBody))
     {
@@ -1022,7 +1022,7 @@ try
     }
 
     // Assert exact stock and ledger effects immediately after putaway confirmation
-    var postPutawayStockResponse = await client.GetAsync($"/api/v1/inventory/stock-on-hand?facilityId={facilityId}");
+    var postPutawayStockResponse = await client.GetAsync($"/api/v1/inventory/stock?facilityId={facilityId}");
     var postPutawayStockBody = await postPutawayStockResponse.Content.ReadAsStringAsync();
     using (var doc = JsonDocument.Parse(postPutawayStockBody))
     {
@@ -1048,7 +1048,7 @@ try
     Console.WriteLine("PASS HTTP POST /api/v1/putaway/tasks/{id}/confirm -> 200 OK, wire string enum 'Completed', exact staging -30m debit, destination +30m credit, total conserved, +1 putaway ledger record.");
 
     // 4. HTTP Query Stock On Hand
-    Console.WriteLine("PASS HTTP GET /api/v1/inventory/stock-on-hand -> 200 OK, verified wire DTO and exact destination balances (staging=0m, bin1=40m, total=100m, total transactions=10).");
+    Console.WriteLine("PASS HTTP GET /api/v1/inventory/stock -> 200 OK, verified wire DTO and exact destination balances (staging=0m, bin1=40m, total=100m, total transactions=10).");
 
     Console.WriteLine("\n================================================================================");
     Console.WriteLine("ALL PHASE 7.3 POSTGRESQL & BACKEND-CONNECTED JOURNEYS PASSED CLEANLY!");

@@ -13,6 +13,7 @@ namespace Warehouse3PL.WebApi.Controllers;
 public class InventoryController : BaseApiController
 {
     [HttpGet("stock")]
+    [HttpGet("stock-on-hand")]
     [HasPermission(Permissions.Inventory.View)]
     [ProducesResponseType(typeof(PagedResult<StockOnHandDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetStock([FromQuery] GetStockOnHandQuery query, CancellationToken ct)
