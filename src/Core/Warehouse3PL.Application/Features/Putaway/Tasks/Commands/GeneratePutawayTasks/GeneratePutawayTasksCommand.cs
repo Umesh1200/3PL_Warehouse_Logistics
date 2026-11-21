@@ -208,10 +208,13 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
 
             return generatedTasks.Select(MapToDto).ToList();
         }
-        catch (Exception ex) when (IsReceiptLineUniqueViolation(ex) && retryCount < 3)
+        catch (Exception ex) when (IsReceiptLineUniqueViolation(ex) && retryCount < 5)
         {
             // Clear failed tracked entities to prevent dirty state in ChangeTracker
             _context.ClearChangeTracker();
+
+            // Exponential backoff with jitter to allow winning transaction to finish commit
+            await Task.Delay(25 * (retryCount + 1) + Random.Shared.Next(10, 40), cancellationToken);
 
             // Retry for overlapping generation batches to ensure no unassigned lines are silently omitted
             return await GenerateTasksInternalAsync(effectiveFacilityId, effectiveClientId, cancellationToken, retryCount + 1);
