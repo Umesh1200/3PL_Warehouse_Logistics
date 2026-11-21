@@ -71,7 +71,7 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
             query = query.Where(l => l.ReceivingSession.ClientId == effectiveClientId.Value || l.Item.ClientId == effectiveClientId.Value);
         }
 
-        var candidateLines = await query.ToListAsync(cancellationToken);
+        var candidateLines = await query.OrderBy(l => l.Id).ToListAsync(cancellationToken);
         if (candidateLines.Count == 0)
         {
             return [];
@@ -95,6 +95,7 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
 
         var unassignedLines = candidateLines
             .Where(l => !existingLineIdSet.Contains(l.Id))
+            .OrderBy(l => l.Id)
             .ToList();
 
         if (unassignedLines.Count == 0)
@@ -119,6 +120,7 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
 
                 var linesToProcess = unassignedLines
                     .Where(l => !assignedSet.Contains(l.Id))
+                    .OrderBy(l => l.Id)
                     .ToList();
 
                 if (linesToProcess.Count == 0)
@@ -206,7 +208,7 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
 
             return generatedTasks.Select(MapToDto).ToList();
         }
-        catch (DbUpdateException ex) when (IsReceiptLineUniqueViolation(ex) && retryCount < 3)
+        catch (Exception ex) when (IsReceiptLineUniqueViolation(ex) && retryCount < 3)
         {
             // Clear failed tracked entities to prevent dirty state in ChangeTracker
             _context.ClearChangeTracker();
@@ -216,9 +218,9 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
         }
     }
 
-    private static bool IsReceiptLineUniqueViolation(DbUpdateException ex)
+    private static bool IsReceiptLineUniqueViolation(Exception ex)
     {
-        var current = ex.InnerException;
+        var current = ex;
         while (current != null)
         {
             var typeName = current.GetType().Name;
@@ -226,16 +228,30 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
             {
                 var sqlStateProp = current.GetType().GetProperty("SqlState");
                 var constraintProp = current.GetType().GetProperty("ConstraintName");
+                var messageProp = current.GetType().GetProperty("MessageText") ?? current.GetType().GetProperty("Message");
+                var whereProp = current.GetType().GetProperty("Where");
+
                 var sqlState = sqlStateProp?.GetValue(current) as string;
                 var constraint = constraintProp?.GetValue(current) as string;
+                var message = messageProp?.GetValue(current) as string;
+                var where = whereProp?.GetValue(current) as string;
 
-                // Only recover from PostgreSQL error 23505 on ix_putaway_tasks_lpn_id
+                // Recover from PostgreSQL error 23505 (unique_violation) on ix_putaway_tasks_lpn_id,
+                // or concurrent index race deadlock (40P01) on the same index
                 if (sqlState == "23505" &&
                     constraint != null &&
                     constraint.Contains("ix_putaway_tasks_lpn_id", StringComparison.OrdinalIgnoreCase))
                 {
                     return true;
                 }
+
+                if (sqlState == "40P01" &&
+                    ((where != null && where.Contains("ix_putaway_tasks_lpn_id", StringComparison.OrdinalIgnoreCase)) ||
+                     (message != null && message.Contains("ix_putaway_tasks_lpn_id", StringComparison.OrdinalIgnoreCase))))
+                {
+                    return true;
+                }
+
                 return false;
             }
             if (typeName == "SqliteException")
