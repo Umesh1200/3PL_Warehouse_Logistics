@@ -155,6 +155,30 @@ public sealed class WarehouseOperationalAuthorizationHttpTests : IAsyncLifetime
         Assert.Equal(HttpStatusCode.Unauthorized, response.StatusCode);
     }
 
+    [Fact]
+    public async Task PutawayTasks_List_WithoutInboundView_ReturnsForbidden_ThroughHttp()
+    {
+        using var request = Request(HttpMethod.Get, $"/api/v1/putaway/tasks?facilityId={FacilityA}", "staff-operator");
+        using var response = await _http.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task ReceivingSessions_List_WithoutInboundView_ReturnsForbidden_ThroughHttp()
+    {
+        using var request = Request(HttpMethod.Get, $"/api/v1/receiving/sessions?facilityId={FacilityA}", "staff-operator");
+        using var response = await _http.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PutawayTasks_Next_WithPutawayExecute_Succeeds_ThroughHttp()
+    {
+        using var request = Request(HttpMethod.Get, $"/api/v1/putaway/tasks/next?facilityId={FacilityA}", "staff-operator");
+        using var response = await _http.SendAsync(request);
+        Assert.True(response.StatusCode == HttpStatusCode.OK || response.StatusCode == HttpStatusCode.NoContent);
+    }
+
     private static HttpRequestMessage Request(HttpMethod method, string path, string actor)
     {
         var request = new HttpRequestMessage(method, path);
@@ -182,16 +206,35 @@ public sealed class WarehouseOperationalAuthorizationHttpTests : IAsyncLifetime
                 return Task.FromResult(AuthenticateResult.NoResult());
             }
 
-            var staff = actor == "staff";
+            var staff = actor.StartsWith("staff");
             var claims = new List<Claim>
             {
                 new(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
                 new("user_type", staff ? "Staff" : "Client"),
                 new("facility_id", FacilityA.ToString()),
-                new("permissions", Permissions.Inventory.View),
-                new("permissions", Permissions.Inventory.Transfer),
-                new("permissions", Permissions.Inventory.Adjust)
             };
+
+            if (actor == "staff-operator")
+            {
+                claims.Add(new("permissions", Permissions.Inbound.PutawayExecute));
+                claims.Add(new("permissions", Permissions.Inbound.Receive));
+            }
+            else if (actor == "staff" || actor == "staff-supervisor")
+            {
+                claims.Add(new("permissions", Permissions.Inventory.View));
+                claims.Add(new("permissions", Permissions.Inventory.Transfer));
+                claims.Add(new("permissions", Permissions.Inventory.Adjust));
+                claims.Add(new("permissions", Permissions.Inbound.View));
+                claims.Add(new("permissions", Permissions.Inbound.PutawayExecute));
+                claims.Add(new("permissions", Permissions.Inbound.Receive));
+            }
+            else
+            {
+                claims.Add(new("permissions", Permissions.Inventory.View));
+                claims.Add(new("permissions", Permissions.Inventory.Transfer));
+                claims.Add(new("permissions", Permissions.Inventory.Adjust));
+            }
+
             if (!staff)
             {
                 claims.Add(new Claim("tenant_id", ClientA.ToString()));

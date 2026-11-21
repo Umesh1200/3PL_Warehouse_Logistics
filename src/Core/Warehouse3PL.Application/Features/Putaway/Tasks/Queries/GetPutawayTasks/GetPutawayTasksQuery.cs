@@ -12,6 +12,7 @@ public record GetPutawayTasksQuery : PagedQuery, IRequest<PagedResult<PutawayTas
     public Guid? FacilityId { get; init; }
     public Guid? ClientId { get; init; }
     public PutawayTaskStatus? Status { get; init; }
+    public List<PutawayTaskStatus>? Statuses { get; init; }
     public Guid? ItemId { get; init; }
 }
 
@@ -55,7 +56,11 @@ public class GetPutawayTasksQueryHandler : IRequestHandler<GetPutawayTasksQuery,
             query = query.Where(t => scope.AuthorizedFacilityIds.Contains(t.FacilityId));
         }
 
-        if (request.Status.HasValue)
+        if (request.Statuses != null && request.Statuses.Count > 0)
+        {
+            query = query.Where(t => request.Statuses.Contains(t.Status));
+        }
+        else if (request.Status.HasValue)
         {
             query = query.Where(t => t.Status == request.Status.Value);
         }

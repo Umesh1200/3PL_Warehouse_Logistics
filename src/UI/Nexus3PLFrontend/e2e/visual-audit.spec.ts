@@ -569,6 +569,10 @@ test.describe('Nexus3PL Visual Design Audit - Multi-Viewport Capture', () => {
         path: path.join(ARTIFACT_DIR, `${vp.name}-03-dashboard.png`),
         fullPage: true,
       });
+      await page.screenshot({
+        path: path.join('C:/Users/DELL/.gemini/antigravity/brain/3ef5018b-e9e3-4374-9eca-184b02ff2c4e', `${vp.name}-03-dashboard.png`),
+        fullPage: true,
+      });
 
       // 4. Inbound / Receiving Page - Sessions List
       await page.goto('/app/inbound');

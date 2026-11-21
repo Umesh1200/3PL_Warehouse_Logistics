@@ -14,7 +14,11 @@ export const putawayApi = {
     const params = new URLSearchParams();
     if (query?.facilityId) params.append('facilityId', query.facilityId);
     if (query?.clientId) params.append('clientId', query.clientId);
-    if (query?.status !== undefined && query?.status !== null) params.append('status', String(query.status));
+    if (query?.statuses && query.statuses.length > 0) {
+      query.statuses.forEach((s) => params.append('statuses', String(s)));
+    } else if (query?.status !== undefined && query?.status !== null) {
+      params.append('status', String(query.status));
+    }
     if (query?.itemId) params.append('itemId', query.itemId);
     if (query?.searchTerm) params.append('searchTerm', query.searchTerm);
     if (query?.pageNumber) params.append('pageNumber', String(query.pageNumber));

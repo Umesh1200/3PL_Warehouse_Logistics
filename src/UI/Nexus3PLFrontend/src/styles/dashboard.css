@@ -4,6 +4,8 @@
   display: flex;
   flex-direction: column;
   gap: 24px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 /* Header & Context Bar */
@@ -271,6 +273,8 @@
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 20px;
+  min-width: 0;
+  max-width: 100%;
 }
 
 @media (max-width: 960px) {
@@ -287,6 +291,8 @@
   overflow: hidden;
   display: flex;
   flex-direction: column;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .queue-header {
@@ -327,7 +333,10 @@
 
 .queue-table-wrap {
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
   flex: 1;
+  min-width: 0;
+  max-width: 100%;
 }
 
 .queue-table {

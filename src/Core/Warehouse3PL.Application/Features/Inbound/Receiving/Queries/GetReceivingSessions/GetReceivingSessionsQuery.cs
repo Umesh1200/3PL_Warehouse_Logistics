@@ -13,6 +13,7 @@ public record GetReceivingSessionsQuery : PagedQuery, IRequest<PagedResult<Recei
     public Guid? ClientId { get; init; }
     public Guid? DockDoorId { get; init; }
     public ReceivingStatus? Status { get; init; }
+    public List<ReceivingStatus>? Statuses { get; init; }
     public DateTime? DateFrom { get; init; }
     public DateTime? DateTo { get; init; }
 }
@@ -66,7 +67,11 @@ public class GetReceivingSessionsQueryHandler : IRequestHandler<GetReceivingSess
             query = query.Where(s => s.DockDoorId == request.DockDoorId.Value);
         }
 
-        if (request.Status.HasValue)
+        if (request.Statuses != null && request.Statuses.Count > 0)
+        {
+            query = query.Where(s => request.Statuses.Contains(s.Status));
+        }
+        else if (request.Status.HasValue)
         {
             query = query.Where(s => s.Status == request.Status.Value);
         }

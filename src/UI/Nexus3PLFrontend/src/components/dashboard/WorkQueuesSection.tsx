@@ -5,32 +5,41 @@ import { Link } from '../../context/RouterContext';
 
 export interface WorkQueuesSectionProps {
   putawayTasks: PutawayTaskDto[];
+  putawayTotalCount: number;
   loadingPutaway: boolean;
   putawayRestricted: boolean;
   putawayError: string | null;
+  canExecutePutaway?: boolean;
   receivingSessions: ReceivingSessionDto[];
+  receivingTotalCount: number;
   loadingReceiving: boolean;
   receivingRestricted: boolean;
   receivingError: string | null;
+  canExecuteReceiving?: boolean;
 }
 
 export const WorkQueuesSection: React.FC<WorkQueuesSectionProps> = ({
   putawayTasks,
+  putawayTotalCount,
   loadingPutaway,
   putawayRestricted,
   putawayError,
+  canExecutePutaway = false,
   receivingSessions,
+  receivingTotalCount,
   loadingReceiving,
   receivingRestricted,
   receivingError,
+  canExecuteReceiving = false,
 }) => {
   const getPutawayStatusBadge = (status: string) => {
     switch (status) {
       case 'Pending':
-        return <span className="badge badge-warning">Pending</span>;
+        return <span className="badge badge-warning">Pending (Unassigned)</span>;
       case 'Assigned':
+        return <span className="badge badge-info">Assigned</span>;
       case 'InTransit':
-        return <span className="badge badge-info">{status}</span>;
+        return <span className="badge badge-primary" style={{ backgroundColor: '#e0e7ff', color: '#3730a3' }}>In Transit</span>;
       case 'Completed':
         return <span className="badge badge-success">Completed</span>;
       case 'ExceptionHold':
@@ -44,8 +53,9 @@ export const WorkQueuesSection: React.FC<WorkQueuesSectionProps> = ({
   const getReceivingStatusBadge = (status: string) => {
     switch (status) {
       case 'Started':
+        return <span className="badge badge-info">Started</span>;
       case 'InProgress':
-        return <span className="badge badge-info">{status}</span>;
+        return <span className="badge badge-primary" style={{ backgroundColor: '#e0e7ff', color: '#3730a3' }}>In Progress</span>;
       case 'Completed':
         return <span className="badge badge-success">Completed</span>;
       case 'Flagged':
@@ -67,20 +77,36 @@ export const WorkQueuesSection: React.FC<WorkQueuesSectionProps> = ({
             <h3 className="queue-title">Directed Putaway Queue</h3>
             {!loadingPutaway && !putawayRestricted && (
               <span className="badge badge-info" style={{ fontSize: '11px' }}>
-                {putawayTasks.length} active
+                {putawayTotalCount} active
               </span>
             )}
           </div>
-          <Link to="/app/inbound/putaway" className="queue-action-link" aria-label="Launch RF Scanner">
-            <span>Launch RF Scanner</span>
-            <AppIcon name="ChevronRight" size="xs" color="primary" />
-          </Link>
+          {canExecutePutaway && (
+            <Link to="/app/inbound/putaway" className="queue-action-link" aria-label="Launch RF Scanner">
+              <span>Launch RF Scanner</span>
+              <AppIcon name="ChevronRight" size="xs" color="primary" />
+            </Link>
+          )}
         </div>
 
         {putawayRestricted ? (
           <div className="queue-empty">
             <AppIcon name="Lock" size="md" color="muted" />
-            <p>Requires inbound putaway execution authorization.</p>
+            <p><strong>Queue listing requires inbound:view authorization.</strong></p>
+            {canExecutePutaway && (
+              <div style={{ marginTop: '12px' }}>
+                <Link
+                  to="/app/inbound/putaway"
+                  className="btn btn-primary"
+                  role="button"
+                  aria-label="Launch RF Putaway Scanner"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '13px', padding: '8px 16px' }}
+                >
+                  <AppIcon name="PackageCheck" size="xs" color="inverse" />
+                  <span>Launch RF Putaway Scanner</span>
+                </Link>
+              </div>
+            )}
           </div>
         ) : putawayError ? (
           <div className="queue-empty" style={{ color: 'var(--status-danger-text)' }}>
@@ -101,6 +127,9 @@ export const WorkQueuesSection: React.FC<WorkQueuesSectionProps> = ({
           </div>
         ) : (
           <div className="queue-table-wrap">
+            <div style={{ padding: '6px 14px', fontSize: '12px', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-subtle)' }}>
+              Showing top {putawayTasks.length} of {putawayTotalCount} active staging tasks
+            </div>
             <table className="queue-table" aria-label="Pending Directed Putaway Tasks">
               <thead>
                 <tr>
@@ -146,20 +175,36 @@ export const WorkQueuesSection: React.FC<WorkQueuesSectionProps> = ({
             <h3 className="queue-title">Active Receiving Sessions</h3>
             {!loadingReceiving && !receivingRestricted && (
               <span className="badge badge-info" style={{ fontSize: '11px' }}>
-                {receivingSessions.length} active
+                {receivingTotalCount} active
               </span>
             )}
           </div>
-          <Link to="/app/inbound" className="queue-action-link" aria-label="Go to Inbound Receiving">
-            <span>Receiving Hub</span>
-            <AppIcon name="ChevronRight" size="xs" color="primary" />
-          </Link>
+          {canExecuteReceiving && (
+            <Link to="/app/inbound" className="queue-action-link" aria-label="Go to Inbound Receiving">
+              <span>Receiving Hub</span>
+              <AppIcon name="ChevronRight" size="xs" color="primary" />
+            </Link>
+          )}
         </div>
 
         {receivingRestricted ? (
           <div className="queue-empty">
             <AppIcon name="Lock" size="md" color="muted" />
-            <p>Requires inbound goods receiving authorization.</p>
+            <p><strong>Queue listing requires inbound:view authorization.</strong></p>
+            {canExecuteReceiving && (
+              <div style={{ marginTop: '12px' }}>
+                <Link
+                  to="/app/inbound"
+                  className="btn btn-primary"
+                  role="button"
+                  aria-label="Open Inbound Receiving"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: '6px', fontSize: '13px', padding: '8px 16px' }}
+                >
+                  <AppIcon name="ArrowDownToLine" size="xs" color="inverse" />
+                  <span>Open Inbound Receiving</span>
+                </Link>
+              </div>
+            )}
           </div>
         ) : receivingError ? (
           <div className="queue-empty" style={{ color: 'var(--status-danger-text)' }}>
@@ -180,6 +225,9 @@ export const WorkQueuesSection: React.FC<WorkQueuesSectionProps> = ({
           </div>
         ) : (
           <div className="queue-table-wrap">
+            <div style={{ padding: '6px 14px', fontSize: '12px', color: 'var(--text-muted)', borderBottom: '1px solid var(--border-subtle)' }}>
+              Showing top {receivingSessions.length} of {receivingTotalCount} active sessions
+            </div>
             <table className="queue-table" aria-label="Active Receiving Sessions">
               <thead>
                 <tr>

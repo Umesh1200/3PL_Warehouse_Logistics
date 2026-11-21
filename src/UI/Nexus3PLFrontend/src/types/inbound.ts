@@ -225,7 +225,8 @@ export interface AssignTaskRequest {
 export interface GetPutawayTasksQuery {
   facilityId?: string | null;
   clientId?: string | null;
-  status?: PutawayTaskStatus | null;
+  status?: PutawayTaskStatus | string | null;
+  statuses?: (PutawayTaskStatus | string)[];
   itemId?: string | null;
   searchTerm?: string | null;
   pageNumber?: number;

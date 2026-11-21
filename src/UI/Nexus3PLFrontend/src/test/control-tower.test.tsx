@@ -56,7 +56,6 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
     companyName: 'Nexus3PL Global Network',
     roles: ['FloorOperator'],
     permissions: [
-      'inbound:putaway',
       'inbound:putaway:execute',
     ],
   };
@@ -197,8 +196,11 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
   });
 
   const setupFetchMock = (userProfile: any, customOverrides: Record<string, any> = {}) => {
+    const recordedCalls: string[] = [];
+
     vi.stubGlobal('fetch', vi.fn().mockImplementation(async (input: any) => {
       const url = String(input);
+      recordedCalls.push(url);
 
       if (url.includes('/api/v1/auth/me')) {
         return {
@@ -231,6 +233,9 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
       }
 
       if (url.includes('/api/v1/control-tower/bottlenecks')) {
+        if (customOverrides.bottlenecksError) {
+          return { ok: false, status: 500, json: async () => ({ message: 'Bottleneck engine failed' }) };
+        }
         return {
           ok: true,
           status: 200,
@@ -239,6 +244,9 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
       }
 
       if (url.includes('/api/v1/control-tower/dock-yard')) {
+        if (customOverrides.dockYardError) {
+          return { ok: false, status: 500, json: async () => ({ message: 'Dock yard service down' }) };
+        }
         return {
           ok: true,
           status: 200,
@@ -247,10 +255,12 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
       }
 
       if (url.includes('/api/v1/putaway/tasks')) {
-        if (!userProfile.permissions.some((p: string) => p.startsWith('inbound:putaway') || p === 'inbound:view')) {
-          return { ok: false, status: 403, json: async () => ({ message: 'Forbidden' }) };
+        // Backend PutawayTasksController.GetTasks strictly requires inbound:view
+        if (!userProfile.permissions.includes('inbound:view')) {
+          return { ok: false, status: 403, json: async () => ({ message: 'Forbidden: inbound:view required' }) };
         }
         const items = customOverrides.emptyQueues ? [] : [mockPutawayTask];
+        const totalCount = customOverrides.putawayTotalCount ?? items.length;
         return {
           ok: true,
           status: 200,
@@ -258,7 +268,7 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
             items,
             pageNumber: 1,
             pageSize: 5,
-            totalCount: items.length,
+            totalCount,
             totalPages: 1,
             hasPreviousPage: false,
             hasNextPage: false,
@@ -267,10 +277,12 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
       }
 
       if (url.includes('/api/v1/receiving/sessions')) {
-        if (!userProfile.permissions.some((p: string) => p.startsWith('inbound:receive') || p === 'inbound:view')) {
-          return { ok: false, status: 403, json: async () => ({ message: 'Forbidden' }) };
+        // Backend ReceivingController.GetSessions strictly requires inbound:view
+        if (!userProfile.permissions.includes('inbound:view')) {
+          return { ok: false, status: 403, json: async () => ({ message: 'Forbidden: inbound:view required' }) };
         }
         const items = customOverrides.emptyQueues ? [] : [mockReceivingSession];
+        const totalCount = customOverrides.receivingTotalCount ?? items.length;
         return {
           ok: true,
           status: 200,
@@ -278,7 +290,7 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
             items,
             pageNumber: 1,
             pageSize: 5,
-            totalCount: items.length,
+            totalCount,
             totalPages: 1,
             hasPreviousPage: false,
             hasNextPage: false,
@@ -292,6 +304,8 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
         json: async () => ({}),
       };
     }));
+
+    return { recordedCalls };
   };
 
   it('renders Control Tower with genuine backend KPI telemetry, live facility metadata, and queues when authorized', async () => {
@@ -307,10 +321,11 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
       </RouterProvider>
     );
 
-    // 1. Facility & Header context
+    // 1. Facility & Header context with As-Of timestamp
     await waitFor(() => {
       expect(screen.getByText(/Enterprise Control Tower/i)).toBeDefined();
       expect(screen.getByText(/FAC-CHI1 — Chicago Central Logistics Hub/i)).toBeDefined();
+      expect(screen.getByText(/Backend As-Of:/i)).toBeDefined();
     });
 
     // 2. Genuine KPI values
@@ -342,8 +357,8 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
     expect(screen.getByTestId('launchpad-clients')).toBeDefined();
   });
 
-  it('fails closed gracefully with permission banner when lacking analytics authorization, preserving floor queues', async () => {
-    setupFetchMock(floorOperatorUser);
+  it('enforces RBAC alignment (P-CT-02): floor operator without inbound:view never calls listing endpoints but sees Launch RF Scanner', async () => {
+    const { recordedCalls } = setupFetchMock(floorOperatorUser);
 
     render(
       <RouterProvider initialPath="/app">
@@ -360,17 +375,83 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
       expect(screen.getByText(/analytics:control-tower:view/i)).toBeDefined();
     });
 
-    // Floor operator still sees authorized putaway queue
-    await waitFor(() => {
-      expect(screen.getByText('LPN-990011')).toBeDefined();
-    });
+    // Assert that the frontend did NOT trigger 403-failing list queries for putaway or receiving
+    const putawayCalls = recordedCalls.filter(c => c.includes('/api/v1/putaway/tasks'));
+    const receivingCalls = recordedCalls.filter(c => c.includes('/api/v1/receiving/sessions'));
+    expect(putawayCalls.length).toBe(0);
+    expect(receivingCalls.length).toBe(0);
 
-    // Receiving session is restricted for this user
-    expect(screen.getByText(/Requires inbound goods receiving authorization/i)).toBeDefined();
+    // Floor operator sees the clean restricted message explaining inbound:view requirement
+    const restrictedNotices = screen.getAllByText(/Queue listing requires inbound:view authorization/i);
+    expect(restrictedNotices.length).toBeGreaterThan(0);
+
+    // Floor operator retains execution navigation: "Launch RF Putaway Scanner" button is present
+    expect(screen.getByRole('button', { name: /Launch RF Putaway Scanner/i })).toBeDefined();
+
+    // Launchpad RF scanner link is accessible for operators with inbound:putaway:execute
+    expect(screen.getByTestId('launchpad-putaway')).toBeDefined();
 
     // Unauthorized launchpad items (e.g. Clients, Users, Roles) are not visible
     expect(screen.queryByTestId('launchpad-clients')).toBeNull();
     expect(screen.queryByTestId('launchpad-users')).toBeNull();
+  });
+
+  it('handles operational queue status filtering and totalCount display (P-CT-01)', async () => {
+    const { recordedCalls } = setupFetchMock(executiveUser, { putawayTotalCount: 38, receivingTotalCount: 17 });
+
+    render(
+      <RouterProvider initialPath="/app">
+        <AuthProvider>
+          <FacilityProvider>
+            <DashboardPage />
+          </FacilityProvider>
+        </AuthProvider>
+      </RouterProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('38 active')).toBeDefined();
+      expect(screen.getByText('17 active')).toBeDefined();
+    });
+
+    // Verify preview row label
+    expect(screen.getByText(/Showing top 1 of 38 active staging tasks/i)).toBeDefined();
+    expect(screen.getByText(/Showing top 1 of 17 active sessions/i)).toBeDefined();
+
+    // Verify status parameters were included in the query
+    const putawayCall = recordedCalls.find(c => c.includes('/api/v1/putaway/tasks'));
+    expect(putawayCall).toContain('statuses=Pending');
+    expect(putawayCall).toContain('statuses=Assigned');
+    expect(putawayCall).toContain('statuses=InTransit');
+
+    const receivingCall = recordedCalls.find(c => c.includes('/api/v1/receiving/sessions'));
+    expect(receivingCall).toContain('statuses=Started');
+    expect(receivingCall).toContain('statuses=InProgress');
+    expect(receivingCall).toContain('statuses=Flagged');
+  });
+
+  it('handles independent auxiliary error handling (P-CT-04): dock yard renders when bottlenecks fail', async () => {
+    setupFetchMock(executiveUser, { bottlenecksError: true });
+
+    render(
+      <RouterProvider initialPath="/app">
+        <AuthProvider>
+          <FacilityProvider>
+            <DashboardPage />
+          </FacilityProvider>
+        </AuthProvider>
+      </RouterProvider>
+    );
+
+    // Bottlenecks card displays error without indefinite skeleton
+    await waitFor(() => {
+      expect(screen.getByText(/Bottleneck diagnostics error:/i)).toBeDefined();
+    });
+
+    // Dock yard telemetry still renders successfully in the same card
+    expect(screen.getByText(/Trucks at Dock:/i)).toBeDefined();
+    expect(screen.getByText(/Waiting in Yard:/i)).toBeDefined();
+    expect(screen.getByText('4 / 20 (20%)')).toBeDefined();
   });
 
   it('renders clear empty states when staging buffer and dock receiving sessions are clear', async () => {
@@ -390,6 +471,37 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
       expect(screen.getByText(/Staging buffer is clear/i)).toBeDefined();
       expect(screen.getByText(/No active sessions at dock doors/i)).toBeDefined();
     });
+  });
+
+  it('supports toggling bounded 60s auto-refresh polling (P-CT-03)', async () => {
+    setupFetchMock(executiveUser);
+
+    render(
+      <RouterProvider initialPath="/app">
+        <AuthProvider>
+          <FacilityProvider>
+            <DashboardPage />
+          </FacilityProvider>
+        </AuthProvider>
+      </RouterProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Enterprise Control Tower/i)).toBeDefined();
+    });
+
+    // Auto-refresh button is initially 60s
+    const autoRefreshBtn = screen.getByRole('button', { name: /Disable 60s auto-refresh/i });
+    expect(autoRefreshBtn).toBeDefined();
+    expect(screen.getByText('Auto: 60s')).toBeDefined();
+
+    // Toggle off
+    fireEvent.click(autoRefreshBtn);
+    expect(screen.getByText('Auto: Off')).toBeDefined();
+
+    // Toggle back on
+    fireEvent.click(autoRefreshBtn);
+    expect(screen.getByText('Auto: 60s')).toBeDefined();
   });
 
   it('renders retry state on network error and handles manual refresh button trigger', async () => {

@@ -259,10 +259,41 @@ export const Header: React.FC<HeaderProps> = ({ onToggleNav }) => {
             display: flex;
           }
           .app-header {
-            padding: 0 16px;
+            padding: 0 12px;
+            gap: 8px;
+          }
+          .header-left {
+            gap: 8px;
+            min-width: 0;
+            flex: 1;
+          }
+          .facility-picker {
+            min-width: 0;
+            flex: 1;
+          }
+          .select-wrapper {
+            min-width: 0;
+            flex: 1;
+          }
+          .facility-select {
+            max-width: 130px;
+            text-overflow: ellipsis;
+            white-space: nowrap;
+            overflow: hidden;
           }
           .picker-label, .facility-tz, .tenant-tag, .role-pill, .signout-text {
             display: none;
+          }
+          .header-right {
+            gap: 8px;
+          }
+        }
+        @media (max-width: 480px) {
+          .user-info {
+            display: none;
+          }
+          .facility-select {
+            max-width: 105px;
           }
         }
       `}</style>

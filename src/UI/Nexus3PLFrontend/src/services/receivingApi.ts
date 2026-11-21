@@ -16,6 +16,7 @@ export interface ReceivingSessionQueryParams {
   clientId?: string | null;
   dockDoorId?: string | null;
   status?: ReceivingStatus | string | null;
+  statuses?: (ReceivingStatus | string)[];
   dateFrom?: string | null;
   dateTo?: string | null;
   searchTerm?: string | null;
@@ -29,7 +30,11 @@ export const receivingApi = {
     if (query?.facilityId) params.append('facilityId', query.facilityId);
     if (query?.clientId) params.append('clientId', query.clientId);
     if (query?.dockDoorId) params.append('dockDoorId', query.dockDoorId);
-    if (query?.status) params.append('status', String(query.status));
+    if (query?.statuses && query.statuses.length > 0) {
+      query.statuses.forEach((s) => params.append('statuses', String(s)));
+    } else if (query?.status) {
+      params.append('status', String(query.status));
+    }
     if (query?.dateFrom) params.append('dateFrom', query.dateFrom);
     if (query?.dateTo) params.append('dateTo', query.dateTo);
     if (query?.searchTerm) params.append('searchTerm', query.searchTerm);

@@ -1,7 +1,7 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react';
 import { useAuth } from '../context/AuthContext';
 import { useFacility } from '../context/FacilityContext';
-import { ControlTowerHeader } from '../components/dashboard/ControlTowerHeader';
+import { ControlTowerHeader, TelemetryFreshnessStatus } from '../components/dashboard/ControlTowerHeader';
 import { KpiMetricsGrid } from '../components/dashboard/KpiMetricsGrid';
 import { WorkQueuesSection } from '../components/dashboard/WorkQueuesSection';
 import { BottlenecksCard } from '../components/dashboard/BottlenecksCard';
@@ -14,7 +14,7 @@ import {
   FacilityBottleneckAnalysisDto,
   DockYardOperationalStatusDto,
 } from '../types/controlTower';
-import { PutawayTaskDto, ReceivingSessionDto } from '../types/inbound';
+import { PutawayTaskDto, ReceivingSessionDto, PutawayTaskStatus, ReceivingStatus } from '../types/inbound';
 
 export const DashboardPage: React.FC = () => {
   const { user, hasPermission, hasAnyPermission } = useAuth();
@@ -22,45 +22,119 @@ export const DashboardPage: React.FC = () => {
 
   // Metrics telemetry state
   const [summary, setSummary] = useState<ControlTowerSummaryDto | null>(null);
-  const [bottlenecks, setBottlenecks] = useState<FacilityBottleneckAnalysisDto | null>(null);
-  const [dockYard, setDockYard] = useState<DockYardOperationalStatusDto | null>(null);
   const [loadingMetrics, setLoadingMetrics] = useState<boolean>(true);
   const [metricsRestricted, setMetricsRestricted] = useState<boolean>(false);
   const [metricsError, setMetricsError] = useState<string | null>(null);
 
-  // Operational Queues state
+  // Independent auxiliary telemetry states (P-CT-04)
+  const [bottlenecks, setBottlenecks] = useState<FacilityBottleneckAnalysisDto | null>(null);
+  const [loadingBottlenecks, setLoadingBottlenecks] = useState<boolean>(false);
+  const [bottlenecksError, setBottlenecksError] = useState<string | null>(null);
+
+  const [dockYard, setDockYard] = useState<DockYardOperationalStatusDto | null>(null);
+  const [loadingDockYard, setLoadingDockYard] = useState<boolean>(false);
+  const [dockYardError, setDockYardError] = useState<string | null>(null);
+
+  // Operational Queues state (P-CT-01 & P-CT-02)
   const [putawayTasks, setPutawayTasks] = useState<PutawayTaskDto[]>([]);
+  const [putawayTotalCount, setPutawayTotalCount] = useState<number>(0);
   const [loadingPutaway, setLoadingPutaway] = useState<boolean>(true);
   const [putawayRestricted, setPutawayRestricted] = useState<boolean>(false);
   const [putawayError, setPutawayError] = useState<string | null>(null);
 
   const [receivingSessions, setReceivingSessions] = useState<ReceivingSessionDto[]>([]);
+  const [receivingTotalCount, setReceivingTotalCount] = useState<number>(0);
   const [loadingReceiving, setLoadingReceiving] = useState<boolean>(true);
   const [receivingRestricted, setReceivingRestricted] = useState<boolean>(false);
   const [receivingError, setReceivingError] = useState<string | null>(null);
 
-  const [lastUpdated, setLastUpdated] = useState<Date | null>(null);
+  // Telemetry freshness & auto-refresh (P-CT-03)
+  const [lastSuccessfulSync, setLastSuccessfulSync] = useState<Date | null>(null);
   const [isRefreshing, setIsRefreshing] = useState<boolean>(false);
+  const [autoRefresh, setAutoRefresh] = useState<boolean>(true);
 
+  const inFlightRef = useRef<boolean>(false);
   const abortControllerRef = useRef<AbortController | null>(null);
 
+  // Backend RBAC permissions
   const canViewAnalytics = hasPermission('analytics:control-tower:view');
-  const canViewPutaway = hasAnyPermission([
+  // Listing queues requires inbound:view per backend controller authorization
+  const canListPutawayQueue = hasPermission('inbound:view');
+  const canListReceivingQueue = hasPermission('inbound:view');
+
+  // Execution privileges for floor operators
+  const canExecutePutaway = hasAnyPermission([
     'inbound:putaway',
     'inbound:putaway:execute',
     'inbound:putaway:manage',
-    'inbound:view',
   ]);
-  const canViewReceiving = hasAnyPermission([
-    'inbound:view',
+  const canExecuteReceiving = hasAnyPermission([
     'inbound:receive',
-    'inbound:asn:view',
   ]);
 
-  const loadData = useCallback(async (isManualRefresh = false) => {
-    if (abortControllerRef.current) {
-      abortControllerRef.current.abort();
+  // Immediate facility wipe upon facility change (P-CT-03)
+  useEffect(() => {
+    setSummary(null);
+    setBottlenecks(null);
+    setDockYard(null);
+    setPutawayTasks([]);
+    setReceivingSessions([]);
+    setPutawayTotalCount(0);
+    setReceivingTotalCount(0);
+    setLastSuccessfulSync(null);
+    setMetricsError(null);
+    setBottlenecksError(null);
+    setDockYardError(null);
+    setPutawayError(null);
+    setReceivingError(null);
+  }, [activeFacility?.id]);
+
+  // Independent auxiliary fetchers
+  const fetchBottlenecks = useCallback(async (signal?: AbortSignal) => {
+    if (!canViewAnalytics || !activeFacility?.id) {
+      setBottlenecks(null);
+      setLoadingBottlenecks(false);
+      return;
     }
+    setLoadingBottlenecks(true);
+    setBottlenecksError(null);
+    try {
+      const bResult = await controlTowerApi.getBottlenecks(activeFacility.id, undefined, signal);
+      setBottlenecks(bResult);
+    } catch (err: any) {
+      if (err.name === 'AbortError') return;
+      setBottlenecksError(err.message || 'Failed to load bottleneck analysis');
+    } finally {
+      setLoadingBottlenecks(false);
+    }
+  }, [canViewAnalytics, activeFacility?.id]);
+
+  const fetchDockYard = useCallback(async (signal?: AbortSignal) => {
+    if (!canViewAnalytics || !activeFacility?.id) {
+      setDockYard(null);
+      setLoadingDockYard(false);
+      return;
+    }
+    setLoadingDockYard(true);
+    setDockYardError(null);
+    try {
+      const dResult = await controlTowerApi.getDockYardStatus(activeFacility.id, undefined, signal);
+      setDockYard(dResult);
+    } catch (err: any) {
+      if (err.name === 'AbortError') return;
+      setDockYardError(err.message || 'Failed to load dock and yard telemetry');
+    } finally {
+      setLoadingDockYard(false);
+    }
+  }, [canViewAnalytics, activeFacility?.id]);
+
+  const loadData = useCallback(async (isManualRefresh = false) => {
+    if (inFlightRef.current && isManualRefresh) {
+      if (abortControllerRef.current) {
+        abortControllerRef.current.abort();
+      }
+    }
+    inFlightRef.current = true;
     const ctrl = new AbortController();
     abortControllerRef.current = ctrl;
 
@@ -78,7 +152,7 @@ export const DashboardPage: React.FC = () => {
 
     const facilityId = activeFacility?.id;
 
-    // 1. Executive Metrics & Bottlenecks
+    // 1. Executive Metrics & Auxiliary Telemetry
     const fetchMetricsPromise = (async () => {
       if (!canViewAnalytics) {
         setMetricsRestricted(true);
@@ -86,6 +160,8 @@ export const DashboardPage: React.FC = () => {
         setBottlenecks(null);
         setDockYard(null);
         setLoadingMetrics(false);
+        setLoadingBottlenecks(false);
+        setLoadingDockYard(false);
         return;
       }
 
@@ -93,19 +169,13 @@ export const DashboardPage: React.FC = () => {
       try {
         const sumResult = await controlTowerApi.getSummary(facilityId, undefined, ctrl.signal);
         setSummary(sumResult);
+        // Only mark lastSuccessfulSync when backend successfully responds with HTTP 200
+        setLastSuccessfulSync(new Date());
 
-        // Fetch bottlenecks & dock status if facilityId is available
+        // Launch auxiliary telemetry independently (P-CT-04)
         if (facilityId) {
-          try {
-            const [bResult, dResult] = await Promise.all([
-              controlTowerApi.getBottlenecks(facilityId, undefined, ctrl.signal).catch(() => null),
-              controlTowerApi.getDockYardStatus(facilityId, undefined, ctrl.signal).catch(() => null),
-            ]);
-            setBottlenecks(bResult);
-            setDockYard(dResult);
-          } catch (_) {
-            // Non-critical auxiliary telemetry
-          }
+          fetchBottlenecks(ctrl.signal);
+          fetchDockYard(ctrl.signal);
         }
       } catch (err: any) {
         if (err.name === 'AbortError') return;
@@ -119,11 +189,12 @@ export const DashboardPage: React.FC = () => {
       }
     })();
 
-    // 2. Putaway Staging Queue
+    // 2. Putaway Staging Queue (Filtered to Active Tasks)
     const fetchPutawayPromise = (async () => {
-      if (!canViewPutaway) {
+      if (!canListPutawayQueue) {
         setPutawayRestricted(true);
         setPutawayTasks([]);
+        setPutawayTotalCount(0);
         setLoadingPutaway(false);
         return;
       }
@@ -133,12 +204,14 @@ export const DashboardPage: React.FC = () => {
         const pResult = await putawayApi.getTasks(
           {
             facilityId,
+            statuses: [PutawayTaskStatus.Pending, PutawayTaskStatus.Assigned, PutawayTaskStatus.InTransit],
             pageNumber: 1,
             pageSize: 5,
           },
           ctrl.signal
         );
         setPutawayTasks(pResult.items || []);
+        setPutawayTotalCount(pResult.totalCount ?? (pResult.items?.length || 0));
       } catch (err: any) {
         if (err.name === 'AbortError') return;
         if (err.status === 403) {
@@ -151,11 +224,12 @@ export const DashboardPage: React.FC = () => {
       }
     })();
 
-    // 3. Receiving Sessions Queue
+    // 3. Receiving Sessions Queue (Filtered to Active Sessions)
     const fetchReceivingPromise = (async () => {
-      if (!canViewReceiving) {
+      if (!canListReceivingQueue) {
         setReceivingRestricted(true);
         setReceivingSessions([]);
+        setReceivingTotalCount(0);
         setLoadingReceiving(false);
         return;
       }
@@ -165,12 +239,14 @@ export const DashboardPage: React.FC = () => {
         const rResult = await receivingApi.getSessions(
           {
             facilityId,
+            statuses: [ReceivingStatus.Started, ReceivingStatus.InProgress, ReceivingStatus.Flagged],
             pageNumber: 1,
             pageSize: 5,
           },
           ctrl.signal
         );
         setReceivingSessions(rResult.items || []);
+        setReceivingTotalCount(rResult.totalCount ?? (rResult.items?.length || 0));
       } catch (err: any) {
         if (err.name === 'AbortError') return;
         if (err.status === 403) {
@@ -184,10 +260,11 @@ export const DashboardPage: React.FC = () => {
     })();
 
     await Promise.allSettled([fetchMetricsPromise, fetchPutawayPromise, fetchReceivingPromise]);
-    setLastUpdated(new Date());
     setIsRefreshing(false);
-  }, [activeFacility?.id, canViewAnalytics, canViewPutaway, canViewReceiving]);
+    inFlightRef.current = false;
+  }, [activeFacility?.id, canViewAnalytics, canListPutawayQueue, canListReceivingQueue, fetchBottlenecks, fetchDockYard]);
 
+  // Initial load
   useEffect(() => {
     loadData();
     return () => {
@@ -197,19 +274,52 @@ export const DashboardPage: React.FC = () => {
     };
   }, [loadData]);
 
+  // Bounded 60s auto-refresh polling with overlap and visibility protection (P-CT-03)
+  useEffect(() => {
+    if (!autoRefresh) return;
+
+    const interval = setInterval(() => {
+      if (document.hidden) return;
+      if (inFlightRef.current) return;
+      loadData(false);
+    }, 60000);
+
+    return () => clearInterval(interval);
+  }, [autoRefresh, loadData]);
+
   const handleRefresh = () => {
     loadData(true);
   };
 
+  // Compute telemetry freshness status
+  let telemetryStatus: TelemetryFreshnessStatus = 'live';
+  if (metricsRestricted) {
+    telemetryStatus = 'restricted';
+  } else if (isRefreshing) {
+    telemetryStatus = 'refreshing';
+  } else if (metricsError) {
+    telemetryStatus = 'error';
+  } else if (!lastSuccessfulSync) {
+    telemetryStatus = 'stale';
+  } else if (Date.now() - lastSuccessfulSync.getTime() > 120000) {
+    telemetryStatus = 'stale';
+  } else {
+    telemetryStatus = 'live';
+  }
+
   return (
     <div className="control-tower" data-testid="control-tower-dashboard">
-      {/* 1. Header & Live Clock / Context */}
+      {/* 1. Header & Live Clock / Freshness Context (P-CT-03) */}
       <ControlTowerHeader
         user={user}
         activeFacility={activeFacility}
         onRefresh={handleRefresh}
         isRefreshing={isRefreshing}
-        lastUpdated={lastUpdated}
+        lastSuccessfulSync={lastSuccessfulSync}
+        backendAsOfUtc={summary?.asOfUtc || null}
+        telemetryStatus={telemetryStatus}
+        autoRefresh={autoRefresh}
+        onToggleAutoRefresh={() => setAutoRefresh((prev) => !prev)}
       />
 
       {/* 2. Executive & Floor Throughput KPIs */}
@@ -221,24 +331,33 @@ export const DashboardPage: React.FC = () => {
         onRetry={handleRefresh}
       />
 
-      {/* 3. Operational Flow & Bottleneck Diagnostics */}
+      {/* 3. Operational Flow & Bottleneck Diagnostics (P-CT-04 Independent Loading & Errors) */}
       <BottlenecksCard
         bottlenecks={bottlenecks}
+        loadingBottlenecks={loadingBottlenecks}
+        bottlenecksError={bottlenecksError}
         dockYard={dockYard}
-        isLoading={loadingMetrics}
+        loadingDockYard={loadingDockYard}
+        dockYardError={dockYardError}
         isRestricted={metricsRestricted}
+        onRetryBottlenecks={() => fetchBottlenecks()}
+        onRetryDockYard={() => fetchDockYard()}
       />
 
-      {/* 4. Active Floor Execution Queues */}
+      {/* 4. Active Floor Execution Queues (P-CT-01 & P-CT-02) */}
       <WorkQueuesSection
         putawayTasks={putawayTasks}
+        putawayTotalCount={putawayTotalCount}
         loadingPutaway={loadingPutaway}
         putawayRestricted={putawayRestricted}
         putawayError={putawayError}
+        canExecutePutaway={canExecutePutaway}
         receivingSessions={receivingSessions}
+        receivingTotalCount={receivingTotalCount}
         loadingReceiving={loadingReceiving}
         receivingRestricted={receivingRestricted}
         receivingError={receivingError}
+        canExecuteReceiving={canExecuteReceiving}
       />
 
       {/* 5. Enterprise Navigation Launchpad */}

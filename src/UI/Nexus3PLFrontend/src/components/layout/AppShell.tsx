@@ -32,17 +32,23 @@ export const AppShell: React.FC<AppShellProps> = ({ children, pageTitle, breadcr
           display: flex;
           min-height: 100vh;
           background: #f5f5f9;
+          overflow-x: hidden;
+          max-width: 100vw;
         }
         .app-shell-main {
           flex: 1;
           display: flex;
           flex-direction: column;
           min-width: 0;
+          overflow-x: hidden;
+          max-width: 100%;
         }
         .app-content {
           flex: 1;
           padding: 24px;
           overflow-y: auto;
+          overflow-x: hidden;
+          min-width: 0;
         }
         .content-page-header {
           margin-bottom: 20px;

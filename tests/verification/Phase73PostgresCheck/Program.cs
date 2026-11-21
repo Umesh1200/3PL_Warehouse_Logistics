@@ -915,6 +915,7 @@ try
     webBuilder.Services.AddScoped<IApplicationDbContext>(sp => sp.GetRequiredService<ApplicationDbContext>());
     webBuilder.Services.AddScoped<WarehouseOperationalAuthorization>();
     webBuilder.Services.AddScoped<IPutawayLocationSelector, PutawayLocationSelector>();
+    webBuilder.Services.AddScoped<IAnalyticsQueryService, Warehouse3PL.Infrastructure.Services.Analytics.AnalyticsQueryService>();
 
     using var app = webBuilder.Build();
     app.UseMiddleware<ExceptionHandlingMiddleware>();
@@ -1304,6 +1305,98 @@ try
     }
     Console.WriteLine("PASS HTTP DELETE /api/v1/clients/{id} -> 204 NoContent, soft delete (is_deleted = true) in PostgreSQL verified.");
 
+    // ------------------------------------------------------------------------------------------------
+    // SECTION 5: CONTROL TOWER TELEMETRY & QUEUE STATUS / RBAC VERIFICATION (P-CT-01 & P-CT-02)
+    // ------------------------------------------------------------------------------------------------
+    Console.WriteLine("\n[5/5] Running Section 5: Control Tower Telemetry, Queue Status Filtering & RBAC Verification...");
+
+    // 5.1 Authorized Control Tower Summary
+    var summaryResponse = await client.GetAsync($"/api/v1/control-tower/summary?facilityId={facilityId}");
+    if (summaryResponse.StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException($"Control Tower Summary query failed: {summaryResponse.StatusCode}");
+    var summaryJson = await summaryResponse.Content.ReadAsStringAsync();
+    using (var doc = JsonDocument.Parse(summaryJson))
+    {
+        var asOfUtc = doc.RootElement.GetProperty("asOfUtc").GetString();
+        if (string.IsNullOrEmpty(asOfUtc))
+            throw new InvalidOperationException("Control Tower summary asOfUtc was empty.");
+    }
+    Console.WriteLine("PASS HTTP GET /api/v1/control-tower/summary -> 200 OK with authentic asOfUtc.");
+
+    // 5.2 Negative Control Tower Summary without analytics permission
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, "FloorOperator"),
+        new Claim("UserType", "Staff"),
+        new Claim("user_type", "Staff"),
+        new Claim("Permission", "Inbound:Putaway:Execute")
+    };
+    var unauthSummaryResponse = await client.GetAsync($"/api/v1/control-tower/summary?facilityId={facilityId}");
+    if (unauthSummaryResponse.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Unauthenticated Control Tower Summary should return 403 Forbidden, got {unauthSummaryResponse.StatusCode}");
+    Console.WriteLine("PASS Negative Check: HTTP GET /api/v1/control-tower/summary without analytics permission -> 403 Forbidden.");
+
+    // 5.3 Active Putaway Queue Status Filtering (P-CT-01)
+    TestAuthHandler.CustomClaims = null; // restore full permissions
+    var putawayFilteredResponse = await client.GetAsync($"/api/v1/putaway/tasks?facilityId={facilityId}&statuses=Pending&statuses=Assigned&statuses=InTransit&pageNumber=1&pageSize=5");
+    if (putawayFilteredResponse.StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException($"Putaway tasks query with active statuses failed: {putawayFilteredResponse.StatusCode}");
+    var putawayJson = await putawayFilteredResponse.Content.ReadAsStringAsync();
+    using (var doc = JsonDocument.Parse(putawayJson))
+    {
+        var items = doc.RootElement.GetProperty("items").EnumerateArray().ToList();
+        foreach (var task in items)
+        {
+            var statusStr = task.GetProperty("status").GetString();
+            if (statusStr == "Completed" || statusStr == "Cancelled")
+                throw new InvalidOperationException($"Putaway tasks query returned inactive task with status: {statusStr}");
+        }
+        var totalCount = doc.RootElement.GetProperty("totalCount").GetInt32();
+        if (totalCount < 0)
+            throw new InvalidOperationException("Putaway tasks query totalCount invalid.");
+    }
+    Console.WriteLine("PASS HTTP GET /api/v1/putaway/tasks with statuses=Pending,Assigned,InTransit -> 200 OK, inactive tasks excluded.");
+
+    // 5.4 RBAC: Floor operator without inbound:view cannot list putaway queue (P-CT-02)
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, "FloorOperator"),
+        new Claim("UserType", "Staff"),
+        new Claim("user_type", "Staff"),
+        new Claim("Permission", "Inbound:Putaway:Execute"),
+        new Claim("permissions", "inbound:putaway:execute")
+    };
+    var operatorPutawayListResponse = await client.GetAsync($"/api/v1/putaway/tasks?facilityId={facilityId}");
+    if (operatorPutawayListResponse.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Floor operator listing putaway tasks should return 403 Forbidden, got {operatorPutawayListResponse.StatusCode}");
+    Console.WriteLine("PASS Negative Check: HTTP GET /api/v1/putaway/tasks without inbound:view -> 403 Forbidden.");
+
+    // 5.5 Floor operator with inbound:putaway:execute CAN invoke /next endpoint
+    var operatorNextResponse = await client.GetAsync($"/api/v1/putaway/tasks/next?facilityId={facilityId}");
+    if (operatorNextResponse.StatusCode != HttpStatusCode.OK && operatorNextResponse.StatusCode != HttpStatusCode.NoContent)
+        throw new InvalidOperationException($"Floor operator GET /api/v1/putaway/tasks/next failed: {operatorNextResponse.StatusCode}");
+    Console.WriteLine($"PASS Execution Check: HTTP GET /api/v1/putaway/tasks/next with inbound:putaway:execute -> {operatorNextResponse.StatusCode} (Authorized).");
+
+    // 5.6 Floor operator without inbound:view cannot list receiving sessions
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, "FloorOperator"),
+        new Claim("UserType", "Staff"),
+        new Claim("user_type", "Staff"),
+        new Claim("Permission", "Inbound:Receive"),
+        new Claim("permissions", "inbound:receive")
+    };
+    var operatorReceivingListResponse = await client.GetAsync($"/api/v1/receiving/sessions?facilityId={facilityId}");
+    if (operatorReceivingListResponse.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Floor operator listing receiving sessions should return 403 Forbidden, got {operatorReceivingListResponse.StatusCode}");
+    Console.WriteLine("PASS Negative Check: HTTP GET /api/v1/receiving/sessions without inbound:view -> 403 Forbidden.");
+
+    // Restore full permissions
+    TestAuthHandler.CustomClaims = null;
+
     Console.WriteLine("\n================================================================================");
     Console.WriteLine("ALL PHASE 7.3 POSTGRESQL & BACKEND-CONNECTED JOURNEYS PASSED CLEANLY!");
     Console.WriteLine("================================================================================");
@@ -1417,6 +1510,8 @@ sealed class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
             new Claim("Permission", "Inbound:View"),
             new Claim("Permission", "Inventory:View"),
             new Claim("Permission", "Analytics:CrossFacility"),
+            new Claim("Permission", "Analytics:ControlTower:View"),
+            new Claim("permissions", "analytics:control-tower:view"),
             new Claim("permissions", "clients:view"),
             new Claim("permissions", "clients:create"),
             new Claim("permissions", "clients:edit"),
