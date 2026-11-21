@@ -106,8 +106,8 @@ try
             INSERT INTO facilities (facility_id, facility_code, name, timezone, country_code, dock_door_count, is_active, is_deleted, created_at)
             VALUES ('{facilityId}', 'MIG-FAC', 'Migration Facility', 'UTC', 'USA', 4, true, false, NOW());
 
-            INSERT INTO items (item_id, client_id, sku, description, abc_velocity, storage_temp_class, status, is_deleted, created_at)
-            VALUES ('{itemId}', '{clientId}', 'MIG-SKU', 'Migration Item', 'C', 'Ambient', 'Active', false, NOW());
+            INSERT INTO items (item_id, client_id, sku, description, unit_price, weight_kg, length_cm, width_cm, height_cm, volume_cm3, abc_velocity, storage_temp_class, allow_planar_rotation, status, is_deleted, created_at)
+            VALUES ('{itemId}', '{clientId}', 'MIG-SKU', 'Migration Item', 10.0000, 1.500, 20.00, 15.00, 10.00, 3000.00, 'C', 'Ambient', true, 'Active', false, NOW());
 
             INSERT INTO locations (location_id, facility_id, location_code, barcode, location_type, is_active, is_receiving, is_pickable, is_damaged, is_locked, is_deleted, created_at)
             VALUES 
@@ -129,13 +129,13 @@ try
         // 3. Differing: suggested_location_id == loc1, target_location_id1 == loc2
         // 4. Duplicate tasks for receipt line (dupLineId): taskDup1 (older), taskDup2 (latest)
         await using (var cmd = new NpgsqlCommand($@"
-            INSERT INTO putaway_tasks (task_id, client_id, facility_id, item_id, source_location_id, suggested_location_id, target_location_id1, lpn_id, quantity, status, priority, notes, created_at_utc, created_at)
+            INSERT INTO putaway_tasks (task_id, client_id, facility_id, item_id, source_location_id, suggested_location_id, target_location_id1, lpn_id, quantity, status, priority, notes, version, created_at_utc, created_at)
             VALUES 
-                ('{task1Matching}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', NULL, 10, 'Pending', 'Normal', 'Matching task', NOW(), NOW()),
-                ('{task2MissingCanonical}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{dummyZeroLoc}', '{loc2}', NULL, 20, 'Pending', 'Normal', 'Missing canonical task', NOW(), NOW()),
-                ('{task3Differing}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc2}', NULL, 30, 'Pending', 'Normal', 'Differing task', NOW(), NOW()),
-                ('{taskDup1}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', '{dupLineId}', 15, 'Pending', 'Normal', 'Pre-migration duplicate task 1', NOW() - INTERVAL '1 hour', NOW()),
-                ('{taskDup2}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', '{dupLineId}', 15, 'Pending', 'Normal', 'Pre-migration duplicate task 2', NOW(), NOW());
+                ('{task1Matching}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', NULL, 10, 'Pending', 'Normal', 'Matching task', 1, NOW(), NOW()),
+                ('{task2MissingCanonical}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{dummyZeroLoc}', '{loc2}', NULL, 20, 'Pending', 'Normal', 'Missing canonical task', 1, NOW(), NOW()),
+                ('{task3Differing}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc2}', NULL, 30, 'Pending', 'Normal', 'Differing task', 1, NOW(), NOW()),
+                ('{taskDup1}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', '{dupLineId}', 15, 'Pending', 'Normal', 'Pre-migration duplicate task 1', 1, NOW() - INTERVAL '1 hour', NOW()),
+                ('{taskDup2}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', '{dupLineId}', 15, 'Pending', 'Normal', 'Pre-migration duplicate task 2', 1, NOW(), NOW());
         ", sqlConn))
         {
             await cmd.ExecuteNonQueryAsync();
@@ -228,8 +228,8 @@ try
         try
         {
             await using var dupInsertCmd = new NpgsqlCommand($@"
-                INSERT INTO putaway_tasks (task_id, client_id, facility_id, item_id, source_location_id, suggested_location_id, lpn_id, quantity, status, priority, created_at_utc, created_at)
-                VALUES ('{Guid.NewGuid()}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{dupLineId}', 10, 'Pending', 'Normal', NOW(), NOW());
+                INSERT INTO putaway_tasks (task_id, client_id, facility_id, item_id, source_location_id, suggested_location_id, lpn_id, quantity, status, priority, version, created_at_utc, created_at)
+                VALUES ('{Guid.NewGuid()}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{dupLineId}', 10, 'Pending', 'Normal', 1, NOW(), NOW());
             ", sqlConn);
             await dupInsertCmd.ExecuteNonQueryAsync();
         }
