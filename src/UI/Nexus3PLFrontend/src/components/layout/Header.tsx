@@ -130,9 +130,13 @@ export const Header: React.FC<HeaderProps> = ({ onToggleNav }) => {
           background: none;
           border: none;
           padding: 8px;
+          min-height: 44px;
+          min-width: 44px;
           cursor: pointer;
           border-radius: var(--radius-xs);
           color: var(--text-main);
+          align-items: center;
+          justify-content: center;
         }
         .mobile-nav-toggle:hover {
           background: #f1f5f9;
@@ -240,8 +244,11 @@ export const Header: React.FC<HeaderProps> = ({ onToggleNav }) => {
         .btn-signout {
           display: inline-flex;
           align-items: center;
+          justify-content: center;
           gap: 6px;
-          padding: 6px 12px;
+          padding: 8px 12px;
+          min-height: 44px;
+          min-width: 44px;
           border: 1px solid var(--border-actionable);
           border-radius: var(--radius-sm);
           font-size: 12.5px;

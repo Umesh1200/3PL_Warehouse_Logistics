@@ -62,7 +62,7 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
 
   const mockSummary = {
     facilityId: 'fac-chi-01',
-    asOfUtc: '2026-11-21T18:00:00Z',
+    asOfUtc: new Date().toISOString(),
     ordersReceivedToday: 120,
     ordersDispatchedToday: 95,
     packagesDispatchedToday: 210,
@@ -228,7 +228,7 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
         return {
           ok: true,
           status: 200,
-          json: async () => mockSummary,
+          json: async () => customOverrides.summaryOverride ?? mockSummary,
         };
       }
 
@@ -339,22 +339,24 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
       expect(screen.getByText('78.4%')).toBeDefined(); // rack occupancy
     });
 
-    // 3. Bottleneck diagnostics
-    expect(screen.getByTestId('bottlenecks-card')).toBeDefined();
-    expect(screen.getByText(/Facility Health: 96\/100/i)).toBeDefined();
-    expect(screen.getByText(/Receiving Inflow/i)).toBeDefined();
+    // 3. Bottleneck diagnostics & queues & launchpad
+    await waitFor(() => {
+      expect(screen.getByTestId('bottlenecks-card')).toBeDefined();
+      expect(screen.getByText(/Facility Health: 96\/100/i)).toBeDefined();
+      expect(screen.getByText(/Receiving Inflow/i)).toBeDefined();
 
-    // 4. Operational Queues
-    expect(screen.getByText('LPN-990011')).toBeDefined();
-    expect(screen.getByText('SKU-ELEC-404')).toBeDefined();
-    expect(screen.getByText('REC-2026-0881')).toBeDefined();
-    expect(screen.getByText('DOCK-DOOR-04')).toBeDefined();
+      // 4. Operational Queues
+      expect(screen.getByText('LPN-990011')).toBeDefined();
+      expect(screen.getByText('SKU-ELEC-404')).toBeDefined();
+      expect(screen.getByText('REC-2026-0881')).toBeDefined();
+      expect(screen.getByText('DOCK-DOOR-04')).toBeDefined();
 
-    // 5. Operations Launchpad links
-    expect(screen.getByTestId('launchpad-putaway')).toBeDefined();
-    expect(screen.getByTestId('launchpad-receiving')).toBeDefined();
-    expect(screen.getByTestId('launchpad-inventory')).toBeDefined();
-    expect(screen.getByTestId('launchpad-clients')).toBeDefined();
+      // 5. Operations Launchpad links
+      expect(screen.getByTestId('launchpad-putaway')).toBeDefined();
+      expect(screen.getByTestId('launchpad-receiving')).toBeDefined();
+      expect(screen.getByTestId('launchpad-inventory')).toBeDefined();
+      expect(screen.getByTestId('launchpad-clients')).toBeDefined();
+    });
   });
 
   it('enforces RBAC alignment (P-CT-02): floor operator without inbound:view never calls listing endpoints but sees Launch RF Scanner', async () => {
@@ -525,5 +527,44 @@ describe('Enterprise Control Tower & Operational Telemetry Tests', () => {
     const refreshBtn = screen.getByRole('button', { name: /Refresh operational metrics/i });
     expect(refreshBtn).toBeDefined();
     fireEvent.click(refreshBtn);
+  });
+
+  it('detects stale backend snapshot age (Section C)', async () => {
+    // 10 minutes in the past
+    const staleAsOf = new Date(Date.now() - 600000).toISOString();
+    setupFetchMock(executiveUser, { summaryOverride: { ...mockSummary, asOfUtc: staleAsOf } });
+
+    render(
+      <RouterProvider initialPath="/app">
+        <AuthProvider>
+          <FacilityProvider>
+            <DashboardPage />
+          </FacilityProvider>
+        </AuthProvider>
+      </RouterProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Snapshot Stale/i)).toBeDefined();
+    });
+  });
+
+  it('renders combined retry control when both bottlenecks and dock-yard fail simultaneously (Section C)', async () => {
+    setupFetchMock(executiveUser, { bottlenecksError: true, dockYardError: true });
+
+    render(
+      <RouterProvider initialPath="/app">
+        <AuthProvider>
+          <FacilityProvider>
+            <DashboardPage />
+          </FacilityProvider>
+        </AuthProvider>
+      </RouterProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText(/Auxiliary Telemetry Unavailable/i)).toBeDefined();
+      expect(screen.getByRole('button', { name: /Retry All Auxiliary Diagnostics/i })).toBeDefined();
+    });
   });
 });

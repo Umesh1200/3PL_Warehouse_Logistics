@@ -55,6 +55,21 @@ export const DashboardPage: React.FC = () => {
 
   const inFlightRef = useRef<boolean>(false);
   const abortControllerRef = useRef<AbortController | null>(null);
+  const currentFacilityRef = useRef<string | undefined>(activeFacility?.id);
+
+  // Periodic clock ensures live-to-stale transition triggers even when auto-refresh polling is disabled
+  const [clockNow, setClockNow] = useState<number>(() => Date.now());
+
+  useEffect(() => {
+    const timer = setInterval(() => {
+      setClockNow(Date.now());
+    }, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    currentFacilityRef.current = activeFacility?.id;
+  }, [activeFacility?.id]);
 
   // Backend RBAC permissions
   const canViewAnalytics = hasPermission('analytics:control-tower:view');
@@ -62,18 +77,21 @@ export const DashboardPage: React.FC = () => {
   const canListPutawayQueue = hasPermission('inbound:view');
   const canListReceivingQueue = hasPermission('inbound:view');
 
-  // Execution privileges for floor operators
-  const canExecutePutaway = hasAnyPermission([
-    'inbound:putaway',
-    'inbound:putaway:execute',
-    'inbound:putaway:manage',
-  ]);
-  const canExecuteReceiving = hasAnyPermission([
-    'inbound:receive',
-  ]);
+  // Execution privileges for floor operators strictly require execution permission or superadmin
+  const canExecutePutaway =
+    hasPermission('inbound:putaway:execute') ||
+    hasPermission('inbound:putaway:manage') ||
+    user?.roles.some((r) => r.toLowerCase() === 'superadmin');
 
-  // Immediate facility wipe upon facility change (P-CT-03)
+  const canExecuteReceiving =
+    hasPermission('inbound:receive') ||
+    user?.roles.some((r) => r.toLowerCase() === 'superadmin');
+
+  // Immediate facility wipe upon facility change (P-CT-03) and cancel in-flight requests
   useEffect(() => {
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort();
+    }
     setSummary(null);
     setBottlenecks(null);
     setDockYard(null);
@@ -89,9 +107,10 @@ export const DashboardPage: React.FC = () => {
     setReceivingError(null);
   }, [activeFacility?.id]);
 
-  // Independent auxiliary fetchers
+  // Independent auxiliary fetchers with facility change race-condition protection
   const fetchBottlenecks = useCallback(async (signal?: AbortSignal) => {
-    if (!canViewAnalytics || !activeFacility?.id) {
+    const facId = activeFacility?.id;
+    if (!canViewAnalytics || !facId) {
       setBottlenecks(null);
       setLoadingBottlenecks(false);
       return;
@@ -99,18 +118,23 @@ export const DashboardPage: React.FC = () => {
     setLoadingBottlenecks(true);
     setBottlenecksError(null);
     try {
-      const bResult = await controlTowerApi.getBottlenecks(activeFacility.id, undefined, signal);
+      const bResult = await controlTowerApi.getBottlenecks(facId, undefined, signal);
+      if (currentFacilityRef.current !== facId) return;
       setBottlenecks(bResult);
     } catch (err: any) {
       if (err.name === 'AbortError') return;
+      if (currentFacilityRef.current !== facId) return;
       setBottlenecksError(err.message || 'Failed to load bottleneck analysis');
     } finally {
-      setLoadingBottlenecks(false);
+      if (currentFacilityRef.current === facId) {
+        setLoadingBottlenecks(false);
+      }
     }
   }, [canViewAnalytics, activeFacility?.id]);
 
   const fetchDockYard = useCallback(async (signal?: AbortSignal) => {
-    if (!canViewAnalytics || !activeFacility?.id) {
+    const facId = activeFacility?.id;
+    if (!canViewAnalytics || !facId) {
       setDockYard(null);
       setLoadingDockYard(false);
       return;
@@ -118,13 +142,17 @@ export const DashboardPage: React.FC = () => {
     setLoadingDockYard(true);
     setDockYardError(null);
     try {
-      const dResult = await controlTowerApi.getDockYardStatus(activeFacility.id, undefined, signal);
+      const dResult = await controlTowerApi.getDockYardStatus(facId, undefined, signal);
+      if (currentFacilityRef.current !== facId) return;
       setDockYard(dResult);
     } catch (err: any) {
       if (err.name === 'AbortError') return;
+      if (currentFacilityRef.current !== facId) return;
       setDockYardError(err.message || 'Failed to load dock and yard telemetry');
     } finally {
-      setLoadingDockYard(false);
+      if (currentFacilityRef.current === facId) {
+        setLoadingDockYard(false);
+      }
     }
   }, [canViewAnalytics, activeFacility?.id]);
 
@@ -291,7 +319,15 @@ export const DashboardPage: React.FC = () => {
     loadData(true);
   };
 
-  // Compute telemetry freshness status
+  // Compute telemetry freshness status (respects lastSuccessfulSync age & backend snapshot asOfUtc age)
+  const FRESHNESS_THRESHOLD_MS = 120000; // 2 minutes sync age
+  const BACKEND_SNAPSHOT_STALE_MS = 300000; // 5 minutes backend snapshot age
+
+  const isSyncExpired = !lastSuccessfulSync || (clockNow - lastSuccessfulSync.getTime() > FRESHNESS_THRESHOLD_MS);
+  const isBackendSnapshotStale = summary?.asOfUtc
+    ? (clockNow - new Date(summary.asOfUtc).getTime() > BACKEND_SNAPSHOT_STALE_MS)
+    : false;
+
   let telemetryStatus: TelemetryFreshnessStatus = 'live';
   if (metricsRestricted) {
     telemetryStatus = 'restricted';
@@ -299,9 +335,7 @@ export const DashboardPage: React.FC = () => {
     telemetryStatus = 'refreshing';
   } else if (metricsError) {
     telemetryStatus = 'error';
-  } else if (!lastSuccessfulSync) {
-    telemetryStatus = 'stale';
-  } else if (Date.now() - lastSuccessfulSync.getTime() > 120000) {
+  } else if (isSyncExpired || isBackendSnapshotStale) {
     telemetryStatus = 'stale';
   } else {
     telemetryStatus = 'live';

@@ -44,12 +44,29 @@ export const BottlenecksCard: React.FC<BottlenecksCardProps> = ({
                 {bottlenecksError || dockYardError}
               </p>
             </div>
-            <div style={{ display: 'flex', gap: '8px' }}>
-              {onRetryBottlenecks && (
-                <button type="button" className="btn btn-secondary" onClick={onRetryBottlenecks} style={{ fontSize: '12px', padding: '6px 12px' }}>
-                  <AppIcon name="RefreshCw" size="xs" /> Retry Telemetry
+            <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+              {onRetryBottlenecks && onRetryDockYard ? (
+                <button
+                  type="button"
+                  className="btn btn-secondary"
+                  onClick={() => {
+                    onRetryBottlenecks();
+                    onRetryDockYard();
+                  }}
+                  style={{ fontSize: '12px', padding: '6px 12px' }}
+                  aria-label="Retry All Auxiliary Diagnostics"
+                >
+                  <AppIcon name="RefreshCw" size="xs" /> Retry All Diagnostics
                 </button>
-              )}
+              ) : onRetryBottlenecks ? (
+                <button type="button" className="btn btn-secondary" onClick={onRetryBottlenecks} style={{ fontSize: '12px', padding: '6px 12px' }}>
+                  <AppIcon name="RefreshCw" size="xs" /> Retry Bottlenecks
+                </button>
+              ) : onRetryDockYard ? (
+                <button type="button" className="btn btn-secondary" onClick={onRetryDockYard} style={{ fontSize: '12px', padding: '6px 12px' }}>
+                  <AppIcon name="RefreshCw" size="xs" /> Retry Yard
+                </button>
+              ) : null}
             </div>
           </div>
         </div>
@@ -61,7 +78,7 @@ export const BottlenecksCard: React.FC<BottlenecksCardProps> = ({
   // If both are initial loading
   if (loadingBottlenecks && loadingDockYard && !bottlenecks && !dockYard) {
     return (
-      <div className="bottlenecks-card" aria-label="Loading Bottleneck Diagnostics">
+      <div className="bottlenecks-card" data-testid="bottlenecks-card" aria-label="Loading Bottleneck Diagnostics">
         <div className="skeleton-line" style={{ width: '30%', marginBottom: '14px' }} />
         <div className="bottlenecks-stages-grid">
           {[1, 2, 3, 4].map((i) => (

@@ -179,6 +179,22 @@ public sealed class WarehouseOperationalAuthorizationHttpTests : IAsyncLifetime
         Assert.True(response.StatusCode == HttpStatusCode.OK || response.StatusCode == HttpStatusCode.NoContent);
     }
 
+    [Fact]
+    public async Task PutawayTasks_Next_WithoutAssignedFacility_ReturnsForbidden_ThroughHttp()
+    {
+        using var request = Request(HttpMethod.Get, $"/api/v1/putaway/tasks/next?facilityId={FacilityA}", "staff-unassigned-operator");
+        using var response = await _http.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
+    [Fact]
+    public async Task PutawayTasks_Next_WithForeignFacility_ReturnsForbidden_ThroughHttp()
+    {
+        using var request = Request(HttpMethod.Get, $"/api/v1/putaway/tasks/next?facilityId={FacilityB}", "staff-operator");
+        using var response = await _http.SendAsync(request);
+        Assert.Equal(HttpStatusCode.Forbidden, response.StatusCode);
+    }
+
     private static HttpRequestMessage Request(HttpMethod method, string path, string actor)
     {
         var request = new HttpRequestMessage(method, path);
@@ -214,7 +230,12 @@ public sealed class WarehouseOperationalAuthorizationHttpTests : IAsyncLifetime
                 new("facility_id", FacilityA.ToString()),
             };
 
-            if (actor == "staff-operator")
+            if (actor == "staff-unassigned-operator")
+            {
+                claims.RemoveAll(c => c.Type == "facility_id");
+                claims.Add(new("permissions", Permissions.Inbound.PutawayExecute));
+            }
+            else if (actor == "staff-operator")
             {
                 claims.Add(new("permissions", Permissions.Inbound.PutawayExecute));
                 claims.Add(new("permissions", Permissions.Inbound.Receive));

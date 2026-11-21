@@ -1365,6 +1365,7 @@ try
         new Claim(ClaimTypes.Role, "FloorOperator"),
         new Claim("UserType", "Staff"),
         new Claim("user_type", "Staff"),
+        new Claim("facility_id", facilityId.ToString()),
         new Claim("Permission", "Inbound:Putaway:Execute"),
         new Claim("permissions", "inbound:putaway:execute")
     };
@@ -1373,11 +1374,43 @@ try
         throw new InvalidOperationException($"Floor operator listing putaway tasks should return 403 Forbidden, got {operatorPutawayListResponse.StatusCode}");
     Console.WriteLine("PASS Negative Check: HTTP GET /api/v1/putaway/tasks without inbound:view -> 403 Forbidden.");
 
-    // 5.5 Floor operator with inbound:putaway:execute CAN invoke /next endpoint
+    // 5.5 Floor operator with inbound:putaway:execute and assigned facility CAN invoke /next endpoint
     var operatorNextResponse = await client.GetAsync($"/api/v1/putaway/tasks/next?facilityId={facilityId}");
     if (operatorNextResponse.StatusCode != HttpStatusCode.OK && operatorNextResponse.StatusCode != HttpStatusCode.NoContent)
         throw new InvalidOperationException($"Floor operator GET /api/v1/putaway/tasks/next failed: {operatorNextResponse.StatusCode}");
     Console.WriteLine($"PASS Execution Check: HTTP GET /api/v1/putaway/tasks/next with inbound:putaway:execute -> {operatorNextResponse.StatusCode} (Authorized).");
+
+    // 5.5b Floor operator without assigned facility is rejected with 403 Forbidden
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, "FloorOperator"),
+        new Claim("UserType", "Staff"),
+        new Claim("user_type", "Staff"),
+        new Claim("Permission", "Inbound:Putaway:Execute"),
+        new Claim("permissions", "inbound:putaway:execute")
+    };
+    var unassignedFacilityResponse = await client.GetAsync($"/api/v1/putaway/tasks/next?facilityId={facilityId}");
+    if (unassignedFacilityResponse.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Floor operator without assigned facility must return 403 Forbidden, got {unassignedFacilityResponse.StatusCode}");
+    Console.WriteLine("PASS Security Check: HTTP GET /api/v1/putaway/tasks/next with missing assigned facility -> 403 Forbidden.");
+
+    // 5.5c Floor operator targeting a foreign facility is rejected with 403 Forbidden
+    var foreignFacilityId = Guid.NewGuid();
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, "FloorOperator"),
+        new Claim("UserType", "Staff"),
+        new Claim("user_type", "Staff"),
+        new Claim("facility_id", facilityId.ToString()),
+        new Claim("Permission", "Inbound:Putaway:Execute"),
+        new Claim("permissions", "inbound:putaway:execute")
+    };
+    var foreignFacilityResponse = await client.GetAsync($"/api/v1/putaway/tasks/next?facilityId={foreignFacilityId}");
+    if (foreignFacilityResponse.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Floor operator targeting foreign facility must return 403 Forbidden, got {foreignFacilityResponse.StatusCode}");
+    Console.WriteLine("PASS Security Check: HTTP GET /api/v1/putaway/tasks/next with foreign facility ID -> 403 Forbidden.");
 
     // 5.6 Floor operator without inbound:view cannot list receiving sessions
     TestAuthHandler.CustomClaims = new List<Claim>
@@ -1386,6 +1419,7 @@ try
         new Claim(ClaimTypes.Role, "FloorOperator"),
         new Claim("UserType", "Staff"),
         new Claim("user_type", "Staff"),
+        new Claim("facility_id", facilityId.ToString()),
         new Claim("Permission", "Inbound:Receive"),
         new Claim("permissions", "inbound:receive")
     };

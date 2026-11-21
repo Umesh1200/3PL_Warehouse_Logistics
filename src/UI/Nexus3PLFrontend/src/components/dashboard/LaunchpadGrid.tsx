@@ -24,7 +24,7 @@ export const LaunchpadGrid: React.FC = () => {
       description: 'Mobile-first barcode scanning, staging verification, and directed shelf confirmation.',
       path: '/app/inbound/putaway',
       icon: 'PackageCheck',
-      permissions: ['inbound:putaway', 'inbound:putaway:execute', 'inbound:putaway:manage', 'inbound:view'],
+      permissions: ['inbound:putaway:execute', 'inbound:putaway:manage', 'inbound:view'],
       badge: 'RF Floor',
     },
     {

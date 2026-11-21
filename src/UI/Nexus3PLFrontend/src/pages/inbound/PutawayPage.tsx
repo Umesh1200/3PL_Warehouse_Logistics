@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import { useFacility } from '../../context/FacilityContext';
 import { useAuth } from '../../context/AuthContext';
 import { putawayApi } from '../../services/putawayApi';
@@ -14,11 +14,23 @@ import {
 
 export const PutawayPage: React.FC = () => {
   const { activeFacility } = useFacility();
-  const { hasPermission, user } = useAuth();
+  const { hasPermission, user, isLoading: isAuthLoading } = useAuth();
   const canManage = hasPermission('inbound:putaway:manage') || user?.roles.some((r) => r.toLowerCase() === 'superadmin');
   const canExecute = hasPermission('inbound:putaway:execute') || canManage;
+  const canViewQueue = hasPermission('inbound:view') || user?.roles.some((r) => r.toLowerCase() === 'superadmin');
 
+  // Execution-only operators default directly to RF mode once auth is resolved
   const [activeTab, setActiveTab] = useState<'queue' | 'rf'>('queue');
+  const tabInitializedRef = useRef<boolean>(false);
+
+  useEffect(() => {
+    if (!isAuthLoading && !tabInitializedRef.current) {
+      tabInitializedRef.current = true;
+      if (!canViewQueue) {
+        setActiveTab('rf');
+      }
+    }
+  }, [isAuthLoading, canViewQueue]);
 
   // Task Queue state
   const [tasks, setTasks] = useState<PutawayTaskDto[]>([]);
@@ -52,7 +64,7 @@ export const PutawayPage: React.FC = () => {
 
   const loadTasks = useCallback(
     async (signal?: AbortSignal) => {
-      if (!activeFacility) return;
+      if (!activeFacility || !canViewQueue) return;
       try {
         setLoadingTasks(true);
         setError(null);
@@ -74,7 +86,7 @@ export const PutawayPage: React.FC = () => {
         setLoadingTasks(false);
       }
     },
-    [activeFacility, taskFilter, searchTerm, page]
+    [activeFacility, canViewQueue, taskFilter, searchTerm, page]
   );
 
   const loadNextTask = useCallback(
@@ -100,14 +112,15 @@ export const PutawayPage: React.FC = () => {
   );
 
   useEffect(() => {
+    if (isAuthLoading) return;
     const ctrl = new AbortController();
-    if (activeTab === 'queue') {
+    if (activeTab === 'queue' && canViewQueue) {
       loadTasks(ctrl.signal);
-    } else {
+    } else if (activeTab === 'rf' && canExecute) {
       loadNextTask(ctrl.signal);
     }
     return () => ctrl.abort();
-  }, [activeTab, loadTasks, loadNextTask]);
+  }, [isAuthLoading, activeTab, canViewQueue, canExecute, loadTasks, loadNextTask]);
 
   const handleGenerateTasks = async () => {
     if (!activeFacility || isGenerating || !canManage) return;
@@ -266,24 +279,38 @@ export const PutawayPage: React.FC = () => {
 
       {/* VIEW SELECTOR TABS */}
       <div className="tab-bar">
-        <button
-          className={`tab-btn ${activeTab === 'queue' ? 'active' : ''}`}
-          onClick={() => setActiveTab('queue')}
-          data-testid="tab-queue"
-        >
-          Putaway Task Queue ({totalTasks})
-        </button>
-        <button
-          className={`tab-btn ${activeTab === 'rf' ? 'active' : ''}`}
-          onClick={() => setActiveTab('rf')}
-          data-testid="tab-rf"
-        >
-          📱 RF Mobile Execution {nextTask ? '• (Task Pending)' : ''}
-        </button>
+        {canViewQueue && (
+          <button
+            className={`tab-btn ${activeTab === 'queue' ? 'active' : ''}`}
+            onClick={() => setActiveTab('queue')}
+            data-testid="tab-queue"
+          >
+            Putaway Task Queue ({totalTasks})
+          </button>
+        )}
+        {canExecute && (
+          <button
+            className={`tab-btn ${activeTab === 'rf' ? 'active' : ''}`}
+            onClick={() => setActiveTab('rf')}
+            data-testid="tab-rf"
+          >
+            📱 RF Mobile Execution {nextTask ? '• (Task Pending)' : ''}
+          </button>
+        )}
       </div>
 
+      {/* ACCESS RESTRICTION BANNER IF LACKING PERMISSION */}
+      {!canExecute && !canViewQueue && (
+        <div className="card" style={{ padding: '32px', textAlign: 'center', margin: '20px 0' }}>
+          <h3>Directed Putaway Authorization Required</h3>
+          <p style={{ color: 'var(--text-muted)', marginTop: '8px' }}>
+            Your account requires <code>inbound:putaway:execute</code> or <code>inbound:view</code> permissions to operate this module.
+          </p>
+        </div>
+      )}
+
       {/* TAB 1: TASK QUEUE TABLE */}
-      {activeTab === 'queue' && (
+      {activeTab === 'queue' && canViewQueue && (
         <div className="queue-view" data-testid="putaway-queue-view">
           <div className="filter-bar card">
             <div className="filter-group">

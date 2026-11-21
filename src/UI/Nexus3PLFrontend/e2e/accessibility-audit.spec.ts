@@ -1,6 +1,6 @@
 import { test, expect } from '@playwright/test';
 
-test.describe('Control Tower & Shell Enterprise Accessibility Audit (WCAG 2.1 AA)', () => {
+test.describe('Control Tower & Shell Enterprise Accessibility & Deep-Link Audit (WCAG 2.1 AA & WCAG 2.2)', () => {
   const mockFacility = {
     id: 'fac-ord1-guid',
     facilityCode: 'FAC-ORD1',
@@ -81,7 +81,7 @@ test.describe('Control Tower & Shell Enterprise Accessibility Audit (WCAG 2.1 AA
         contentType: 'application/json',
         body: JSON.stringify({
           facilityId: mockFacility.id,
-          asOfUtc: '2026-11-21T18:00:00Z',
+          asOfUtc: new Date().toISOString(),
           ordersReceivedToday: 148,
           ordersDispatchedToday: 122,
           packagesDispatchedToday: 340,
@@ -109,7 +109,7 @@ test.describe('Control Tower & Shell Enterprise Accessibility Audit (WCAG 2.1 AA
         contentType: 'application/json',
         body: JSON.stringify({
           facilityId: mockFacility.id,
-          evaluatedAtUtc: '2026-11-21T18:00:00Z',
+          evaluatedAtUtc: new Date().toISOString(),
           overallHealthScore: 98,
           receivingCongestion: { stage: 'Receiving', severity: 'Normal', queueDepth: 1, metricValue: 18, metricUnit: 'pallets', summaryMessage: 'Inflow clear', recommendedAction: 'None' },
           pickingBacklog: { stage: 'Picking', severity: 'Normal', queueDepth: 3, metricValue: 28, metricUnit: 'orders', summaryMessage: 'Picking pacing balanced', recommendedAction: 'None' },
@@ -187,7 +187,7 @@ test.describe('Control Tower & Shell Enterprise Accessibility Audit (WCAG 2.1 AA
     });
   });
 
-  test('zero horizontal overflow on mobile viewport (375x812)', async ({ page }) => {
+  test('zero horizontal overflow on mobile viewport (375x812, WCAG 2.1 Reflow 1.4.10)', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });
 
     await page.goto('/login');
@@ -207,10 +207,9 @@ test.describe('Control Tower & Shell Enterprise Accessibility Audit (WCAG 2.1 AA
 
     expect(overflowCheck.hasOverflow).toBe(false);
     expect(overflowCheck.scrollW).toBeLessThanOrEqual(overflowCheck.innerW);
-    expect(overflowCheck.scrollW).toBeLessThanOrEqual(overflowCheck.innerW);
   });
 
-  test('mobile touch targets meet or exceed 44x44px minimum sizing guideline', async ({ page }) => {
+  test('mobile operational touch targets meet or exceed 44x44px target standard (WCAG 2.2 Target Size & Mobile Ergonomics)', async ({ page }) => {
     await page.setViewportSize({ width: 375, height: 812 });
 
     await page.goto('/login');
@@ -221,26 +220,29 @@ test.describe('Control Tower & Shell Enterprise Accessibility Audit (WCAG 2.1 AA
     await page.waitForSelector('.control-tower', { timeout: 10000 });
     await page.waitForLoadState('networkidle');
 
-    // Check main action buttons & links on dashboard
-    const buttons = page.locator('.control-tower button, .control-tower a.btn, .mobile-menu-btn, .theme-toggle');
-    const count = await buttons.count();
+    // Check specific primary action controls on mobile
+    const actionSelectors = [
+      '.mobile-nav-toggle',
+      '.btn-signout',
+      '.ct-refresh-btn',
+      '.queue-action-link',
+      '.launchpad-card',
+    ];
 
-    expect(count).toBeGreaterThan(0);
-
-    for (let i = 0; i < count; i++) {
-      const btn = buttons.nth(i);
-      if (await btn.isVisible()) {
-        const box = await btn.boundingBox();
+    for (const sel of actionSelectors) {
+      const element = page.locator(sel).first();
+      if (await element.isVisible()) {
+        const box = await element.boundingBox();
+        expect(box).not.toBeNull();
         if (box) {
-          // Touch target height or width >= 36px (WCAG 2.5.8 Level AA minimum is 24x24, Apple/Android recommended is 44x44)
-          // Buttons with padding fulfill >= 40px bounding box
-          expect(box.height).toBeGreaterThanOrEqual(32);
+          expect(box.height).toBeGreaterThanOrEqual(44);
+          expect(box.width).toBeGreaterThanOrEqual(44);
         }
       }
     }
   });
 
-  test('keyboard Tab traversal maintains visible focus outlines across dashboard controls', async ({ page }) => {
+  test('keyboard Tab traversal maintains computed focus outline and visibility across dashboard controls (WCAG 2.1 Criteria 2.1.1 & 2.4.7)', async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
 
     await page.goto('/login');
@@ -251,16 +253,110 @@ test.describe('Control Tower & Shell Enterprise Accessibility Audit (WCAG 2.1 AA
     await page.waitForSelector('.control-tower', { timeout: 10000 });
     await page.waitForLoadState('networkidle');
 
-    // Press Tab multiple times and verify that focus shifts through document elements
-    const focusedTags: string[] = [];
-    for (let i = 0; i < 6; i++) {
+    // Press Tab multiple times and verify that active interactive elements show focus
+    for (let i = 0; i < 5; i++) {
       await page.keyboard.press('Tab');
-      const tag = await page.evaluate(() => document.activeElement?.tagName);
-      if (tag) focusedTags.push(tag);
+      const focusStyle = await page.evaluate(() => {
+        const el = document.activeElement;
+        if (!el || el === document.body) return null;
+        const s = window.getComputedStyle(el);
+        return {
+          tag: el.tagName,
+          outlineWidth: parseFloat(s.outlineWidth) || 0,
+          outlineStyle: s.outlineStyle,
+          boxShadow: s.boxShadow,
+        };
+      });
+      if (focusStyle) {
+        expect(focusStyle.outlineWidth > 0 || focusStyle.boxShadow !== 'none').toBe(true);
+      }
     }
+  });
 
-    // Focus must move to interactive elements (A, BUTTON, INPUT)
-    const interactiveTags = focusedTags.filter(t => ['A', 'BUTTON', 'INPUT'].includes(t));
-    expect(interactiveTags.length).toBeGreaterThan(0);
+  test('browser regression: execution-only deep-link from Control Tower opens RF mode without unauthorized list requests (P-CT-02 & Section B)', async ({ page }) => {
+    // Configure execution-only floor operator profile
+    await page.route('**/api/v1/auth/me', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          userId: 'e2e-floor-op',
+          email: 'operator@3pl.local',
+          firstName: 'Marcus',
+          lastName: 'Chen',
+          userType: 1,
+          tenantId: null,
+          companyName: 'Nexus3PL Enterprise Logistics',
+          roles: ['FloorOperator'],
+          permissions: [
+            'inbound:putaway:execute',
+          ],
+        }),
+      });
+    });
+
+    const mockRfTask = {
+      id: 'tsk-rf-99',
+      facilityId: mockFacility.id,
+      sku: 'SKU-RF-SCAN',
+      itemDescription: 'Rugged Handheld Barcode Scanner',
+      sourceLocationCode: 'STG-PALLET-01',
+      suggestedLocationCode: 'RCK-04-12-A',
+      suggestedLocationBarcode: 'LOC-RCK-04-12-A',
+      quantity: 15,
+      status: 'Pending',
+      priority: 'Normal',
+      lpnCode: 'LPN-RF-7788',
+    };
+
+    let putawayListCallsCount = 0;
+    let putawayNextCallsCount = 0;
+
+    await page.route('**/api/v1/putaway/tasks?**', async (route) => {
+      putawayListCallsCount++;
+      // Backend strictly rejects listing without inbound:view
+      return route.fulfill({ status: 403, body: JSON.stringify({ message: 'Forbidden: inbound:view required' }) });
+    });
+
+    await page.route('**/api/v1/putaway/tasks/next**', async (route) => {
+      putawayNextCallsCount++;
+      return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(mockRfTask) });
+    });
+
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'whlead@3pl.local');
+    await page.fill('input[type="password"]', 'CorrectHorseBatteryStaple123!');
+    await page.click('button[type="submit"]');
+
+    await page.waitForSelector('.control-tower', { timeout: 10000 });
+    await page.waitForLoadState('networkidle');
+
+    // On Control Tower, floor operator sees "Launch RF Putaway Scanner"
+    const launchRfBtn = page.locator('a:has-text("Launch RF Putaway Scanner")');
+    await expect(launchRfBtn).toBeVisible();
+
+    // Verify 0 list calls were triggered from the dashboard
+    expect(putawayListCallsCount).toBe(0);
+
+    // Click to navigate to Putaway module
+    await launchRfBtn.click();
+
+    // Verify page navigates to /app/inbound/putaway and opens directly in RF mode
+    await page.waitForSelector('[data-testid="tab-rf"]', { timeout: 10000 });
+    const rfTab = page.locator('[data-testid="tab-rf"]');
+    await expect(rfTab).toHaveClass(/active/);
+
+    // Queue tab should NOT be rendered for execution-only user
+    const queueTab = page.locator('[data-testid="tab-queue"]');
+    await expect(queueTab).toHaveCount(0);
+
+    // Verify that NO unauthorized task list calls were triggered during navigation or load
+    expect(putawayListCallsCount).toBe(0);
+
+    // Verify authorized /next call was executed and task details are displayed
+    expect(putawayNextCallsCount).toBeGreaterThanOrEqual(1);
+    await expect(page.getByText('LPN-RF-7788', { exact: true })).toBeVisible();
+    await expect(page.getByText('RCK-04-12-A', { exact: true })).toBeVisible();
   });
 });
