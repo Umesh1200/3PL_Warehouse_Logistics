@@ -64,7 +64,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => 
         {
           label: 'Directed Putaway',
           path: '/app/inbound/putaway',
-          permissions: ['inbound:putaway', 'inbound:putaway:execute', 'inbound:putaway:manage'],
+          permissions: ['inbound:putaway', 'inbound:putaway:execute', 'inbound:putaway:manage', 'inbound:view'],
           icon: 'PackageCheck',
         },
         {

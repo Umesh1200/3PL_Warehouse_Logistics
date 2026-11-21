@@ -72,20 +72,20 @@ export const DashboardPage: React.FC = () => {
   }, [activeFacility?.id]);
 
   // Backend RBAC permissions
-  const canViewAnalytics = hasPermission('analytics:control-tower:view');
+  const isSuperAdmin = user?.roles.some((r) => r.toLowerCase() === 'superadmin' || r.toLowerCase() === 'admin');
+  const canViewAnalytics = hasPermission('analytics:control-tower:view') || isSuperAdmin;
   // Listing queues requires inbound:view per backend controller authorization
-  const canListPutawayQueue = hasPermission('inbound:view');
-  const canListReceivingQueue = hasPermission('inbound:view');
+  const canListPutawayQueue = hasPermission('inbound:view') || isSuperAdmin;
+  const canListReceivingQueue = hasPermission('inbound:view') || isSuperAdmin;
 
   // Execution privileges for floor operators strictly require execution permission or superadmin
   const canExecutePutaway =
     hasPermission('inbound:putaway:execute') ||
-    hasPermission('inbound:putaway:manage') ||
-    user?.roles.some((r) => r.toLowerCase() === 'superadmin');
+    isSuperAdmin;
 
   const canExecuteReceiving =
     hasPermission('inbound:receive') ||
-    user?.roles.some((r) => r.toLowerCase() === 'superadmin');
+    isSuperAdmin;
 
   // Immediate facility wipe upon facility change (P-CT-03) and cancel in-flight requests
   useEffect(() => {

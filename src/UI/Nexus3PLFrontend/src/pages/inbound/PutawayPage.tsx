@@ -15,9 +15,10 @@ import {
 export const PutawayPage: React.FC = () => {
   const { activeFacility } = useFacility();
   const { hasPermission, user, isLoading: isAuthLoading } = useAuth();
-  const canManage = hasPermission('inbound:putaway:manage') || user?.roles.some((r) => r.toLowerCase() === 'superadmin');
-  const canExecute = hasPermission('inbound:putaway:execute') || canManage;
-  const canViewQueue = hasPermission('inbound:view') || user?.roles.some((r) => r.toLowerCase() === 'superadmin');
+  const isSuperAdmin = user?.roles.some((r) => r.toLowerCase() === 'superadmin' || r.toLowerCase() === 'admin');
+  const canManage = hasPermission('inbound:putaway:manage') || isSuperAdmin;
+  const canExecute = hasPermission('inbound:putaway:execute') || isSuperAdmin;
+  const canViewQueue = hasPermission('inbound:view') || isSuperAdmin;
 
   // Execution-only operators default directly to RF mode once auth is resolved
   const [activeTab, setActiveTab] = useState<'queue' | 'rf'>('queue');
@@ -25,12 +26,12 @@ export const PutawayPage: React.FC = () => {
 
   useEffect(() => {
     if (!isAuthLoading && !tabInitializedRef.current) {
-      tabInitializedRef.current = true;
-      if (!canViewQueue) {
+      if (!canViewQueue && canExecute) {
+        tabInitializedRef.current = true;
         setActiveTab('rf');
       }
     }
-  }, [isAuthLoading, canViewQueue]);
+  }, [isAuthLoading, canViewQueue, canExecute]);
 
   // Task Queue state
   const [tasks, setTasks] = useState<PutawayTaskDto[]>([]);
@@ -91,7 +92,7 @@ export const PutawayPage: React.FC = () => {
 
   const loadNextTask = useCallback(
     async (signal?: AbortSignal) => {
-      if (!activeFacility) return;
+      if (!activeFacility || !canExecute) return;
       try {
         setLoadingNext(true);
         const task = await putawayApi.getNextTask(activeFacility.id, user?.userId, signal);
@@ -108,7 +109,7 @@ export const PutawayPage: React.FC = () => {
         setLoadingNext(false);
       }
     },
-    [activeFacility, user?.userId]
+    [activeFacility, canExecute, user?.userId]
   );
 
   useEffect(() => {
@@ -388,7 +389,7 @@ export const PutawayPage: React.FC = () => {
       )}
 
       {/* TAB 2: RF DIRECTED WORK CARD */}
-      {activeTab === 'rf' && (
+      {activeTab === 'rf' && canExecute && (
         <div className="rf-view" data-testid="rf-execution-view">
           {loadingNext ? (
             <div className="card loading-card" data-testid="rf-loading">Fetching next directed task...</div>

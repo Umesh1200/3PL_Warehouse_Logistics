@@ -15,7 +15,8 @@ interface LaunchpadItem {
 }
 
 export const LaunchpadGrid: React.FC = () => {
-  const { hasPermission, hasAnyPermission } = useAuth();
+  const { hasPermission, hasAnyPermission, user } = useAuth();
+  const isSuperAdmin = user?.roles.some((r) => r.toLowerCase() === 'superadmin' || r.toLowerCase() === 'admin');
 
   const items: LaunchpadItem[] = [
     {
@@ -24,7 +25,7 @@ export const LaunchpadGrid: React.FC = () => {
       description: 'Mobile-first barcode scanning, staging verification, and directed shelf confirmation.',
       path: '/app/inbound/putaway',
       icon: 'PackageCheck',
-      permissions: ['inbound:putaway:execute', 'inbound:putaway:manage', 'inbound:view'],
+      permission: 'inbound:putaway:execute',
       badge: 'RF Floor',
     },
     {
@@ -81,6 +82,7 @@ export const LaunchpadGrid: React.FC = () => {
   ];
 
   const authorizedItems = items.filter((item) => {
+    if (isSuperAdmin) return true;
     if (item.permission) return hasPermission(item.permission);
     if (item.permissions) return hasAnyPermission(item.permissions);
     return true;
