@@ -3,6 +3,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -26,13 +27,16 @@ public class AssignPutawayTaskCommandHandler : IRequestHandler<AssignPutawayTask
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserContext _currentUser;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
     public AssignPutawayTaskCommandHandler(
         IApplicationDbContext context,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
         _currentUser = currentUser;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<PutawayTaskDto> Handle(AssignPutawayTaskCommand request, CancellationToken cancellationToken)
@@ -47,6 +51,16 @@ public class AssignPutawayTaskCommandHandler : IRequestHandler<AssignPutawayTask
         if (task == null)
         {
             throw new EntityNotFoundException(nameof(PutawayTask), request.TaskId);
+        }
+
+        await _operationalAuth.ValidateClientFacilityAccessAsync(
+            task.ClientId, task.FacilityId, cancellationToken);
+
+        if (request.UserId.HasValue && request.UserId != _currentUser.UserId &&
+            !_currentUser.IsSuperAdmin &&
+            !_currentUser.HasPermission(Warehouse3PL.Domain.Constants.Permissions.Inbound.PutawayManage))
+        {
+            throw new ForbiddenException("Assigning a putaway task to another user requires putaway management permission.");
         }
 
         var targetUserId = request.UserId ?? _currentUser.UserId ?? Guid.Empty;

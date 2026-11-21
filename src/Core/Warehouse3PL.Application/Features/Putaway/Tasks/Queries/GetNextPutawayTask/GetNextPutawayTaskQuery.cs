@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Application.Features.Putaway.Tasks.Queries.GetNextPutawayTask;
@@ -11,14 +12,21 @@ public record GetNextPutawayTaskQuery(Guid FacilityId, Guid? OperatorUserId = nu
 public class GetNextPutawayTaskQueryHandler : IRequestHandler<GetNextPutawayTaskQuery, PutawayTaskDto?>
 {
     private readonly IApplicationDbContext _context;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
-    public GetNextPutawayTaskQueryHandler(IApplicationDbContext context)
+    public GetNextPutawayTaskQueryHandler(
+        IApplicationDbContext context,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<PutawayTaskDto?> Handle(GetNextPutawayTaskQuery request, CancellationToken cancellationToken)
     {
+        var scope = await _operationalAuth.ResolveQueryScopeAsync(
+            null, request.FacilityId, cancellationToken);
+
         var tasksQuery = _context.PutawayTasks
             .AsNoTracking()
             .Include(t => t.Item)
@@ -31,6 +39,11 @@ public class GetNextPutawayTaskQueryHandler : IRequestHandler<GetNextPutawayTask
                          t.Status == PutawayTaskStatus.ReRouted ||
                          (request.OperatorUserId.HasValue && t.AssignedUserId == request.OperatorUserId &&
                           (t.Status == PutawayTaskStatus.Assigned || t.Status == PutawayTaskStatus.InTransit))));
+
+        if (scope.ClientId.HasValue)
+        {
+            tasksQuery = tasksQuery.Where(t => t.ClientId == scope.ClientId.Value);
+        }
 
         var tasks = await tasksQuery.ToListAsync(cancellationToken);
 

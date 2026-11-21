@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Application.Common.Security;
+using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -62,11 +63,13 @@ public class ResolveReceivingDiscrepancyCommandHandler : IRequestHandler<Resolve
         }
 
         // Operational Authorization
-        await _operationalAuth.ValidateFacilityAccessAsync(discrepancy.ReceivingSession.FacilityId, cancellationToken);
+        await _operationalAuth.ValidateReceivingSessionAccessAsync(
+            discrepancy.ReceivingSession, cancellationToken);
 
-        if (!_currentUser.IsStaff && !_currentUser.IsSuperAdmin)
+        if (!_currentUser.IsSuperAdmin &&
+            (!_currentUser.IsStaff || !_currentUser.HasPermission(Permissions.Inbound.DiscrepancyResolve)))
         {
-            throw new ForbiddenException("Discrepancy resolution requires staff operational authority.");
+            throw new ForbiddenException("Discrepancy resolution requires the dedicated discrepancy resolution permission.");
         }
 
         var supervisorId = _currentUser.UserId ?? Guid.NewGuid();

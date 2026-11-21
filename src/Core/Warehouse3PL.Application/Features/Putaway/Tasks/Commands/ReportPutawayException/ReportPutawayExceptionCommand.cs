@@ -3,6 +3,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -28,13 +29,16 @@ public class ReportPutawayExceptionCommandHandler : IRequestHandler<ReportPutawa
 {
     private readonly IApplicationDbContext _context;
     private readonly IPutawayLocationSelector _locationSelector;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
     public ReportPutawayExceptionCommandHandler(
         IApplicationDbContext context,
-        IPutawayLocationSelector locationSelector)
+        IPutawayLocationSelector locationSelector,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
         _locationSelector = locationSelector;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<PutawayTaskDto> Handle(ReportPutawayExceptionCommand request, CancellationToken cancellationToken)
@@ -50,6 +54,9 @@ public class ReportPutawayExceptionCommandHandler : IRequestHandler<ReportPutawa
         {
             throw new EntityNotFoundException(nameof(PutawayTask), request.TaskId);
         }
+
+        await _operationalAuth.ValidateClientFacilityAccessAsync(
+            task.ClientId, task.FacilityId, cancellationToken);
 
         // 1. Report Exception
         task.ReportException(request.ExceptionReason);

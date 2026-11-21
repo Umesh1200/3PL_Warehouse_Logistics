@@ -117,6 +117,7 @@ public class StartReceivingSessionCommandHandler : IRequestHandler<StartReceivin
         Guid? targetAsnId = request.AsnId ?? yardVisit.AsnId;
         Guid? targetPoId = request.PurchaseOrderId;
         AdvanceShippingNotice? asn = null;
+        PurchaseOrder? purchaseOrder = null;
 
         if (targetAsnId.HasValue)
         {
@@ -127,21 +128,57 @@ public class StartReceivingSessionCommandHandler : IRequestHandler<StartReceivin
                 .Include(a => a.PurchaseOrder)
                 .FirstOrDefaultAsync(a => a.Id == targetAsnId.Value, cancellationToken);
 
-            if (asn != null)
+            if (asn == null)
             {
-                if (asn.FacilityId != request.FacilityId)
-                {
-                    throw new ValidationException(nameof(request.AsnId), "ASN facility does not match receiving facility.");
-                }
-
-                targetClientId ??= asn.ClientId;
-                targetPoId ??= asn.PurchaseOrderId;
-
-                if (asn.Status == AsnStatus.Arrived || asn.Status == AsnStatus.InTransit)
-                {
-                    asn.StartReceiving();
-                }
+                throw new EntityNotFoundException(nameof(AdvanceShippingNotice), targetAsnId.Value);
             }
+
+            if (asn.FacilityId != request.FacilityId)
+            {
+                throw new ValidationException(nameof(request.AsnId), "ASN facility does not match receiving facility.");
+            }
+
+            if (targetClientId.HasValue && targetClientId.Value != asn.ClientId)
+            {
+                throw new ValidationException(nameof(request.AsnId), "ASN client does not match the yard visit client.");
+            }
+
+            targetClientId ??= asn.ClientId;
+            targetPoId ??= asn.PurchaseOrderId;
+
+            if (asn.Status == AsnStatus.Arrived || asn.Status == AsnStatus.InTransit)
+            {
+                asn.StartReceiving();
+            }
+        }
+
+        if (targetPoId.HasValue)
+        {
+            purchaseOrder = await _context.PurchaseOrders
+                .IgnoreQueryFilters()
+                .FirstOrDefaultAsync(p => p.Id == targetPoId.Value, cancellationToken);
+
+            if (purchaseOrder == null)
+            {
+                throw new EntityNotFoundException(nameof(PurchaseOrder), targetPoId.Value);
+            }
+
+            if (purchaseOrder.FacilityId != request.FacilityId)
+            {
+                throw new ValidationException(nameof(request.PurchaseOrderId), "Purchase order facility does not match receiving facility.");
+            }
+
+            if (targetClientId.HasValue && targetClientId.Value != purchaseOrder.ClientId)
+            {
+                throw new ValidationException(nameof(request.PurchaseOrderId), "Purchase order client does not match the receiving client.");
+            }
+
+            if (asn?.PurchaseOrderId.HasValue == true && asn.PurchaseOrderId.Value != purchaseOrder.Id)
+            {
+                throw new ValidationException(nameof(request.PurchaseOrderId), "Purchase order does not match the selected ASN.");
+            }
+
+            targetClientId ??= purchaseOrder.ClientId;
         }
 
         var isBlind = request.IsBlindReceiving || (targetAsnId == null && targetPoId == null);
@@ -165,6 +202,12 @@ public class StartReceivingSessionCommandHandler : IRequestHandler<StartReceivin
             }
 
             targetClientId = _currentUser.TenantId.Value;
+        }
+
+        if (targetClientId.HasValue)
+        {
+            await _operationalAuth.ValidateClientFacilityAccessAsync(
+                targetClientId.Value, request.FacilityId, cancellationToken);
         }
 
         var sessionCount = await _context.ReceivingSessions
@@ -255,7 +298,7 @@ public class StartReceivingSessionCommandHandler : IRequestHandler<StartReceivin
             AsnId = session.AsnId,
             AsnNumber = asn?.AsnNumber,
             PurchaseOrderId = session.PurchaseOrderId,
-            PoNumber = asn?.PurchaseOrder?.PoNumber,
+            PoNumber = purchaseOrder?.PoNumber ?? asn?.PurchaseOrder?.PoNumber,
             SessionNumber = session.SessionNumber,
             Status = session.Status,
             StartedAtUtc = session.StartedAtUtc,

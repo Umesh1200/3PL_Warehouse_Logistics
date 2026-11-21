@@ -76,16 +76,8 @@ public class ConfirmPutawayTaskCommandHandler : IRequestHandler<ConfirmPutawayTa
             }
 
             // Facility and Tenant Access Validation
-            await _operationalAuth.ValidateFacilityAccessAsync(task.FacilityId, cancellationToken);
-
-            if (!_currentUser.IsStaff)
-            {
-                var tenantId = _currentUser.TenantId;
-                if (!tenantId.HasValue || tenantId == Guid.Empty || task.ClientId != tenantId.Value)
-                {
-                    throw new ForbiddenException("Client does not have access to this putaway task.");
-                }
-            }
+            await _operationalAuth.ValidateClientFacilityAccessAsync(
+                task.ClientId, task.FacilityId, cancellationToken);
 
             if (task.Status == PutawayTaskStatus.Completed)
             {

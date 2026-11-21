@@ -3,6 +3,9 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
+using Warehouse3PL.Domain.Constants;
+using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -29,13 +32,16 @@ public class ConfirmPutawayCommandHandler : IRequestHandler<ConfirmPutawayComman
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserContext _currentUser;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
     public ConfirmPutawayCommandHandler(
         IApplicationDbContext context,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
         _currentUser = currentUser;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<PutawayTaskDto> Handle(ConfirmPutawayCommand request, CancellationToken cancellationToken)
@@ -55,6 +61,9 @@ public class ConfirmPutawayCommandHandler : IRequestHandler<ConfirmPutawayComman
                 throw new EntityNotFoundException(nameof(PutawayTask), request.TaskId);
             }
 
+            await _operationalAuth.ValidateClientFacilityAccessAsync(
+                task.ClientId, task.FacilityId, cancellationToken);
+
             if (task.Status == PutawayTaskStatus.Completed)
             {
                 throw new ValidationException(nameof(request.TaskId), "This putaway task has already been completed.");
@@ -62,6 +71,38 @@ public class ConfirmPutawayCommandHandler : IRequestHandler<ConfirmPutawayComman
 
             var targetLocationId = request.ConfirmedTargetLocationId ?? task.TargetLocationId;
             var putawayQty = request.ConfirmedQuantity ?? task.Quantity;
+
+            if (putawayQty != task.Quantity)
+            {
+                throw new ValidationException(nameof(request.ConfirmedQuantity),
+                    "Putaway quantity must match the server-assigned task quantity.");
+            }
+
+            if (targetLocationId != task.TargetLocationId)
+            {
+                var canOverride = _currentUser.IsSuperAdmin ||
+                    _currentUser.HasPermission(Permissions.Inbound.PutawayManage) ||
+                    _currentUser.HasPermission(Permissions.Inbound.PutawayOverride) ||
+                    _currentUser.HasPermission(Permissions.Inbound.PutawayRules);
+                if (!canOverride)
+                {
+                    throw new ForbiddenException("Current user does not have permission to override the putaway destination.");
+                }
+            }
+
+            var destination = await _context.Locations.FirstOrDefaultAsync(l =>
+                l.Id == targetLocationId && l.FacilityId == task.FacilityId && !l.IsDeleted,
+                cancellationToken);
+            if (destination == null)
+            {
+                throw new EntityNotFoundException(nameof(Location), targetLocationId);
+            }
+            if (!destination.IsActive || destination.IsLocked || destination.IsDamaged ||
+                destination.IsReceiving || destination.LocationType == LocationType.StagingLane)
+            {
+                throw new ValidationException(nameof(request.ConfirmedTargetLocationId),
+                    $"Destination location '{destination.LocationCode}' is not a suitable active storage location.");
+            }
 
             // 1. Decrement Stock from Receiving/Source Location
             var sourceStock = await _context.StockOnHand
@@ -72,11 +113,14 @@ public class ConfirmPutawayCommandHandler : IRequestHandler<ConfirmPutawayComman
                     s.LocationId == task.SourceLocationId &&
                     s.LotId == task.LotId, cancellationToken);
 
-            if (sourceStock != null)
+            if (sourceStock == null || sourceStock.QtyAvailable < putawayQty)
             {
-                sourceStock.QtyAvailable = Math.Max(0, sourceStock.QtyAvailable - putawayQty);
-                sourceStock.Version++;
+                throw new ValidationException(nameof(request.ConfirmedQuantity),
+                    $"Insufficient source stock. Required: {putawayQty}, Available: {sourceStock?.QtyAvailable ?? 0m}.");
             }
+
+            sourceStock.QtyAvailable -= putawayQty;
+            sourceStock.Version++;
 
             // 2. Increment Stock at Destination Bin
             var destStock = await _context.StockOnHand

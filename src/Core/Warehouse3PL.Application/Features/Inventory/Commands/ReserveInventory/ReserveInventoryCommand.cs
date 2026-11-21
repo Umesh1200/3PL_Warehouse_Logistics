@@ -2,6 +2,7 @@ using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -37,15 +38,23 @@ public class ReserveInventoryCommandHandler : IRequestHandler<ReserveInventoryCo
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserContext _currentUser;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
-    public ReserveInventoryCommandHandler(IApplicationDbContext context, ICurrentUserContext currentUser)
+    public ReserveInventoryCommandHandler(
+        IApplicationDbContext context,
+        ICurrentUserContext currentUser,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
         _currentUser = currentUser;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<bool> Handle(ReserveInventoryCommand request, CancellationToken cancellationToken)
     {
+        await _operationalAuth.ValidateClientFacilityAccessAsync(
+            request.ClientId, request.FacilityId, cancellationToken);
+
         return await _context.ExecuteInTransactionAsync(async () =>
         {
             var stock = await _context.StockOnHand

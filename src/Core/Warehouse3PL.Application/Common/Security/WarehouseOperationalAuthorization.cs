@@ -183,6 +183,33 @@ public class WarehouseOperationalAuthorization
     }
 
     /// <summary>
+    /// Validates a concrete client/facility pair used by warehouse mutations and detail queries.
+    /// Staff are confined to their entitled facility; client identities are additionally confined
+    /// to their trusted tenant, irrespective of caller-supplied request values.
+    /// </summary>
+    public async Task ValidateClientFacilityAccessAsync(
+        Guid clientId,
+        Guid facilityId,
+        CancellationToken ct = default)
+    {
+        if (clientId == Guid.Empty || facilityId == Guid.Empty)
+        {
+            throw new ForbiddenException("A valid client and facility scope is required.");
+        }
+
+        await ValidateFacilityAccessAsync(facilityId, ct);
+
+        if (_currentUser.UserType == UserType.Client)
+        {
+            var tenantId = _currentUser.TenantId;
+            if (!tenantId.HasValue || tenantId == Guid.Empty || tenantId.Value != clientId)
+            {
+                throw new ForbiddenException("Cross-client operational access is forbidden.");
+            }
+        }
+    }
+
+    /// <summary>
     /// Validates tenant ownership and facility authorization for a receiving session.
     /// </summary>
     public async Task ValidateReceivingSessionAccessAsync(ReceivingSession session, CancellationToken ct = default)

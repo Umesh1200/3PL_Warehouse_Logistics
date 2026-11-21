@@ -4,6 +4,7 @@ using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Application.Common.Security;
+using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Exceptions;
 using ValidationException = Warehouse3PL.Domain.Exceptions.ValidationException;
@@ -59,12 +60,13 @@ public class ApproveReceivingSessionCommandHandler : IRequestHandler<ApproveRece
         }
 
         // Operational Authorization
-        await _operationalAuth.ValidateFacilityAccessAsync(session.FacilityId, cancellationToken);
+        await _operationalAuth.ValidateReceivingSessionAccessAsync(session, cancellationToken);
 
         // Supervisor authorization requirement: Staff or SuperAdmin with Inbound permissions
-        if (!_currentUser.IsStaff && !_currentUser.IsSuperAdmin)
+        if (!_currentUser.IsSuperAdmin &&
+            (!_currentUser.IsStaff || !_currentUser.HasPermission(Permissions.Inbound.Approve)))
         {
-            throw new ForbiddenException("Supervisor approval requires staff operational authority.");
+            throw new ForbiddenException("Supervisor approval requires the dedicated inbound approval permission.");
         }
 
         var supervisorId = _currentUser.UserId ?? Guid.NewGuid();

@@ -35,7 +35,7 @@ public class PutawayStrategyAndExecutionTests
         var itemId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -645,7 +645,7 @@ public class PutawayStrategyAndExecutionTests
         var loc2 = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
 
         var task1Id = Guid.NewGuid();
         var task2Id = Guid.NewGuid();
@@ -693,7 +693,8 @@ public class PutawayStrategyAndExecutionTests
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
-        var handler = new GetNextPutawayTaskQueryHandler(context);
+        var handler = new GetNextPutawayTaskQueryHandler(context,
+            new WarehouseOperationalAuthorization(context, currentUser));
 
         var nextTask = await handler.Handle(new GetNextPutawayTaskQuery(facilityId), CancellationToken.None);
 
@@ -715,7 +716,7 @@ public class PutawayStrategyAndExecutionTests
         var workerUserId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserId = workerUserId, UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = workerUserId, UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -742,7 +743,8 @@ public class PutawayStrategyAndExecutionTests
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
-        var handler = new AssignPutawayTaskCommandHandler(context, currentUser);
+        var handler = new AssignPutawayTaskCommandHandler(context, currentUser,
+            new WarehouseOperationalAuthorization(context, currentUser));
 
         var result = await handler.Handle(new AssignPutawayTaskCommand { TaskId = taskId, UserId = workerUserId }, CancellationToken.None);
 
@@ -961,7 +963,7 @@ public class PutawayStrategyAndExecutionTests
         var taskId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -990,7 +992,8 @@ public class PutawayStrategyAndExecutionTests
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
         var selector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
-        var handler = new ReportPutawayExceptionCommandHandler(context, selector);
+        var handler = new ReportPutawayExceptionCommandHandler(context, selector,
+            new WarehouseOperationalAuthorization(context, currentUser));
 
         var result = await handler.Handle(new ReportPutawayExceptionCommand
         {

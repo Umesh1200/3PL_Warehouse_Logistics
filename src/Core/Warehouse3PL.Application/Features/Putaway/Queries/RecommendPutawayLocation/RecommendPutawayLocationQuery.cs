@@ -1,5 +1,6 @@
 using MediatR;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 
 namespace Warehouse3PL.Application.Features.Putaway.Queries.RecommendPutawayLocation;
 
@@ -13,14 +14,21 @@ public record RecommendPutawayLocationQuery(
 public class RecommendPutawayLocationQueryHandler : IRequestHandler<RecommendPutawayLocationQuery, List<PutawayRecommendation>>
 {
     private readonly IPutawayRecommendationService _putawayService;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
-    public RecommendPutawayLocationQueryHandler(IPutawayRecommendationService putawayService)
+    public RecommendPutawayLocationQueryHandler(
+        IPutawayRecommendationService putawayService,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _putawayService = putawayService;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<List<PutawayRecommendation>> Handle(RecommendPutawayLocationQuery request, CancellationToken cancellationToken)
     {
+        await _operationalAuth.ValidateClientFacilityAccessAsync(
+            request.ClientId, request.FacilityId, cancellationToken);
+
         return await _putawayService.RecommendLocationsAsync(
             request.ClientId,
             request.FacilityId,

@@ -70,7 +70,7 @@ public class Phase3MilestoneAuditTests
             });
 
             seed.Locations.AddRange(
-                new Location { Id = stagingLocId, FacilityId = facilityId, ZoneId = zoneId, LocationCode = "STAGING_LANE_01", Barcode = "BAR-RCV-STAGE", LocationType = LocationType.StagingLane },
+                new Location { Id = stagingLocId, FacilityId = facilityId, ZoneId = zoneId, LocationCode = "STAGING_LANE_01", Barcode = "BAR-RCV-STAGE", LocationType = LocationType.StagingLane, IsReceiving = true },
                 new Location { Id = outboundStagingLocId, FacilityId = facilityId, ZoneId = zoneId, LocationCode = "OUTBOUND_MARSHAL_01", Barcode = "BAR-OUT-STAGE", LocationType = LocationType.StagingLane },
                 new Location { Id = permanentBinId, FacilityId = facilityId, ZoneId = zoneId, LocationCode = "BIN-AISLE1-RACK1-S1", Barcode = "BAR-PERM-BIN", LocationType = LocationType.Bin, MaxWeightKg = 5000, MaxVolumeCm3 = 10000000 }
             );

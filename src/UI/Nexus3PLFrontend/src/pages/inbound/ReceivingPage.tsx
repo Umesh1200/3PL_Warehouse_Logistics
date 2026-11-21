@@ -18,6 +18,8 @@ export const ReceivingPage: React.FC = () => {
   const { activeFacility } = useFacility();
   const { hasPermission } = useAuth();
   const canReceive = hasPermission('inbound:receive');
+  const canApprove = hasPermission('inbound:receive:approve');
+  const canResolveDiscrepancy = hasPermission('inbound:discrepancy:resolve');
 
   const [sessions, setSessions] = useState<ReceivingSessionDto[]>([]);
   const [totalSessions, setTotalSessions] = useState(0);
@@ -461,7 +463,7 @@ export const ReceivingPage: React.FC = () => {
                 <div>
                   <strong>Attention:</strong> This session requires supervisor sign-off before completion due to blind receiving or flagged discrepancies.
                 </div>
-                {canReceive && (
+                {canApprove && (
                   <button
                     className="btn btn-warning btn-sm"
                     onClick={handleApproveSession}
@@ -643,7 +645,7 @@ export const ReceivingPage: React.FC = () => {
                         <th>Reported At</th>
                         <th>Status</th>
                         <th>Resolution Notes</th>
-                        {canReceive && <th>Supervisor Actions</th>}
+                        {canResolveDiscrepancy && <th>Supervisor Actions</th>}
                       </tr>
                     </thead>
                     <tbody>
@@ -659,7 +661,7 @@ export const ReceivingPage: React.FC = () => {
                             </span>
                           </td>
                           <td>{d.resolutionNotes || (d.resolvedAtUtc ? `Resolved at ${new Date(d.resolvedAtUtc).toLocaleTimeString()}` : '—')}</td>
-                          {canReceive && (
+                          {canResolveDiscrepancy && (
                             <td>
                               {d.status === DiscrepancyResolutionStatus.PendingReview ? (
                                 <div style={{ display: 'flex', gap: '0.5rem' }}>

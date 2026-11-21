@@ -43,6 +43,8 @@ describe('Phase 7.3: Receiving, Directed Putaway & Inventory Ledger Integration 
     permissions: [
       'inbound:view',
       'inbound:receive',
+      'inbound:receive:approve',
+      'inbound:discrepancy:resolve',
       'inbound:putaway',
       'inbound:putaway:execute',
       'inbound:putaway:manage',

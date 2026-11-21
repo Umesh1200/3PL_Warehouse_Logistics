@@ -108,7 +108,7 @@ public class ReceivingController : BaseApiController
     }
 
     [HttpPost("sessions/{id:guid}/approve")]
-    [HasPermission(Permissions.Inbound.Receive)]
+    [HasPermission(Permissions.Inbound.Approve)]
     [ProducesResponseType(typeof(ReceivingSessionDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> ApproveSession([FromRoute] Guid id, CancellationToken ct)
@@ -118,7 +118,7 @@ public class ReceivingController : BaseApiController
     }
 
     [HttpPost("sessions/{id:guid}/discrepancies/{discrepancyId:guid}/resolve")]
-    [HasPermission(Permissions.Inbound.Receive)]
+    [HasPermission(Permissions.Inbound.DiscrepancyResolve)]
     [ProducesResponseType(typeof(ReceivingDiscrepancyDto), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> ResolveDiscrepancy(

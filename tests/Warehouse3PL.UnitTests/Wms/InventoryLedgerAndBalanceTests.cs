@@ -27,7 +27,7 @@ public class InventoryLedgerAndBalanceTests
         var toLocId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seedContext = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -53,7 +53,8 @@ public class InventoryLedgerAndBalanceTests
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
-        var handler = new TransferInventoryCommandHandler(context, currentUser);
+        var handler = new TransferInventoryCommandHandler(context, currentUser,
+            new Warehouse3PL.Application.Common.Security.WarehouseOperationalAuthorization(context, currentUser));
 
         // Act - Transfer 20 units from LOC-A to LOC-B
         var txId = await handler.Handle(new TransferInventoryCommand
@@ -97,7 +98,7 @@ public class InventoryLedgerAndBalanceTests
         var toLocId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seedContext = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -117,7 +118,8 @@ public class InventoryLedgerAndBalanceTests
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
-        var handler = new TransferInventoryCommandHandler(context, currentUser);
+        var handler = new TransferInventoryCommandHandler(context, currentUser,
+            new Warehouse3PL.Application.Common.Security.WarehouseOperationalAuthorization(context, currentUser));
 
         // Act & Assert - Attempt to move 10 units
         await Assert.ThrowsAsync<ValidationException>(async () =>
@@ -145,7 +147,7 @@ public class InventoryLedgerAndBalanceTests
         var locId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seedContext = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -163,7 +165,8 @@ public class InventoryLedgerAndBalanceTests
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
-        var handler = new ReserveInventoryCommandHandler(context, currentUser);
+        var handler = new ReserveInventoryCommandHandler(context, currentUser,
+            new Warehouse3PL.Application.Common.Security.WarehouseOperationalAuthorization(context, currentUser));
 
         // Act - Reserve 35 units for an order
         var success = await handler.Handle(new ReserveInventoryCommand

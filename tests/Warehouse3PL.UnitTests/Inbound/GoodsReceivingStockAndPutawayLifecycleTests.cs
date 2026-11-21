@@ -52,7 +52,7 @@ public class GoodsReceivingStockAndPutawayLifecycleTests
             TenantId = clientId,
             FacilityId = facilityId,
             UserType = UserType.Staff,
-            PermissionsList = [Permissions.Inbound.Receive, Permissions.Inbound.PutawayExecute, Permissions.Inbound.PutawayManage]
+            PermissionsList = [Permissions.Inbound.Receive, Permissions.Inbound.DiscrepancyResolve, Permissions.Inbound.PutawayExecute, Permissions.Inbound.PutawayManage]
         };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, staffUser, dbName))
@@ -538,6 +538,12 @@ public class GoodsReceivingStockAndPutawayLifecycleTests
             // Verify persisted in database
             var dbLine = await context.ReceiptLines.FindAsync(line.Id);
             Assert.NotNull(dbLine!.StagingLocationId);
+            var fallback = await context.Locations.FindAsync(dbLine.StagingLocationId.Value);
+            Assert.NotNull(fallback);
+            Assert.True(fallback!.IsReceiving);
+            Assert.True(fallback.IsActive);
+            Assert.False(fallback.IsDeleted);
+            Assert.Equal(LocationType.StagingLane, fallback.LocationType);
 
             // Generate Putaway tasks -> discovers the line and generates task!
             var locationSelector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
@@ -671,7 +677,7 @@ public class GoodsReceivingStockAndPutawayLifecycleTests
             TenantId = clientId,
             FacilityId = facilityId,
             UserType = UserType.Staff,
-            PermissionsList = [Permissions.Inbound.Receive, Permissions.Inbound.View]
+            PermissionsList = [Permissions.Inbound.Receive, Permissions.Inbound.View, Permissions.Inbound.Approve, Permissions.Inbound.DiscrepancyResolve]
         };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, staffUser, dbName))
@@ -734,6 +740,14 @@ public class GoodsReceivingStockAndPutawayLifecycleTests
 
             // 4. Resolve discrepancy via API command
             var resolveHandler = new ResolveReceivingDiscrepancyCommandHandler(context, staffUser, opAuth);
+            staffUser.PermissionsList.Remove(Permissions.Inbound.DiscrepancyResolve);
+            await Assert.ThrowsAsync<ForbiddenException>(() => resolveHandler.Handle(new ResolveReceivingDiscrepancyCommand
+            {
+                ReceivingSessionId = session.Id,
+                DiscrepancyId = dbDiscrepancies[0].Id,
+                Resolution = DiscrepancyResolutionStatus.Approved
+            }, CancellationToken.None));
+            staffUser.PermissionsList.Add(Permissions.Inbound.DiscrepancyResolve);
             await resolveHandler.Handle(new ResolveReceivingDiscrepancyCommand
             {
                 ReceivingSessionId = session.Id,
@@ -744,6 +758,10 @@ public class GoodsReceivingStockAndPutawayLifecycleTests
 
             // 5. Approve session via API command
             var approveHandler = new ApproveReceivingSessionCommandHandler(context, staffUser, opAuth);
+            staffUser.PermissionsList.Remove(Permissions.Inbound.Approve);
+            await Assert.ThrowsAsync<ForbiddenException>(() => approveHandler.Handle(
+                new ApproveReceivingSessionCommand(session.Id), CancellationToken.None));
+            staffUser.PermissionsList.Add(Permissions.Inbound.Approve);
             var approved = await approveHandler.Handle(new ApproveReceivingSessionCommand(session.Id), CancellationToken.None);
             Assert.True(approved.IsSupervisorApproved);
 
@@ -834,5 +852,97 @@ public class GoodsReceivingStockAndPutawayLifecycleTests
             var txCount = await context.InventoryTransactions.CountAsync(t => t.ReferenceId == session.Id);
             Assert.Equal(1, txCount);
         }
+    }
+
+    [Fact]
+    public async Task CompleteReceivingSession_SameLotNumberAcrossItems_CreatesDistinctLotsAndStockKeys()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var clientId = Guid.NewGuid();
+        var facilityId = Guid.NewGuid();
+        var doorId = Guid.NewGuid();
+        var visitId = Guid.NewGuid();
+        var stagingId = Guid.NewGuid();
+        var firstItemId = Guid.NewGuid();
+        var secondItemId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var tenant = new TestTenantProvider { TenantId = clientId };
+        var user = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(), FacilityId = facilityId, TenantId = clientId, UserType = UserType.Staff,
+            PermissionsList = [Permissions.Inbound.Receive]
+        };
+
+        using (var seed = TestDbContextFactory.Create(tenant, user, dbName))
+        {
+            seed.Clients.Add(new Client { Id = clientId, CompanyName = "Lot Client", AccountCode = "LOT" });
+            seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "LOT-FAC", Name = "Lot Facility" });
+            seed.DockDoors.Add(new DockDoor { Id = doorId, FacilityId = facilityId, DoorNumber = "LOT-D1", Status = DockDoorStatus.Active });
+            seed.YardVisits.Add(new YardVisit { Id = visitId, FacilityId = facilityId, ClientId = clientId, VisitNumber = "LOT-YV", TrailerNumber = "LOT-TR", Status = YardVisitStatus.AtDock });
+            seed.Locations.Add(new Location { Id = stagingId, FacilityId = facilityId, LocationCode = "LOT-STG", Barcode = "LOT-STG", LocationType = LocationType.StagingLane, IsReceiving = true, IsActive = true });
+            seed.Items.AddRange(
+                new Item { Id = firstItemId, ClientId = clientId, Sku = "LOT-A", Description = "First" },
+                new Item { Id = secondItemId, ClientId = clientId, Sku = "LOT-B", Description = "Second" });
+            seed.ReceivingSessions.Add(new ReceivingSession
+            {
+                Id = sessionId, FacilityId = facilityId, DockDoorId = doorId, YardVisitId = visitId,
+                ClientId = clientId, SessionNumber = "RCV-LOT-1", Status = ReceivingStatus.InProgress,
+                ReceivedByUserId = user.UserId!.Value,
+                Lines =
+                [
+                    new ReceiptLine { ItemId = firstItemId, Lpn = "LOT-LPN-A", QuantityReceived = 3, LotNumber = "SHARED", StagingLocationId = stagingId },
+                    new ReceiptLine { ItemId = secondItemId, Lpn = "LOT-LPN-B", QuantityReceived = 4, LotNumber = "SHARED", StagingLocationId = stagingId }
+                ]
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        using var context = TestDbContextFactory.Create(tenant, user, dbName);
+        var auth = new WarehouseOperationalAuthorization(context, user);
+        await new CompleteReceivingSessionCommandHandler(context, user, auth).Handle(
+            new CompleteReceivingSessionCommand { ReceivingSessionId = sessionId }, CancellationToken.None);
+
+        var lots = await context.InventoryLots.Where(l => l.LotNumber == "SHARED").OrderBy(l => l.ItemId).ToListAsync();
+        Assert.Equal(2, lots.Count);
+        Assert.NotEqual(lots[0].ItemId, lots[1].ItemId);
+        var stocks = await context.StockOnHand.Where(s => s.LocationId == stagingId).ToListAsync();
+        Assert.Equal(2, stocks.Count);
+        Assert.All(stocks, stock => Assert.NotNull(stock.LotId));
+        Assert.Equal(7m, stocks.Sum(s => s.TotalQuantity));
+    }
+
+    [Fact]
+    public async Task StockProjection_RestoresOnHoldTotalAndLastCountedAt()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var clientId = Guid.NewGuid();
+        var facilityId = Guid.NewGuid();
+        var itemId = Guid.NewGuid();
+        var locationId = Guid.NewGuid();
+        var countedAt = DateTime.UtcNow.AddHours(-2);
+        var tenant = new TestTenantProvider { TenantId = clientId };
+        var user = new TestCurrentUserContext { UserId = Guid.NewGuid(), FacilityId = facilityId, UserType = UserType.Staff };
+        using (var seed = TestDbContextFactory.Create(tenant, user, dbName))
+        {
+            seed.Clients.Add(new Client { Id = clientId, CompanyName = "Stock Client", AccountCode = "STK" });
+            seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "STK-F", Name = "Stock Facility" });
+            seed.Items.Add(new Item { Id = itemId, ClientId = clientId, Sku = "STK-1", Description = "Stock" });
+            seed.Locations.Add(new Location { Id = locationId, FacilityId = facilityId, LocationCode = "STK-BIN", Barcode = "STK-BIN" });
+            seed.StockOnHand.Add(new StockOnHand
+            {
+                ClientId = clientId, FacilityId = facilityId, ItemId = itemId, LocationId = locationId,
+                QtyAvailable = 1, QtyAllocated = 2, QtyReserved = 3, QtyQuarantined = 4, QtyDamaged = 5,
+                QtyOnHold = 6, LastCountedAt = countedAt
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        using var context = TestDbContextFactory.Create(tenant, user, dbName);
+        var result = await new GetStockOnHandQueryHandler(context, new WarehouseOperationalAuthorization(context, user))
+            .Handle(new GetStockOnHandQuery { FacilityId = facilityId }, CancellationToken.None);
+        var stock = Assert.Single(result.Items);
+        Assert.Equal(6m, stock.QtyOnHold);
+        Assert.Equal(21m, stock.TotalQuantity);
+        Assert.Equal(countedAt, stock.LastCountedAt);
     }
 }

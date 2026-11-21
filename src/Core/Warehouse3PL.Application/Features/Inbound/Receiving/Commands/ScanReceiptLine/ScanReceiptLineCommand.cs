@@ -194,17 +194,37 @@ public class ScanReceiptLineCommandHandler : IRequestHandler<ScanReceiptLineComm
         if (stagingLocationId.HasValue)
         {
             var stagingLoc = await _context.Locations
-                .FirstOrDefaultAsync(l => l.Id == stagingLocationId.Value && l.FacilityId == session.FacilityId, cancellationToken);
+                .FirstOrDefaultAsync(l =>
+                    l.Id == stagingLocationId.Value &&
+                    l.FacilityId == session.FacilityId &&
+                    l.IsReceiving &&
+                    l.LocationType == LocationType.StagingLane &&
+                    l.IsActive &&
+                    !l.IsDeleted &&
+                    !l.IsLocked &&
+                    !l.IsDamaged,
+                    cancellationToken);
 
-            if (stagingLoc != null)
+            if (stagingLoc == null)
             {
-                stagingLocationCode = stagingLoc.LocationCode;
+                throw new ValidationException(nameof(request.StagingLocationId),
+                    "Receiving location must be an active, unlocked, undamaged receiving staging lane in the session facility.");
             }
+
+            stagingLocationCode = stagingLoc.LocationCode;
         }
         else
         {
             var defaultStaging = await _context.Locations
-                .FirstOrDefaultAsync(l => l.FacilityId == session.FacilityId && l.IsReceiving && l.IsActive, cancellationToken);
+                .FirstOrDefaultAsync(l =>
+                    l.FacilityId == session.FacilityId &&
+                    l.IsReceiving &&
+                    l.LocationType == LocationType.StagingLane &&
+                    l.IsActive &&
+                    !l.IsDeleted &&
+                    !l.IsLocked &&
+                    !l.IsDamaged,
+                    cancellationToken);
 
             if (defaultStaging != null)
             {

@@ -193,7 +193,7 @@ public class PutawayEngineTests
         var taskId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seedContext = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -229,7 +229,8 @@ public class PutawayEngineTests
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
-        var handler = new ConfirmPutawayCommandHandler(context, currentUser);
+        var handler = new ConfirmPutawayCommandHandler(context, currentUser,
+            new Warehouse3PL.Application.Common.Security.WarehouseOperationalAuthorization(context, currentUser));
 
         // Act - Confirm Putaway Execution
         var result = await handler.Handle(new ConfirmPutawayCommand

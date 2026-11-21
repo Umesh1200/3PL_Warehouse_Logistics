@@ -150,7 +150,7 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
 
             // Ledger Integration: Ingest into transient staging records
             Location? fallbackStagingLocation = null;
-            var localLots = new Dictionary<string, InventoryLot>(StringComparer.OrdinalIgnoreCase);
+            var localLots = new Dictionary<(Guid ClientId, Guid ItemId, string LotNumber), InventoryLot>();
             var localStocks = new Dictionary<(Guid ClientId, Guid FacilityId, Guid ItemId, Guid LocationId, Guid? LotId), StockOnHand>();
 
             foreach (var line in session.Lines)
@@ -162,9 +162,15 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
                 if (!stagingLocId.HasValue)
                 {
                     fallbackStagingLocation ??= await _context.Locations
-                        .FirstOrDefaultAsync(l => l.FacilityId == session.FacilityId && l.IsReceiving && l.IsActive, cancellationToken)
-                        ?? await _context.Locations
-                            .FirstOrDefaultAsync(l => l.FacilityId == session.FacilityId && l.IsActive, cancellationToken);
+                        .FirstOrDefaultAsync(l =>
+                            l.FacilityId == session.FacilityId &&
+                            l.IsReceiving &&
+                            l.LocationType == LocationType.StagingLane &&
+                            l.IsActive &&
+                            !l.IsDeleted &&
+                            !l.IsLocked &&
+                            !l.IsDamaged,
+                            cancellationToken);
 
                     stagingLocId = fallbackStagingLocation?.Id;
                 }
@@ -194,7 +200,8 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
                 if (!string.IsNullOrWhiteSpace(line.LotNumber))
                 {
                     var normalizedLot = line.LotNumber.Trim().ToUpperInvariant();
-                    if (!localLots.TryGetValue(normalizedLot, out lot))
+                    var lotKey = (clientId, line.ItemId, normalizedLot);
+                    if (!localLots.TryGetValue(lotKey, out lot))
                     {
                         lot = await _context.InventoryLots
                             .FirstOrDefaultAsync(l =>
@@ -222,7 +229,7 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
                             _context.InventoryLots.Add(lot);
                         }
 
-                        localLots[normalizedLot] = lot;
+                        localLots[lotKey] = lot;
                     }
                 }
 

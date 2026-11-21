@@ -39,3 +39,5 @@ artifacts/
 ## OS generated files
 .DS_Store
 Thumbs.db
+# Generated frontend handoff archives are release artifacts, not source.
+src/UI/Nexus3PLFrontend-scaffold.zip

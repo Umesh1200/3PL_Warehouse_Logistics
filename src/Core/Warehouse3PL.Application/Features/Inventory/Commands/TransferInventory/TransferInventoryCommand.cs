@@ -2,6 +2,7 @@ using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Enums;
@@ -39,17 +40,23 @@ public class TransferInventoryCommandHandler : IRequestHandler<TransferInventory
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserContext _currentUser;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
     public TransferInventoryCommandHandler(
         IApplicationDbContext context,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
         _currentUser = currentUser;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<long> Handle(TransferInventoryCommand request, CancellationToken cancellationToken)
     {
+        await _operationalAuth.ValidateClientFacilityAccessAsync(
+            request.ClientId, request.FacilityId, cancellationToken);
+
         return await _context.ExecuteInTransactionAsync(async () =>
         {
             // 1. Fetch Source Stock Balance
@@ -75,6 +82,13 @@ public class TransferInventoryCommandHandler : IRequestHandler<TransferInventory
             if (destLocation == null)
             {
                 throw new EntityNotFoundException(nameof(Location), request.ToLocationId);
+            }
+
+            if (!destLocation.IsActive || destLocation.IsDeleted || destLocation.IsReceiving ||
+                destLocation.LocationType == LocationType.StagingLane)
+            {
+                throw new ValidationException(nameof(request.ToLocationId),
+                    $"Target location '{destLocation.LocationCode}' is not an active storage location.");
             }
 
             if (destLocation.IsLocked || destLocation.IsDamaged)

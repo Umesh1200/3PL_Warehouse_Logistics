@@ -95,8 +95,9 @@ public class GetStockOnHandQueryHandler : IRequestHandler<GetStockOnHandQuery, P
                 QtyReserved = s.QtyReserved,
                 QtyQuarantined = s.QtyQuarantined,
                 QtyDamaged = s.QtyDamaged,
-                QtyOnHold = 0m,
-                TotalQuantity = s.QtyAvailable + s.QtyAllocated + s.QtyReserved + s.QtyQuarantined + s.QtyDamaged,
+                QtyOnHold = s.QtyOnHold,
+                TotalQuantity = s.QtyAvailable + s.QtyAllocated + s.QtyReserved + s.QtyQuarantined + s.QtyDamaged + s.QtyOnHold,
+                LastCountedAt = s.LastCountedAt,
                 Version = s.Version
             })
             .ToListAsync(cancellationToken);
