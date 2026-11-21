@@ -81,7 +81,7 @@ try
         seed.PutawayTasks.Add(new PutawayTask
         {
             Id = taskId, ClientId = clientId, FacilityId = facilityId, ItemId = itemId,
-            SourceLocationId = stagingId, SuggestedLocationId = destinationId,
+            SourceLocationId = stagingId, SuggestedLocationId = destinationId, TargetLocationId = destinationId,
             LpnCode = "P73-LPN1", Quantity = 10m, Status = PutawayTaskStatus.Pending
         });
         await seed.SaveChangesAsync();
