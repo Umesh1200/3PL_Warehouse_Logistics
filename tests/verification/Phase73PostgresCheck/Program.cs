@@ -84,6 +84,7 @@ try
     var taskDup1 = Guid.NewGuid();
     var taskDup2 = Guid.NewGuid();
     var dupLineId = Guid.NewGuid();
+    var sessionId = Guid.NewGuid();
 
     await using (var sqlConn = new NpgsqlConnection(migrationConn))
     {
@@ -118,6 +119,12 @@ try
 
             INSERT INTO users (user_id, email, password_hash, first_name, last_name, user_type, status, is_deleted, created_at)
             VALUES ('{verifier.UserId}', 'verifier@mig.local', 'hash', 'Migration', 'Verifier', 'Staff', 'Active', false, NOW());
+
+            INSERT INTO receiving_sessions (session_id, facility_id, client_id, session_number, status, started_at_utc, received_by_user_id, is_blind_receiving, requires_supervisor_approval, is_supervisor_approved, version, is_deleted, created_at)
+            VALUES ('{sessionId}', '{facilityId}', '{clientId}', 'MIG-RCV-001', 'Completed', NOW(), '{verifier.UserId}', false, false, false, 1, false, NOW());
+
+            INSERT INTO receipt_lines (receipt_line_id, session_id, item_id, lpn, quantity_received, quantity_expected, condition, staging_location_id, scanned_at_utc, version, is_deleted)
+            VALUES ('{dupLineId}', '{sessionId}', '{itemId}', 'MIG-LPN-001', 15.0000, 15.0000, 'Sound', '{stagingLoc}', NOW(), 1, false);
         ", sqlConn))
         {
             await cmd.ExecuteNonQueryAsync();
