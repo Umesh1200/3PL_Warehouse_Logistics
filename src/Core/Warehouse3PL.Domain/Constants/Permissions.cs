@@ -61,6 +61,9 @@ public static class Permissions
         public const string PutawayManage = "inbound:putaway:manage";
         public const string PutawayExecute = "inbound:putaway:execute";
         public const string PutawayRules = "inbound:putaway:rules";
+        public const string PutawayOverride = "inbound:putaway:override";
+        public const string Approve = "inbound:receive:approve";
+        public const string DiscrepancyResolve = "inbound:discrepancy:resolve";
 
         public const string OrdersView = "inbound:orders:view";
         public const string OrdersCreate = "inbound:orders:create";
@@ -171,6 +174,7 @@ public static class Permissions
         Items.View, Items.Create, Items.Edit, Items.Delete,
         Inventory.View, Inventory.Adjust, Inventory.Count, Inventory.Transfer,
         Inbound.View, Inbound.Receive, Inbound.Putaway, Inbound.PutawayManage, Inbound.PutawayExecute, Inbound.PutawayRules,
+        Inbound.PutawayOverride, Inbound.Approve, Inbound.DiscrepancyResolve,
         Inbound.OrdersView, Inbound.OrdersCreate, Inbound.OrdersEdit, Inbound.OrdersCancel,
         Inbound.AsnView, Inbound.AsnCreate, Inbound.AsnEdit, Inbound.AsnCancel,
         Inbound.SuppliersView, Inbound.SuppliersCreate, Inbound.SuppliersEdit,

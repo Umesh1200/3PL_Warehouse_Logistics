@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.CrossDock.Plans.Commands.CancelCrossDockPlan;
 using Warehouse3PL.Application.Features.CrossDock.Plans.Commands.GenerateCrossDockPlan;
 using Warehouse3PL.Application.Features.CrossDock.Tasks.Commands.ConfirmCrossDockTask;
@@ -52,7 +53,7 @@ public class Phase3MilestoneAuditTests
         var operatorUserId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { TenantId = clientId, BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserId = operatorUserId, UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = operatorUserId, UserType = UserType.Staff, FacilityId = facilityId };
 
         // 1. Arrange - Seed Baseline Warehouse, Inventory Locations, PO, ASN, and Outbound Demand
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
@@ -175,7 +176,8 @@ public class Phase3MilestoneAuditTests
         Guid sessionId;
         using (var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
-            var startHandler = new StartReceivingSessionCommandHandler(context, currentUser);
+            var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+            var startHandler = new StartReceivingSessionCommandHandler(context, currentUser, opAuth);
             var sessionResult = await startHandler.Handle(new StartReceivingSessionCommand
             {
                 FacilityId = facilityId,
@@ -188,7 +190,7 @@ public class Phase3MilestoneAuditTests
             sessionId = sessionResult.Id;
 
             // Scan intake of 100 sound units on LPN-AUDIT-100
-            var scanHandler = new ScanReceiptLineCommandHandler(context);
+            var scanHandler = new ScanReceiptLineCommandHandler(context, opAuth);
             await scanHandler.Handle(new ScanReceiptLineCommand
             {
                 ReceivingSessionId = sessionId,
@@ -202,7 +204,7 @@ public class Phase3MilestoneAuditTests
             }, CancellationToken.None);
 
             // Complete Receiving Session -> posts stock to StockOnHand & creates InventoryTransaction (TxType.Receive)
-            var completeHandler = new CompleteReceivingSessionCommandHandler(context, currentUser);
+            var completeHandler = new CompleteReceivingSessionCommandHandler(context, currentUser, opAuth);
             await completeHandler.Handle(new CompleteReceivingSessionCommand { ReceivingSessionId = sessionId }, CancellationToken.None);
         }
 
@@ -262,7 +264,8 @@ public class Phase3MilestoneAuditTests
             await context.SaveChangesAsync();
 
             var selector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
-            var putawayHandler = new GeneratePutawayTasksCommandHandler(context, selector);
+            var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+            var putawayHandler = new GeneratePutawayTasksCommandHandler(context, selector, opAuth);
 
             var putawayTasks = await putawayHandler.Handle(new GeneratePutawayTasksCommand
             {
@@ -298,7 +301,8 @@ public class Phase3MilestoneAuditTests
         // =========================================================================
         using (var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
-            var confirmPutawayHandler = new ConfirmPutawayTaskCommandHandler(context, currentUser);
+            var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+            var confirmPutawayHandler = new ConfirmPutawayTaskCommandHandler(context, currentUser, opAuth);
             var putawayResult = await confirmPutawayHandler.Handle(new ConfirmPutawayTaskCommand
             {
                 TaskId = putawayTaskId,
@@ -468,7 +472,7 @@ public class Phase3MilestoneAuditTests
         var itemId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -531,7 +535,8 @@ public class Phase3MilestoneAuditTests
 
         // Putaway task generation produces 0 tasks
         var selector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
-        var putawayHandler = new GeneratePutawayTasksCommandHandler(context, selector);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var putawayHandler = new GeneratePutawayTasksCommandHandler(context, selector, opAuth);
 
         var putawayTasks = await putawayHandler.Handle(new GeneratePutawayTasksCommand
         {
@@ -578,7 +583,7 @@ public class Phase3MilestoneAuditTests
         var itemId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
 
         Guid planId;
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
@@ -652,7 +657,8 @@ public class Phase3MilestoneAuditTests
 
             // Now putaway engine can process the entire 100 units!
             var selector = new PutawayLocationSelector(verifyRestored, NullLogger<PutawayLocationSelector>.Instance);
-            var putawayHandler = new GeneratePutawayTasksCommandHandler(verifyRestored, selector);
+            var opAuth = new WarehouseOperationalAuthorization(verifyRestored, currentUser);
+            var putawayHandler = new GeneratePutawayTasksCommandHandler(verifyRestored, selector, opAuth);
 
             var pTasks = await putawayHandler.Handle(new GeneratePutawayTasksCommand
             {

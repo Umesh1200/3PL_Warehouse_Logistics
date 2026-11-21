@@ -58,7 +58,7 @@ export const PutawayPage: React.FC = () => {
         setError(null);
         const query: GetPutawayTasksQuery = {
           facilityId: activeFacility.id,
-          status: taskFilter !== 'all' ? Number(taskFilter) : undefined,
+          status: taskFilter !== 'all' ? (taskFilter as PutawayTaskStatus) : undefined,
           searchTerm: searchTerm.trim() || undefined,
           pageNumber: page,
           pageSize,

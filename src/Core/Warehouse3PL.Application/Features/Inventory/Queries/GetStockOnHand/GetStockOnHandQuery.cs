@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 
 namespace Warehouse3PL.Application.Features.Inventory.Queries.GetStockOnHand;
 
@@ -17,21 +18,20 @@ public record GetStockOnHandQuery : PagedQuery, IRequest<PagedResult<StockOnHand
 public class GetStockOnHandQueryHandler : IRequestHandler<GetStockOnHandQuery, PagedResult<StockOnHandDto>>
 {
     private readonly IApplicationDbContext _context;
-    private readonly ITenantProvider _tenantProvider;
-    private readonly ICurrentUserContext _currentUser;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
     public GetStockOnHandQueryHandler(
         IApplicationDbContext context,
-        ITenantProvider tenantProvider,
-        ICurrentUserContext currentUser)
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
-        _tenantProvider = tenantProvider;
-        _currentUser = currentUser;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<PagedResult<StockOnHandDto>> Handle(GetStockOnHandQuery request, CancellationToken cancellationToken)
     {
+        var scope = await _operationalAuth.ResolveQueryScopeAsync(request.ClientId, request.FacilityId, cancellationToken);
+
         var query = _context.StockOnHand
             .AsNoTracking()
             .Include(s => s.Item)
@@ -39,24 +39,18 @@ public class GetStockOnHandQueryHandler : IRequestHandler<GetStockOnHandQuery, P
             .Include(s => s.Lot)
             .AsQueryable();
 
-        if (!_currentUser.IsStaff)
+        if (scope.ClientId.HasValue)
         {
-            var callerTenant = _currentUser.TenantId ?? _tenantProvider.TenantId;
-            if (!callerTenant.HasValue || callerTenant.Value == Guid.Empty)
-            {
-                // Non-staff callers must have a valid tenant; fail closed if absent
-                return PagedResult<StockOnHandDto>.Create([], 0, request.PageNumber, request.PageSize);
-            }
-            query = query.Where(s => s.ClientId == callerTenant.Value);
-        }
-        else if (request.ClientId.HasValue)
-        {
-            query = query.Where(s => s.ClientId == request.ClientId.Value);
+            query = query.Where(s => s.ClientId == scope.ClientId.Value);
         }
 
-        if (request.FacilityId.HasValue)
+        if (scope.FacilityId.HasValue)
         {
-            query = query.Where(s => s.FacilityId == request.FacilityId.Value);
+            query = query.Where(s => s.FacilityId == scope.FacilityId.Value);
+        }
+        else if (scope.AuthorizedFacilityIds != null)
+        {
+            query = query.Where(s => scope.AuthorizedFacilityIds.Contains(s.FacilityId));
         }
 
         if (request.ItemId.HasValue)
@@ -101,14 +95,12 @@ public class GetStockOnHandQueryHandler : IRequestHandler<GetStockOnHandQuery, P
                 QtyReserved = s.QtyReserved,
                 QtyQuarantined = s.QtyQuarantined,
                 QtyDamaged = s.QtyDamaged,
-                QtyOnHold = s.QtyOnHold,
-                TotalQuantity = s.QtyAvailable + s.QtyAllocated + s.QtyReserved + s.QtyQuarantined + s.QtyDamaged + s.QtyOnHold,
-                LastCountedAt = s.LastCountedAt,
+                QtyOnHold = 0m,
+                TotalQuantity = s.QtyAvailable + s.QtyAllocated + s.QtyReserved + s.QtyQuarantined + s.QtyDamaged,
                 Version = s.Version
             })
             .ToListAsync(cancellationToken);
 
-        return new PagedResult<StockOnHandDto>(items, totalCount, request.PageNumber, request.PageSize);
+        return PagedResult<StockOnHandDto>.Create(items, totalCount, request.PageNumber, request.PageSize);
     }
 }
-

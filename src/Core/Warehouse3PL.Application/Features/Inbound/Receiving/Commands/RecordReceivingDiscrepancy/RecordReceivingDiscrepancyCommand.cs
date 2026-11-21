@@ -3,6 +3,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -37,10 +38,14 @@ public class RecordReceivingDiscrepancyCommandValidator : AbstractValidator<Reco
 public class RecordReceivingDiscrepancyCommandHandler : IRequestHandler<RecordReceivingDiscrepancyCommand, ReceivingDiscrepancyDto>
 {
     private readonly IApplicationDbContext _context;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
-    public RecordReceivingDiscrepancyCommandHandler(IApplicationDbContext context)
+    public RecordReceivingDiscrepancyCommandHandler(
+        IApplicationDbContext context,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<ReceivingDiscrepancyDto> Handle(RecordReceivingDiscrepancyCommand request, CancellationToken cancellationToken)
@@ -54,6 +59,9 @@ public class RecordReceivingDiscrepancyCommandHandler : IRequestHandler<RecordRe
         {
             throw new EntityNotFoundException(nameof(ReceivingSession), request.ReceivingSessionId);
         }
+
+        // Enforce trusted tenant and authorized facility scope
+        await _operationalAuth.ValidateReceivingSessionAccessAsync(session, cancellationToken);
 
         ReceiptLine? line = null;
         if (request.ReceiptLineId.HasValue)

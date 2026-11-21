@@ -1,7 +1,9 @@
 using Microsoft.AspNetCore.Mvc;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Features.Inbound.Receiving.Commands.ApproveReceivingSession;
 using Warehouse3PL.Application.Features.Inbound.Receiving.Commands.CompleteReceivingSession;
 using Warehouse3PL.Application.Features.Inbound.Receiving.Commands.RecordReceivingDiscrepancy;
+using Warehouse3PL.Application.Features.Inbound.Receiving.Commands.ResolveReceivingDiscrepancy;
 using Warehouse3PL.Application.Features.Inbound.Receiving.Commands.ScanReceiptLine;
 using Warehouse3PL.Application.Features.Inbound.Receiving.Commands.StartReceivingSession;
 using Warehouse3PL.Application.Features.Inbound.Receiving.Queries.GetReceivingSessionById;
@@ -104,6 +106,42 @@ public class ReceivingController : BaseApiController
         var result = await Mediator.Send(new CompleteReceivingSessionCommand { ReceivingSessionId = id }, ct);
         return Ok(result);
     }
+
+    [HttpPost("sessions/{id:guid}/approve")]
+    [HasPermission(Permissions.Inbound.Receive)]
+    [ProducesResponseType(typeof(ReceivingSessionDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ApproveSession([FromRoute] Guid id, CancellationToken ct)
+    {
+        var result = await Mediator.Send(new ApproveReceivingSessionCommand(id), ct);
+        return Ok(result);
+    }
+
+    [HttpPost("sessions/{id:guid}/discrepancies/{discrepancyId:guid}/resolve")]
+    [HasPermission(Permissions.Inbound.Receive)]
+    [ProducesResponseType(typeof(ReceivingDiscrepancyDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> ResolveDiscrepancy(
+        [FromRoute] Guid id,
+        [FromRoute] Guid discrepancyId,
+        [FromBody] ResolveDiscrepancyRequest request,
+        CancellationToken ct)
+    {
+        var result = await Mediator.Send(new ResolveReceivingDiscrepancyCommand
+        {
+            ReceivingSessionId = id,
+            DiscrepancyId = discrepancyId,
+            Resolution = request.Resolution,
+            Notes = request.Notes
+        }, ct);
+        return Ok(result);
+    }
+}
+
+public record ResolveDiscrepancyRequest
+{
+    public DiscrepancyResolutionStatus Resolution { get; init; }
+    public string? Notes { get; init; }
 }
 
 public record ScanReceiptLineRequest

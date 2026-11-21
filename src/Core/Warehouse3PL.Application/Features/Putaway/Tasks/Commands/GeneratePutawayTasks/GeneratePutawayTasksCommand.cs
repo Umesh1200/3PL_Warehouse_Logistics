@@ -3,9 +3,11 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
+using ValidationException = Warehouse3PL.Domain.Exceptions.ValidationException;
 
 namespace Warehouse3PL.Application.Features.Putaway.Tasks.Commands.GeneratePutawayTasks;
 
@@ -27,30 +29,37 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
 {
     private readonly IApplicationDbContext _context;
     private readonly IPutawayLocationSelector _locationSelector;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
     public GeneratePutawayTasksCommandHandler(
         IApplicationDbContext context,
-        IPutawayLocationSelector locationSelector)
+        IPutawayLocationSelector locationSelector,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
         _locationSelector = locationSelector;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<List<PutawayTaskDto>> Handle(GeneratePutawayTasksCommand request, CancellationToken cancellationToken)
     {
-        // 1. Find all sound receipt lines that reside in a staging location
+        var scope = await _operationalAuth.ResolveQueryScopeAsync(request.ClientId, request.FacilityId, cancellationToken);
+        var effectiveFacilityId = scope.FacilityId ?? throw new ValidationException(nameof(request.FacilityId), "A specific authorized facility is required.");
+
+        // 1. Find all sound receipt lines that belong to COMPLETED receiving sessions and reside in staging
         var query = _context.ReceiptLines
             .Include(l => l.ReceivingSession)
             .Include(l => l.Item)
             .Include(l => l.StagingLocation)
-            .Where(l => l.ReceivingSession.FacilityId == request.FacilityId &&
+            .Where(l => l.ReceivingSession.FacilityId == effectiveFacilityId &&
+                        l.ReceivingSession.Status == ReceivingStatus.Completed && // Only completed sessions
                         l.StagingLocationId != null &&
                         l.Condition == ReceiptConditionStatus.Sound &&
                         l.QuantityReceived > 0);
 
-        if (request.ClientId.HasValue)
+        if (scope.ClientId.HasValue)
         {
-            query = query.Where(l => l.ReceivingSession.ClientId == request.ClientId.Value || l.Item.ClientId == request.ClientId.Value);
+            query = query.Where(l => l.ReceivingSession.ClientId == scope.ClientId.Value || l.Item.ClientId == scope.ClientId.Value);
         }
 
         var candidateLines = await query.ToListAsync(cancellationToken);
@@ -58,7 +67,7 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
         // 2. Identify LPNs / ReceiptLines that already have active or completed tasks
         var existingTasks = await _context.PutawayTasks
             .AsNoTracking()
-            .Where(t => t.FacilityId == request.FacilityId &&
+            .Where(t => t.FacilityId == effectiveFacilityId &&
                         (t.Status != PutawayTaskStatus.Cancelled))
             .ToListAsync(cancellationToken);
 

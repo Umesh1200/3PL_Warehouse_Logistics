@@ -4,6 +4,7 @@ using MediatR;
 using Microsoft.Extensions.DependencyInjection;
 using Warehouse3PL.Application.Common.Behaviors;
 using Warehouse3PL.Application.Common.Mappings;
+using Warehouse3PL.Application.Common.Security;
 
 namespace Warehouse3PL.Application;
 
@@ -18,6 +19,9 @@ public static class DependencyInjection
 
         // Register FluentValidation
         services.AddValidatorsFromAssembly(assembly);
+
+        // Register Operational Authorization
+        services.AddScoped<WarehouseOperationalAuthorization>();
 
         // Register MediatR & Pipeline Behaviors
         services.AddMediatR(cfg =>

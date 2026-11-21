@@ -3,6 +3,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Dock;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inbound;
@@ -45,15 +46,23 @@ public class StartReceivingSessionCommandHandler : IRequestHandler<StartReceivin
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserContext _currentUser;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
-    public StartReceivingSessionCommandHandler(IApplicationDbContext context, ICurrentUserContext currentUser)
+    public StartReceivingSessionCommandHandler(
+        IApplicationDbContext context,
+        ICurrentUserContext currentUser,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
         _currentUser = currentUser;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<ReceivingSessionDto> Handle(StartReceivingSessionCommand request, CancellationToken cancellationToken)
     {
+        // Enforce facility authorization
+        await _operationalAuth.ValidateFacilityAccessAsync(request.FacilityId, cancellationToken);
+
         var facility = await _context.Facilities
             .FirstOrDefaultAsync(f => f.Id == request.FacilityId, cancellationToken);
 
@@ -137,6 +146,26 @@ public class StartReceivingSessionCommandHandler : IRequestHandler<StartReceivin
 
         var isBlind = request.IsBlindReceiving || (targetAsnId == null && targetPoId == null);
         var requiresSupervisor = isBlind;
+
+        if (!_currentUser.IsStaff)
+        {
+            if (_currentUser.UserType != UserType.Client || !_currentUser.TenantId.HasValue)
+            {
+                throw new ForbiddenException("Authenticated client identity is required to start a receiving session.");
+            }
+
+            if (isBlind)
+            {
+                throw new ForbiddenException("Client users cannot initiate blind receiving sessions.");
+            }
+
+            if (targetClientId.HasValue && targetClientId.Value != _currentUser.TenantId.Value)
+            {
+                throw new ForbiddenException("Client cannot start receiving session for another client.");
+            }
+
+            targetClientId = _currentUser.TenantId.Value;
+        }
 
         var sessionCount = await _context.ReceivingSessions
             .CountAsync(s => s.FacilityId == request.FacilityId, cancellationToken);

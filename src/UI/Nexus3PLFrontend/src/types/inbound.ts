@@ -1,46 +1,46 @@
 export enum ReceivingStatus {
-  Started = 1,
-  InProgress = 2,
-  Completed = 3,
-  Flagged = 4,
-  Cancelled = 5,
+  Started = 'Started',
+  InProgress = 'InProgress',
+  Completed = 'Completed',
+  Flagged = 'Flagged',
+  Cancelled = 'Cancelled',
 }
 
 export enum ReceiptConditionStatus {
-  Sound = 1,
-  Damaged = 2,
-  Defective = 3,
+  Sound = 'Sound',
+  Damaged = 'Damaged',
+  Defective = 'Defective',
 }
 
 export enum PutawayTaskStatus {
-  Pending = 1,
-  Assigned = 2,
-  InTransit = 3,
-  Completed = 4,
-  ExceptionHold = 5,
-  ReRouted = 6,
-  Cancelled = 7,
+  Pending = 'Pending',
+  Assigned = 'Assigned',
+  InTransit = 'InTransit',
+  Completed = 'Completed',
+  ExceptionHold = 'ExceptionHold',
+  ReRouted = 'ReRouted',
+  Cancelled = 'Cancelled',
 }
 
 export enum PutawayPriority {
-  Normal = 1,
-  High = 2,
-  Expedite = 3,
+  Normal = 'Normal',
+  High = 'High',
+  Expedite = 'Expedite',
 }
 
 export enum DiscrepancyType {
-  QuantityOverage = 1,
-  QuantityShortage = 2,
-  DamagedGoods = 3,
-  TempExcursion = 4,
-  UnexpectedSKU = 5,
+  QuantityOverage = 'QuantityOverage',
+  QuantityShortage = 'QuantityShortage',
+  DamagedGoods = 'DamagedGoods',
+  TempExcursion = 'TempExcursion',
+  UnexpectedSKU = 'UnexpectedSKU',
 }
 
 export enum DiscrepancyResolutionStatus {
-  PendingReview = 1,
-  Approved = 2,
-  Rejected = 3,
-  Quarantined = 4,
+  PendingReview = 'PendingReview',
+  Approved = 'Approved',
+  Rejected = 'Rejected',
+  Quarantined = 'Quarantined',
 }
 
 export interface ReceiptLineDto {
@@ -102,8 +102,7 @@ export interface ReceivingSessionDto {
   status: ReceivingStatus;
   startedAtUtc: string;
   completedAtUtc?: string | null;
-  receivedByUserId: string;
-  receivedByUserName?: string | null;
+  receivedByUserId?: string | null;
   initialProbeTemperature?: number | null;
   sealNumber?: string | null;
   sealIntact?: boolean | null;
@@ -118,13 +117,25 @@ export interface ReceivingSessionDto {
   discrepancies: ReceivingDiscrepancyDto[];
 }
 
+export interface GetReceivingSessionsQuery {
+  facilityId?: string | null;
+  clientId?: string | null;
+  dockDoorId?: string | null;
+  status?: ReceivingStatus | null;
+  dateFrom?: string | null;
+  dateTo?: string | null;
+  searchTerm?: string | null;
+  pageNumber?: number;
+  pageSize?: number;
+}
+
 export interface StartReceivingSessionRequest {
   facilityId: string;
-  dockDoorId?: string | null;
-  yardVisitId?: string | null;
-  clientId?: string | null;
+  dockDoorId: string;
+  yardVisitId: string;
   asnId?: string | null;
   purchaseOrderId?: string | null;
+  initialProbeTemperature?: number | null;
   sealNumber?: string | null;
   sealIntact?: boolean | null;
   notes?: string | null;
@@ -142,7 +153,7 @@ export interface ScanReceiptLineRequest {
   catchWeightKg?: number | null;
   manufactureDate?: string | null;
   expirationDate?: string | null;
-  condition: ReceiptConditionStatus;
+  condition?: ReceiptConditionStatus;
   stagingLocationId?: string | null;
   notes?: string | null;
 }
@@ -152,6 +163,11 @@ export interface RecordReceivingDiscrepancyRequest {
   type: DiscrepancyType;
   discrepantQuantity: number;
   notes: string;
+}
+
+export interface ResolveDiscrepancyRequest {
+  resolution: DiscrepancyResolutionStatus;
+  notes?: string;
 }
 
 export interface PutawayTaskDto {

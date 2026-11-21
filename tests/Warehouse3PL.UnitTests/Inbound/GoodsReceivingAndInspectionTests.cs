@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Inbound.Inspections.Commands.RecordInspectionDecision;
 using Warehouse3PL.Application.Features.Inbound.Receiving.Commands.CompleteReceivingSession;
 using Warehouse3PL.Application.Features.Inbound.Receiving.Commands.RecordReceivingDiscrepancy;
@@ -62,9 +63,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
         using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
-        var handler = new StartReceivingSessionCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new StartReceivingSessionCommandHandler(context, currentUser, opAuth);
 
         var result = await handler.Handle(new StartReceivingSessionCommand
         {
@@ -108,9 +110,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
         using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
-        var handler = new StartReceivingSessionCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new StartReceivingSessionCommandHandler(context, currentUser, opAuth);
 
         await Assert.ThrowsAsync<ValidationException>(async () =>
         {
@@ -152,9 +155,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
         using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
-        var handler = new StartReceivingSessionCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new StartReceivingSessionCommandHandler(context, currentUser, opAuth);
 
         await Assert.ThrowsAsync<ValidationException>(async () =>
         {
@@ -200,9 +204,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
         using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
-        var handler = new StartReceivingSessionCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new StartReceivingSessionCommandHandler(context, currentUser, opAuth);
 
         // Missing InitialProbeTemperature throws ValidationException
         await Assert.ThrowsAsync<ValidationException>(async () =>
@@ -251,9 +256,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
         using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
-        var handler = new StartReceivingSessionCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new StartReceivingSessionCommandHandler(context, currentUser, opAuth);
 
         // 14.5°C exceeds safe 8°C upper threshold for refrigerated cargo!
         var result = await handler.Handle(new StartReceivingSessionCommand
@@ -320,8 +326,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName);
-        var handler = new ScanReceiptLineCommandHandler(context);
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
+        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new ScanReceiptLineCommandHandler(context, opAuth);
 
         var result = await handler.Handle(new ScanReceiptLineCommand
         {
@@ -372,8 +380,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName);
-        var handler = new ScanReceiptLineCommandHandler(context);
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
+        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new ScanReceiptLineCommandHandler(context, opAuth);
 
         // Attempting to scan Item B against PO line for Item A
         await Assert.ThrowsAsync<ValidationException>(async () =>
@@ -412,8 +422,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName);
-        var handler = new ScanReceiptLineCommandHandler(context);
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
+        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new ScanReceiptLineCommandHandler(context, opAuth);
 
         // Attempting to receive 130 on a 100 expected line (exceeds 10% over-receiving limit)
         await Assert.ThrowsAsync<ValidationException>(async () =>
@@ -452,8 +464,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName);
-        var handler = new ScanReceiptLineCommandHandler(context);
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
+        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new ScanReceiptLineCommandHandler(context, opAuth);
 
         // 105 is within the 110 threshold, but 5 over expected -> logs overage discrepancy
         var result = await handler.Handle(new ScanReceiptLineCommand
@@ -507,8 +521,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName);
-        var handler = new ScanReceiptLineCommandHandler(context);
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
+        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new ScanReceiptLineCommandHandler(context, opAuth);
 
         var result = await handler.Handle(new ScanReceiptLineCommand
         {
@@ -556,8 +572,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName);
-        var handler = new ScanReceiptLineCommandHandler(context);
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
+        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new ScanReceiptLineCommandHandler(context, opAuth);
 
         var result = await handler.Handle(new ScanReceiptLineCommand
         {
@@ -603,9 +621,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
         using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
-        var handler = new CompleteReceivingSessionCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new CompleteReceivingSessionCommandHandler(context, currentUser, opAuth);
 
         await Assert.ThrowsAsync<ValidationException>(async () =>
         {
@@ -646,9 +665,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
         using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
-        var handler = new CompleteReceivingSessionCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new CompleteReceivingSessionCommandHandler(context, currentUser, opAuth);
 
         await Assert.ThrowsAsync<ValidationException>(async () =>
         {
@@ -708,9 +728,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
         using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
-        var handler = new CompleteReceivingSessionCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new CompleteReceivingSessionCommandHandler(context, currentUser, opAuth);
 
         var result = await handler.Handle(new CompleteReceivingSessionCommand { ReceivingSessionId = sessionId }, CancellationToken.None);
 
@@ -787,9 +808,10 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
         using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, currentUser, dbName);
-        var handler = new CompleteReceivingSessionCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new CompleteReceivingSessionCommandHandler(context, currentUser, opAuth);
 
         var result = await handler.Handle(new CompleteReceivingSessionCommand { ReceivingSessionId = sessionId }, CancellationToken.None);
 
@@ -956,7 +978,7 @@ public class GoodsReceivingAndInspectionTests
             await seed.SaveChangesAsync();
         }
 
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
 
         // Session 1: Partial delivery of 40 units
         var session1Id = Guid.NewGuid();
@@ -986,7 +1008,8 @@ public class GoodsReceivingAndInspectionTests
             context1.ReceivingSessions.Add(session1);
             await context1.SaveChangesAsync();
 
-            var completeHandler = new CompleteReceivingSessionCommandHandler(context1, currentUser);
+            var opAuth1 = new WarehouseOperationalAuthorization(context1, currentUser);
+            var completeHandler = new CompleteReceivingSessionCommandHandler(context1, currentUser, opAuth1);
             await completeHandler.Handle(new CompleteReceivingSessionCommand { ReceivingSessionId = session1Id }, CancellationToken.None);
 
             var poAfterPart1 = await context1.PurchaseOrders.Include(p => p.Lines).FirstOrDefaultAsync(p => p.Id == poId);
@@ -1023,7 +1046,8 @@ public class GoodsReceivingAndInspectionTests
             context2.ReceivingSessions.Add(session2);
             await context2.SaveChangesAsync();
 
-            var completeHandler = new CompleteReceivingSessionCommandHandler(context2, currentUser);
+            var opAuth2 = new WarehouseOperationalAuthorization(context2, currentUser);
+            var completeHandler = new CompleteReceivingSessionCommandHandler(context2, currentUser, opAuth2);
             await completeHandler.Handle(new CompleteReceivingSessionCommand { ReceivingSessionId = session2Id }, CancellationToken.None);
 
             var poAfterPart2 = await context2.PurchaseOrders.Include(p => p.Lines).FirstOrDefaultAsync(p => p.Id == poId);

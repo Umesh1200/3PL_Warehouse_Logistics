@@ -8,6 +8,7 @@ import {
   ReceivingStatus,
   ReceiptConditionStatus,
   DiscrepancyType,
+  DiscrepancyResolutionStatus,
   StartReceivingSessionRequest,
   ScanReceiptLineRequest,
   RecordReceivingDiscrepancyRequest,
@@ -45,6 +46,8 @@ export const ReceivingPage: React.FC = () => {
   const [isScanning, setIsScanning] = useState(false);
   const [isCompleting, setIsCompleting] = useState(false);
   const [isRecordingDiscrepancy, setIsRecordingDiscrepancy] = useState(false);
+  const [isApproving, setIsApproving] = useState(false);
+  const [resolvingDiscrepancyId, setResolvingDiscrepancyId] = useState<string | null>(null);
 
   // Start Session Form
   const [startForm, setStartForm] = useState<Partial<StartReceivingSessionRequest>>({
@@ -99,7 +102,7 @@ export const ReceivingPage: React.FC = () => {
         const query: ReceivingSessionQueryParams = {
           facilityId: activeFacility.id,
           searchTerm: searchTerm.trim() || undefined,
-          status: statusFilter !== 'all' ? Number(statusFilter) : undefined,
+          status: statusFilter !== 'all' ? statusFilter : undefined,
           pageNumber: page,
           pageSize,
         };
@@ -156,8 +159,8 @@ export const ReceivingPage: React.FC = () => {
       setFeedback(null);
       const payload: StartReceivingSessionRequest = {
         facilityId: activeFacility.id,
-        dockDoorId: startForm.dockDoorId || undefined,
-        yardVisitId: startForm.yardVisitId || undefined,
+        dockDoorId: startForm.dockDoorId || '',
+        yardVisitId: startForm.yardVisitId || '',
         asnId: startForm.asnId || undefined,
         purchaseOrderId: startForm.purchaseOrderId || undefined,
         sealNumber: startForm.sealNumber || undefined,
@@ -276,6 +279,52 @@ export const ReceivingPage: React.FC = () => {
       setFeedback({ type: 'error', message: err.message || 'Failed to complete receiving session' });
     } finally {
       setIsCompleting(false);
+    }
+  };
+
+  const handleApproveSession = async () => {
+    if (!sessionDetail || isApproving || !canReceive) return;
+
+    try {
+      setIsApproving(true);
+      setFeedback(null);
+      const updated = await receivingApi.approveSession(sessionDetail.id);
+      setSessionDetail(updated);
+      setFeedback({
+        type: 'success',
+        message: `Receiving session ${updated.sessionNumber} approved by supervisor. Ready for intake and completion.`,
+      });
+      await loadSessions();
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err.message || 'Failed to approve receiving session' });
+    } finally {
+      setIsApproving(false);
+    }
+  };
+
+  const handleResolveDiscrepancy = async (
+    discrepancyId: string,
+    resolution: DiscrepancyResolutionStatus,
+    notes?: string
+  ) => {
+    if (!sessionDetail || resolvingDiscrepancyId || !canReceive) return;
+
+    try {
+      setResolvingDiscrepancyId(discrepancyId);
+      setFeedback(null);
+      await receivingApi.resolveDiscrepancy(sessionDetail.id, discrepancyId, {
+        resolution,
+        notes: notes || `Discrepancy resolved as ${resolution}`,
+      });
+      setFeedback({
+        type: 'success',
+        message: `Discrepancy successfully resolved as ${resolution}.`,
+      });
+      await loadSessionDetail(sessionDetail.id);
+    } catch (err: any) {
+      setFeedback({ type: 'error', message: err.message || 'Failed to resolve discrepancy' });
+    } finally {
+      setResolvingDiscrepancyId(null);
     }
   };
 
@@ -408,8 +457,20 @@ export const ReceivingPage: React.FC = () => {
             </div>
 
             {sessionDetail.requiresSupervisorApproval && !sessionDetail.isSupervisorApproved && (
-              <div className="supervisor-warning-banner" role="alert">
-                <strong>Attention:</strong> This session requires supervisor sign-off before completion due to blind receiving or flagged discrepancies.
+              <div className="supervisor-warning-banner" role="alert" data-testid="supervisor-warning-banner">
+                <div>
+                  <strong>Attention:</strong> This session requires supervisor sign-off before completion due to blind receiving or flagged discrepancies.
+                </div>
+                {canReceive && (
+                  <button
+                    className="btn btn-warning btn-sm"
+                    onClick={handleApproveSession}
+                    disabled={isApproving}
+                    data-testid="approve-session-btn"
+                  >
+                    {isApproving ? 'Approving...' : '✓ Approve Session (Supervisor)'}
+                  </button>
+                )}
               </div>
             )}
           </div>
@@ -471,7 +532,7 @@ export const ReceivingPage: React.FC = () => {
                         className="form-select"
                         value={scanForm.condition}
                         onChange={(e) =>
-                          setScanForm({ ...scanForm, condition: Number(e.target.value) as ReceiptConditionStatus })
+                          setScanForm({ ...scanForm, condition: e.target.value as ReceiptConditionStatus })
                         }
                         data-testid="scan-condition-select"
                       >
@@ -568,6 +629,78 @@ export const ReceivingPage: React.FC = () => {
               </table>
             </div>
 
+            {/* DISCREPANCIES TABLE */}
+            {sessionDetail.discrepancies.length > 0 && (
+              <div className="card discrepancies-table-card" data-testid="discrepancies-table-card" style={{ marginTop: '1.5rem' }}>
+                <h3 className="card-title">Recorded Discrepancies & Quality Holds ({sessionDetail.discrepancies.length})</h3>
+                <div className="table-responsive">
+                  <table className="enterprise-table" data-testid="discrepancies-table">
+                    <thead>
+                      <tr>
+                        <th>Type</th>
+                        <th>Quantity</th>
+                        <th>Notes</th>
+                        <th>Reported At</th>
+                        <th>Status</th>
+                        <th>Resolution Notes</th>
+                        {canReceive && <th>Supervisor Actions</th>}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {sessionDetail.discrepancies.map((d) => (
+                        <tr key={d.id} data-testid={`discrepancy-row-${d.id}`}>
+                          <td className="fw-600">{d.type}</td>
+                          <td className="fw-600">{d.discrepantQuantity}</td>
+                          <td>{d.notes || '—'}</td>
+                          <td>{new Date(d.reportedAtUtc).toLocaleTimeString()}</td>
+                          <td>
+                            <span className={`status-badge badge-${d.status.toLowerCase()}`}>
+                              {d.status}
+                            </span>
+                          </td>
+                          <td>{d.resolutionNotes || (d.resolvedAtUtc ? `Resolved at ${new Date(d.resolvedAtUtc).toLocaleTimeString()}` : '—')}</td>
+                          {canReceive && (
+                            <td>
+                              {d.status === DiscrepancyResolutionStatus.PendingReview ? (
+                                <div style={{ display: 'flex', gap: '0.5rem' }}>
+                                  <button
+                                    className="btn btn-sm btn-success"
+                                    onClick={() => handleResolveDiscrepancy(d.id, DiscrepancyResolutionStatus.Approved)}
+                                    disabled={resolvingDiscrepancyId === d.id}
+                                    data-testid={`resolve-approve-${d.id}`}
+                                  >
+                                    Approve
+                                  </button>
+                                  <button
+                                    className="btn btn-sm btn-warning"
+                                    onClick={() => handleResolveDiscrepancy(d.id, DiscrepancyResolutionStatus.Quarantined)}
+                                    disabled={resolvingDiscrepancyId === d.id}
+                                    data-testid={`resolve-quarantine-${d.id}`}
+                                  >
+                                    Quarantine
+                                  </button>
+                                  <button
+                                    className="btn btn-sm btn-danger"
+                                    onClick={() => handleResolveDiscrepancy(d.id, DiscrepancyResolutionStatus.Rejected)}
+                                    disabled={resolvingDiscrepancyId === d.id}
+                                    data-testid={`resolve-reject-${d.id}`}
+                                  >
+                                    Reject
+                                  </button>
+                                </div>
+                              ) : (
+                                <span className="text-muted">Resolved</span>
+                              )}
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+
             {/* COMPLETION ACTION BAR */}
             {sessionDetail.status !== ReceivingStatus.Completed &&
               sessionDetail.status !== ReceivingStatus.Cancelled &&
@@ -581,7 +714,8 @@ export const ReceivingPage: React.FC = () => {
                     disabled={
                       isCompleting ||
                       sessionDetail.lines.length === 0 ||
-                      (sessionDetail.requiresSupervisorApproval && !sessionDetail.isSupervisorApproved)
+                      (sessionDetail.requiresSupervisorApproval && !sessionDetail.isSupervisorApproved) ||
+                      sessionDetail.discrepancies.some((d) => d.status === DiscrepancyResolutionStatus.PendingReview)
                     }
                     onClick={() => setShowCompleteConfirm(true)}
                     data-testid="complete-session-action-btn"
@@ -832,7 +966,7 @@ export const ReceivingPage: React.FC = () => {
                   className="form-select"
                   value={discrepancyForm.type}
                   onChange={(e) =>
-                    setDiscrepancyForm({ ...discrepancyForm, type: Number(e.target.value) as DiscrepancyType })
+                    setDiscrepancyForm({ ...discrepancyForm, type: e.target.value as DiscrepancyType })
                   }
                   data-testid="disc-type-select"
                 >

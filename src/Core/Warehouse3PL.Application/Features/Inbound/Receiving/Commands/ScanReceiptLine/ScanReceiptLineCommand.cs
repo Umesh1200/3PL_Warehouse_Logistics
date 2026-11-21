@@ -3,6 +3,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Catalog;
 using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Enums;
@@ -47,10 +48,14 @@ public class ScanReceiptLineCommandValidator : AbstractValidator<ScanReceiptLine
 public class ScanReceiptLineCommandHandler : IRequestHandler<ScanReceiptLineCommand, ReceiptLineDto>
 {
     private readonly IApplicationDbContext _context;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
-    public ScanReceiptLineCommandHandler(IApplicationDbContext context)
+    public ScanReceiptLineCommandHandler(
+        IApplicationDbContext context,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<ReceiptLineDto> Handle(ScanReceiptLineCommand request, CancellationToken cancellationToken)
@@ -69,6 +74,9 @@ public class ScanReceiptLineCommandHandler : IRequestHandler<ScanReceiptLineComm
         {
             throw new EntityNotFoundException(nameof(ReceivingSession), request.ReceivingSessionId);
         }
+
+        // Enforce trusted tenant and authorized facility scope
+        await _operationalAuth.ValidateReceivingSessionAccessAsync(session, cancellationToken);
 
         if (session.Status == ReceivingStatus.Completed || session.Status == ReceivingStatus.Cancelled)
         {

@@ -3,6 +3,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Entities.Inventory;
@@ -30,11 +31,16 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserContext _currentUser;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
-    public CompleteReceivingSessionCommandHandler(IApplicationDbContext context, ICurrentUserContext currentUser)
+    public CompleteReceivingSessionCommandHandler(
+        IApplicationDbContext context,
+        ICurrentUserContext currentUser,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
         _currentUser = currentUser;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<ReceivingSessionDto> Handle(CompleteReceivingSessionCommand request, CancellationToken cancellationToken)
@@ -60,6 +66,10 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
             throw new EntityNotFoundException(nameof(ReceivingSession), request.ReceivingSessionId);
         }
 
+        // 1. Enforce trusted tenant and authorized facility scope
+        await _operationalAuth.ValidateReceivingSessionAccessAsync(session, cancellationToken);
+
+        // 2. Idempotency Check: if already completed, return existing session DTO without modifying ledger
         if (session.Status == ReceivingStatus.Completed)
         {
             return MapToDto(session);
@@ -70,7 +80,7 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
             throw new ValidationException(nameof(request.ReceivingSessionId), $"Cannot complete cancelled receiving session '{session.SessionNumber}'.");
         }
 
-        // Supervisor Approval Gate
+        // 3. Supervisor Approval Gate
         if (session.RequiresSupervisorApproval && !session.IsSupervisorApproved)
         {
             throw new ValidationException(
@@ -78,7 +88,7 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
                 $"Receiving session '{session.SessionNumber}' requires supervisor approval before it can be finalized (Blind receiving or flagged discrepancies).");
         }
 
-        // Pending Discrepancies Gate
+        // 4. Pending Discrepancies Gate
         var pendingDiscrepancies = session.Discrepancies
             .Where(d => d.Status == DiscrepancyResolutionStatus.PendingReview)
             .ToList();
@@ -90,185 +100,205 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
                 $"Cannot complete session '{session.SessionNumber}' with {pendingDiscrepancies.Count} discrepancy(ies) pending review. All discrepancies must be approved, rejected, or quarantined.");
         }
 
-        var completingUserId = _currentUser.UserId ?? Guid.NewGuid();
-        session.Complete(completingUserId);
-
-        // 1. Reconcile ASN quantities & status
-        if (session.AdvanceShippingNotice != null)
+        // 5. Execute all updates atomically within a single encompassing database transaction
+        return await _context.ExecuteInTransactionAsync(async () =>
         {
-            foreach (var line in session.Lines)
+            var completingUserId = _currentUser.UserId ?? Guid.NewGuid();
+            session.Complete(completingUserId);
+
+            // Reconcile ASN quantities & status
+            if (session.AdvanceShippingNotice != null)
             {
-                if (line.AsnLineItemId.HasValue)
+                foreach (var line in session.Lines)
                 {
-                    session.AdvanceShippingNotice.RecordLineReceipt(line.AsnLineItemId.Value, line.QuantityReceived);
-                }
-                else
-                {
-                    var matchingAsnLine = session.AdvanceShippingNotice.Lines.FirstOrDefault(l => l.ItemId == line.ItemId);
-                    if (matchingAsnLine != null)
+                    if (line.AsnLineItemId.HasValue)
                     {
-                        session.AdvanceShippingNotice.RecordLineReceipt(matchingAsnLine.Id, line.QuantityReceived);
+                        session.AdvanceShippingNotice.RecordLineReceipt(line.AsnLineItemId.Value, line.QuantityReceived);
+                    }
+                    else
+                    {
+                        var matchingAsnLine = session.AdvanceShippingNotice.Lines.FirstOrDefault(l => l.ItemId == line.ItemId);
+                        if (matchingAsnLine != null)
+                        {
+                            session.AdvanceShippingNotice.RecordLineReceipt(matchingAsnLine.Id, line.QuantityReceived);
+                        }
+                    }
+                }
+
+                session.AdvanceShippingNotice.CompleteReceiving();
+            }
+
+            // Reconcile PO line quantities & status
+            if (session.PurchaseOrder != null)
+            {
+                foreach (var line in session.Lines)
+                {
+                    if (line.PurchaseOrderLineId.HasValue)
+                    {
+                        session.PurchaseOrder.RecordLineReceipt(line.PurchaseOrderLineId.Value, line.QuantityReceived);
+                    }
+                    else
+                    {
+                        var matchingPoLine = session.PurchaseOrder.Lines.FirstOrDefault(l => l.ItemId == line.ItemId);
+                        if (matchingPoLine != null)
+                        {
+                            session.PurchaseOrder.RecordLineReceipt(matchingPoLine.Id, line.QuantityReceived);
+                        }
                     }
                 }
             }
 
-            session.AdvanceShippingNotice.CompleteReceiving();
-        }
+            // Ledger Integration: Ingest into transient staging records
+            Location? fallbackStagingLocation = null;
+            var localLots = new Dictionary<string, InventoryLot>(StringComparer.OrdinalIgnoreCase);
+            var localStocks = new Dictionary<(Guid ClientId, Guid FacilityId, Guid ItemId, Guid LocationId, Guid? LotId), StockOnHand>();
 
-        // 2. Reconcile PO line quantities & status
-        if (session.PurchaseOrder != null)
-        {
             foreach (var line in session.Lines)
             {
-                if (line.PurchaseOrderLineId.HasValue)
+                var clientId = session.ClientId ?? line.Item.ClientId;
+
+                // Determine destination receiving staging location
+                var stagingLocId = line.StagingLocationId;
+                if (!stagingLocId.HasValue)
                 {
-                    session.PurchaseOrder.RecordLineReceipt(line.PurchaseOrderLineId.Value, line.QuantityReceived);
+                    fallbackStagingLocation ??= await _context.Locations
+                        .FirstOrDefaultAsync(l => l.FacilityId == session.FacilityId && l.IsReceiving && l.IsActive, cancellationToken)
+                        ?? await _context.Locations
+                            .FirstOrDefaultAsync(l => l.FacilityId == session.FacilityId && l.IsActive, cancellationToken);
+
+                    stagingLocId = fallbackStagingLocation?.Id;
                 }
-                else
+
+                if (!stagingLocId.HasValue)
                 {
-                    var matchingPoLine = session.PurchaseOrder.Lines.FirstOrDefault(l => l.ItemId == line.ItemId);
-                    if (matchingPoLine != null)
+                    // Create a default transient receiving staging location if none exists
+                    var autoStaging = new Location
                     {
-                        session.PurchaseOrder.RecordLineReceipt(matchingPoLine.Id, line.QuantityReceived);
-                    }
-                }
-            }
-        }
-
-        // 3. Ledger Integration: Ingest into transient staging records in Phase 2 Ledger
-        Location? fallbackStagingLocation = null;
-
-        foreach (var line in session.Lines)
-        {
-            var clientId = session.ClientId ?? line.Item.ClientId;
-
-            // Determine destination receiving staging location
-            var stagingLocId = line.StagingLocationId;
-            if (!stagingLocId.HasValue)
-            {
-                fallbackStagingLocation ??= await _context.Locations
-                    .FirstOrDefaultAsync(l => l.FacilityId == session.FacilityId && l.IsReceiving && l.IsActive, cancellationToken)
-                    ?? await _context.Locations
-                        .FirstOrDefaultAsync(l => l.FacilityId == session.FacilityId && l.IsActive, cancellationToken);
-
-                stagingLocId = fallbackStagingLocation?.Id;
-            }
-
-            if (!stagingLocId.HasValue)
-            {
-                // Create a default transient receiving staging location if none exists
-                var autoStaging = new Location
-                {
-                    FacilityId = session.FacilityId,
-                    LocationCode = $"STAGING-RCV-{session.Facility.FacilityCode}",
-                    Barcode = $"LOC-STG-RCV-{session.Facility.FacilityCode}",
-                    LocationType = LocationType.StagingLane,
-                    IsActive = true,
-                    IsReceiving = true
-                };
-                _context.Locations.Add(autoStaging);
-                await _context.SaveChangesAsync(cancellationToken);
-                stagingLocId = autoStaging.Id;
-                fallbackStagingLocation = autoStaging;
-            }
-
-            // Inventory Lot Handling
-            InventoryLot? lot = null;
-            if (!string.IsNullOrWhiteSpace(line.LotNumber))
-            {
-                var normalizedLot = line.LotNumber.Trim().ToUpperInvariant();
-                lot = await _context.InventoryLots
-                    .FirstOrDefaultAsync(l =>
-                        l.ClientId == clientId &&
-                        l.ItemId == line.ItemId &&
-                        l.LotNumber == normalizedLot,
-                        cancellationToken);
-
-                if (lot == null)
-                {
-                    var qaStatus = (line.Condition == ReceiptConditionStatus.Damaged || line.Condition == ReceiptConditionStatus.Defective)
-                        ? LotQaStatus.Quarantine
-                        : LotQaStatus.Released;
-
-                    lot = new InventoryLot
-                    {
-                        ClientId = clientId,
-                        ItemId = line.ItemId,
-                        LotNumber = normalizedLot,
-                        ManufactureDate = line.ManufactureDate,
-                        ExpirationDate = line.ExpirationDate,
-                        QaStatus = qaStatus,
-                        QaNotes = line.Condition != ReceiptConditionStatus.Sound ? $"Flagged as {line.Condition} upon intake" : null
+                        FacilityId = session.FacilityId,
+                        LocationCode = $"STAGING-RCV-{session.Facility.FacilityCode}",
+                        Barcode = $"LOC-STG-RCV-{session.Facility.FacilityCode}",
+                        LocationType = LocationType.StagingLane,
+                        IsActive = true,
+                        IsReceiving = true
                     };
-                    _context.InventoryLots.Add(lot);
-                    await _context.SaveChangesAsync(cancellationToken);
+                    _context.Locations.Add(autoStaging);
+                    stagingLocId = autoStaging.Id;
+                    fallbackStagingLocation = autoStaging;
                 }
-            }
 
-            // StockOnHand snapshot update
-            var lotId = lot?.Id;
-            var stock = await _context.StockOnHand
-                .FirstOrDefaultAsync(s =>
-                    s.ClientId == clientId &&
-                    s.FacilityId == session.FacilityId &&
-                    s.ItemId == line.ItemId &&
-                    s.LocationId == stagingLocId.Value &&
-                    s.LotId == lotId,
-                    cancellationToken);
+                // Persist the authoritative staging assignment onto the receipt line
+                line.StagingLocationId = stagingLocId.Value;
 
-            if (stock == null)
-            {
-                stock = new StockOnHand
+                // Inventory Lot Handling
+                InventoryLot? lot = null;
+                if (!string.IsNullOrWhiteSpace(line.LotNumber))
+                {
+                    var normalizedLot = line.LotNumber.Trim().ToUpperInvariant();
+                    if (!localLots.TryGetValue(normalizedLot, out lot))
+                    {
+                        lot = await _context.InventoryLots
+                            .FirstOrDefaultAsync(l =>
+                                l.ClientId == clientId &&
+                                l.ItemId == line.ItemId &&
+                                l.LotNumber == normalizedLot,
+                                cancellationToken);
+
+                        if (lot == null)
+                        {
+                            var qaStatus = (line.Condition == ReceiptConditionStatus.Damaged || line.Condition == ReceiptConditionStatus.Defective)
+                                ? LotQaStatus.Quarantine
+                                : LotQaStatus.Released;
+
+                            lot = new InventoryLot
+                            {
+                                ClientId = clientId,
+                                ItemId = line.ItemId,
+                                LotNumber = normalizedLot,
+                                ManufactureDate = line.ManufactureDate,
+                                ExpirationDate = line.ExpirationDate,
+                                QaStatus = qaStatus,
+                                QaNotes = line.Condition != ReceiptConditionStatus.Sound ? $"Flagged as {line.Condition} upon intake" : null
+                            };
+                            _context.InventoryLots.Add(lot);
+                        }
+
+                        localLots[normalizedLot] = lot;
+                    }
+                }
+
+                // StockOnHand snapshot update
+                var lotId = lot?.Id;
+                var stockKey = (clientId, session.FacilityId, line.ItemId, stagingLocId.Value, lotId);
+
+                if (!localStocks.TryGetValue(stockKey, out var stock))
+                {
+                    stock = await _context.StockOnHand
+                        .FirstOrDefaultAsync(s =>
+                            s.ClientId == clientId &&
+                            s.FacilityId == session.FacilityId &&
+                            s.ItemId == line.ItemId &&
+                            s.LocationId == stagingLocId.Value &&
+                            s.LotId == lotId,
+                            cancellationToken);
+
+                    if (stock == null)
+                    {
+                        stock = new StockOnHand
+                        {
+                            ClientId = clientId,
+                            FacilityId = session.FacilityId,
+                            ItemId = line.ItemId,
+                            LocationId = stagingLocId.Value,
+                            LotId = lotId,
+                            QtyAvailable = 0m,
+                            QtyDamaged = 0m,
+                            QtyQuarantined = 0m
+                        };
+                        _context.StockOnHand.Add(stock);
+                    }
+
+                    localStocks[stockKey] = stock;
+                }
+
+                if (line.Condition == ReceiptConditionStatus.Sound)
+                {
+                    stock.QtyAvailable += line.QuantityReceived;
+                }
+                else if (line.Condition == ReceiptConditionStatus.Damaged)
+                {
+                    stock.QtyDamaged += line.QuantityReceived;
+                }
+                else // Defective / QC Hold
+                {
+                    stock.QtyQuarantined += line.QuantityReceived;
+                }
+                stock.Version++;
+
+                // Append-only Inventory Transaction Ledger entry
+                var ledgerTx = new InventoryTransaction
                 {
                     ClientId = clientId,
                     FacilityId = session.FacilityId,
                     ItemId = line.ItemId,
-                    LocationId = stagingLocId.Value,
                     LotId = lotId,
-                    QtyAvailable = 0m,
-                    QtyDamaged = 0m,
-                    QtyQuarantined = 0m
+                    FromLocationId = null,
+                    ToLocationId = stagingLocId.Value,
+                    TxType = InventoryTxType.Receive,
+                    Quantity = line.QuantityReceived,
+                    ReferenceType = "ReceivingSession",
+                    ReferenceId = session.Id,
+                    UserId = completingUserId,
+                    TxTimestamp = DateTime.UtcNow,
+                    Notes = $"Goods Received: Session {session.SessionNumber} (LPN: {line.Lpn}, Condition: {line.Condition})"
                 };
-                _context.StockOnHand.Add(stock);
+                _context.InventoryTransactions.Add(ledgerTx);
             }
 
-            if (line.Condition == ReceiptConditionStatus.Sound)
-            {
-                stock.QtyAvailable += line.QuantityReceived;
-            }
-            else if (line.Condition == ReceiptConditionStatus.Damaged)
-            {
-                stock.QtyDamaged += line.QuantityReceived;
-            }
-            else // Defective / QC Hold
-            {
-                stock.QtyQuarantined += line.QuantityReceived;
-            }
-            stock.Version++;
+            // Commit all changes atomically at the end of the transaction
+            await _context.SaveChangesAsync(cancellationToken);
 
-            // Append-only Inventory Transaction Ledger entry
-            var ledgerTx = new InventoryTransaction
-            {
-                ClientId = clientId,
-                FacilityId = session.FacilityId,
-                ItemId = line.ItemId,
-                LotId = lotId,
-                FromLocationId = null,
-                ToLocationId = stagingLocId.Value,
-                TxType = InventoryTxType.Receive,
-                Quantity = line.QuantityReceived,
-                ReferenceType = "ReceivingSession",
-                ReferenceId = session.Id,
-                UserId = completingUserId,
-                TxTimestamp = DateTime.UtcNow,
-                Notes = $"Goods Received: Session {session.SessionNumber} (LPN: {line.Lpn}, Condition: {line.Condition})"
-            };
-            _context.InventoryTransactions.Add(ledgerTx);
-        }
-
-        await _context.SaveChangesAsync(cancellationToken);
-
-        return MapToDto(session);
+            return MapToDto(session);
+        }, cancellationToken);
     }
 
     private static ReceivingSessionDto MapToDto(ReceivingSession session)
@@ -346,4 +376,3 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
         };
     }
 }
-

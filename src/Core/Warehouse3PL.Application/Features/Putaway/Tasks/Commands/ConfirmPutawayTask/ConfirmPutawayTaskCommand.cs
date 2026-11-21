@@ -3,6 +3,9 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
+using Warehouse3PL.Domain.Constants;
+using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -15,17 +18,17 @@ public record ConfirmPutawayTaskCommand : IRequest<PutawayTaskDto>
     public Guid TaskId { get; init; }
 
     /// <summary>
-    /// Physical scan of the container / pallet LPN barcode.
+    /// Scanned container or pallet LPN tag from mobile RF device.
     /// </summary>
     public string ScannedLpn { get; init; } = string.Empty;
 
     /// <summary>
-    /// Physical scan of the destination bin location barcode tag.
+    /// Scanned target location barcode from rack/bin label.
     /// </summary>
     public string ScannedLocationBarcode { get; init; } = string.Empty;
 
     /// <summary>
-    /// Whether operator is explicitly authorized to override the suggested bin.
+    /// Set true when a warehouse supervisor or authorized lead explicitly overrides the suggested bin.
     /// </summary>
     public bool AllowOverride { get; init; } = false;
 }
@@ -35,8 +38,8 @@ public class ConfirmPutawayTaskCommandValidator : AbstractValidator<ConfirmPutaw
     public ConfirmPutawayTaskCommandValidator()
     {
         RuleFor(x => x.TaskId).NotEmpty().WithMessage("TaskId is required.");
-        RuleFor(x => x.ScannedLpn).NotEmpty().WithMessage("ScannedLpn is required for dual-scan verification.");
-        RuleFor(x => x.ScannedLocationBarcode).NotEmpty().WithMessage("ScannedLocationBarcode is required for dual-scan verification.");
+        RuleFor(x => x.ScannedLpn).NotEmpty().WithMessage("Scanned LPN is required.");
+        RuleFor(x => x.ScannedLocationBarcode).NotEmpty().WithMessage("Scanned location barcode is required.");
     }
 }
 
@@ -44,13 +47,16 @@ public class ConfirmPutawayTaskCommandHandler : IRequestHandler<ConfirmPutawayTa
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserContext _currentUser;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
     public ConfirmPutawayTaskCommandHandler(
         IApplicationDbContext context,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
         _currentUser = currentUser;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<PutawayTaskDto> Handle(ConfirmPutawayTaskCommand request, CancellationToken cancellationToken)
@@ -67,6 +73,18 @@ public class ConfirmPutawayTaskCommandHandler : IRequestHandler<ConfirmPutawayTa
             if (task == null)
             {
                 throw new EntityNotFoundException(nameof(PutawayTask), request.TaskId);
+            }
+
+            // Facility and Tenant Access Validation
+            await _operationalAuth.ValidateFacilityAccessAsync(task.FacilityId, cancellationToken);
+
+            if (!_currentUser.IsStaff)
+            {
+                var tenantId = _currentUser.TenantId;
+                if (!tenantId.HasValue || tenantId == Guid.Empty || task.ClientId != tenantId.Value)
+                {
+                    throw new ForbiddenException("Client does not have access to this putaway task.");
+                }
             }
 
             if (task.Status == PutawayTaskStatus.Completed)
@@ -101,16 +119,61 @@ public class ConfirmPutawayTaskCommandHandler : IRequestHandler<ConfirmPutawayTa
                     $"Location barcode '{request.ScannedLocationBarcode}' is not recognized in this facility.");
             }
 
-            if (scannedLoc.Id != task.SuggestedLocationId && !request.AllowOverride)
+            if (scannedLoc.Id != task.SuggestedLocationId)
             {
-                throw new ValidationException(
-                    nameof(request.ScannedLocationBarcode),
-                    $"Scanned location barcode '{request.ScannedLocationBarcode}' ({scannedLoc.LocationCode}) does not match suggested bin '{task.SuggestedLocation.LocationCode}'. Bin override not authorized.");
+                if (!request.AllowOverride)
+                {
+                    throw new ValidationException(
+                        nameof(request.ScannedLocationBarcode),
+                        $"Scanned location barcode '{request.ScannedLocationBarcode}' ({scannedLoc.LocationCode}) does not match suggested bin '{task.SuggestedLocation?.LocationCode}'. Bin override not authorized.");
+                }
+
+                // Server-authorized override check
+                var hasOverridePerm = _currentUser.IsSuperAdmin ||
+                    _currentUser.HasPermission(Permissions.Inbound.PutawayManage) ||
+                    _currentUser.HasPermission(Permissions.Inbound.PutawayOverride) ||
+                    _currentUser.HasPermission(Permissions.Inbound.PutawayRules);
+
+                if (!hasOverridePerm)
+                {
+                    throw new ForbiddenException("Current user does not have permission to override suggested putaway location.");
+                }
+            }
+
+            // Validate destination suitability
+            if (!scannedLoc.IsActive)
+            {
+                throw new ValidationException(nameof(request.ScannedLocationBarcode), $"Destination location '{scannedLoc.LocationCode}' is inactive.");
+            }
+
+            if (scannedLoc.IsDeleted)
+            {
+                throw new ValidationException(nameof(request.ScannedLocationBarcode), $"Destination location '{scannedLoc.LocationCode}' has been deleted.");
+            }
+
+            if (scannedLoc.IsLocked)
+            {
+                throw new ValidationException(nameof(request.ScannedLocationBarcode), $"Destination location '{scannedLoc.LocationCode}' is currently locked.");
+            }
+
+            if (scannedLoc.IsDamaged)
+            {
+                throw new ValidationException(nameof(request.ScannedLocationBarcode), $"Destination location '{scannedLoc.LocationCode}' is marked as damaged and cannot accept inventory.");
+            }
+
+            if (scannedLoc.IsReceiving || scannedLoc.LocationType == LocationType.StagingLane)
+            {
+                throw new ValidationException(nameof(request.ScannedLocationBarcode), $"Destination location '{scannedLoc.LocationCode}' is a receiving staging area. Putaway destination must be a storage location.");
+            }
+
+            if (scannedLoc.FacilityId != task.FacilityId)
+            {
+                throw new ValidationException(nameof(request.ScannedLocationBarcode), $"Destination location '{scannedLoc.LocationCode}' belongs to another facility.");
             }
 
             var actualLocation = scannedLoc;
 
-            // 3. Atomic Ledger Relocation: Decrement stock from STAGING_LANE
+            // 3. Inventory Conservation: Verify and decrement stock from source staging location
             var sourceStock = await _context.StockOnHand
                 .FirstOrDefaultAsync(s =>
                     s.ClientId == task.ClientId &&
@@ -119,11 +182,16 @@ public class ConfirmPutawayTaskCommandHandler : IRequestHandler<ConfirmPutawayTa
                     s.LocationId == task.SourceLocationId &&
                     s.LotId == task.LotId, cancellationToken);
 
-            if (sourceStock != null)
+            if (sourceStock == null || sourceStock.QtyAvailable < task.Quantity)
             {
-                sourceStock.QtyAvailable = Math.Max(0, sourceStock.QtyAvailable - task.Quantity);
-                sourceStock.Version++;
+                throw new ValidationException(
+                    nameof(task.Quantity),
+                    $"Insufficient stock at source staging location '{task.SourceLocation?.LocationCode ?? task.SourceLocationId.ToString()}'. " +
+                    $"Required: {task.Quantity}, Available: {sourceStock?.QtyAvailable ?? 0m}. Putaway confirmation aborted to conserve inventory.");
             }
+
+            sourceStock.QtyAvailable -= task.Quantity;
+            sourceStock.Version++;
 
             // 4. Atomic Ledger Relocation: Increment stock at Target Bin
             var destStock = await _context.StockOnHand
@@ -158,7 +226,7 @@ public class ConfirmPutawayTaskCommandHandler : IRequestHandler<ConfirmPutawayTa
             task.Complete(actualLocation.Id, _currentUser.UserId ?? Guid.Empty);
 
             // 6. Record append-only immutable Transfer transaction in Ledger
-            var tx = new InventoryTransaction
+            var ledgerTx = new InventoryTransaction
             {
                 ClientId = task.ClientId,
                 FacilityId = task.FacilityId,
@@ -170,41 +238,39 @@ public class ConfirmPutawayTaskCommandHandler : IRequestHandler<ConfirmPutawayTa
                 Quantity = task.Quantity,
                 ReferenceType = "PUTAWAY_TASK",
                 ReferenceId = task.Id,
-                UserId = _currentUser.UserId,
-                Notes = $"Putaway dual-scan confirmed for LPN '{task.LpnCode}' into bin '{actualLocation.LocationCode}'.",
-                TxTimestamp = DateTime.UtcNow
+                UserId = _currentUser.UserId ?? Guid.Empty,
+                TxTimestamp = DateTime.UtcNow,
+                Notes = $"Directed Putaway Dual-Scan Confirmed: Task {task.Id} (LPN: {task.LpnCode}, Dest: {actualLocation.LocationCode})"
             };
-            _context.InventoryTransactions.Add(tx);
+            _context.InventoryTransactions.Add(ledgerTx);
 
             await _context.SaveChangesAsync(cancellationToken);
 
             return new PutawayTaskDto
             {
                 Id = task.Id,
-                ClientId = task.ClientId,
                 FacilityId = task.FacilityId,
+                ClientId = task.ClientId,
                 ItemId = task.ItemId,
-                Sku = task.Item.Sku,
-                ItemDescription = task.Item.Description,
+                Sku = task.Item?.Sku ?? string.Empty,
+                ItemDescription = task.Item?.Description ?? string.Empty,
                 LotId = task.LotId,
                 LotNumber = task.Lot?.LotNumber,
                 LpnId = task.LpnId,
                 LpnCode = task.LpnCode,
+                Quantity = task.Quantity,
                 SourceLocationId = task.SourceLocationId,
-                SourceLocationCode = task.SourceLocation.LocationCode,
+                SourceLocationCode = task.SourceLocation?.LocationCode ?? string.Empty,
                 SuggestedLocationId = task.SuggestedLocationId,
-                SuggestedLocationCode = task.SuggestedLocation.LocationCode,
-                SuggestedLocationBarcode = task.SuggestedLocation.Barcode,
+                SuggestedLocationCode = task.SuggestedLocation?.LocationCode ?? string.Empty,
                 ActualLocationId = task.ActualLocationId,
                 ActualLocationCode = actualLocation.LocationCode,
-                Quantity = task.Quantity,
                 Status = task.Status,
                 Priority = task.Priority,
                 AssignedUserId = task.AssignedUserId,
                 CreatedAtUtc = task.CreatedAtUtc,
                 CompletedAtUtc = task.CompletedAtUtc,
                 ExceptionReason = task.ExceptionReason,
-                Notes = task.Notes,
                 Version = task.Version
             };
         }, cancellationToken);

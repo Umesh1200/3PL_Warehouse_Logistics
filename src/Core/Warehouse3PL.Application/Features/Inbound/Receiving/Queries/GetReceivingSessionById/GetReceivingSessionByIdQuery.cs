@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -12,12 +13,14 @@ public record GetReceivingSessionByIdQuery(Guid Id) : IRequest<ReceivingSessionD
 public class GetReceivingSessionByIdQueryHandler : IRequestHandler<GetReceivingSessionByIdQuery, ReceivingSessionDto>
 {
     private readonly IApplicationDbContext _context;
-    private readonly ICurrentUserContext _currentUser;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
-    public GetReceivingSessionByIdQueryHandler(IApplicationDbContext context, ICurrentUserContext currentUser)
+    public GetReceivingSessionByIdQueryHandler(
+        IApplicationDbContext context,
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
-        _currentUser = currentUser;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<ReceivingSessionDto> Handle(GetReceivingSessionByIdQuery request, CancellationToken cancellationToken)
@@ -42,10 +45,8 @@ public class GetReceivingSessionByIdQueryHandler : IRequestHandler<GetReceivingS
             throw new EntityNotFoundException(nameof(ReceivingSession), request.Id);
         }
 
-        if (!_currentUser.IsStaff && session.ClientId.HasValue && session.ClientId != _currentUser.TenantId)
-        {
-            throw new ForbiddenException("You do not have permission to view this receiving session.");
-        }
+        // Enforce trusted tenant and authorized facility scope
+        await _operationalAuth.ValidateReceivingSessionAccessAsync(session, cancellationToken);
 
         return new ReceivingSessionDto
         {
@@ -97,7 +98,7 @@ public class GetReceivingSessionByIdQueryHandler : IRequestHandler<GetReceivingS
                 ExpirationDate = l.ExpirationDate,
                 Condition = l.Condition,
                 StagingLocationId = l.StagingLocationId,
-                StagingLocationCode = l.StagingLocation?.LocationCode,
+                StagingLocationCode = l.StagingLocation != null ? l.StagingLocation.LocationCode : null,
                 Notes = l.Notes,
                 ScannedAtUtc = l.ScannedAtUtc,
                 Version = l.Version

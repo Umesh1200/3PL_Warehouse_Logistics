@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Application.Features.Putaway.Tasks.Queries.GetPutawayTasks;
@@ -17,21 +18,20 @@ public record GetPutawayTasksQuery : PagedQuery, IRequest<PagedResult<PutawayTas
 public class GetPutawayTasksQueryHandler : IRequestHandler<GetPutawayTasksQuery, PagedResult<PutawayTaskDto>>
 {
     private readonly IApplicationDbContext _context;
-    private readonly ICurrentUserContext _currentUser;
-    private readonly ITenantProvider _tenantProvider;
+    private readonly WarehouseOperationalAuthorization _operationalAuth;
 
     public GetPutawayTasksQueryHandler(
         IApplicationDbContext context,
-        ICurrentUserContext currentUser,
-        ITenantProvider tenantProvider)
+        WarehouseOperationalAuthorization operationalAuth)
     {
         _context = context;
-        _currentUser = currentUser;
-        _tenantProvider = tenantProvider;
+        _operationalAuth = operationalAuth;
     }
 
     public async Task<PagedResult<PutawayTaskDto>> Handle(GetPutawayTasksQuery request, CancellationToken cancellationToken)
     {
+        var scope = await _operationalAuth.ResolveQueryScopeAsync(request.ClientId, request.FacilityId, cancellationToken);
+
         var query = _context.PutawayTasks
             .AsNoTracking()
             .Include(t => t.Item)
@@ -41,23 +41,18 @@ public class GetPutawayTasksQueryHandler : IRequestHandler<GetPutawayTasksQuery,
             .Include(t => t.ActualLocation)
             .AsQueryable();
 
-        if (!_currentUser.IsStaff)
+        if (scope.ClientId.HasValue)
         {
-            var callerTenant = _currentUser.TenantId ?? _tenantProvider.TenantId;
-            if (!callerTenant.HasValue || callerTenant.Value == Guid.Empty)
-            {
-                return PagedResult<PutawayTaskDto>.Create([], 0, request.PageNumber, request.PageSize);
-            }
-            query = query.Where(t => t.ClientId == callerTenant.Value);
-        }
-        else if (request.ClientId.HasValue)
-        {
-            query = query.Where(t => t.ClientId == request.ClientId.Value);
+            query = query.Where(t => t.ClientId == scope.ClientId.Value);
         }
 
-        if (request.FacilityId.HasValue)
+        if (scope.FacilityId.HasValue)
         {
-            query = query.Where(t => t.FacilityId == request.FacilityId.Value);
+            query = query.Where(t => t.FacilityId == scope.FacilityId.Value);
+        }
+        else if (scope.AuthorizedFacilityIds != null)
+        {
+            query = query.Where(t => scope.AuthorizedFacilityIds.Contains(t.FacilityId));
         }
 
         if (request.Status.HasValue)
@@ -74,49 +69,46 @@ public class GetPutawayTasksQueryHandler : IRequestHandler<GetPutawayTasksQuery,
         {
             var term = request.SearchTerm.Trim().ToLower();
             query = query.Where(t =>
-                t.Item.Sku.ToLower().Contains(term) ||
                 (t.LpnCode != null && t.LpnCode.ToLower().Contains(term)) ||
-                t.SourceLocation.LocationCode.ToLower().Contains(term) ||
-                t.SuggestedLocation.LocationCode.ToLower().Contains(term));
+                t.Item.Sku.ToLower().Contains(term));
         }
 
         var totalCount = await query.CountAsync(cancellationToken);
 
-        var tasks = await query
-            .OrderByDescending(t => t.CreatedAtUtc)
+        var items = await query
+            .OrderByDescending(t => t.Priority)
+            .ThenBy(t => t.CreatedAtUtc)
             .Skip((request.PageNumber - 1) * request.PageSize)
             .Take(request.PageSize)
+            .Select(t => new PutawayTaskDto
+            {
+                Id = t.Id,
+                FacilityId = t.FacilityId,
+                ClientId = t.ClientId,
+                ItemId = t.ItemId,
+                Sku = t.Item.Sku,
+                ItemDescription = t.Item.Description,
+                LotId = t.LotId,
+                LotNumber = t.Lot != null ? t.Lot.LotNumber : null,
+                LpnId = t.LpnId,
+                LpnCode = t.LpnCode,
+                Quantity = t.Quantity,
+                SourceLocationId = t.SourceLocationId,
+                SourceLocationCode = t.SourceLocation.LocationCode,
+                SuggestedLocationId = t.SuggestedLocationId,
+                SuggestedLocationCode = t.SuggestedLocation.LocationCode,
+                SuggestedLocationBarcode = t.SuggestedLocation.Barcode,
+                ActualLocationId = t.ActualLocationId,
+                ActualLocationCode = t.ActualLocation != null ? t.ActualLocation.LocationCode : null,
+                Status = t.Status,
+                Priority = t.Priority,
+                AssignedUserId = t.AssignedUserId,
+                CreatedAtUtc = t.CreatedAtUtc,
+                CompletedAtUtc = t.CompletedAtUtc,
+                ExceptionReason = t.ExceptionReason,
+                Version = t.Version
+            })
             .ToListAsync(cancellationToken);
-
-        var items = tasks.Select(t => new PutawayTaskDto
-        {
-            Id = t.Id,
-            ClientId = t.ClientId,
-            FacilityId = t.FacilityId,
-            ItemId = t.ItemId,
-            Sku = t.Item?.Sku ?? string.Empty,
-            ItemDescription = t.Item?.Description ?? string.Empty,
-            LotId = t.LotId,
-            LotNumber = t.Lot?.LotNumber,
-            LpnId = t.LpnId,
-            LpnCode = t.LpnCode,
-            SourceLocationId = t.SourceLocationId,
-            SourceLocationCode = t.SourceLocation?.LocationCode ?? string.Empty,
-            SuggestedLocationId = t.SuggestedLocationId,
-            SuggestedLocationCode = t.SuggestedLocation?.LocationCode ?? string.Empty,
-            SuggestedLocationBarcode = t.SuggestedLocation?.Barcode ?? string.Empty,
-            ActualLocationId = t.ActualLocationId,
-            ActualLocationCode = t.ActualLocation?.LocationCode,
-            Quantity = t.Quantity,
-            Status = t.Status,
-            Priority = t.Priority,
-            AssignedUserId = t.AssignedUserId,
-            CreatedAtUtc = t.CreatedAtUtc,
-            CompletedAtUtc = t.CompletedAtUtc,
-            ExceptionReason = t.ExceptionReason,
-            Notes = t.Notes,
-            Version = t.Version
-        }).ToList();
 
         return PagedResult<PutawayTaskDto>.Create(items, totalCount, request.PageNumber, request.PageSize);
     }

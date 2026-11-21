@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Putaway.Tasks.Commands.AssignPutawayTask;
 using Warehouse3PL.Application.Features.Putaway.Tasks.Commands.ConfirmPutawayTask;
 using Warehouse3PL.Application.Features.Putaway.Tasks.Commands.GeneratePutawayTasks;
@@ -475,7 +476,7 @@ public class PutawayStrategyAndExecutionTests
         var receiptLineId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -515,7 +516,8 @@ public class PutawayStrategyAndExecutionTests
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
         var selector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
-        var handler = new GeneratePutawayTasksCommandHandler(context, selector);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new GeneratePutawayTasksCommandHandler(context, selector, opAuth);
 
         var tasks = await handler.Handle(new GeneratePutawayTasksCommand
         {
@@ -542,7 +544,7 @@ public class PutawayStrategyAndExecutionTests
         var itemId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -573,7 +575,8 @@ public class PutawayStrategyAndExecutionTests
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
         var selector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
-        var handler = new GeneratePutawayTasksCommandHandler(context, selector);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new GeneratePutawayTasksCommandHandler(context, selector, opAuth);
 
         var tasks = await handler.Handle(new GeneratePutawayTasksCommand { FacilityId = facilityId }, CancellationToken.None);
 
@@ -592,7 +595,7 @@ public class PutawayStrategyAndExecutionTests
         var itemId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -622,7 +625,8 @@ public class PutawayStrategyAndExecutionTests
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
         var selector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
-        var handler = new GeneratePutawayTasksCommandHandler(context, selector);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new GeneratePutawayTasksCommandHandler(context, selector, opAuth);
 
         var tasks = await handler.Handle(new GeneratePutawayTasksCommand { FacilityId = facilityId }, CancellationToken.None);
 
@@ -767,7 +771,7 @@ public class PutawayStrategyAndExecutionTests
         var taskId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -795,7 +799,8 @@ public class PutawayStrategyAndExecutionTests
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
-        var handler = new ConfirmPutawayTaskCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new ConfirmPutawayTaskCommandHandler(context, currentUser, opAuth);
 
         await Assert.ThrowsAsync<ValidationException>(() => handler.Handle(new ConfirmPutawayTaskCommand
         {
@@ -818,7 +823,7 @@ public class PutawayStrategyAndExecutionTests
         var taskId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -847,7 +852,8 @@ public class PutawayStrategyAndExecutionTests
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
-        var handler = new ConfirmPutawayTaskCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new ConfirmPutawayTaskCommandHandler(context, currentUser, opAuth);
 
         // Operator scanned BAR-OTHER without override permission
         await Assert.ThrowsAsync<ValidationException>(() => handler.Handle(new ConfirmPutawayTaskCommand
@@ -872,7 +878,7 @@ public class PutawayStrategyAndExecutionTests
         var workerUserId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserId = workerUserId, UserType = UserType.Staff };
+        var currentUser = new TestCurrentUserContext { UserId = workerUserId, UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
         {
@@ -910,7 +916,8 @@ public class PutawayStrategyAndExecutionTests
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
-        var handler = new ConfirmPutawayTaskCommandHandler(context, currentUser);
+        var opAuth = new WarehouseOperationalAuthorization(context, currentUser);
+        var handler = new ConfirmPutawayTaskCommandHandler(context, currentUser, opAuth);
 
         var result = await handler.Handle(new ConfirmPutawayTaskCommand
         {

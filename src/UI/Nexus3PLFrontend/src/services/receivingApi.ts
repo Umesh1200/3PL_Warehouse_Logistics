@@ -6,6 +6,8 @@ import {
   StartReceivingSessionRequest,
   ScanReceiptLineRequest,
   RecordReceivingDiscrepancyRequest,
+  ResolveDiscrepancyRequest,
+  ReceivingStatus,
 } from '../types/inbound';
 import { PagedResult } from '../types/auth';
 
@@ -13,7 +15,7 @@ export interface ReceivingSessionQueryParams {
   facilityId?: string | null;
   clientId?: string | null;
   dockDoorId?: string | null;
-  status?: number | null;
+  status?: ReceivingStatus | string | null;
   dateFrom?: string | null;
   dateTo?: string | null;
   searchTerm?: string | null;
@@ -27,7 +29,7 @@ export const receivingApi = {
     if (query?.facilityId) params.append('facilityId', query.facilityId);
     if (query?.clientId) params.append('clientId', query.clientId);
     if (query?.dockDoorId) params.append('dockDoorId', query.dockDoorId);
-    if (query?.status !== undefined && query?.status !== null) params.append('status', String(query.status));
+    if (query?.status) params.append('status', String(query.status));
     if (query?.dateFrom) params.append('dateFrom', query.dateFrom);
     if (query?.dateTo) params.append('dateTo', query.dateTo);
     if (query?.searchTerm) params.append('searchTerm', query.searchTerm);
@@ -70,6 +72,21 @@ export const receivingApi = {
   completeSession: (sessionId: string, signal?: AbortSignal) => {
     return apiClient<ReceivingSessionDto>(`/api/v1/receiving/sessions/${sessionId}/complete`, {
       method: 'PATCH',
+      signal,
+    });
+  },
+
+  approveSession: (sessionId: string, signal?: AbortSignal) => {
+    return apiClient<ReceivingSessionDto>(`/api/v1/receiving/sessions/${sessionId}/approve`, {
+      method: 'POST',
+      signal,
+    });
+  },
+
+  resolveDiscrepancy: (sessionId: string, discrepancyId: string, data: ResolveDiscrepancyRequest, signal?: AbortSignal) => {
+    return apiClient<ReceivingDiscrepancyDto>(`/api/v1/receiving/sessions/${sessionId}/discrepancies/${discrepancyId}/resolve`, {
+      method: 'POST',
+      body: JSON.stringify(data),
       signal,
     });
   },

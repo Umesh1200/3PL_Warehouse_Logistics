@@ -28,7 +28,7 @@ test.describe('Phase 7.3: Real Browser E2E Receiving, Directed Putaway & Stock L
     asnId: 'asn-1',
     asnNumber: 'ASN-2026-001',
     sessionNumber: 'RCV-FAC-ORD1-20261119-0001',
-    status: 2, // InProgress
+    status: 'InProgress',
     startedAtUtc: '2026-11-19T09:00:00Z',
     completedAtUtc: null,
     receivedByUserId: 'e2e-user-1',
@@ -47,7 +47,7 @@ test.describe('Phase 7.3: Real Browser E2E Receiving, Directed Putaway & Stock L
         quantityReceived: 10,
         quantityExpected: 10,
         lotNumber: 'LOT-AUDIO-1',
-        condition: 1, // Sound
+        condition: 'Sound',
         stagingLocationId: 'loc-stg-1',
         stagingLocationCode: 'STAGING-RCV-FAC-ORD1',
         scannedAtUtc: '2026-11-19T09:15:00Z',
@@ -74,8 +74,8 @@ test.describe('Phase 7.3: Real Browser E2E Receiving, Directed Putaway & Stock L
     suggestedLocationCode: 'BIN-HIGHBAY-04',
     suggestedLocationBarcode: 'LOC-BIN-HB-04',
     quantity: 10,
-    status: 1, // Pending
-    priority: 2, // High
+    status: 'Pending',
+    priority: 'High',
     createdAtUtc: '2026-11-19T09:30:00Z',
     version: 1,
   };
@@ -173,7 +173,7 @@ test.describe('Phase 7.3: Real Browser E2E Receiving, Directed Putaway & Stock L
           contentType: 'application/json',
           body: JSON.stringify({
             ...mockSession,
-            status: 3, // Completed
+            status: 'Completed',
             completedAtUtc: '2026-11-19T09:45:00Z',
           }),
         });
@@ -213,7 +213,7 @@ test.describe('Phase 7.3: Real Browser E2E Receiving, Directed Putaway & Stock L
           contentType: 'application/json',
           body: JSON.stringify({
             ...mockPutawayTask,
-            status: 4, // Completed
+            status: 'Completed',
             actualLocationId: 'loc-bin-401',
             actualLocationCode: 'BIN-HIGHBAY-04',
           }),
