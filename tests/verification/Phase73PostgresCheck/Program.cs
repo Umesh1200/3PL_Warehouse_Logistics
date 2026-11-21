@@ -36,6 +36,16 @@ try
         await seed.Database.MigrateAsync();
         seed.Clients.Add(new Client { Id = clientId, AccountCode = "P73", CompanyName = "Phase 7.3 Verification" });
         seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "P73", Name = "Phase 7.3 Facility" });
+        seed.Users.Add(new User
+        {
+            Id = user.UserId!.Value,
+            Email = "phase73-verification@local",
+            PasswordHash = "verification-only",
+            FirstName = "Phase73",
+            LastName = "Verifier",
+            UserType = UserType.Staff,
+            Status = UserStatus.Active
+        });
         seed.Items.Add(new Item { Id = itemId, ClientId = clientId, Sku = "P73-SKU", Description = "PostgreSQL verification stock" });
         seed.Locations.AddRange(
             new Location { Id = sourceId, FacilityId = facilityId, LocationCode = "P73-SRC", Barcode = "P73-SRC", LocationType = LocationType.Bin, IsActive = true },
