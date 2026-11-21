@@ -887,6 +887,7 @@ try
     }
 
     // Build WebApi TestServer pointing to the same live PostgreSQL connection
+    TestAuthHandler.CurrentUserId = user.UserId!.Value;
     var webBuilder = WebApplication.CreateBuilder();
     webBuilder.Host.UseDefaultServiceProvider(o => o.ValidateOnBuild = false);
     webBuilder.Logging.ClearProviders();
@@ -1138,6 +1139,8 @@ sealed class VerificationIdentity(Guid facilityId) : ICurrentUserContext
 
 sealed class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions>
 {
+    public static Guid CurrentUserId { get; set; } = Guid.Empty;
+
     public TestAuthHandler(
         IOptionsMonitor<AuthenticationSchemeOptions> options,
         ILoggerFactory logger,
@@ -1146,9 +1149,10 @@ sealed class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
+        var userId = CurrentUserId != Guid.Empty ? CurrentUserId.ToString() : Guid.NewGuid().ToString();
         var claims = new[]
         {
-            new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+            new Claim(ClaimTypes.NameIdentifier, userId),
             new Claim(ClaimTypes.Email, "staff@test.local"),
             new Claim(ClaimTypes.Role, "SuperAdmin"),
             new Claim("UserType", "Staff"),
