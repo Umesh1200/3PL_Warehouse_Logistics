@@ -243,6 +243,88 @@ describe('Phase 7.3: Receiving, Directed Putaway & Inventory Ledger Integration 
     expect(completeInvoked).toBe(1);
   });
 
+  it('allows a dedicated-permission supervisor without inbound receive to approve and resolve', async () => {
+    const supervisor = {
+      ...mockUserProfile,
+      permissions: [
+        'inbound:view',
+        'inbound:receive:approve',
+        'inbound:discrepancy:resolve',
+        'facilities:view',
+      ],
+    };
+    const discrepancy = {
+      id: 'disc-supervisor-1',
+      receivingSessionId: 'session-supervisor-1',
+      receiptLineId: null,
+      type: DiscrepancyType.UnexpectedSKU,
+      discrepantQuantity: 1,
+      notes: 'Supervisor review required',
+      status: DiscrepancyResolutionStatus.PendingReview,
+      reportedAtUtc: '2026-11-19T10:05:00Z',
+      resolvedAtUtc: null,
+      resolvedByUserId: null,
+      resolutionNotes: null,
+      version: 1,
+    };
+    const session = {
+      id: 'session-supervisor-1',
+      facilityId: mockFacility.id,
+      facilityCode: mockFacility.facilityCode,
+      dockDoorId: 'door-1',
+      doorNumber: 'DOOR-01',
+      yardVisitId: 'visit-1',
+      visitNumber: 'VISIT-01',
+      trailerNumber: 'TR-01',
+      clientId: 'client-1',
+      clientName: 'Client One',
+      sessionNumber: 'RCV-SUPERVISOR-1',
+      status: ReceivingStatus.Flagged,
+      startedAtUtc: '2026-11-19T10:00:00Z',
+      completedAtUtc: null,
+      receivedByUserId: 'receiver-1',
+      isBlindReceiving: true,
+      requiresSupervisorApproval: true,
+      isSupervisorApproved: false,
+      version: 1,
+      lines: [],
+      discrepancies: [discrepancy],
+    };
+    let approvalRequests = 0;
+    let resolutionRequests = 0;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      const url = input.toString();
+      if (url.endsWith('/api/v1/auth/me'))
+        return { ok: true, status: 200, json: async () => supervisor } as Response;
+      if (url.includes('/api/v1/facilities'))
+        return { ok: true, status: 200, json: async () => [mockFacility] } as Response;
+      if (url.endsWith(`/api/v1/receiving/sessions/${session.id}/approve`) && init?.method === 'POST') {
+        approvalRequests++;
+        return { ok: true, status: 200, json: async () => ({ ...session, isSupervisorApproved: true }) } as Response;
+      }
+      if (url.endsWith(`/api/v1/receiving/sessions/${session.id}/discrepancies/${discrepancy.id}/resolve`) && init?.method === 'POST') {
+        resolutionRequests++;
+        return { ok: true, status: 200, json: async () => ({ ...discrepancy, status: DiscrepancyResolutionStatus.Approved }) } as Response;
+      }
+      if (url.endsWith(`/api/v1/receiving/sessions/${session.id}`))
+        return { ok: true, status: 200, json: async () => session } as Response;
+      if (url.includes('/api/v1/receiving/sessions'))
+        return { ok: true, status: 200, json: async () => ({ items: [session], totalCount: 1, pageNumber: 1, pageSize: 15 }) } as Response;
+      return { ok: false, status: 404 } as Response;
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+    setupProviders(<ReceivingPage />);
+
+    await waitFor(() => expect(screen.getByTestId(`open-session-${session.id}`)).toBeDefined());
+    fireEvent.click(screen.getByTestId(`open-session-${session.id}`));
+    await waitFor(() => expect(screen.getByTestId('approve-session-btn')).toBeDefined());
+
+    fireEvent.click(screen.getByTestId('approve-session-btn'));
+    await waitFor(() => expect(approvalRequests).toBe(1));
+    fireEvent.click(screen.getByTestId(`resolve-approve-${discrepancy.id}`));
+    await waitFor(() => expect(resolutionRequests).toBe(1));
+  });
+
   it('generates directed putaway tasks and executes dual-scan verification with ledger relocation', async () => {
     const mockPendingTask = {
       id: 'task-ptw-1',

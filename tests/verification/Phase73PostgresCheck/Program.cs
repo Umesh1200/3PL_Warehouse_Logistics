@@ -1,10 +1,14 @@
 using Microsoft.EntityFrameworkCore;
+using Microsoft.EntityFrameworkCore.Diagnostics;
 using Npgsql;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Security;
-using Warehouse3PL.Application.Features.Inventory.Commands.TransferInventory;
+using Warehouse3PL.Application.Features.Inbound.Receiving.Commands.CompleteReceivingSession;
+using Warehouse3PL.Application.Features.Putaway.Tasks.Commands.ConfirmPutawayTask;
 using Warehouse3PL.Domain.Entities.Catalog;
+using Warehouse3PL.Domain.Entities.Dock;
 using Warehouse3PL.Domain.Entities.Facilities;
+using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
@@ -27,8 +31,12 @@ try
     var clientId = Guid.NewGuid();
     var facilityId = Guid.NewGuid();
     var itemId = Guid.NewGuid();
-    var sourceId = Guid.NewGuid();
+    var stagingId = Guid.NewGuid();
     var destinationId = Guid.NewGuid();
+    var doorId = Guid.NewGuid();
+    var visitId = Guid.NewGuid();
+    var sessionId = Guid.NewGuid();
+    var taskId = Guid.NewGuid();
     var user = new VerificationIdentity(facilityId);
 
     await using (var seed = CreateDb(connectionString, user))
@@ -48,35 +56,46 @@ try
         });
         seed.Items.Add(new Item { Id = itemId, ClientId = clientId, Sku = "P73-SKU", Description = "PostgreSQL verification stock" });
         seed.Locations.AddRange(
-            new Location { Id = sourceId, FacilityId = facilityId, LocationCode = "P73-SRC", Barcode = "P73-SRC", LocationType = LocationType.Bin, IsActive = true },
+            new Location { Id = stagingId, FacilityId = facilityId, LocationCode = "P73-STG", Barcode = "P73-STG", LocationType = LocationType.StagingLane, IsReceiving = true, IsActive = true },
             new Location { Id = destinationId, FacilityId = facilityId, LocationCode = "P73-DST", Barcode = "P73-DST", LocationType = LocationType.Bin, IsActive = true });
-        seed.StockOnHand.Add(new StockOnHand
+        seed.DockDoors.Add(new DockDoor { Id = doorId, FacilityId = facilityId, DoorNumber = "P73-D1", Status = DockDoorStatus.Active });
+        seed.YardVisits.Add(new YardVisit
         {
-            ClientId = clientId, FacilityId = facilityId, ItemId = itemId, LocationId = sourceId,
-            QtyAvailable = 10m, Version = 1
+            Id = visitId, FacilityId = facilityId, ClientId = clientId, VisitNumber = "P73-V1",
+            TrailerNumber = "P73-TR1", Status = YardVisitStatus.AtDock
+        });
+        seed.ReceivingSessions.Add(new ReceivingSession
+        {
+            Id = sessionId, FacilityId = facilityId, DockDoorId = doorId, YardVisitId = visitId,
+            ClientId = clientId, SessionNumber = "P73-RCV1", Status = ReceivingStatus.InProgress,
+            ReceivedByUserId = user.UserId!.Value,
+            Lines =
+            [
+                new ReceiptLine
+                {
+                    ItemId = itemId, Lpn = "P73-LPN1", QuantityReceived = 10m,
+                    Condition = ReceiptConditionStatus.Sound, StagingLocationId = stagingId
+                }
+            ]
+        });
+        seed.PutawayTasks.Add(new PutawayTask
+        {
+            Id = taskId, ClientId = clientId, FacilityId = facilityId, ItemId = itemId,
+            SourceLocationId = stagingId, SuggestedLocationId = destinationId,
+            LpnCode = "P73-LPN1", Quantity = 10m, Status = PutawayTaskStatus.Pending
         });
         await seed.SaveChangesAsync();
     }
 
-    // Force failure after SQL has been issued inside the transaction.
-    await using (var failing = CreateDb(connectionString, user))
+    // Receiving completion: throw after SaveChanges has issued SQL, then verify the outer
+    // production transaction rolls lifecycle, stock and ledger back together.
+    await using (var failing = CreateDb(connectionString, user, new ThrowAfterSaveInterceptor()))
     {
         try
         {
-            await failing.ExecuteInTransactionAsync<bool>(async () =>
-            {
-                var stock = await failing.StockOnHand.SingleAsync(s => s.LocationId == sourceId);
-                stock.QtyAvailable -= 5m;
-                failing.InventoryTransactions.Add(new InventoryTransaction
-                {
-                    ClientId = clientId, FacilityId = facilityId, ItemId = itemId,
-                    FromLocationId = sourceId, ToLocationId = destinationId,
-                    TxType = InventoryTxType.Move, Quantity = 5m, ReferenceType = "PHASE73_FORCED_FAILURE",
-                    UserId = user.UserId, TxTimestamp = DateTime.UtcNow
-                });
-                await failing.SaveChangesAsync();
-                throw new ForcedRollbackException();
-            });
+            var auth = new WarehouseOperationalAuthorization(failing, user);
+            await new CompleteReceivingSessionCommandHandler(failing, user, auth).Handle(
+                new CompleteReceivingSessionCommand { ReceivingSessionId = sessionId }, CancellationToken.None);
         }
         catch (ForcedRollbackException)
         {
@@ -86,35 +105,82 @@ try
 
     await using (var verifyRollback = CreateDb(connectionString, user))
     {
-        var source = await verifyRollback.StockOnHand.AsNoTracking().SingleAsync(s => s.LocationId == sourceId);
-        if (source.QtyAvailable != 10m || await verifyRollback.InventoryTransactions.AnyAsync())
-            throw new InvalidOperationException("PostgreSQL rollback did not restore stock and ledger state.");
-        Console.WriteLine("PASS PostgreSQL rollback: source=10, destination absent, ledger=0");
+        var session = await verifyRollback.ReceivingSessions.AsNoTracking().SingleAsync(s => s.Id == sessionId);
+        if (session.Status != ReceivingStatus.InProgress ||
+            await verifyRollback.StockOnHand.AnyAsync() ||
+            await verifyRollback.InventoryTransactions.AnyAsync())
+            throw new InvalidOperationException("Receiving rollback did not restore lifecycle, stock and ledger state.");
+        Console.WriteLine("PASS PostgreSQL receiving rollback: status=InProgress, stock=0, ledger=0");
     }
 
-    // Retry the operation through the production handler after the failed attempt.
+    // Retry receiving completion through the production handler.
     await using (var retry = CreateDb(connectionString, user))
     {
-        var authorization = new WarehouseOperationalAuthorization(retry, user);
-        var handler = new TransferInventoryCommandHandler(retry, user, authorization);
-        await handler.Handle(new TransferInventoryCommand
+        var auth = new WarehouseOperationalAuthorization(retry, user);
+        await new CompleteReceivingSessionCommandHandler(retry, user, auth).Handle(
+            new CompleteReceivingSessionCommand { ReceivingSessionId = sessionId }, CancellationToken.None);
+    }
+
+    await using (var verifyRetry = CreateDb(connectionString, user))
+    {
+        var session = await verifyRetry.ReceivingSessions.AsNoTracking().SingleAsync(s => s.Id == sessionId);
+        var source = await verifyRetry.StockOnHand.AsNoTracking().SingleAsync(s => s.LocationId == stagingId);
+        if (session.Status != ReceivingStatus.Completed || source.QtyAvailable != 10m ||
+            await verifyRetry.InventoryTransactions.CountAsync(t => t.ReferenceId == sessionId) != 1)
+            throw new InvalidOperationException("Receiving retry did not complete exactly once.");
+        Console.WriteLine("PASS PostgreSQL receiving retry: status=Completed, staging=10, receive ledger=1");
+    }
+
+    // Putaway confirmation: force the same post-save failure and verify rollback.
+    await using (var failing = CreateDb(connectionString, user, new ThrowAfterSaveInterceptor()))
+    {
+        try
         {
-            ClientId = clientId, FacilityId = facilityId, ItemId = itemId,
-            FromLocationId = sourceId, ToLocationId = destinationId, Quantity = 5m,
-            Reason = "Phase 7.3 rollback/retry verification"
+            var auth = new WarehouseOperationalAuthorization(failing, user);
+            await new ConfirmPutawayTaskCommandHandler(failing, user, auth).Handle(new ConfirmPutawayTaskCommand
+            {
+                TaskId = taskId, ScannedLpn = "P73-LPN1", ScannedLocationBarcode = "P73-DST"
+            }, CancellationToken.None);
+        }
+        catch (ForcedRollbackException)
+        {
+            // Expected.
+        }
+    }
+
+    await using (var verifyRollback = CreateDb(connectionString, user))
+    {
+        var task = await verifyRollback.PutawayTasks.AsNoTracking().SingleAsync(t => t.Id == taskId);
+        var source = await verifyRollback.StockOnHand.AsNoTracking().SingleAsync(s => s.LocationId == stagingId);
+        if (task.Status != PutawayTaskStatus.Pending || task.ActualLocationId != null ||
+            source.QtyAvailable != 10m || await verifyRollback.StockOnHand.AnyAsync(s => s.LocationId == destinationId) ||
+            await verifyRollback.InventoryTransactions.CountAsync() != 1)
+            throw new InvalidOperationException("Putaway rollback did not restore task, balances and ledger state.");
+        Console.WriteLine("PASS PostgreSQL putaway rollback: status=Pending, staging=10, destination absent, ledger=1");
+    }
+
+    await using (var retry = CreateDb(connectionString, user))
+    {
+        var auth = new WarehouseOperationalAuthorization(retry, user);
+        await new ConfirmPutawayTaskCommandHandler(retry, user, auth).Handle(new ConfirmPutawayTaskCommand
+        {
+            TaskId = taskId, ScannedLpn = "P73-LPN1", ScannedLocationBarcode = "P73-DST"
         }, CancellationToken.None);
     }
 
     await using (var verifyRetry = CreateDb(connectionString, user))
     {
-        var balances = await verifyRetry.StockOnHand.AsNoTracking().OrderBy(s => s.LocationId).ToListAsync();
-        var source = balances.Single(s => s.LocationId == sourceId);
+        var task = await verifyRetry.PutawayTasks.AsNoTracking().SingleAsync(t => t.Id == taskId);
+        var balances = await verifyRetry.StockOnHand.AsNoTracking().ToListAsync();
+        var source = balances.Single(s => s.LocationId == stagingId);
         var destination = balances.Single(s => s.LocationId == destinationId);
-        var ledgerCount = await verifyRetry.InventoryTransactions.CountAsync();
-        if (source.QtyAvailable != 5m || destination.QtyAvailable != 5m ||
-            balances.Sum(s => s.TotalQuantity) != 10m || ledgerCount != 1)
-            throw new InvalidOperationException("PostgreSQL retry violated balance conservation or ledger exactly-once behavior.");
-        Console.WriteLine("PASS PostgreSQL retry: source=5, destination=5, conserved total=10, ledger=1");
+        if (task.Status != PutawayTaskStatus.Completed || task.ActualLocationId != destinationId ||
+            source.QtyAvailable != 0m || destination.QtyAvailable != 10m ||
+            balances.Sum(s => s.TotalQuantity) != 10m ||
+            await verifyRetry.InventoryTransactions.CountAsync() != 2 ||
+            await verifyRetry.InventoryTransactions.CountAsync(t => t.ReferenceId == taskId) != 1)
+            throw new InvalidOperationException("Putaway retry violated lifecycle, conservation or ledger exactly-once behavior.");
+        Console.WriteLine("PASS PostgreSQL putaway retry: status=Completed, staging=0, destination=10, conserved total=10, ledgers=2");
     }
 }
 finally
@@ -126,17 +192,29 @@ finally
     await new NpgsqlCommand($"DROP DATABASE IF EXISTS {databaseName} WITH (FORCE)", cleanup).ExecuteNonQueryAsync();
 }
 
-static ApplicationDbContext CreateDb(string connectionString, VerificationIdentity user)
+static ApplicationDbContext CreateDb(string connectionString, VerificationIdentity user, IInterceptor? interceptor = null)
 {
-    var options = new DbContextOptionsBuilder<ApplicationDbContext>()
+    var optionsBuilder = new DbContextOptionsBuilder<ApplicationDbContext>()
         .UseNpgsql(connectionString)
-        .UseSnakeCaseNamingConvention()
-        .Options;
-    return new ApplicationDbContext(options, new VerificationTenant(), user,
+        .UseSnakeCaseNamingConvention();
+    if (interceptor != null) optionsBuilder.AddInterceptors(interceptor);
+    return new ApplicationDbContext(optionsBuilder.Options, new VerificationTenant(), user,
         new AuditableEntityInterceptor(user, new VerificationClock()));
 }
 
 sealed class ForcedRollbackException : Exception;
+sealed class ThrowAfterSaveInterceptor : SaveChangesInterceptor
+{
+    private int _thrown;
+    public override ValueTask<int> SavedChangesAsync(
+        SaveChangesCompletedEventData eventData,
+        int result,
+        CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.Exchange(ref _thrown, 1) == 0) throw new ForcedRollbackException();
+        return ValueTask.FromResult(result);
+    }
+}
 sealed class VerificationTenant : ITenantProvider
 {
     public Guid? TenantId => null;

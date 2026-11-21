@@ -285,7 +285,7 @@ export const ReceivingPage: React.FC = () => {
   };
 
   const handleApproveSession = async () => {
-    if (!sessionDetail || isApproving || !canReceive) return;
+    if (!sessionDetail || isApproving || !canApprove) return;
 
     try {
       setIsApproving(true);
@@ -309,7 +309,7 @@ export const ReceivingPage: React.FC = () => {
     resolution: DiscrepancyResolutionStatus,
     notes?: string
   ) => {
-    if (!sessionDetail || resolvingDiscrepancyId || !canReceive) return;
+    if (!sessionDetail || resolvingDiscrepancyId || !canResolveDiscrepancy) return;
 
     try {
       setResolvingDiscrepancyId(discrepancyId);
