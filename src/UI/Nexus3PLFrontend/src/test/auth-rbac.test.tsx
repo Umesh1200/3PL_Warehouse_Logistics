@@ -13,6 +13,7 @@ import { ClientsPage } from '../pages/admin/ClientsPage';
 import { ProtectedRoute } from '../components/auth/ProtectedRoute';
 import { tokenManager, requestManager, apiClient, executeSingleFlightRefresh, AuthExpiredError } from '../services/apiClient';
 import { adminApi } from '../services/adminApi';
+import { TEST_CLIENT_SCHEMA_FIXTURE } from '../services/schemaService';
 import { AccessLevel, UserType, UserStatus, SlaTier, ClientStatus, normalizeUserType, normalizeUserStatus, normalizeAccessLevel } from '../types/auth';
 
 describe('Phase 7.2: Authentication, Session Management & RBAC Shell Tests', () => {
@@ -565,6 +566,9 @@ describe('Phase 7.2: Authentication, Session Management & RBAC Shell Tests', () 
 
     const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
       const url = input.toString();
+      if (url.includes('/api/v1/schemas/Client')) {
+        return { ok: true, status: 200, json: async () => TEST_CLIENT_SCHEMA_FIXTURE } as Response;
+      }
       if (url.includes('/api/v1/clients')) {
         return { ok: true, status: 200, json: async () => mockClients } as Response;
       }

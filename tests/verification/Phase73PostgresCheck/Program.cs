@@ -1051,6 +1051,149 @@ try
     // 4. HTTP Query Stock On Hand
     Console.WriteLine("PASS HTTP GET /api/v1/inventory/stock -> 200 OK, verified wire DTO and exact destination balances (staging=0m, bin1=40m, total=100m, total transactions=10).");
 
+    // ------------------------------------------------------------------------------------------------
+    // SECTION 4: METADATA SCHEMA & CLIENT CRUD HTTP INTEGRATION VERIFICATION (P-META-01 - P-META-04)
+    // ------------------------------------------------------------------------------------------------
+    Console.WriteLine("\n[4/4] Running Metadata Schema & Client CRUD HTTP Integration Verification...");
+
+    // 4.1 Authoritative Schema Resolution: GET /api/v1/schemas/Client
+    var schemaResponse = await client.GetAsync("/api/v1/schemas/Client");
+    if (schemaResponse.StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException($"HTTP GET /api/v1/schemas/Client failed: {schemaResponse.StatusCode} - {await schemaResponse.Content.ReadAsStringAsync()}");
+
+    var schemaBody = await schemaResponse.Content.ReadAsStringAsync();
+    using (var doc = JsonDocument.Parse(schemaBody))
+    {
+        var root = doc.RootElement;
+        var name = root.GetProperty("name").GetString();
+        var primaryKey = root.GetProperty("primaryKey").GetString();
+        if (name != "Client" || primaryKey != "id")
+            throw new InvalidOperationException($"Client schema identity mismatch: name={name}, primaryKey={primaryKey}");
+
+        var fields = root.GetProperty("fields").EnumerateArray().Select(f => f.GetProperty("name").GetString()).ToList();
+        if (!fields.Contains("accountCode") || !fields.Contains("companyName") || !fields.Contains("slaTier") || !fields.Contains("currency") || !fields.Contains("status"))
+            throw new InvalidOperationException("Client schema missing core required fields.");
+
+        // Must NOT contain contact editing fields
+        if (fields.Contains("contactFirstName") || fields.Contains("contactLastName") || fields.Contains("contactEmail") || fields.Contains("contactPhone"))
+            throw new InvalidOperationException("Client schema incorrectly contains unsupported contact editing fields.");
+    }
+    Console.WriteLine("PASS HTTP GET /api/v1/schemas/Client -> 200 OK, authoritative metadata resolved, contact fields excluded.");
+
+    // 4.2 Negative Authorization: GET /api/v1/schemas/Client without clients:view permission
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, "StandardViewer"),
+        new Claim("user_type", "Staff")
+        // No clients:view permission
+    };
+    var unauthSchemaResponse = await client.GetAsync("/api/v1/schemas/Client");
+    if (unauthSchemaResponse.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Expected 403 Forbidden for unauthorized schema query, got {unauthSchemaResponse.StatusCode}");
+    Console.WriteLine("PASS HTTP GET /api/v1/schemas/Client without clients:view -> 403 Forbidden (fail-closed verified).");
+
+    // Negative Authorization: GET /api/v1/clients without clients:view permission
+    var unauthClientsResponse = await client.GetAsync("/api/v1/clients");
+    if (unauthClientsResponse.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Expected 403 Forbidden for unauthorized clients query, got {unauthClientsResponse.StatusCode}");
+    Console.WriteLine("PASS HTTP GET /api/v1/clients without clients:view -> 403 Forbidden (fail-closed verified).");
+
+    // Restore full staff authorization
+    TestAuthHandler.CustomClaims = null;
+
+    // 4.3 Create Client: POST /api/v1/clients
+    var createClientPayload = new
+    {
+        CompanyName = "Postgres Metadata Enterprise",
+        AccountCode = "pme-01",
+        SlaTier = 2, // Silver
+        Currency = "usd",
+        Status = 2 // Active
+    };
+    var createClientResponse = await client.PostAsJsonAsync("/api/v1/clients", createClientPayload);
+    if (createClientResponse.StatusCode != HttpStatusCode.Created)
+        throw new InvalidOperationException($"HTTP POST /api/v1/clients failed: {createClientResponse.StatusCode} - {await createClientResponse.Content.ReadAsStringAsync()}");
+
+    var createClientBody = await createClientResponse.Content.ReadAsStringAsync();
+    Guid createdClientId;
+    using (var doc = JsonDocument.Parse(createClientBody))
+    {
+        var root = doc.RootElement;
+        createdClientId = root.GetProperty("id").GetGuid();
+        var code = root.GetProperty("accountCode").GetString();
+        var cName = root.GetProperty("companyName").GetString();
+        var curr = root.GetProperty("currency").GetString();
+        if (code != "PME-01")
+            throw new InvalidOperationException($"AccountCode normalization to uppercase failed: expected 'PME-01', found '{code}'");
+        if (cName != "Postgres Metadata Enterprise")
+            throw new InvalidOperationException($"CompanyName mismatch: expected 'Postgres Metadata Enterprise', found '{cName}'");
+        if (curr != "USD")
+            throw new InvalidOperationException($"Currency normalization failed: expected 'USD', found '{curr}'");
+    }
+    Console.WriteLine("PASS HTTP POST /api/v1/clients -> 201 Created, uppercase code normalization & valid UUID verified.");
+
+    // 4.4 Search, Server-Side Sorting & Pagination: GET /api/v1/clients?searchTerm=Metadata&sortBy=companyName&sortDescending=false
+    var queryClientsResponse = await client.GetAsync("/api/v1/clients?searchTerm=Metadata&sortBy=companyName&sortDescending=false&pageNumber=1&pageSize=10");
+    if (queryClientsResponse.StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException($"HTTP GET /api/v1/clients query failed: {queryClientsResponse.StatusCode}");
+
+    var queryClientsBody = await queryClientsResponse.Content.ReadAsStringAsync();
+    using (var doc = JsonDocument.Parse(queryClientsBody))
+    {
+        var root = doc.RootElement;
+        var totalCount = root.GetProperty("totalCount").GetInt32();
+        var items = root.GetProperty("items").EnumerateArray().ToList();
+        if (totalCount < 1 || !items.Any(i => i.GetProperty("id").GetGuid() == createdClientId))
+            throw new InvalidOperationException("Filtered and sorted query did not return the created client.");
+    }
+    Console.WriteLine("PASS HTTP GET /api/v1/clients?searchTerm=Metadata&sortBy=companyName -> 200 OK, server-side sorting & filtering verified.");
+
+    // 4.5 Detail Query: GET /api/v1/clients/{id}
+    var detailResponse = await client.GetAsync($"/api/v1/clients/{createdClientId}");
+    if (detailResponse.StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException($"HTTP GET /api/v1/clients/{createdClientId} failed: {detailResponse.StatusCode}");
+    Console.WriteLine("PASS HTTP GET /api/v1/clients/{id} -> 200 OK, authoritative detail retrieval verified.");
+
+    // 4.6 Update Client: PUT /api/v1/clients/{id} (writable fields only; immutable accountCode omitted)
+    var updatePayload = new
+    {
+        Id = createdClientId,
+        CompanyName = "Postgres Metadata Enterprise Global",
+        SlaTier = 3, // Gold
+        Currency = "EUR",
+        Status = 2
+    };
+    var updateResponse = await client.PutAsJsonAsync($"/api/v1/clients/{createdClientId}", updatePayload);
+    if (updateResponse.StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException($"HTTP PUT /api/v1/clients/{createdClientId} failed: {updateResponse.StatusCode} - {await updateResponse.Content.ReadAsStringAsync()}");
+
+    var updateBody = await updateResponse.Content.ReadAsStringAsync();
+    using (var doc = JsonDocument.Parse(updateBody))
+    {
+        var root = doc.RootElement;
+        var updatedName = root.GetProperty("companyName").GetString();
+        var code = root.GetProperty("accountCode").GetString();
+        if (updatedName != "Postgres Metadata Enterprise Global")
+            throw new InvalidOperationException($"Updated company name mismatch: expected 'Postgres Metadata Enterprise Global', found '{updatedName}'");
+        if (code != "PME-01")
+            throw new InvalidOperationException($"Account code was altered unexpectedly: expected 'PME-01', found '{code}'");
+    }
+    Console.WriteLine("PASS HTTP PUT /api/v1/clients/{id} -> 200 OK, companyName updated, accountCode immutability preserved.");
+
+    // 4.7 Soft Delete: DELETE /api/v1/clients/{id}
+    var deleteResponse = await client.DeleteAsync($"/api/v1/clients/{createdClientId}");
+    if (deleteResponse.StatusCode != HttpStatusCode.NoContent)
+        throw new InvalidOperationException($"HTTP DELETE /api/v1/clients/{createdClientId} failed: {deleteResponse.StatusCode}");
+
+    await using (var dbCheck = CreateDb(operationalConn, user))
+    {
+        var clientInDb = await dbCheck.Clients.IgnoreQueryFilters().SingleAsync(c => c.Id == createdClientId);
+        if (!clientInDb.IsDeleted)
+            throw new InvalidOperationException("Client record in PostgreSQL is not marked as is_deleted = true.");
+    }
+    Console.WriteLine("PASS HTTP DELETE /api/v1/clients/{id} -> 204 NoContent, soft delete (is_deleted = true) in PostgreSQL verified.");
+
     Console.WriteLine("\n================================================================================");
     Console.WriteLine("ALL PHASE 7.3 POSTGRESQL & BACKEND-CONNECTED JOURNEYS PASSED CLEANLY!");
     Console.WriteLine("================================================================================");
@@ -1140,6 +1283,7 @@ sealed class VerificationIdentity(Guid facilityId) : ICurrentUserContext
 sealed class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions>
 {
     public static Guid CurrentUserId { get; set; } = Guid.Empty;
+    public static List<Claim>? CustomClaims { get; set; } = null;
 
     public TestAuthHandler(
         IOptionsMonitor<AuthenticationSchemeOptions> options,
@@ -1150,18 +1294,27 @@ sealed class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
         var userId = CurrentUserId != Guid.Empty ? CurrentUserId.ToString() : Guid.NewGuid().ToString();
-        var claims = new[]
+        var claims = CustomClaims ?? new List<Claim>
         {
             new Claim(ClaimTypes.NameIdentifier, userId),
             new Claim(ClaimTypes.Email, "staff@test.local"),
             new Claim(ClaimTypes.Role, "SuperAdmin"),
             new Claim("UserType", "Staff"),
+            new Claim("user_type", "Staff"),
             new Claim("Permission", "Inbound:Receive"),
             new Claim("Permission", "Inbound:Putaway:Execute"),
             new Claim("Permission", "Inbound:Putaway:Manage"),
             new Claim("Permission", "Inbound:View"),
             new Claim("Permission", "Inventory:View"),
-            new Claim("Permission", "Analytics:CrossFacility")
+            new Claim("Permission", "Analytics:CrossFacility"),
+            new Claim("permissions", "clients:view"),
+            new Claim("permissions", "clients:create"),
+            new Claim("permissions", "clients:edit"),
+            new Claim("permissions", "clients:delete"),
+            new Claim("Permission", "clients:view"),
+            new Claim("Permission", "clients:create"),
+            new Claim("Permission", "clients:edit"),
+            new Claim("Permission", "clients:delete")
         };
         var identity = new ClaimsIdentity(claims, "TestAuth");
         var ticket = new AuthenticationTicket(new ClaimsPrincipal(identity), "TestAuth");

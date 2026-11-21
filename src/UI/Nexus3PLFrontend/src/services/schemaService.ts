@@ -2,10 +2,11 @@ import { EntitySchema } from '../types/schema';
 import { apiClient } from './apiClient';
 
 /**
- * Built-in fallback schema for Client entity.
- * Used for instant cold-start, testing fixtures, or when server schema is preloaded.
+ * Isolated test fixture schema for Client entity.
+ * Intended ONLY for isolated component unit testing and mock fixtures.
+ * In production runtime, schema resolution must always resolve authoritatively from the backend.
  */
-export const DEFAULT_CLIENT_SCHEMA: EntitySchema = {
+export const TEST_CLIENT_SCHEMA_FIXTURE: EntitySchema = {
   name: 'Client',
   version: '1.0.0',
   title: 'Client Tenant',
@@ -122,48 +123,20 @@ export const DEFAULT_CLIENT_SCHEMA: EntitySchema = {
       readOnly: true,
       icon: 'Users',
     },
-    {
-      name: 'contactFirstName',
-      label: 'Contact First Name',
-      type: 'string',
-      placeholder: 'John',
-      icon: 'Users',
-    },
-    {
-      name: 'contactLastName',
-      label: 'Contact Last Name',
-      type: 'string',
-      placeholder: 'Doe',
-      icon: 'Users',
-    },
-    {
-      name: 'contactEmail',
-      label: 'Contact Email',
-      type: 'email',
-      placeholder: 'jdoe@company.com',
-      icon: 'Mail',
-    },
-    {
-      name: 'contactPhone',
-      label: 'Contact Phone',
-      type: 'phone',
-      placeholder: '+1 555-0199',
-      icon: 'Phone',
-    },
   ],
   views: {
     list: {
       columns: [
         { field: 'accountCode', label: 'Client Code', width: '150px', sortable: true, format: 'code' },
         { field: 'companyName', label: 'Company Name', sortable: true, format: 'text' },
-        { field: 'slaTier', label: 'SLA Tier', width: '130px', format: 'badge' },
-        { field: 'currency', label: 'Currency', width: '110px', align: 'center', format: 'currency' },
-        { field: 'status', label: 'Status', width: '120px', align: 'center', format: 'badge' },
-        { field: 'createdAt', label: 'Created', width: '130px', align: 'right', format: 'date' },
+        { field: 'slaTier', label: 'SLA Tier', width: '130px', sortable: true, format: 'badge' },
+        { field: 'currency', label: 'Currency', width: '110px', align: 'center', sortable: true, format: 'currency' },
+        { field: 'status', label: 'Status', width: '120px', align: 'center', sortable: true, format: 'badge' },
+        { field: 'createdAt', label: 'Created', width: '130px', align: 'right', sortable: true, format: 'date' },
       ],
       defaultSort: {
-        field: 'companyName',
-        direction: 'asc',
+        field: 'createdAt',
+        direction: 'desc',
       },
       searchFields: ['companyName', 'accountCode'],
       emptyState: {
@@ -182,14 +155,6 @@ export const DEFAULT_CLIENT_SCHEMA: EntitySchema = {
           icon: 'Building',
           columns: 2,
           fields: ['companyName', 'accountCode', 'slaTier', 'currency', 'status'],
-        },
-        {
-          id: 'contact',
-          title: 'Primary Contact Information',
-          description: 'Direct communications contact for logistics operations and exceptions.',
-          icon: 'Mail',
-          columns: 2,
-          fields: ['contactFirstName', 'contactLastName', 'contactEmail', 'contactPhone'],
         },
       ],
     },
@@ -223,46 +188,52 @@ export const DEFAULT_CLIENT_SCHEMA: EntitySchema = {
   ],
 };
 
+/** @deprecated Alias preserved for isolated test backwards compatibility */
+export const DEFAULT_CLIENT_SCHEMA = TEST_CLIENT_SCHEMA_FIXTURE;
+
+export interface AuthSchemaScope {
+  userId?: string | null;
+  roles?: string[];
+  permissions?: string[];
+}
+
 const schemaCache = new Map<string, EntitySchema>();
 
 export const schemaService = {
   /**
    * Retrieve authoritative, permission-resolved schema for an entity from backend.
+   * Fails closed on HTTP 401, 403, 404, network failure, or malformed schema response.
+   * Production requests strictly require server resolution without unrestricted local fallback.
    */
-  getSchema: async (entityName: string, signal?: AbortSignal): Promise<EntitySchema> => {
-    const key = entityName.toLowerCase();
-    if (schemaCache.has(key)) {
-      return schemaCache.get(key)!;
+  getSchema: async (
+    entityName: string,
+    authScope?: AuthSchemaScope,
+    signal?: AbortSignal
+  ): Promise<EntitySchema> => {
+    const scopeKey = authScope?.userId
+      ? `${authScope.userId}:${(authScope.permissions || []).slice().sort().join(',')}`
+      : 'anonymous';
+    const cacheKey = `${scopeKey}::${entityName.toLowerCase()}`;
+
+    if (schemaCache.has(cacheKey)) {
+      return schemaCache.get(cacheKey)!;
     }
 
-    try {
-      const remote = await apiClient<EntitySchema>(`/api/v1/schemas/${entityName}`, {
-        method: 'GET',
-        signal,
-      });
-      if (remote && remote.name) {
-        schemaCache.set(key, remote);
-        return remote;
-      }
-    } catch (err) {
-      // If remote schema is unavailable, fallback to default schema definition
-      if (key === 'client') {
-        schemaCache.set(key, DEFAULT_CLIENT_SCHEMA);
-        return DEFAULT_CLIENT_SCHEMA;
-      }
-      throw err;
+    const remote = await apiClient<EntitySchema>(`/api/v1/schemas/${entityName}`, {
+      method: 'GET',
+      signal,
+    });
+
+    if (!remote || !remote.name || !Array.isArray(remote.fields)) {
+      throw new Error(`Malformed schema payload received for entity '${entityName}'.`);
     }
 
-    if (key === 'client') {
-      schemaCache.set(key, DEFAULT_CLIENT_SCHEMA);
-      return DEFAULT_CLIENT_SCHEMA;
-    }
-
-    throw new Error(`Schema for entity '${entityName}' not found.`);
+    schemaCache.set(cacheKey, remote);
+    return remote;
   },
 
   /**
-   * Clear schema cache (e.g. upon user role change or logout).
+   * Clear schema cache (e.g. upon user role change, login, logout, or session expiry).
    */
   clearCache: () => {
     schemaCache.clear();

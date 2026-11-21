@@ -40,17 +40,24 @@ export const DynamicList: React.FC<DynamicListProps> = ({
   onAction,
 }) => {
   const auth = useContext(AuthContext);
-  const isSuperAdmin = auth?.user?.roles?.some((r) => r.toLowerCase() === 'superadmin') ?? true;
+  const isSuperAdmin = auth?.user?.roles?.some((r) => r.toLowerCase() === 'superadmin') ?? false;
 
   const checkPermission = (perm?: string): boolean => {
     if (!perm) return true;
-    if (!auth) return true; // Standalone renderer allows all permitted schema actions
+    if (!auth || !auth.user) return false; // Fail closed: no permissive actions without auth context
     if (isSuperAdmin) return true;
     return auth.hasPermission(perm);
   };
 
-  const columns = schema.views.list.columns;
   const fieldMap = new Map(schema.fields.map((f) => [f.name, f]));
+
+  // Filter columns to remove hidden or read-restricted fields
+  const effectiveColumns = (schema.views.list.columns || []).filter((col) => {
+    const fieldDef = fieldMap.get(col.field);
+    if (fieldDef?.hidden) return false;
+    if (fieldDef?.readPermission && !checkPermission(fieldDef.readPermission)) return false;
+    return true;
+  });
 
   const headerActions = schema.actions.filter(
     (a) => a.target === 'header' && checkPermission(a.permission)
@@ -212,7 +219,7 @@ export const DynamicList: React.FC<DynamicListProps> = ({
             <table className="enterprise-data-table" data-testid="entity-table">
               <thead>
                 <tr>
-                  {columns.map((col) => {
+                  {effectiveColumns.map((col) => {
                     const fieldDef = fieldMap.get(col.field);
                     const label = col.label || fieldDef?.label || col.field;
                     const isSorted = sortBy === col.field;
@@ -224,6 +231,15 @@ export const DynamicList: React.FC<DynamicListProps> = ({
                         style={{ width: col.width }}
                         className={`${col.sortable ? 'sortable-header' : ''} ${alignClass}`}
                         onClick={() => col.sortable && onSortChange(col.field)}
+                        onKeyDown={(e) => {
+                          if (col.sortable && (e.key === 'Enter' || e.key === ' ')) {
+                            e.preventDefault();
+                            onSortChange(col.field);
+                          }
+                        }}
+                        tabIndex={col.sortable ? 0 : undefined}
+                        role={col.sortable ? 'button' : undefined}
+                        aria-label={col.sortable ? `Sort by ${label}` : undefined}
                         aria-sort={
                           isSorted ? (sortDirection === 'asc' ? 'ascending' : 'descending') : undefined
                         }
@@ -256,7 +272,7 @@ export const DynamicList: React.FC<DynamicListProps> = ({
 
                   return (
                     <tr key={keyVal} data-testid={`row-${keyVal}`}>
-                      {columns.map((col) => {
+                      {effectiveColumns.map((col) => {
                         const alignClass = col.align ? `text-${col.align}` : '';
                         return (
                           <td key={col.field} className={alignClass}>

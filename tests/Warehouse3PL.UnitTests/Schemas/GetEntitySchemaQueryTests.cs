@@ -65,13 +65,13 @@ public class GetEntitySchemaQueryTests
     }
 
     [Fact]
-    public async Task Handle_WhenCallerLacksViewPermission_ThrowsUnauthorizedAccessException()
+    public async Task Handle_WhenCallerLacksViewPermission_ThrowsForbiddenException()
     {
         // Arrange: View permission omitted
         var handler = new GetEntitySchemaQueryHandler(_currentUser);
 
         // Act & Assert
-        var ex = await Assert.ThrowsAsync<UnauthorizedAccessException>(() =>
+        var ex = await Assert.ThrowsAsync<ForbiddenException>(() =>
             handler.Handle(new GetEntitySchemaQuery("Client"), CancellationToken.None));
         Assert.Contains("clients:view", ex.Message, StringComparison.OrdinalIgnoreCase);
     }

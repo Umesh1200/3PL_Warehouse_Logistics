@@ -114,34 +114,6 @@
       "type": "integer",
       "readOnly": true,
       "icon": "Users"
-    },
-    {
-      "name": "contactFirstName",
-      "label": "Contact First Name",
-      "type": "string",
-      "placeholder": "John",
-      "icon": "Users"
-    },
-    {
-      "name": "contactLastName",
-      "label": "Contact Last Name",
-      "type": "string",
-      "placeholder": "Doe",
-      "icon": "Users"
-    },
-    {
-      "name": "contactEmail",
-      "label": "Contact Email",
-      "type": "email",
-      "placeholder": "jdoe@company.com",
-      "icon": "Mail"
-    },
-    {
-      "name": "contactPhone",
-      "label": "Contact Phone",
-      "type": "phone",
-      "placeholder": "+1 555-0199",
-      "icon": "Phone"
     }
   ],
   "views": {
@@ -149,14 +121,14 @@
       "columns": [
         { "field": "accountCode", "label": "Client Code", "width": "150px", "sortable": true, "format": "code" },
         { "field": "companyName", "label": "Company Name", "sortable": true, "format": "text" },
-        { "field": "slaTier", "label": "SLA Tier", "width": "130px", "format": "badge" },
-        { "field": "currency", "label": "Currency", "width": "110px", "align": "center", "format": "currency" },
-        { "field": "status", "label": "Status", "width": "120px", "align": "center", "format": "badge" },
-        { "field": "createdAt", "label": "Created", "width": "130px", "align": "right", "format": "date" }
+        { "field": "slaTier", "label": "SLA Tier", "width": "130px", "sortable": true, "format": "badge" },
+        { "field": "currency", "label": "Currency", "width": "110px", "align": "center", "sortable": true, "format": "currency" },
+        { "field": "status", "label": "Status", "width": "120px", "align": "center", "sortable": true, "format": "badge" },
+        { "field": "createdAt", "label": "Created", "width": "130px", "align": "right", "sortable": true, "format": "date" }
       ],
       "defaultSort": {
-        "field": "companyName",
-        "direction": "asc"
+        "field": "createdAt",
+        "direction": "desc"
       },
       "searchFields": ["companyName", "accountCode"],
       "emptyState": {
@@ -175,14 +147,6 @@
           "icon": "Building",
           "columns": 2,
           "fields": ["companyName", "accountCode", "slaTier", "currency", "status"]
-        },
-        {
-          "id": "contact",
-          "title": "Primary Contact Information",
-          "description": "Direct communications contact for logistics operations and exceptions.",
-          "icon": "Mail",
-          "columns": 2,
-          "fields": ["contactFirstName", "contactLastName", "contactEmail", "contactPhone"]
         }
       ]
     }

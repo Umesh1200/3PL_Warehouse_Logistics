@@ -41,7 +41,7 @@ public class GetEntitySchemaQueryHandler : IRequestHandler<GetEntitySchemaQuery,
         // 2. Authorization check: user must possess the View permission for this schema
         if (!string.IsNullOrWhiteSpace(schema.Permissions.View) && !_currentUser.HasPermission(schema.Permissions.View))
         {
-            throw new UnauthorizedAccessException($"Caller does not have required permission '{schema.Permissions.View}' to view schema for '{schema.Name}'.");
+            throw new ForbiddenException($"Caller does not have required permission '{schema.Permissions.View}' to view schema for '{schema.Name}'.");
         }
 
         // 3. Server-side authoritative pruning of actions based on caller's effective permissions

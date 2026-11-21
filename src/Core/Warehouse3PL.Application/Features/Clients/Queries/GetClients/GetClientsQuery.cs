@@ -44,8 +44,42 @@ public class GetClientsQueryHandler : IRequestHandler<GetClientsQuery, PagedResu
 
         var totalCount = await query.CountAsync(cancellationToken);
 
+        // Server-side sorting with strict validated contract
+        if (!string.IsNullOrWhiteSpace(request.SortBy))
+        {
+            query = (request.SortBy.Trim().ToLowerInvariant()) switch
+            {
+                "companyname" => request.SortDescending
+                    ? query.OrderByDescending(c => c.CompanyName)
+                    : query.OrderBy(c => c.CompanyName),
+                "accountcode" => request.SortDescending
+                    ? query.OrderByDescending(c => c.AccountCode)
+                    : query.OrderBy(c => c.AccountCode),
+                "slatier" => request.SortDescending
+                    ? query.OrderByDescending(c => c.SlaTier)
+                    : query.OrderBy(c => c.SlaTier),
+                "status" => request.SortDescending
+                    ? query.OrderByDescending(c => c.Status)
+                    : query.OrderBy(c => c.Status),
+                "currency" => request.SortDescending
+                    ? query.OrderByDescending(c => c.Currency)
+                    : query.OrderBy(c => c.Currency),
+                "createdat" => request.SortDescending
+                    ? query.OrderByDescending(c => c.CreatedAt)
+                    : query.OrderBy(c => c.CreatedAt),
+                _ => request.SortDescending
+                    ? query.OrderByDescending(c => c.CreatedAt)
+                    : query.OrderBy(c => c.CreatedAt)
+            };
+        }
+        else
+        {
+            query = request.SortDescending
+                ? query.OrderByDescending(c => c.CreatedAt)
+                : query.OrderByDescending(c => c.CreatedAt);
+        }
+
         var items = await query
-            .OrderByDescending(c => c.CreatedAt)
             .Skip((request.PageNumber - 1) * request.PageSize)
             .Take(request.PageSize)
             .ToListAsync(cancellationToken);

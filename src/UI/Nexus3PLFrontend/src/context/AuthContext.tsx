@@ -1,6 +1,7 @@
 import React, { createContext, useContext, useEffect, useState, useCallback } from 'react';
 import { authApi } from '../services/authApi';
 import { tokenManager, requestManager } from '../services/apiClient';
+import { schemaService } from '../services/schemaService';
 import { CurrentUserDto, LoginRequest } from '../types/auth';
 
 interface AuthContextType {
@@ -68,6 +69,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
       tokenManager.setTokens(authResponse.accessToken, authResponse.refreshToken);
       const profile = await authApi.getCurrentUser();
       if (tokenManager.getSessionGeneration() !== gen) return;
+      schemaService.clearCache();
       setUser(profile);
     } finally {
       if (tokenManager.getSessionGeneration() === gen) {
@@ -79,6 +81,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const logout = () => {
     requestManager.abortAll();
     tokenManager.clearSession();
+    schemaService.clearCache();
     setUser(null);
     setIsLoading(false);
   };

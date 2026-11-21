@@ -64,15 +64,24 @@ export const adminApi = {
   },
 
   /**
-   * Retrieve paginated client tenants.
+   * Retrieve paginated client tenants with server-side search, filtering, and sorting.
    */
   getClients: async (
-    params: { pageNumber?: number; pageSize?: number } = {},
+    params: {
+      pageNumber?: number;
+      pageSize?: number;
+      searchTerm?: string;
+      sortBy?: string;
+      sortDescending?: boolean;
+    } = {},
     signal?: AbortSignal
   ): Promise<PagedResult<ClientDto>> => {
     const query = new URLSearchParams();
     if (params.pageNumber) query.set('pageNumber', params.pageNumber.toString());
     if (params.pageSize) query.set('pageSize', params.pageSize.toString());
+    if (params.searchTerm?.trim()) query.set('searchTerm', params.searchTerm.trim());
+    if (params.sortBy?.trim()) query.set('sortBy', params.sortBy.trim());
+    if (params.sortDescending !== undefined) query.set('sortDescending', params.sortDescending.toString());
 
     const qs = query.toString() ? `?${query.toString()}` : '';
     return apiClient<PagedResult<ClientDto>>(`/api/v1/clients${qs}`, {

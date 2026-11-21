@@ -68,7 +68,7 @@ import {
  * Authoritative allowlist of supported icon keys across modules, views, fields, and actions.
  * Dynamic eval, raw URLs, or arbitrary SVG strings from tenant metadata are strictly prohibited.
  */
-export const ICON_REGISTRY: Record<string, LucideIcon> = {
+export const ICON_REGISTRY = {
   // Navigation & Modules
   LayoutDashboard,
   Compass,
@@ -131,7 +131,7 @@ export const ICON_REGISTRY: Record<string, LucideIcon> = {
   Mail,
   Layers,
   HelpCircle,
-};
+} as const satisfies Record<string, LucideIcon>;
 
 export type AppIconName = keyof typeof ICON_REGISTRY;
 
@@ -149,7 +149,7 @@ export type AppIconColor =
   | string;
 
 export interface AppIconProps {
-  name: AppIconName | string;
+  name: AppIconName | (string & {});
   size?: AppIconSize;
   color?: AppIconColor;
   strokeWidth?: number;
@@ -188,7 +188,7 @@ export const AppIcon: React.FC<AppIconProps> = ({
   title,
   style,
 }) => {
-  const IconComponent = ICON_REGISTRY[name] || HelpCircle;
+  const IconComponent = (hasAppIcon(name) ? ICON_REGISTRY[name] : undefined) || HelpCircle;
 
   const resolvedSize = typeof size === 'number' ? size : SIZE_MAP[size] || 16;
   const resolvedColor = COLOR_MAP[color] || color;

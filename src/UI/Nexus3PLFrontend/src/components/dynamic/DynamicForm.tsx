@@ -1,6 +1,7 @@
-import React, { useState } from 'react';
+import React, { useState, useContext } from 'react';
 import { EntitySchema, FieldDefinition } from '../../types/schema';
 import { AppIcon } from '../common/AppIcon';
+import { AuthContext } from '../../context/AuthContext';
 
 export interface DynamicFormProps {
   schema: EntitySchema;
@@ -105,29 +106,20 @@ export const DynamicForm: React.FC<DynamicFormProps> = ({
     });
   };
 
-  const handleSubmit = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (isSubmitting) return;
+  const auth = useContext(AuthContext);
+  const isSuperAdmin = auth?.user?.roles?.some((r) => r.toLowerCase() === 'superadmin') ?? false;
 
-    // Run full validation
-    const errors: Record<string, string> = {};
-    for (const field of schema.fields) {
-      const err = validateField(field, formData[field.name]);
-      if (err) {
-        errors[field.name] = err;
-      }
-    }
-
-    if (Object.keys(errors).length > 0) {
-      setValidationErrors(errors);
-      return;
-    }
-
-    onSubmit(formData);
+  const checkPermission = (perm?: string): boolean => {
+    if (!perm) return true;
+    if (!auth || !auth.user) return false;
+    if (isSuperAdmin) return true;
+    return auth.hasPermission(perm);
   };
 
-  // Determine sections
-  const sections = schema.views.form?.sections || [
+  const fieldMap = new Map(schema.fields.map((f) => [f.name, f]));
+
+  // Determine sections, filtering out hidden and permission-restricted fields
+  const rawSections = schema.views.form?.sections || [
     {
       id: 'default',
       title: `${schema.title} Details`,
@@ -136,12 +128,54 @@ export const DynamicForm: React.FC<DynamicFormProps> = ({
     },
   ];
 
-  const fieldMap = new Map(schema.fields.map((f) => [f.name, f]));
+  const visibleSections = rawSections
+    .map((sec) => ({
+      ...sec,
+      fields: sec.fields.filter((fName) => {
+        const field = fieldMap.get(fName);
+        if (!field || field.hidden) return false;
+        if (field.readPermission && !checkPermission(field.readPermission)) return false;
+        return true;
+      }),
+    }))
+    .filter((sec) => sec.fields.length > 0);
+
+  const handleSubmit = (e: React.FormEvent) => {
+    e.preventDefault();
+    if (isSubmitting) return;
+
+    // Run full validation on visible, permitted fields
+    const errors: Record<string, string> = {};
+    const sanitizedData: Record<string, any> = {};
+
+    for (const sec of visibleSections) {
+      for (const fName of sec.fields) {
+        const field = fieldMap.get(fName);
+        if (field) {
+          sanitizedData[fName] = formData[fName];
+          const err = validateField(field, formData[fName]);
+          if (err) {
+            errors[fName] = err;
+          }
+        }
+      }
+    }
+
+    if (Object.keys(errors).length > 0) {
+      setValidationErrors(errors);
+      return;
+    }
+
+    onSubmit(sanitizedData);
+  };
 
   const renderInput = (field: FieldDefinition) => {
     const value = formData[field.name] ?? '';
     const error = validationErrors[field.name];
-    const isFieldReadOnly = field.readOnly || (mode === 'edit' && field.name === 'accountCode');
+    const isFieldReadOnly =
+      field.readOnly ||
+      (mode === 'edit' && field.name === 'accountCode') ||
+      (!!field.writePermission && !checkPermission(field.writePermission));
 
     const commonProps = {
       id: `field-${field.name}`,
@@ -285,7 +319,7 @@ export const DynamicForm: React.FC<DynamicFormProps> = ({
         </div>
       )}
 
-      {sections.map((section) => {
+      {visibleSections.map((section) => {
         const sectionFields = section.fields
           .map((fname) => fieldMap.get(fname))
           .filter((f): f is FieldDefinition => !!f && !f.hidden);

@@ -1,16 +1,17 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useContext } from 'react';
 import { EntitySchema } from '../../types/schema';
-import { schemaService, DEFAULT_CLIENT_SCHEMA } from '../../services/schemaService';
+import { schemaService } from '../../services/schemaService';
 import { DynamicList } from './DynamicList';
 import { DynamicForm } from './DynamicForm';
 import { Modal } from '../common/Modal';
 import { AppIcon } from '../common/AppIcon';
 import { adminApi } from '../../services/adminApi';
+import { AuthContext } from '../../context/AuthContext';
 
 export interface DynamicEntityPageProps {
   entityName: string;
   initialSchema?: EntitySchema;
-  customFetchList?: (params: { pageNumber: number; pageSize: number; searchTerm?: string }, signal?: AbortSignal) => Promise<{ items: any[]; totalCount: number }>;
+  customFetchList?: (params: { pageNumber: number; pageSize: number; searchTerm?: string; sortBy?: string; sortDescending?: boolean }, signal?: AbortSignal) => Promise<{ items: any[]; totalCount: number }>;
   customCreate?: (data: any) => Promise<any>;
   customUpdate?: (id: string, data: any) => Promise<any>;
   customDelete?: (id: string) => Promise<any>;
@@ -24,16 +25,12 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
   customUpdate,
   customDelete,
 }) => {
-  const [schema, setSchema] = useState<EntitySchema | null>(() => {
-    if (initialSchema) return initialSchema;
-    if (entityName.toLowerCase() === 'client') return DEFAULT_CLIENT_SCHEMA;
-    return null;
-  });
-  const [loadingSchema, setLoadingSchema] = useState(() => {
-    if (initialSchema) return false;
-    if (entityName.toLowerCase() === 'client') return false;
-    return true;
-  });
+  const auth = useContext(AuthContext);
+  const user = auth?.user;
+
+  // In production runtime, fail closed: never pre-seed schema with unrestricted local fallback
+  const [schema, setSchema] = useState<EntitySchema | null>(initialSchema || null);
+  const [loadingSchema, setLoadingSchema] = useState(!initialSchema);
   const [schemaError, setSchemaError] = useState<string | null>(null);
 
   // List data state
@@ -52,6 +49,7 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
   // Modal states
   const [isFormModalOpen, setIsFormModalOpen] = useState(false);
   const [editingItem, setEditingItem] = useState<any | null>(null);
+  const [loadingDetail, setLoadingDetail] = useState(false);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const [formError, setFormError] = useState<string | null>(null);
 
@@ -62,7 +60,7 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
   // Feedback banner
   const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
 
-  // 1. Fetch Schema
+  // 1. Fetch Authoritative Schema from Server
   useEffect(() => {
     if (initialSchema) {
       setSchema(initialSchema);
@@ -81,14 +79,14 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
       try {
         setLoadingSchema(true);
         setSchemaError(null);
-        const res = await schemaService.getSchema(entityName, ctrl.signal);
+        const res = await schemaService.getSchema(
+          entityName,
+          { userId: user?.userId, roles: user?.roles, permissions: user?.permissions },
+          ctrl.signal
+        );
         if (active) {
-          setSchema((prev) => {
-            if (prev && prev.version === res.version && prev.name === res.name) {
-              return prev; // Preserve identity to prevent aborting active list queries
-            }
-            return res;
-          });
+          // Unconditionally replace with server's permission-resolved response
+          setSchema(res);
           if (res.views?.list?.defaultSort) {
             setSortBy((prev) => prev || res.views.list.defaultSort!.field);
             setSortDirection((prev) => prev || res.views.list.defaultSort!.direction);
@@ -96,7 +94,9 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
         }
       } catch (err: any) {
         if (active && err.name !== 'AbortError') {
-          setSchemaError(err.message || `Failed to load schema for ${entityName}`);
+          // Fail closed on error: remove schema to prevent displaying unauthorized views
+          setSchema(null);
+          setSchemaError(err.message || `Failed to load authoritative schema for ${entityName}`);
         }
       } finally {
         if (active) setLoadingSchema(false);
@@ -108,9 +108,9 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
       active = false;
       ctrl.abort();
     };
-  }, [entityName, initialSchema]);
+  }, [entityName, initialSchema, user?.userId, user?.roles, user?.permissions]);
 
-  // 2. Fetch Entity Data
+  // 2. Fetch Entity Data via Server-side Search, Sort, and Pagination
   const loadData = useCallback(
     async (signal?: AbortSignal) => {
       if (!schema) return;
@@ -121,21 +121,30 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
         let result: { items: any[]; totalCount: number };
 
         if (customFetchList) {
-          result = await customFetchList({ pageNumber: page, pageSize, searchTerm }, signal);
+          result = await customFetchList(
+            {
+              pageNumber: page,
+              pageSize,
+              searchTerm: searchTerm.trim() || undefined,
+              sortBy,
+              sortDescending: sortDirection === 'desc',
+            },
+            signal
+          );
         } else if (entityName.toLowerCase() === 'client') {
-          const res = await adminApi.getClients({ pageNumber: page, pageSize }, signal);
-          let filtered = res.items || [];
-          if (searchTerm.trim()) {
-            const term = searchTerm.trim().toLowerCase();
-            filtered = filtered.filter(
-              (c: any) =>
-                c.companyName?.toLowerCase().includes(term) ||
-                c.accountCode?.toLowerCase().includes(term)
-            );
-          }
-          result = { items: filtered, totalCount: res.totalCount || filtered.length };
+          const res = await adminApi.getClients(
+            {
+              pageNumber: page,
+              pageSize,
+              searchTerm: searchTerm.trim() || undefined,
+              sortBy,
+              sortDescending: sortDirection === 'desc',
+            },
+            signal
+          );
+          result = { items: res.items || [], totalCount: res.totalCount ?? (res.items?.length || 0) };
         } else {
-          result = { items: [], totalCount: 0 };
+          throw new Error(`List operation is not supported for entity '${entityName}'.`);
         }
 
         setItems(result.items);
@@ -148,7 +157,7 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
         setLoadingData(false);
       }
     },
-    [schema, entityName, page, searchTerm, customFetchList]
+    [schema, entityName, page, searchTerm, sortBy, sortDirection, customFetchList]
   );
 
   useEffect(() => {
@@ -158,7 +167,12 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
     return () => ctrl.abort();
   }, [schema, loadData]);
 
-  // Handlers
+  // Filter & Sort Handlers: Reset to page 1 on filter/sort change
+  const handleSearchChange = (term: string) => {
+    setSearchTerm(term);
+    setPage(1);
+  };
+
   const handleSortChange = (field: string) => {
     if (sortBy === field) {
       setSortDirection((prev) => (prev === 'asc' ? 'desc' : 'asc'));
@@ -166,22 +180,41 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
       setSortBy(field);
       setSortDirection('asc');
     }
+    setPage(1);
   };
 
-  const handleAction = (actionId: string, item?: any) => {
+  // Action Dispatcher: Loads authoritative detail before opening edit modal
+  const handleAction = async (actionId: string, item?: any) => {
     if (actionId === 'create') {
       setEditingItem(null);
       setFormError(null);
       setIsFormModalOpen(true);
     } else if (actionId === 'edit' && item) {
-      setEditingItem(item);
+      if (!schema) return;
       setFormError(null);
-      setIsFormModalOpen(true);
+      const primaryKeyVal = item[schema.primaryKey];
+      try {
+        setLoadingDetail(true);
+        let detailData = item;
+        if (entityName.toLowerCase() === 'client') {
+          detailData = await adminApi.getClientById(primaryKeyVal);
+        }
+        setEditingItem(detailData);
+        setIsFormModalOpen(true);
+      } catch (err: any) {
+        setFeedback({
+          type: 'error',
+          message: err.message || `Failed to load authoritative details for ${schema.title} '${item.companyName || primaryKeyVal}'.`,
+        });
+      } finally {
+        setLoadingDetail(false);
+      }
     } else if (actionId === 'deactivate' && item) {
       setDeactivatingItem(item);
     }
   };
 
+  // Form Submit Handler: Builds explicit projection of writable supported fields
   const handleFormSubmit = async (formData: Record<string, any>) => {
     if (!schema) return;
     try {
@@ -189,23 +222,41 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
       setFormError(null);
 
       if (editingItem) {
-        // Update
+        // Update projection: permitted writable fields only (no accountCode or contacts)
         const primaryKeyVal = editingItem[schema.primaryKey];
         if (customUpdate) {
           await customUpdate(primaryKeyVal, formData);
         } else if (entityName.toLowerCase() === 'client') {
-          await adminApi.updateClient(primaryKeyVal, formData);
+          const updatePayload = {
+            id: primaryKeyVal,
+            companyName: formData.companyName?.trim(),
+            slaTier: Number(formData.slaTier) || 1,
+            currency: (formData.currency?.trim() || 'USD').toUpperCase(),
+            status: Number(formData.status) || 2,
+          };
+          await adminApi.updateClient(primaryKeyVal, updatePayload);
+        } else {
+          throw new Error(`Update operation is not supported for entity '${entityName}'.`);
         }
         setFeedback({
           type: 'success',
           message: `${schema.title} '${formData.companyName || primaryKeyVal}' updated successfully.`,
         });
       } else {
-        // Create
+        // Create projection: permitted writable fields
         if (customCreate) {
           await customCreate(formData);
         } else if (entityName.toLowerCase() === 'client') {
-          await adminApi.createClient(formData);
+          const createPayload = {
+            companyName: formData.companyName?.trim(),
+            accountCode: formData.accountCode?.trim().toUpperCase(),
+            slaTier: Number(formData.slaTier) || 1,
+            currency: (formData.currency?.trim() || 'USD').toUpperCase(),
+            status: Number(formData.status) || 2,
+          };
+          await adminApi.createClient(createPayload);
+        } else {
+          throw new Error(`Create operation is not supported for entity '${entityName}'.`);
         }
         setFeedback({
           type: 'success',
@@ -232,6 +283,8 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
         await customDelete(primaryKeyVal);
       } else if (entityName.toLowerCase() === 'client') {
         await adminApi.deactivateClient(primaryKeyVal);
+      } else {
+        throw new Error(`Deactivate operation is not supported for entity '${entityName}'.`);
       }
 
       setFeedback({
@@ -340,7 +393,7 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
         searchTerm={searchTerm}
         sortBy={sortBy}
         sortDirection={sortDirection}
-        onSearchChange={setSearchTerm}
+        onSearchChange={handleSearchChange}
         onSortChange={handleSortChange}
         onPageChange={setPage}
         onRefresh={() => loadData()}
