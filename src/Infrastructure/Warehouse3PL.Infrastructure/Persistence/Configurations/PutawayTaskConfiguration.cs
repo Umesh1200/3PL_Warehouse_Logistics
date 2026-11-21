@@ -102,6 +102,9 @@ public class PutawayTaskConfiguration : IEntityTypeConfiguration<PutawayTask>
         builder.HasIndex(pt => pt.ClientId);
         builder.HasIndex(pt => new { pt.FacilityId, pt.Status, pt.Priority });
         builder.HasIndex(pt => pt.LpnCode);
+        builder.HasIndex(pt => pt.LpnId)
+            .IsUnique()
+            .HasFilter("lpn_id IS NOT NULL AND status <> 'Cancelled'");
 
         // Relationships
         builder.HasOne(pt => pt.Client)

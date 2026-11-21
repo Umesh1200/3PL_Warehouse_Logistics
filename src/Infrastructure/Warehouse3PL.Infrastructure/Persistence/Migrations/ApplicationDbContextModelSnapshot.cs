@@ -10766,7 +10766,9 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasDatabaseName("ix_putaway_tasks_lpn_code");
 
                     b.HasIndex("LpnId")
-                        .HasDatabaseName("ix_putaway_tasks_lpn_id");
+                        .IsUnique()
+                        .HasDatabaseName("ix_putaway_tasks_lpn_id")
+                        .HasFilter("lpn_id IS NOT NULL AND status <> 'Cancelled'");
 
                     b.HasIndex("SourceLocationId")
                         .HasDatabaseName("ix_putaway_tasks_source_location_id");

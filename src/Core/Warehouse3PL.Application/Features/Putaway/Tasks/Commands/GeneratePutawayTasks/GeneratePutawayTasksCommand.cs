@@ -63,115 +63,175 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
         }
 
         var candidateLines = await query.ToListAsync(cancellationToken);
+        if (candidateLines.Count == 0)
+        {
+            return [];
+        }
 
-        // 2. Identify LPNs / ReceiptLines that already have active or completed tasks
+        var candidateLineIds = candidateLines.Select(l => l.Id).ToList();
+
+        // 2. Authoritative receipt-line duplicate check:
+        // A receipt line cannot have more than one active putaway task. Cancelled tasks do not block regeneration.
         var existingTasks = await _context.PutawayTasks
             .AsNoTracking()
             .Where(t => t.FacilityId == effectiveFacilityId &&
-                        (t.Status != PutawayTaskStatus.Cancelled))
+                        t.LpnId.HasValue &&
+                        candidateLineIds.Contains(t.LpnId.Value) &&
+                        t.Status != PutawayTaskStatus.Cancelled)
+            .Select(t => t.LpnId!.Value)
             .ToListAsync(cancellationToken);
 
-        var existingLpnIds = existingTasks.Where(t => t.LpnId.HasValue).Select(t => t.LpnId!.Value).ToHashSet();
-        var existingLpnCodes = existingTasks.Where(t => !string.IsNullOrEmpty(t.LpnCode)).Select(t => t.LpnCode!).ToHashSet();
+        var existingLineIdSet = existingTasks.ToHashSet();
 
         var unassignedLines = candidateLines
-            .Where(l => !existingLpnIds.Contains(l.Id) && (string.IsNullOrEmpty(l.Lpn) || !existingLpnCodes.Contains(l.Lpn)))
+            .Where(l => !existingLineIdSet.Contains(l.Id))
             .ToList();
 
-        var generatedTasks = new List<PutawayTask>();
-
-        foreach (var line in unassignedLines)
+        if (unassignedLines.Count == 0)
         {
-            var clientId = line.ReceivingSession.ClientId ?? line.Item.ClientId;
-            var facilityId = line.ReceivingSession.FacilityId;
-
-            // Resolve Lot if LotNumber is present
-            Guid? lotId = null;
-            if (!string.IsNullOrWhiteSpace(line.LotNumber))
-            {
-                var lot = await _context.InventoryLots
-                    .FirstOrDefaultAsync(l => l.ClientId == clientId && l.ItemId == line.ItemId && l.LotNumber == line.LotNumber, cancellationToken);
-                lotId = lot?.Id;
-            }
-
-            // Slotting allocation
-            var optimalLocation = await _locationSelector.SelectOptimalLocationAsync(
-                clientId,
-                facilityId,
-                line.ItemId,
-                line.QuantityReceived,
-                lotId,
-                null,
-                cancellationToken);
-
-            if (optimalLocation == null)
-            {
-                continue; // Skip if no eligible bin is currently available
-            }
-
-            // Determine Priority
-            var priority = PutawayPriority.Normal;
-            if (line.Item.StorageTempClass == StorageTempClass.Frozen || line.Item.StorageTempClass == StorageTempClass.Refrigerated)
-            {
-                priority = PutawayPriority.Expedite; // Cold chain goods priority
-            }
-            else if (line.Item.AbcVelocity == AbcVelocity.A)
-            {
-                priority = PutawayPriority.High; // Fast-movers priority
-            }
-
-            var task = new PutawayTask
-            {
-                ClientId = clientId,
-                FacilityId = facilityId,
-                ItemId = line.ItemId,
-                LotId = lotId,
-                LpnId = line.Id,
-                LpnCode = line.Lpn,
-                SourceLocationId = line.StagingLocationId!.Value,
-                SuggestedLocationId = optimalLocation.Id,
-                Quantity = line.QuantityReceived,
-                Status = PutawayTaskStatus.Pending,
-                Priority = priority,
-                CreatedAtUtc = DateTime.UtcNow,
-                Notes = $"Auto-generated from Receiving Session {line.ReceivingSession.SessionNumber}"
-            };
-
-            task.SuggestedLocation = optimalLocation;
-            task.Item = line.Item;
-            task.SourceLocation = line.StagingLocation!;
-
-            generatedTasks.Add(task);
-            _context.PutawayTasks.Add(task);
+            return [];
         }
 
-        if (generatedTasks.Count > 0)
+        try
         {
-            await _context.SaveChangesAsync(cancellationToken);
-        }
+            return await _context.ExecuteInTransactionAsync(async () =>
+            {
+                // Double check inside transaction to ensure another concurrent generation has not assigned lines
+                var assignedIds = await _context.PutawayTasks
+                    .Where(t => t.FacilityId == effectiveFacilityId &&
+                                t.LpnId.HasValue &&
+                                candidateLineIds.Contains(t.LpnId.Value) &&
+                                t.Status != PutawayTaskStatus.Cancelled)
+                    .Select(t => t.LpnId!.Value)
+                    .ToListAsync(cancellationToken);
+                var assignedSet = assignedIds.ToHashSet();
 
-        return generatedTasks.Select(t => new PutawayTaskDto
+                var linesToProcess = unassignedLines
+                    .Where(l => !assignedSet.Contains(l.Id))
+                    .ToList();
+
+                if (linesToProcess.Count == 0)
+                {
+                    return [];
+                }
+
+                var generatedTasks = new List<PutawayTask>();
+
+                foreach (var line in linesToProcess)
+                {
+                    var clientId = line.ReceivingSession.ClientId ?? line.Item.ClientId;
+                    var facilityId = line.ReceivingSession.FacilityId;
+
+                    // Resolve Lot if LotNumber is present using consistent normalized lot identity
+                    Guid? lotId = null;
+                    InventoryLot? lot = null;
+                    if (!string.IsNullOrWhiteSpace(line.LotNumber))
+                    {
+                        var normalizedLot = line.LotNumber.Trim().ToUpperInvariant();
+                        lot = await _context.InventoryLots
+                            .FirstOrDefaultAsync(l => l.ClientId == clientId && l.ItemId == line.ItemId && l.LotNumber == normalizedLot, cancellationToken);
+                        lotId = lot?.Id;
+                    }
+
+                    // Slotting allocation
+                    var optimalLocation = await _locationSelector.SelectOptimalLocationAsync(
+                        clientId,
+                        facilityId,
+                        line.ItemId,
+                        line.QuantityReceived,
+                        lotId,
+                        null,
+                        cancellationToken);
+
+                    if (optimalLocation == null)
+                    {
+                        continue; // Skip if no eligible bin is currently available
+                    }
+
+                    // Determine Priority
+                    var priority = PutawayPriority.Normal;
+                    if (line.Item.StorageTempClass == StorageTempClass.Frozen || line.Item.StorageTempClass == StorageTempClass.Refrigerated)
+                    {
+                        priority = PutawayPriority.Expedite; // Cold chain goods priority
+                    }
+                    else if (line.Item.AbcVelocity == AbcVelocity.A)
+                    {
+                        priority = PutawayPriority.High; // Fast-movers priority
+                    }
+
+                    var task = new PutawayTask
+                    {
+                        ClientId = clientId,
+                        FacilityId = facilityId,
+                        ItemId = line.ItemId,
+                        LotId = lotId,
+                        Lot = lot,
+                        LpnId = line.Id,
+                        LpnCode = line.Lpn,
+                        SourceLocationId = line.StagingLocationId!.Value,
+                        SuggestedLocationId = optimalLocation.Id,
+                        Quantity = line.QuantityReceived,
+                        Status = PutawayTaskStatus.Pending,
+                        Priority = priority,
+                        CreatedAtUtc = DateTime.UtcNow,
+                        Notes = $"Auto-generated from Receiving Session {line.ReceivingSession.SessionNumber}"
+                    };
+
+                    task.SuggestedLocation = optimalLocation;
+                    task.Item = line.Item;
+                    task.SourceLocation = line.StagingLocation!;
+
+                    generatedTasks.Add(task);
+                    _context.PutawayTasks.Add(task);
+                }
+
+                if (generatedTasks.Count > 0)
+                {
+                    await _context.SaveChangesAsync(cancellationToken);
+                }
+
+                return generatedTasks.Select(MapToDto).ToList();
+            }, cancellationToken);
+        }
+        catch (DbUpdateException)
         {
-            Id = t.Id,
-            ClientId = t.ClientId,
-            FacilityId = t.FacilityId,
-            ItemId = t.ItemId,
-            Sku = t.Item?.Sku ?? string.Empty,
-            ItemDescription = t.Item?.Description ?? string.Empty,
-            LotId = t.LotId,
-            LpnId = t.LpnId,
-            LpnCode = t.LpnCode,
-            SourceLocationId = t.SourceLocationId,
-            SourceLocationCode = t.SourceLocation?.LocationCode ?? string.Empty,
-            SuggestedLocationId = t.SuggestedLocationId,
-            SuggestedLocationCode = t.SuggestedLocation?.LocationCode ?? string.Empty,
-            SuggestedLocationBarcode = t.SuggestedLocation?.Barcode ?? string.Empty,
-            Quantity = t.Quantity,
-            Status = t.Status,
-            Priority = t.Priority,
-            CreatedAtUtc = t.CreatedAtUtc,
-            Notes = t.Notes,
-            Version = t.Version
-        }).ToList();
+            // Concurrent generation race condition: another concurrent transaction committed tasks for some or all candidate lines.
+            // Safely reload and return active tasks for these candidate lines.
+            var existingTasksForCandidates = await _context.PutawayTasks
+                .Include(t => t.Item)
+                .Include(t => t.SourceLocation)
+                .Include(t => t.SuggestedLocation)
+                .Where(t => t.FacilityId == effectiveFacilityId &&
+                            t.LpnId.HasValue &&
+                            candidateLineIds.Contains(t.LpnId.Value) &&
+                            t.Status != PutawayTaskStatus.Cancelled)
+                .ToListAsync(cancellationToken);
+
+            return existingTasksForCandidates.Select(MapToDto).ToList();
+        }
     }
+
+    private static PutawayTaskDto MapToDto(PutawayTask t) => new()
+    {
+        Id = t.Id,
+        ClientId = t.ClientId,
+        FacilityId = t.FacilityId,
+        ItemId = t.ItemId,
+        Sku = t.Item?.Sku ?? string.Empty,
+        ItemDescription = t.Item?.Description ?? string.Empty,
+        LotId = t.LotId,
+        LpnId = t.LpnId,
+        LpnCode = t.LpnCode,
+        SourceLocationId = t.SourceLocationId,
+        SourceLocationCode = t.SourceLocation?.LocationCode ?? string.Empty,
+        SuggestedLocationId = t.SuggestedLocationId,
+        SuggestedLocationCode = t.SuggestedLocation?.LocationCode ?? string.Empty,
+        SuggestedLocationBarcode = t.SuggestedLocation?.Barcode ?? string.Empty,
+        Quantity = t.Quantity,
+        Status = t.Status,
+        Priority = t.Priority,
+        CreatedAtUtc = t.CreatedAtUtc,
+        Notes = t.Notes,
+        Version = t.Version
+    };
 }

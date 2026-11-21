@@ -6,6 +6,10 @@
     <Nullable>enable</Nullable>
   </PropertyGroup>
   <ItemGroup>
+    <PackageReference Include="Microsoft.AspNetCore.TestHost" Version="10.0.4" />
+  </ItemGroup>
+  <ItemGroup>
     <ProjectReference Include="../../../src/Infrastructure/Warehouse3PL.Infrastructure/Warehouse3PL.Infrastructure.csproj" />
+    <ProjectReference Include="../../../src/Presentation/Warehouse3PL.WebApi/Warehouse3PL.WebApi.csproj" />
   </ItemGroup>
 </Project>

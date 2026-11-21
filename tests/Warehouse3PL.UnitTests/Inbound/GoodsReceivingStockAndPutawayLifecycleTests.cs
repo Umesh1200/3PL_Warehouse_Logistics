@@ -945,4 +945,334 @@ public class GoodsReceivingStockAndPutawayLifecycleTests
         Assert.Equal(21m, stock.TotalQuantity);
         Assert.Equal(countedAt, stock.LastCountedAt);
     }
+
+    [Fact]
+    public async Task PutawayGeneration_MultiItemPallet_GeneratesSeparateTasksForDifferentReceiptLinesSharingLpn()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var clientId = Guid.NewGuid();
+        var facilityId = Guid.NewGuid();
+        var stagingId = Guid.NewGuid();
+        var bin1Id = Guid.NewGuid();
+        var bin2Id = Guid.NewGuid();
+        var itemAId = Guid.NewGuid();
+        var itemBId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var lineAId = Guid.NewGuid();
+        var lineBId = Guid.NewGuid();
+
+        var tenant = new TestTenantProvider { TenantId = clientId };
+        var user = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            FacilityId = facilityId,
+            UserType = UserType.Staff,
+            PermissionsList = [Permissions.Inbound.Receive, Permissions.Inbound.PutawayExecute, Permissions.Inbound.PutawayManage]
+        };
+
+        using (var seed = TestDbContextFactory.Create(tenant, user, dbName))
+        {
+            seed.Clients.Add(new Client { Id = clientId, CompanyName = "Multi Pallet Client", AccountCode = "MPC" });
+            seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "MPC-F", Name = "MPC Facility" });
+            seed.Items.AddRange(
+                new Item { Id = itemAId, ClientId = clientId, Sku = "SKU-MPC-A", Description = "Item A" },
+                new Item { Id = itemBId, ClientId = clientId, Sku = "SKU-MPC-B", Description = "Item B" });
+            seed.Locations.AddRange(
+                new Location { Id = stagingId, FacilityId = facilityId, LocationCode = "MPC-STG", Barcode = "MPC-STG", LocationType = LocationType.StagingLane, IsReceiving = true, IsActive = true },
+                new Location { Id = bin1Id, FacilityId = facilityId, LocationCode = "MPC-BIN1", Barcode = "MPC-BIN1", LocationType = LocationType.Bin, IsActive = true },
+                new Location { Id = bin2Id, FacilityId = facilityId, LocationCode = "MPC-BIN2", Barcode = "MPC-BIN2", LocationType = LocationType.Bin, IsActive = true });
+            seed.ReceivingSessions.Add(new ReceivingSession
+            {
+                Id = sessionId,
+                FacilityId = facilityId,
+                ClientId = clientId,
+                SessionNumber = "RCV-MPC-1",
+                Status = ReceivingStatus.InProgress,
+                ReceivedByUserId = user.UserId!.Value,
+                Lines =
+                [
+                    new ReceiptLine { Id = lineAId, ItemId = itemAId, Lpn = "PALLET-MULTI-1", QuantityReceived = 10, Condition = ReceiptConditionStatus.Sound, StagingLocationId = stagingId },
+                    new ReceiptLine { Id = lineBId, ItemId = itemBId, Lpn = "PALLET-MULTI-1", QuantityReceived = 20, Condition = ReceiptConditionStatus.Sound, StagingLocationId = stagingId }
+                ]
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        using var context = TestDbContextFactory.Create(tenant, user, dbName);
+        var auth = new WarehouseOperationalAuthorization(context, user);
+        await new CompleteReceivingSessionCommandHandler(context, user, auth).Handle(
+            new CompleteReceivingSessionCommand { ReceivingSessionId = sessionId }, CancellationToken.None);
+
+        var locationSelector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
+        var genHandler = new GeneratePutawayTasksCommandHandler(context, locationSelector, auth);
+        var tasks = await genHandler.Handle(new GeneratePutawayTasksCommand { FacilityId = facilityId }, CancellationToken.None);
+
+        Assert.Equal(2, tasks.Count);
+        Assert.All(tasks, t => Assert.Equal("PALLET-MULTI-1", t.LpnCode));
+        Assert.Contains(tasks, t => t.LpnId == lineAId && t.ItemId == itemAId && t.Quantity == 10);
+        Assert.Contains(tasks, t => t.LpnId == lineBId && t.ItemId == itemBId && t.Quantity == 20);
+    }
+
+    [Fact]
+    public async Task PutawayGeneration_CrossClientSharedLpn_GeneratesDistinctTasksForBothClients()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var clientA = Guid.NewGuid();
+        var clientB = Guid.NewGuid();
+        var facilityId = Guid.NewGuid();
+        var stagingId = Guid.NewGuid();
+        var bin1Id = Guid.NewGuid();
+        var bin2Id = Guid.NewGuid();
+        var itemA = Guid.NewGuid();
+        var itemB = Guid.NewGuid();
+        var sessionA = Guid.NewGuid();
+        var sessionB = Guid.NewGuid();
+        var lineA = Guid.NewGuid();
+        var lineB = Guid.NewGuid();
+
+        var tenant = new TestTenantProvider { BypassTenantFilter = true };
+        var superUser = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            FacilityId = facilityId,
+            UserType = UserType.Staff,
+            RolesList = ["SuperAdmin"],
+            PermissionsList = [Permissions.Inbound.Receive, Permissions.Inbound.PutawayExecute, Permissions.Inbound.PutawayManage]
+        };
+
+        using (var seed = TestDbContextFactory.Create(tenant, superUser, dbName))
+        {
+            seed.Clients.AddRange(
+                new Client { Id = clientA, CompanyName = "Client A", AccountCode = "CLA" },
+                new Client { Id = clientB, CompanyName = "Client B", AccountCode = "CLB" });
+            seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "CL-F", Name = "Client Facility" });
+            seed.Items.AddRange(
+                new Item { Id = itemA, ClientId = clientA, Sku = "SKU-CLA", Description = "Client A Item" },
+                new Item { Id = itemB, ClientId = clientB, Sku = "SKU-CLB", Description = "Client B Item" });
+            seed.Locations.AddRange(
+                new Location { Id = stagingId, FacilityId = facilityId, LocationCode = "CL-STG", Barcode = "CL-STG", LocationType = LocationType.StagingLane, IsReceiving = true, IsActive = true },
+                new Location { Id = bin1Id, FacilityId = facilityId, LocationCode = "CL-BIN1", Barcode = "CL-BIN1", LocationType = LocationType.Bin, IsActive = true },
+                new Location { Id = bin2Id, FacilityId = facilityId, LocationCode = "CL-BIN2", Barcode = "CL-BIN2", LocationType = LocationType.Bin, IsActive = true });
+            seed.ReceivingSessions.AddRange(
+                new ReceivingSession
+                {
+                    Id = sessionA, FacilityId = facilityId, ClientId = clientA, SessionNumber = "RCV-CLA",
+                    Status = ReceivingStatus.InProgress, ReceivedByUserId = superUser.UserId!.Value,
+                    Lines = [new ReceiptLine { Id = lineA, ItemId = itemA, Lpn = "SHARED-PALLET-01", QuantityReceived = 5, Condition = ReceiptConditionStatus.Sound, StagingLocationId = stagingId }]
+                },
+                new ReceivingSession
+                {
+                    Id = sessionB, FacilityId = facilityId, ClientId = clientB, SessionNumber = "RCV-CLB",
+                    Status = ReceivingStatus.InProgress, ReceivedByUserId = superUser.UserId!.Value,
+                    Lines = [new ReceiptLine { Id = lineB, ItemId = itemB, Lpn = "SHARED-PALLET-01", QuantityReceived = 8, Condition = ReceiptConditionStatus.Sound, StagingLocationId = stagingId }]
+                });
+            await seed.SaveChangesAsync();
+        }
+
+        using var context = TestDbContextFactory.Create(tenant, superUser, dbName);
+        var auth = new WarehouseOperationalAuthorization(context, superUser);
+        await new CompleteReceivingSessionCommandHandler(context, superUser, auth).Handle(
+            new CompleteReceivingSessionCommand { ReceivingSessionId = sessionA }, CancellationToken.None);
+        await new CompleteReceivingSessionCommandHandler(context, superUser, auth).Handle(
+            new CompleteReceivingSessionCommand { ReceivingSessionId = sessionB }, CancellationToken.None);
+
+        var locationSelector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
+        var genHandler = new GeneratePutawayTasksCommandHandler(context, locationSelector, auth);
+        var tasks = await genHandler.Handle(new GeneratePutawayTasksCommand { FacilityId = facilityId }, CancellationToken.None);
+
+        Assert.Equal(2, tasks.Count);
+        Assert.All(tasks, t => Assert.Equal("SHARED-PALLET-01", t.LpnCode));
+        Assert.Contains(tasks, t => t.ClientId == clientA && t.ItemId == itemA && t.Quantity == 5);
+        Assert.Contains(tasks, t => t.ClientId == clientB && t.ItemId == itemB && t.Quantity == 8);
+    }
+
+    [Fact]
+    public async Task PutawayGeneration_RepeatedSubmission_IsIdempotentAndDoesNotDuplicateTasks()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var clientId = Guid.NewGuid();
+        var facilityId = Guid.NewGuid();
+        var stagingId = Guid.NewGuid();
+        var binId = Guid.NewGuid();
+        var itemId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+
+        var tenant = new TestTenantProvider { TenantId = clientId };
+        var user = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            FacilityId = facilityId,
+            UserType = UserType.Staff,
+            PermissionsList = [Permissions.Inbound.Receive, Permissions.Inbound.PutawayExecute, Permissions.Inbound.PutawayManage]
+        };
+
+        using (var seed = TestDbContextFactory.Create(tenant, user, dbName))
+        {
+            seed.Clients.Add(new Client { Id = clientId, CompanyName = "Repeat Client", AccountCode = "RPC" });
+            seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "RPC-F", Name = "Repeat Facility" });
+            seed.Items.Add(new Item { Id = itemId, ClientId = clientId, Sku = "SKU-RPC", Description = "Repeat Item" });
+            seed.Locations.AddRange(
+                new Location { Id = stagingId, FacilityId = facilityId, LocationCode = "RPC-STG", Barcode = "RPC-STG", LocationType = LocationType.StagingLane, IsReceiving = true, IsActive = true },
+                new Location { Id = binId, FacilityId = facilityId, LocationCode = "RPC-BIN", Barcode = "RPC-BIN", LocationType = LocationType.Bin, IsActive = true });
+            seed.ReceivingSessions.Add(new ReceivingSession
+            {
+                Id = sessionId, FacilityId = facilityId, ClientId = clientId, SessionNumber = "RCV-RPC",
+                Status = ReceivingStatus.InProgress, ReceivedByUserId = user.UserId!.Value,
+                Lines = [new ReceiptLine { ItemId = itemId, Lpn = "RPC-LPN", QuantityReceived = 12, Condition = ReceiptConditionStatus.Sound, StagingLocationId = stagingId }]
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        using var context = TestDbContextFactory.Create(tenant, user, dbName);
+        var auth = new WarehouseOperationalAuthorization(context, user);
+        await new CompleteReceivingSessionCommandHandler(context, user, auth).Handle(
+            new CompleteReceivingSessionCommand { ReceivingSessionId = sessionId }, CancellationToken.None);
+
+        var locationSelector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
+        var genHandler = new GeneratePutawayTasksCommandHandler(context, locationSelector, auth);
+
+        var firstTasks = await genHandler.Handle(new GeneratePutawayTasksCommand { FacilityId = facilityId }, CancellationToken.None);
+        Assert.Single(firstTasks);
+
+        var secondTasks = await genHandler.Handle(new GeneratePutawayTasksCommand { FacilityId = facilityId }, CancellationToken.None);
+        Assert.Empty(secondTasks);
+
+        var allTasks = await context.PutawayTasks.Where(t => t.FacilityId == facilityId).ToListAsync();
+        Assert.Single(allTasks);
+    }
+
+    [Fact]
+    public async Task PutawayGeneration_CancelledTask_AllowsRegenerationForReceiptLine()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var clientId = Guid.NewGuid();
+        var facilityId = Guid.NewGuid();
+        var stagingId = Guid.NewGuid();
+        var binId = Guid.NewGuid();
+        var itemId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+        var lineId = Guid.NewGuid();
+
+        var tenant = new TestTenantProvider { TenantId = clientId };
+        var user = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            FacilityId = facilityId,
+            UserType = UserType.Staff,
+            PermissionsList = [Permissions.Inbound.Receive, Permissions.Inbound.PutawayExecute, Permissions.Inbound.PutawayManage]
+        };
+
+        using (var seed = TestDbContextFactory.Create(tenant, user, dbName))
+        {
+            seed.Clients.Add(new Client { Id = clientId, CompanyName = "Regen Client", AccountCode = "RGC" });
+            seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "RGC-F", Name = "Regen Facility" });
+            seed.Items.Add(new Item { Id = itemId, ClientId = clientId, Sku = "SKU-RGC", Description = "Regen Item" });
+            seed.Locations.AddRange(
+                new Location { Id = stagingId, FacilityId = facilityId, LocationCode = "RGC-STG", Barcode = "RGC-STG", LocationType = LocationType.StagingLane, IsReceiving = true, IsActive = true },
+                new Location { Id = binId, FacilityId = facilityId, LocationCode = "RGC-BIN", Barcode = "RGC-BIN", LocationType = LocationType.Bin, IsActive = true });
+            seed.ReceivingSessions.Add(new ReceivingSession
+            {
+                Id = sessionId, FacilityId = facilityId, ClientId = clientId, SessionNumber = "RCV-RGC",
+                Status = ReceivingStatus.InProgress, ReceivedByUserId = user.UserId!.Value,
+                Lines = [new ReceiptLine { Id = lineId, ItemId = itemId, Lpn = "RGC-LPN", QuantityReceived = 15, Condition = ReceiptConditionStatus.Sound, StagingLocationId = stagingId }]
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        using var context = TestDbContextFactory.Create(tenant, user, dbName);
+        var auth = new WarehouseOperationalAuthorization(context, user);
+        await new CompleteReceivingSessionCommandHandler(context, user, auth).Handle(
+            new CompleteReceivingSessionCommand { ReceivingSessionId = sessionId }, CancellationToken.None);
+
+        var locationSelector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
+        var genHandler = new GeneratePutawayTasksCommandHandler(context, locationSelector, auth);
+
+        var initialTasks = await genHandler.Handle(new GeneratePutawayTasksCommand { FacilityId = facilityId }, CancellationToken.None);
+        var initialTask = Assert.Single(initialTasks);
+        Assert.Equal(PutawayTaskStatus.Pending, initialTask.Status);
+
+        // Cancel the task
+        var entity = await context.PutawayTasks.SingleAsync(t => t.Id == initialTask.Id);
+        entity.Status = PutawayTaskStatus.Cancelled;
+        await context.SaveChangesAsync();
+
+        // Regenerate -> should create a new active task for the line
+        var regeneratedTasks = await genHandler.Handle(new GeneratePutawayTasksCommand { FacilityId = facilityId }, CancellationToken.None);
+        var newTask = Assert.Single(regeneratedTasks);
+        Assert.NotEqual(initialTask.Id, newTask.Id);
+        Assert.Equal(lineId, newTask.LpnId);
+        Assert.Equal(PutawayTaskStatus.Pending, newTask.Status);
+
+        // Verify total tasks in DB: 1 cancelled, 1 active
+        var dbTasks = await context.PutawayTasks.Where(t => t.FacilityId == facilityId).ToListAsync();
+        Assert.Equal(2, dbTasks.Count);
+        Assert.Single(dbTasks, t => t.Status == PutawayTaskStatus.Cancelled);
+        Assert.Single(dbTasks, t => t.Status == PutawayTaskStatus.Pending);
+    }
+
+    [Fact]
+    public async Task PutawayGeneration_PreservesNormalizedLotIdentity()
+    {
+        var dbName = Guid.NewGuid().ToString();
+        var clientId = Guid.NewGuid();
+        var facilityId = Guid.NewGuid();
+        var stagingId = Guid.NewGuid();
+        var binId = Guid.NewGuid();
+        var itemId = Guid.NewGuid();
+        var sessionId = Guid.NewGuid();
+
+        var tenant = new TestTenantProvider { TenantId = clientId };
+        var user = new TestCurrentUserContext
+        {
+            UserId = Guid.NewGuid(),
+            FacilityId = facilityId,
+            UserType = UserType.Staff,
+            PermissionsList = [Permissions.Inbound.Receive, Permissions.Inbound.PutawayExecute, Permissions.Inbound.PutawayManage]
+        };
+
+        using (var seed = TestDbContextFactory.Create(tenant, user, dbName))
+        {
+            seed.Clients.Add(new Client { Id = clientId, CompanyName = "Norm Lot Client", AccountCode = "NLC" });
+            seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "NLC-F", Name = "Norm Facility" });
+            seed.Items.Add(new Item { Id = itemId, ClientId = clientId, Sku = "SKU-NLC", Description = "Norm Item" });
+            seed.Locations.AddRange(
+                new Location { Id = stagingId, FacilityId = facilityId, LocationCode = "NLC-STG", Barcode = "NLC-STG", LocationType = LocationType.StagingLane, IsReceiving = true, IsActive = true },
+                new Location { Id = binId, FacilityId = facilityId, LocationCode = "NLC-BIN", Barcode = "NLC-BIN", LocationType = LocationType.Bin, IsActive = true });
+            seed.ReceivingSessions.Add(new ReceivingSession
+            {
+                Id = sessionId, FacilityId = facilityId, ClientId = clientId, SessionNumber = "RCV-NLC",
+                Status = ReceivingStatus.InProgress, ReceivedByUserId = user.UserId!.Value,
+                Lines = [new ReceiptLine { ItemId = itemId, Lpn = "NLC-LPN", QuantityReceived = 7, LotNumber = "lot-exp-01  ", Condition = ReceiptConditionStatus.Sound, StagingLocationId = stagingId }]
+            });
+            await seed.SaveChangesAsync();
+        }
+
+        using var context = TestDbContextFactory.Create(tenant, user, dbName);
+        var auth = new WarehouseOperationalAuthorization(context, user);
+        await new CompleteReceivingSessionCommandHandler(context, user, auth).Handle(
+            new CompleteReceivingSessionCommand { ReceivingSessionId = sessionId }, CancellationToken.None);
+
+        var lot = await context.InventoryLots.SingleAsync(l => l.ClientId == clientId && l.ItemId == itemId);
+        Assert.Equal("LOT-EXP-01", lot.LotNumber);
+
+        var locationSelector = new PutawayLocationSelector(context, NullLogger<PutawayLocationSelector>.Instance);
+        var genHandler = new GeneratePutawayTasksCommandHandler(context, locationSelector, auth);
+        var tasks = await genHandler.Handle(new GeneratePutawayTasksCommand { FacilityId = facilityId }, CancellationToken.None);
+
+        var task = Assert.Single(tasks);
+        Assert.Equal(lot.Id, task.LotId);
+
+        // Confirm putaway with dual-scan and verify lot identity moves to destination
+        var confirmHandler = new ConfirmPutawayTaskCommandHandler(context, user, auth);
+        await confirmHandler.Handle(new ConfirmPutawayTaskCommand
+        {
+            TaskId = task.Id,
+            ScannedLpn = "NLC-LPN",
+            ScannedLocationBarcode = "NLC-BIN"
+        }, CancellationToken.None);
+
+        var destStock = await context.StockOnHand.SingleAsync(s => s.LocationId == binId);
+        Assert.Equal(lot.Id, destStock.LotId);
+        Assert.Equal(7m, destStock.QtyAvailable);
+    }
 }
