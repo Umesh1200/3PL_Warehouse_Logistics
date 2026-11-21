@@ -558,4 +558,265 @@ describe('Phase 7.3: Receiving, Directed Putaway & Inventory Ledger Integration 
     // Verify X-Facility-Id header was sent
     expect(facilityHeaderCaptured).toBe(mockFacility.id);
   });
+
+  it('verifies receiving intake workstation ergonomics, hardware wedge scanner single-flight guard, and focus restoration', async () => {
+    const mockSession = {
+      id: 'session-rcv-wedge',
+      facilityId: mockFacility.id,
+      facilityCode: 'FAC-ORD1',
+      dockDoorId: 'door-1',
+      doorNumber: 'DOOR-02',
+      yardVisitId: 'yv-2',
+      visitNumber: 'YV-02',
+      trailerNumber: 'TR-202',
+      clientId: 'client-1',
+      clientName: 'Apex Retail',
+      asnId: 'asn-2',
+      asnNumber: 'ASN-202',
+      sessionNumber: 'RCV-FAC-ORD1-20261119-0002',
+      status: ReceivingStatus.InProgress,
+      startedAtUtc: '2026-11-19T10:00:00Z',
+      completedAtUtc: null,
+      receivedByUserId: 'usr-wh-lead-1',
+      isBlindReceiving: false,
+      requiresSupervisorApproval: false,
+      isSupervisorApproved: false,
+      version: 1,
+      lines: [],
+      discrepancies: [],
+    };
+
+    let lineScanCallCount = 0;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+
+      if (url.endsWith('/api/v1/auth/me')) {
+        return { ok: true, status: 200, json: async () => mockUserProfile } as Response;
+      }
+      if (url.includes('/api/v1/facilities')) {
+        return { ok: true, status: 200, json: async () => [mockFacility] } as Response;
+      }
+      if (url.includes('/api/v1/receiving/sessions/session-rcv-wedge/lines')) {
+        lineScanCallCount++;
+        // Simulate network latency to test single-flight / in-flight protection
+        await new Promise((r) => setTimeout(r, 80));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            id: 'line-wedge-1',
+            receivingSessionId: 'session-rcv-wedge',
+            itemId: 'item-wedge-99',
+            sku: 'SKU-WEDGE-99',
+            itemDescription: 'Hardware Wedge Scanner SKU',
+            lpn: 'LPN-WEDGE-01',
+            quantityReceived: 5,
+            quantityExpected: 5,
+            lotNumber: 'LOT-WEDGE',
+            condition: ReceiptConditionStatus.Sound,
+            stagingLocationId: 'loc-stg-1',
+            stagingLocationCode: 'STAGING-01',
+            scannedAtUtc: new Date().toISOString(),
+            version: 1,
+          }),
+        } as Response;
+      }
+      if (url.includes('/api/v1/receiving/sessions/session-rcv-wedge')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ...mockSession,
+            lines: lineScanCallCount > 0 ? [
+              {
+                id: 'line-wedge-1',
+                receivingSessionId: 'session-rcv-wedge',
+                itemId: 'item-wedge-99',
+                sku: 'SKU-WEDGE-99',
+                itemDescription: 'Hardware Wedge Scanner SKU',
+                lpn: 'LPN-WEDGE-01',
+                quantityReceived: 5,
+                quantityExpected: 5,
+                lotNumber: 'LOT-WEDGE',
+                condition: ReceiptConditionStatus.Sound,
+                stagingLocationId: 'loc-stg-1',
+                stagingLocationCode: 'STAGING-01',
+                scannedAtUtc: new Date().toISOString(),
+                version: 1,
+              }
+            ] : [],
+          }),
+        } as Response;
+      }
+      if (url.includes('/api/v1/receiving/sessions')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [mockSession],
+            totalCount: 1,
+            pageNumber: 1,
+            pageSize: 10,
+          }),
+        } as Response;
+      }
+      return { ok: false, status: 404 } as Response;
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    setupProviders(<ReceivingPage />, '/app/inbound');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('open-session-session-rcv-wedge')).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId('open-session-session-rcv-wedge'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('line-scanner-card')).toBeDefined();
+    });
+
+    const itemInput = screen.getByTestId('scan-item-id-input') as HTMLInputElement;
+    const lpnInput = screen.getByTestId('scan-lpn-input') as HTMLInputElement;
+
+    // Verify barcode input classes (>=52px height, monospace readable scanner text)
+    expect(itemInput.className).toContain('scan-barcode-input');
+    expect(lpnInput.className).toContain('scan-barcode-input');
+
+    // Fill form
+    fireEvent.change(itemInput, { target: { value: 'item-wedge-99' } });
+    fireEvent.change(screen.getByTestId('scan-qty-input'), { target: { value: '5' } });
+    fireEvent.change(lpnInput, { target: { value: 'LPN-WEDGE-01' } });
+
+    const submitBtn = screen.getByTestId('submit-line-btn');
+
+    // Simulate rapid hardware scanner double Enter / double submission
+    fireEvent.click(submitBtn);
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(lineScanCallCount).toBe(1); // Protected by inFlightScanRef single-flight guard
+      expect(screen.getByText('SKU-WEDGE-99')).toBeDefined();
+    });
+
+    // Verify focus restoration after scan
+    await waitFor(() => {
+      expect(document.activeElement).toBe(itemInput);
+    });
+  });
+
+  it('verifies RF directed putaway two-step guidance, device vibration feedback, and duplicate confirmation prevention', async () => {
+    const mockPutawayTask = {
+      id: 'ptw-step-1',
+      facilityId: mockFacility.id,
+      facilityCode: 'FAC-ORD1',
+      receiptLineId: 'line-step-1',
+      lpnCode: 'LPN-DUAL-01',
+      sku: 'SKU-DUAL-55',
+      itemDescription: 'Dual-Scan Ergonomics Item',
+      quantity: 20,
+      sourceLocationCode: 'STAGE-DOCK-1',
+      sourceLocationBarcode: 'LOC-STAGE-DOCK-1',
+      suggestedLocationCode: 'RACK-BIN-99',
+      suggestedLocationBarcode: 'LOC-RACK-BIN-99',
+      status: PutawayTaskStatus.Pending,
+      priority: PutawayPriority.High,
+      createdAtUtc: new Date().toISOString(),
+      assignedUserId: null,
+      actualLocationCode: null,
+      completedAtUtc: null,
+      version: 1,
+    };
+
+    let confirmTaskCalls = 0;
+    const vibrateSpy = vi.fn();
+    // Stub navigator.vibrate
+    Object.defineProperty(navigator, 'vibrate', {
+      value: vibrateSpy,
+      configurable: true,
+      writable: true,
+    });
+
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+
+      if (url.endsWith('/api/v1/auth/me')) {
+        return { ok: true, status: 200, json: async () => mockUserProfile } as Response;
+      }
+      if (url.includes('/api/v1/facilities')) {
+        return { ok: true, status: 200, json: async () => [mockFacility] } as Response;
+      }
+      if (url.includes('/api/v1/putaway/tasks/next')) {
+        return { ok: true, status: 200, json: async () => mockPutawayTask } as Response;
+      }
+      if (url.includes('/api/v1/putaway/tasks/ptw-step-1/confirm')) {
+        confirmTaskCalls++;
+        await new Promise((r) => setTimeout(r, 80));
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            ...mockPutawayTask,
+            actualLocationCode: 'RACK-BIN-99',
+            status: PutawayTaskStatus.Completed,
+          }),
+        } as Response;
+      }
+      if (url.includes('/api/v1/putaway/tasks')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [mockPutawayTask],
+            totalCount: 1,
+            pageNumber: 1,
+            pageSize: 10,
+          }),
+        } as Response;
+      }
+      return { ok: false, status: 404 } as Response;
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    setupProviders(<PutawayPage />, '/app/inbound/putaway');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('tab-rf')).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId('tab-rf'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('rf-task-card')).toBeDefined();
+      expect(screen.getByText('SKU-DUAL-55')).toBeDefined();
+    });
+
+    // Verify 2-step scanning guidance labels
+    expect(screen.getByText('Step 1')).toBeDefined();
+    expect(screen.getByText(/Scan Container LPN Barcode \*/i)).toBeDefined();
+    expect(screen.getByText('Step 2')).toBeDefined();
+    expect(screen.getByText(/Scan Destination Bin Tag Barcode \*/i)).toBeDefined();
+
+    // Verify inputs have scan-input styling
+    const lpnInput = screen.getByTestId('input-scanned-lpn') as HTMLInputElement;
+    const binInput = screen.getByTestId('input-scanned-bin') as HTMLInputElement;
+    expect(lpnInput.className).toContain('scan-input');
+    expect(binInput.className).toContain('scan-input');
+
+    // Fill inputs
+    fireEvent.change(lpnInput, { target: { value: 'LPN-DUAL-01' } });
+    fireEvent.change(binInput, { target: { value: 'LOC-RACK-BIN-99' } });
+
+    const confirmBtn = screen.getByTestId('confirm-putaway-btn');
+
+    // Simulate rapid double click to test duplicate submission guard
+    fireEvent.click(confirmBtn);
+    fireEvent.click(confirmBtn);
+
+    await waitFor(() => {
+      expect(confirmTaskCalls).toBe(1); // Single-flight ref prevented duplicate call
+      expect(vibrateSpy).toHaveBeenCalledWith([100, 50, 100]); // Device vibration feedback verified
+      expect(screen.getByText(/Putaway confirmed!/i)).toBeDefined();
+    });
+  });
 });

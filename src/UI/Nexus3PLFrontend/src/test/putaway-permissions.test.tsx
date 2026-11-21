@@ -352,7 +352,12 @@ describe('Directed Putaway & Control Tower RF Permission Matrix Tests', () => {
       // "Generate Directed Tasks" button IS rendered for management
       await waitFor(() => {
         expect(screen.getByTestId('generate-tasks-btn')).toBeDefined();
+        // Dedicated management workstation is rendered (Requirement D)
+        expect(screen.getByTestId('putaway-manage-workstation')).toBeDefined();
       });
+
+      // Does NOT show misleading "Authorization Required" error card
+      expect(screen.queryByText(/Directed Putaway Authorization Required/i)).toBeNull();
 
       // tab-rf is NOT rendered because user lacks execution permission
       expect(screen.queryByTestId('tab-rf')).toBeNull();
