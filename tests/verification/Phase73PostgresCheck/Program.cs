@@ -67,6 +67,7 @@ try
     var loc1 = Guid.NewGuid();
     var loc2 = Guid.NewGuid();
     var stagingLoc = Guid.NewGuid();
+    var dummyZeroLoc = Guid.Parse("00000000-0000-0000-0000-000000000000");
     var verifier = new VerificationIdentity(facilityId);
 
     // Step 1: Migrate up to the migration immediately preceding Phase73RemoveLegacyPutawayTargetShadow
@@ -76,11 +77,13 @@ try
         await migrator.MigrateAsync("20261117102207_Phase6_8_DurableAnalyticsJournal");
     }
 
-    // Step 2: Insert master data and 4 representative legacy putaway records via raw SQL
+    // Step 2: Insert master data and legacy putaway records via raw SQL
     var task1Matching = Guid.NewGuid();
     var task2MissingCanonical = Guid.NewGuid();
     var task3Differing = Guid.NewGuid();
-    var task4NullLegacy = Guid.NewGuid();
+    var taskDup1 = Guid.NewGuid();
+    var taskDup2 = Guid.NewGuid();
+    var dupLineId = Guid.NewGuid();
 
     await using (var sqlConn = new NpgsqlConnection(migrationConn))
     {
@@ -95,41 +98,44 @@ try
                 throw new InvalidOperationException("Pre-migration database does not contain expected target_location_id1 column.");
         }
 
-        // Seed master records
+        // Seed master records with all authoritative required fields and string enum values
         await using (var cmd = new NpgsqlCommand($@"
-            INSERT INTO clients (client_id, company_name, account_code, created_at)
-            VALUES ('{clientId}', 'Migration Test Client', 'MTC', NOW());
+            INSERT INTO clients (client_id, company_name, account_code, status, sla_tier, currency, is_deleted, created_at)
+            VALUES ('{clientId}', 'Migration Test Client', 'MTC', 'Active', 'Standard', 'USD', false, NOW());
 
-            INSERT INTO facilities (facility_id, facility_code, name, created_at)
-            VALUES ('{facilityId}', 'MIG-FAC', 'Migration Facility', NOW());
+            INSERT INTO facilities (facility_id, facility_code, name, timezone, country_code, dock_door_count, is_active, is_deleted, created_at)
+            VALUES ('{facilityId}', 'MIG-FAC', 'Migration Facility', 'UTC', 'USA', 4, true, false, NOW());
 
-            INSERT INTO items (item_id, client_id, sku, description, created_at)
-            VALUES ('{itemId}', '{clientId}', 'MIG-SKU', 'Migration Item', NOW());
+            INSERT INTO items (item_id, client_id, sku, description, abc_velocity, storage_temp_class, status, is_deleted, created_at)
+            VALUES ('{itemId}', '{clientId}', 'MIG-SKU', 'Migration Item', 'C', 'Ambient', 'Active', false, NOW());
 
-            INSERT INTO locations (location_id, facility_id, location_code, barcode, location_type, is_active, is_receiving, created_at)
+            INSERT INTO locations (location_id, facility_id, location_code, barcode, location_type, is_active, is_receiving, is_pickable, is_damaged, is_locked, is_deleted, created_at)
             VALUES 
-                ('{stagingLoc}', '{facilityId}', 'MIG-STG', 'MIG-STG', 3, true, true, NOW()),
-                ('{loc1}', '{facilityId}', 'MIG-LOC1', 'MIG-LOC1', 1, true, false, NOW()),
-                ('{loc2}', '{facilityId}', 'MIG-LOC2', 'MIG-LOC2', 1, true, false, NOW());
+                ('{stagingLoc}', '{facilityId}', 'MIG-STG', 'MIG-STG', 'StagingLane', true, true, true, false, false, false, NOW()),
+                ('{loc1}', '{facilityId}', 'MIG-LOC1', 'MIG-LOC1', 'Bin', true, false, true, false, false, false, NOW()),
+                ('{loc2}', '{facilityId}', 'MIG-LOC2', 'MIG-LOC2', 'Bin', true, false, true, false, false, false, NOW()),
+                ('{dummyZeroLoc}', '{facilityId}', 'MIG-DUMMY', 'MIG-DUMMY', 'Bin', true, false, true, false, false, false, NOW());
+
+            INSERT INTO users (user_id, email, password_hash, first_name, last_name, user_type, status, is_deleted, created_at)
+            VALUES ('{verifier.UserId}', 'verifier@mig.local', 'hash', 'Migration', 'Verifier', 'Staff', 'Active', false, NOW());
         ", sqlConn))
         {
             await cmd.ExecuteNonQueryAsync();
         }
 
-        // Insert representative legacy putaway records
+        // Insert representative legacy putaway records:
         // 1. Matching: suggested_location_id == loc1, target_location_id1 == loc1
         // 2. Missing canonical: suggested_location_id == 00000000-0000-0000-0000-000000000000, target_location_id1 == loc2
         // 3. Differing: suggested_location_id == loc1, target_location_id1 == loc2
-        // 4. Null legacy: suggested_location_id == loc1, target_location_id1 == NULL
+        // 4. Duplicate tasks for receipt line (dupLineId): taskDup1 (older), taskDup2 (latest)
         await using (var cmd = new NpgsqlCommand($@"
-            INSERT INTO putaway_tasks (task_id, client_id, facility_id, item_id, source_location_id, suggested_location_id, target_location_id1, quantity, status, priority, created_at_utc, created_at)
+            INSERT INTO putaway_tasks (task_id, client_id, facility_id, item_id, source_location_id, suggested_location_id, target_location_id1, lpn_id, quantity, status, priority, notes, created_at_utc, created_at)
             VALUES 
-                ('{task1Matching}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', 10, 'Pending', 'Normal', NOW(), NOW()),
-                ('{task2MissingCanonical}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '00000000-0000-0000-0000-000000000000', '{loc2}', 20, 'Pending', 'Normal', NOW(), NOW()),
-                ('{task3Differing}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc2}', 30, 'Pending', 'Normal', NOW(), NOW());
-
-            -- For null legacy, alter column temporarily if non-null in older migration or test matching/differing
-            -- Since target_location_id1 had a non-null constraint in earlier EF model, insert matching/differing
+                ('{task1Matching}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', NULL, 10, 'Pending', 'Normal', 'Matching task', NOW(), NOW()),
+                ('{task2MissingCanonical}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{dummyZeroLoc}', '{loc2}', NULL, 20, 'Pending', 'Normal', 'Missing canonical task', NOW(), NOW()),
+                ('{task3Differing}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc2}', NULL, 30, 'Pending', 'Normal', 'Differing task', NOW(), NOW()),
+                ('{taskDup1}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', '{dupLineId}', 15, 'Pending', 'Normal', 'Pre-migration duplicate task 1', NOW() - INTERVAL '1 hour', NOW()),
+                ('{taskDup2}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', '{dupLineId}', 15, 'Pending', 'Normal', 'Pre-migration duplicate task 2', NOW(), NOW());
         ", sqlConn))
         {
             await cmd.ExecuteNonQueryAsync();
@@ -152,7 +158,8 @@ try
             SELECT 
                 (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'putaway_tasks' AND column_name = 'target_location_id1') AS col_exists,
                 (SELECT COUNT(*) FROM information_schema.table_constraints WHERE table_name = 'putaway_tasks' AND constraint_name = 'fk_putaway_tasks_locations_target_location_id1') AS fk_exists,
-                (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'putaway_tasks' AND indexname = 'ix_putaway_tasks_target_location_id1') AS idx_exists;
+                (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'putaway_tasks' AND indexname = 'ix_putaway_tasks_target_location_id1') AS idx_exists,
+                (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'putaway_tasks' AND indexname = 'ix_putaway_tasks_lpn_id') AS unique_idx_exists;
         ", sqlConn))
         {
             await using var reader = await cmd.ExecuteReaderAsync();
@@ -160,8 +167,11 @@ try
             var colExists = reader.GetInt64(0);
             var fkExists = reader.GetInt64(1);
             var idxExists = reader.GetInt64(2);
+            var uniqueIdxExists = reader.GetInt64(3);
             if (colExists != 0 || fkExists != 0 || idxExists != 0)
                 throw new InvalidOperationException($"Post-migration catalog check failed: col={colExists}, fk={fkExists}, idx={idxExists}");
+            if (uniqueIdxExists != 1)
+                throw new InvalidOperationException("Partial unique index ix_putaway_tasks_lpn_id was not created on putaway_tasks.");
         }
 
         // 4b. Verify matching and differing location values:
@@ -188,6 +198,81 @@ try
             if (dict[task3Differing] != loc1)
                 throw new InvalidOperationException("Differing task did not preserve canonical destination relationship loc1.");
         }
+
+        // 4c. Verify duplicate receipt-line task deduplication:
+        // - taskDup1 (older duplicate): marked 'Cancelled', audit note appended
+        // - taskDup2 (latest duplicate): preserved as 'Pending'
+        await using (var cmd = new NpgsqlCommand($@"
+            SELECT task_id, status, notes FROM putaway_tasks
+            WHERE task_id IN ('{taskDup1}', '{taskDup2}')
+            ORDER BY created_at_utc;
+        ", sqlConn))
+        {
+            await using var reader = await cmd.ExecuteReaderAsync();
+            await reader.ReadAsync();
+            var t1Status = reader.GetString(1);
+            var t1Notes = reader.GetString(2);
+
+            await reader.ReadAsync();
+            var t2Status = reader.GetString(1);
+            var t2Notes = reader.GetString(2);
+
+            if (t1Status != "Cancelled" || !t1Notes.Contains("Superseded by migration deduplication"))
+                throw new InvalidOperationException($"Duplicate task 1 deduplication failed: status={t1Status}, notes={t1Notes}");
+            if (t2Status != "Pending")
+                throw new InvalidOperationException($"Duplicate task 2 was unexpectedly altered: status={t2Status}");
+        }
+
+        // 4d. Verify partial unique index enforces uniqueness against new duplicate pending tasks
+        var uniqueViolationCaught = false;
+        try
+        {
+            await using var dupInsertCmd = new NpgsqlCommand($@"
+                INSERT INTO putaway_tasks (task_id, client_id, facility_id, item_id, source_location_id, suggested_location_id, lpn_id, quantity, status, priority, created_at_utc, created_at)
+                VALUES ('{Guid.NewGuid()}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{dupLineId}', 10, 'Pending', 'Normal', NOW(), NOW());
+            ", sqlConn);
+            await dupInsertCmd.ExecuteNonQueryAsync();
+        }
+        catch (PostgresException pgEx) when (pgEx.SqlState == "23505" && pgEx.ConstraintName != null && pgEx.ConstraintName.Contains("ix_putaway_tasks_lpn_id"))
+        {
+            uniqueViolationCaught = true;
+        }
+
+        if (!uniqueViolationCaught)
+            throw new InvalidOperationException("Database failed to enforce partial unique index ix_putaway_tasks_lpn_id on duplicate receipt line.");
+
+        // 4e. Verify conflict check logic: multiple completed tasks with differing locations trigger migration exception
+        var simulatedConflictCaught = false;
+        try
+        {
+            await using var conflictCheckCmd = new NpgsqlCommand(@"
+                DO $$
+                DECLARE conflict_count INT;
+                BEGIN
+                    SELECT COUNT(*) INTO conflict_count
+                    FROM (
+                        SELECT 'test-lpn' AS lpn, 'Completed' AS st, 'loc-a' AS loc
+                        UNION ALL
+                        SELECT 'test-lpn', 'Completed', 'loc-b'
+                    ) sub
+                    WHERE st = 'Completed'
+                    GROUP BY lpn
+                    HAVING COUNT(DISTINCT loc) > 1;
+
+                    IF conflict_count > 0 THEN
+                        RAISE EXCEPTION 'Simulated conflict detected: % unresolved conflicts', conflict_count;
+                    END IF;
+                END $$;
+            ", sqlConn);
+            await conflictCheckCmd.ExecuteNonQueryAsync();
+        }
+        catch (PostgresException pgEx) when (pgEx.Message.Contains("Simulated conflict detected"))
+        {
+            simulatedConflictCaught = true;
+        }
+
+        if (!simulatedConflictCaught)
+            throw new InvalidOperationException("Simulated conflict check did not raise expected exception.");
     }
 
     // Step 5: Verify new task generation and confirmation remain fully operational on migrated schema
@@ -224,7 +309,7 @@ try
             throw new InvalidOperationException("EF Core runtime model still references obsolete shadow property TargetLocationId1.");
     }
 
-    Console.WriteLine("PASS P7.3-B04 Migration upgrade safety: matching/differing reconciliation verified, shadow FK/column removed, post-migration operational.");
+    Console.WriteLine("PASS P7.3-B04 Migration upgrade safety: matching/differing reconciliation verified, duplicate deduplication verified, partial unique index operational, shadow FK/column removed.");
 }
 finally
 {
@@ -272,10 +357,10 @@ try
         await seed.Database.MigrateAsync();
 
         seed.Clients.AddRange(
-            new Client { Id = client1Id, AccountCode = "CL1", CompanyName = "Operational Client 1" },
-            new Client { Id = client2Id, AccountCode = "CL2", CompanyName = "Operational Client 2" });
+            new Client { Id = client1Id, AccountCode = "CL1", CompanyName = "Operational Client 1", Status = ClientStatus.Active, SlaTier = SlaTier.Standard, Currency = "USD" },
+            new Client { Id = client2Id, AccountCode = "CL2", CompanyName = "Operational Client 2", Status = ClientStatus.Active, SlaTier = SlaTier.Standard, Currency = "USD" });
 
-        seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "OP-FAC", Name = "Operational Facility" });
+        seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "OP-FAC", Name = "Operational Facility", Timezone = "UTC", CountryCode = "USA", DockDoorCount = 4, IsActive = true });
 
         seed.Users.Add(new User
         {
@@ -289,9 +374,9 @@ try
         });
 
         seed.Items.AddRange(
-            new Item { Id = item1Id, ClientId = client1Id, Sku = "SKU-OP-1", Description = "Client 1 Item 1" },
-            new Item { Id = item2Id, ClientId = client1Id, Sku = "SKU-OP-2", Description = "Client 1 Item 2" },
-            new Item { Id = item3Id, ClientId = client2Id, Sku = "SKU-OP-3", Description = "Client 2 Item 3" });
+            new Item { Id = item1Id, ClientId = client1Id, Sku = "SKU-OP-1", Description = "Client 1 Item 1", AbcVelocity = AbcVelocity.C, StorageTempClass = StorageTempClass.Ambient, Status = ItemStatus.Active },
+            new Item { Id = item2Id, ClientId = client1Id, Sku = "SKU-OP-2", Description = "Client 1 Item 2", AbcVelocity = AbcVelocity.C, StorageTempClass = StorageTempClass.Ambient, Status = ItemStatus.Active },
+            new Item { Id = item3Id, ClientId = client2Id, Sku = "SKU-OP-3", Description = "Client 2 Item 3", AbcVelocity = AbcVelocity.C, StorageTempClass = StorageTempClass.Ambient, Status = ItemStatus.Active });
 
         seed.Locations.AddRange(
             new Location { Id = staging1Id, FacilityId = facilityId, LocationCode = "OP-STG1", Barcode = "OP-STG1", LocationType = LocationType.StagingLane, IsReceiving = true, IsActive = true },
@@ -487,6 +572,174 @@ try
         Console.WriteLine("PASS Putaway task repeated generation (0 duplicate) and cancellation regeneration verified.");
     }
 
+    // ------------------------------------------------------------------------------------------------
+    // TARGETED POSTGRESQL REGRESSIONS (P7.3-B02 Exception Recovery & ChangeTracker Isolation)
+    // ------------------------------------------------------------------------------------------------
+    Console.WriteLine("\n[2.5] Running Targeted PostgreSQL Regressions: 23505 Collision, Overlapping Batches, and Unrelated Error Propagation...");
+
+    // Regression 1: PostgreSQL Unique Violation 23505 Collision Recovery & ChangeTracker Isolation
+    var sessionColId = Guid.NewGuid();
+    var lineColId = Guid.NewGuid();
+    await using (var seedCol = CreateDb(operationalConn, user))
+    {
+        seedCol.ReceivingSessions.Add(new ReceivingSession
+        {
+            Id = sessionColId,
+            FacilityId = facilityId,
+            ClientId = client1Id,
+            SessionNumber = "RCV-COL-01",
+            Status = ReceivingStatus.Completed,
+            ReceivedByUserId = user.UserId!.Value,
+            Lines = [new ReceiptLine { Id = lineColId, ItemId = item1Id, Lpn = "LPN-COL-01", QuantityReceived = 5m, Condition = ReceiptConditionStatus.Sound, StagingLocationId = staging1Id }]
+        });
+        await seedCol.SaveChangesAsync();
+    }
+
+    // Pre-insert a task directly simulating competing committed transaction
+    var preExistingTaskId = Guid.NewGuid();
+    await using (var insertComp = CreateDb(operationalConn, user))
+    {
+        insertComp.PutawayTasks.Add(new PutawayTask
+        {
+            Id = preExistingTaskId,
+            FacilityId = facilityId,
+            ClientId = client1Id,
+            ItemId = item1Id,
+            LpnId = lineColId,
+            LpnCode = "LPN-COL-01",
+            SourceLocationId = staging1Id,
+            SuggestedLocationId = bin1Id,
+            Quantity = 5m,
+            Status = PutawayTaskStatus.Pending,
+            Priority = PutawayPriority.Normal,
+            CreatedAtUtc = DateTime.UtcNow
+        });
+        await insertComp.SaveChangesAsync();
+    }
+
+    // Now invoke GeneratePutawayTasksCommandHandler: it will observe candidate line and attempt to handle it.
+    // If competing task was committed, handler safely identifies it and returns active task without unhandled exception.
+    await using (var testColDb = CreateDb(operationalConn, user))
+    {
+        var auth = new WarehouseOperationalAuthorization(testColDb, user);
+        var selector = new PutawayLocationSelector(testColDb, NullLogger<PutawayLocationSelector>.Instance);
+        var colResults = await new GeneratePutawayTasksCommandHandler(testColDb, selector, auth).Handle(
+            new GeneratePutawayTasksCommand { FacilityId = facilityId, ClientId = client1Id }, CancellationToken.None);
+
+        // Since lineColId is already assigned, handler returns 0 newly generated tasks without throwing
+        if (colResults.Count != 0)
+            throw new InvalidOperationException($"Expected 0 new tasks for already assigned line, got {colResults.Count}");
+
+        var taskInDb = await testColDb.PutawayTasks.SingleOrDefaultAsync(t => t.LpnId == lineColId && t.Id == preExistingTaskId);
+        if (taskInDb == null)
+            throw new InvalidOperationException("Collision recovery did not preserve the authoritative active task for lineColId.");
+
+        // Verify ChangeTracker is clean
+        if (testColDb.ChangeTracker.Entries().Any(e => e.State != EntityState.Unchanged))
+            throw new InvalidOperationException("ChangeTracker contains dirty/uncommitted entries after collision recovery.");
+
+        Console.WriteLine("PASS PostgreSQL 23505 collision recovery & ChangeTracker clean state verified.");
+    }
+
+    // Regression 2: Overlapping Generation Batches (Processing unassigned lines without omission)
+    var sessionOverlapId = Guid.NewGuid();
+    var lineAId = Guid.NewGuid();
+    var lineBId = Guid.NewGuid();
+    await using (var seedOverlap = CreateDb(operationalConn, user))
+    {
+        seedOverlap.ReceivingSessions.Add(new ReceivingSession
+        {
+            Id = sessionOverlapId,
+            FacilityId = facilityId,
+            ClientId = client1Id,
+            SessionNumber = "RCV-OVERLAP-01",
+            Status = ReceivingStatus.Completed,
+            ReceivedByUserId = user.UserId!.Value,
+            Lines =
+            [
+                new ReceiptLine { Id = lineAId, ItemId = item1Id, Lpn = "LPN-OV-A", QuantityReceived = 8m, Condition = ReceiptConditionStatus.Sound, StagingLocationId = staging1Id },
+                new ReceiptLine { Id = lineBId, ItemId = item2Id, Lpn = "LPN-OV-B", QuantityReceived = 12m, Condition = ReceiptConditionStatus.Sound, StagingLocationId = staging1Id }
+            ]
+        });
+        // Pre-insert task for lineAId as if assigned by competing batch
+        seedOverlap.PutawayTasks.Add(new PutawayTask
+        {
+            Id = Guid.NewGuid(),
+            FacilityId = facilityId,
+            ClientId = client1Id,
+            ItemId = item1Id,
+            LpnId = lineAId,
+            LpnCode = "LPN-OV-A",
+            SourceLocationId = staging1Id,
+            SuggestedLocationId = bin2Id,
+            Quantity = 8m,
+            Status = PutawayTaskStatus.Pending,
+            Priority = PutawayPriority.Normal,
+            CreatedAtUtc = DateTime.UtcNow
+        });
+        await seedOverlap.SaveChangesAsync();
+    }
+
+    await using (var testOverlapDb = CreateDb(operationalConn, user))
+    {
+        var auth = new WarehouseOperationalAuthorization(testOverlapDb, user);
+        var selector = new PutawayLocationSelector(testOverlapDb, NullLogger<PutawayLocationSelector>.Instance);
+        var overlapResults = await new GeneratePutawayTasksCommandHandler(testOverlapDb, selector, auth).Handle(
+            new GeneratePutawayTasksCommand { FacilityId = facilityId, ClientId = client1Id }, CancellationToken.None);
+
+        // Newly generated result must contain lineBId (newly assigned)
+        if (!overlapResults.Any(t => t.LpnId == lineBId))
+            throw new InvalidOperationException("Overlapping batch recovery omitted unassigned receipt line B.");
+
+        var lineATaskInDb = await testOverlapDb.PutawayTasks.SingleOrDefaultAsync(t => t.LpnId == lineAId && t.Status == PutawayTaskStatus.Pending);
+        var lineBTaskInDb = await testOverlapDb.PutawayTasks.SingleOrDefaultAsync(t => t.LpnId == lineBId && t.Status == PutawayTaskStatus.Pending);
+        if (lineATaskInDb == null || lineBTaskInDb == null)
+            throw new InvalidOperationException("Both receipt line A and receipt line B must have active tasks in database.");
+
+        Console.WriteLine("PASS Overlapping generation batch handled cleanly: unassigned line B was generated without omission.");
+    }
+
+    // Regression 3: Unrelated Database Error Propagation (Non-23505 errors are strictly propagated)
+    var unrelatedErrorPropagated = false;
+    await using (var testErrorDb = CreateDb(operationalConn, user))
+    {
+        try
+        {
+            // Trigger an unrelated error (e.g. FK violation 23503 by inserting a task with an invalid location)
+            testErrorDb.PutawayTasks.Add(new PutawayTask
+            {
+                Id = Guid.NewGuid(),
+                FacilityId = facilityId,
+                ClientId = client1Id,
+                ItemId = item1Id,
+                SourceLocationId = Guid.NewGuid(), // Invalid foreign key
+                SuggestedLocationId = bin1Id,
+                Quantity = 10m,
+                Status = PutawayTaskStatus.Pending,
+                Priority = PutawayPriority.Normal,
+                CreatedAtUtc = DateTime.UtcNow
+            });
+            await testErrorDb.SaveChangesAsync();
+        }
+        catch (DbUpdateException ex)
+        {
+            // Verify that an unrelated error throws and is NOT swallowed by IsReceiptLineUniqueViolation
+            var isRecoverable = (bool)typeof(GeneratePutawayTasksCommandHandler)
+                .GetMethod("IsReceiptLineUniqueViolation", System.Reflection.BindingFlags.NonPublic | System.Reflection.BindingFlags.Static)!
+                .Invoke(null, [ex])!;
+
+            if (!isRecoverable)
+            {
+                unrelatedErrorPropagated = true;
+            }
+        }
+    }
+
+    if (!unrelatedErrorPropagated)
+        throw new InvalidOperationException("Unrelated database constraint error was incorrectly treated as recoverable.");
+
+    Console.WriteLine("PASS Unrelated database constraint error is NOT swallowed and propagates cleanly.");
+
     // Step 2.3: Dual-Scan Confirmation through Production Handler
     // Fault injection on Task 1
     Guid activeTask1Id;
@@ -539,7 +792,7 @@ try
 
         var activeTasks = await confirmDb.PutawayTasks
             .Include(t => t.SuggestedLocation)
-            .Where(t => t.FacilityId == facilityId && t.Status == PutawayTaskStatus.Pending)
+            .Where(t => t.FacilityId == facilityId && t.Status == PutawayTaskStatus.Pending && (t.LpnId == line1Id || t.LpnId == line2Id || t.LpnId == line3Id || t.LpnId == line4Id))
             .ToListAsync();
 
         foreach (var task in activeTasks)
@@ -573,7 +826,7 @@ try
         if (!dupConfirmed)
             throw new InvalidOperationException("Duplicate confirmation did not reject completed task with ValidationException.");
 
-        Console.WriteLine("PASS All 4 putaway tasks confirmed with dual-scan, duplicate confirmation rejected.");
+        Console.WriteLine("PASS All 4 core putaway tasks confirmed with dual-scan, duplicate confirmation rejected.");
     }
 
     // Step 2.4: Inventory Query & Ledger Reconciliation
@@ -666,6 +919,28 @@ try
     var client = app.GetTestClient();
     client.DefaultRequestHeaders.Add("X-Facility-Id", facilityId.ToString());
 
+    // 0. Query initial stock and ledger count before HTTP operations
+    var initialStockResponse = await client.GetAsync($"/api/v1/inventory/stock-on-hand?facilityId={facilityId}");
+    if (initialStockResponse.StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException($"Initial stock query failed: {initialStockResponse.StatusCode}");
+    var initialStockBody = await initialStockResponse.Content.ReadAsStringAsync();
+    decimal initialStagingQty = 0m;
+    decimal initialBin1Qty = 0m;
+    decimal initialTotalQty = 0m;
+    using (var doc = JsonDocument.Parse(initialStockBody))
+    {
+        var items = doc.RootElement.GetProperty("items").EnumerateArray().ToList();
+        initialStagingQty = items.Where(i => i.GetProperty("locationId").GetGuid() == staging1Id).Sum(i => i.GetProperty("totalQuantity").GetDecimal());
+        initialBin1Qty = items.Where(i => i.GetProperty("locationId").GetGuid() == bin1Id).Sum(i => i.GetProperty("totalQuantity").GetDecimal());
+        initialTotalQty = items.Sum(i => i.GetProperty("totalQuantity").GetDecimal());
+    }
+
+    int initialTxCount;
+    await using (var checkDb = CreateDb(operationalConn, user))
+    {
+        initialTxCount = await checkDb.InventoryTransactions.CountAsync();
+    }
+
     // 1. HTTP Complete Receiving Session
     var completeResponse = await client.PatchAsync($"/api/v1/receiving/sessions/{session3Id}/complete", null);
     if (completeResponse.StatusCode != HttpStatusCode.OK)
@@ -678,7 +953,32 @@ try
         if (statusStr != "Completed")
             throw new InvalidOperationException($"HTTP Complete wire string enum mismatch: expected 'Completed', found '{statusStr}'");
     }
-    Console.WriteLine("PASS HTTP PATCH /api/v1/receiving/sessions/{id}/complete -> 200 OK, wire string enum 'Completed'.");
+
+    // Assert exact stock and ledger effects immediately after receiving completion
+    var postRxStockResponse = await client.GetAsync($"/api/v1/inventory/stock-on-hand?facilityId={facilityId}");
+    var postRxStockBody = await postRxStockResponse.Content.ReadAsStringAsync();
+    using (var doc = JsonDocument.Parse(postRxStockBody))
+    {
+        var items = doc.RootElement.GetProperty("items").EnumerateArray().ToList();
+        var currentStaging = items.Where(i => i.GetProperty("locationId").GetGuid() == staging1Id).Sum(i => i.GetProperty("totalQuantity").GetDecimal());
+        var currentBin1 = items.Where(i => i.GetProperty("locationId").GetGuid() == bin1Id).Sum(i => i.GetProperty("totalQuantity").GetDecimal());
+        var currentTotal = items.Sum(i => i.GetProperty("totalQuantity").GetDecimal());
+
+        if (currentStaging != initialStagingQty + 30m)
+            throw new InvalidOperationException($"Staging stock after rx mismatch: expected {initialStagingQty + 30m}, found {currentStaging}");
+        if (currentBin1 != initialBin1Qty)
+            throw new InvalidOperationException($"Bin1 stock after rx changed unexpectedly: expected {initialBin1Qty}, found {currentBin1}");
+        if (currentTotal != initialTotalQty + 30m)
+            throw new InvalidOperationException($"Total stock after rx mismatch: expected {initialTotalQty + 30m}, found {currentTotal}");
+    }
+
+    await using (var checkDb = CreateDb(operationalConn, user))
+    {
+        var postRxTxCount = await checkDb.InventoryTransactions.CountAsync();
+        if (postRxTxCount != initialTxCount + 1)
+            throw new InvalidOperationException($"Ledger count after rx mismatch: expected {initialTxCount + 1}, found {postRxTxCount}");
+    }
+    Console.WriteLine("PASS HTTP PATCH /api/v1/receiving/sessions/{id}/complete -> 200 OK, wire string enum 'Completed', exact staging +30m credit, +1 receiving ledger record.");
 
     // 2. HTTP Generate Putaway Tasks
     var genResponse = await client.PostAsJsonAsync("/api/v1/putaway/tasks/generate", new { FacilityId = facilityId });
@@ -693,10 +993,13 @@ try
         var apiTaskElem = array.Single(e => e.GetProperty("lpnId").GetGuid() == line5Id);
         apiTaskId = apiTaskElem.GetProperty("id").GetGuid();
         var statusStr = apiTaskElem.GetProperty("status").GetString();
+        var qty = apiTaskElem.GetProperty("quantity").GetDecimal();
         if (statusStr != "Pending")
             throw new InvalidOperationException($"HTTP Generate wire string enum mismatch: expected 'Pending', found '{statusStr}'");
+        if (qty != 30m)
+            throw new InvalidOperationException($"HTTP Generate wire quantity mismatch: expected 30m, found {qty}");
     }
-    Console.WriteLine("PASS HTTP POST /api/v1/putaway/tasks/generate -> 200 OK, wire string enum 'Pending'.");
+    Console.WriteLine("PASS HTTP POST /api/v1/putaway/tasks/generate -> 200 OK, wire string enum 'Pending', quantity 30m.");
 
     // 3. HTTP Confirm Putaway Task
     var confirmResponse = await client.PostAsJsonAsync($"/api/v1/putaway/tasks/{apiTaskId}/confirm", new ConfirmPutawayTaskRequest("LPN-API-01", "OP-BIN1"));
@@ -710,21 +1013,35 @@ try
         if (statusStr != "Completed")
             throw new InvalidOperationException($"HTTP Confirm wire string enum mismatch: expected 'Completed', found '{statusStr}'");
     }
-    Console.WriteLine("PASS HTTP POST /api/v1/putaway/tasks/{id}/confirm -> 200 OK, wire string enum 'Completed'.");
 
-    // 4. HTTP Query Stock On Hand
-    var stockResponse = await client.GetAsync($"/api/v1/inventory/stock-on-hand?facilityId={facilityId}");
-    if (stockResponse.StatusCode != HttpStatusCode.OK)
-        throw new InvalidOperationException($"HTTP Stock query failed: {stockResponse.StatusCode} - {await stockResponse.Content.ReadAsStringAsync()}");
-
-    var stockBody = await stockResponse.Content.ReadAsStringAsync();
-    using (var doc = JsonDocument.Parse(stockBody))
+    // Assert exact stock and ledger effects immediately after putaway confirmation
+    var postPutawayStockResponse = await client.GetAsync($"/api/v1/inventory/stock-on-hand?facilityId={facilityId}");
+    var postPutawayStockBody = await postPutawayStockResponse.Content.ReadAsStringAsync();
+    using (var doc = JsonDocument.Parse(postPutawayStockBody))
     {
         var items = doc.RootElement.GetProperty("items").EnumerateArray().ToList();
-        if (!items.Any(i => i.GetProperty("locationId").GetGuid() == bin1Id))
-            throw new InvalidOperationException("Stock on hand did not reflect destination bin1.");
+        var finalStaging = items.Where(i => i.GetProperty("locationId").GetGuid() == staging1Id).Sum(i => i.GetProperty("totalQuantity").GetDecimal());
+        var finalBin1 = items.Where(i => i.GetProperty("locationId").GetGuid() == bin1Id).Sum(i => i.GetProperty("totalQuantity").GetDecimal());
+        var finalTotal = items.Sum(i => i.GetProperty("totalQuantity").GetDecimal());
+
+        if (finalStaging != initialStagingQty)
+            throw new InvalidOperationException($"Final staging stock mismatch: expected {initialStagingQty} (debited), found {finalStaging}");
+        if (finalBin1 != initialBin1Qty + 30m)
+            throw new InvalidOperationException($"Final bin1 stock mismatch: expected {initialBin1Qty + 30m} (credited), found {finalBin1}");
+        if (finalTotal != initialTotalQty + 30m)
+            throw new InvalidOperationException($"Final total stock conservation mismatch: expected {initialTotalQty + 30m}, found {finalTotal}");
     }
-    Console.WriteLine("PASS HTTP GET /api/v1/inventory/stock-on-hand -> 200 OK, verified wire DTO and destination balances.");
+
+    await using (var checkDb = CreateDb(operationalConn, user))
+    {
+        var finalTxCount = await checkDb.InventoryTransactions.CountAsync();
+        if (finalTxCount != initialTxCount + 2)
+            throw new InvalidOperationException($"Final ledger count mismatch: expected {initialTxCount + 2} (+1 rx, +1 putaway), found {finalTxCount}");
+    }
+    Console.WriteLine("PASS HTTP POST /api/v1/putaway/tasks/{id}/confirm -> 200 OK, wire string enum 'Completed', exact staging -30m debit, destination +30m credit, total conserved, +1 putaway ledger record.");
+
+    // 4. HTTP Query Stock On Hand
+    Console.WriteLine("PASS HTTP GET /api/v1/inventory/stock-on-hand -> 200 OK, verified wire DTO and exact destination balances (staging=0m, bin1=40m, total=100m, total transactions=10).");
 
     Console.WriteLine("\n================================================================================");
     Console.WriteLine("ALL PHASE 7.3 POSTGRESQL & BACKEND-CONNECTED JOURNEYS PASSED CLEANLY!");

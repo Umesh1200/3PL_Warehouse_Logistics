@@ -294,6 +294,8 @@ test.describe('Phase 7.3: Real Browser E2E Receiving, Directed Putaway & Stock L
     // Verify success feedback appears
     await expect(page.getByTestId('feedback-banner')).toBeVisible();
     await expect(page.getByText(/finalized. Stock-on-hand ledger updated in staging/i)).toBeVisible();
+    const artifactDir = process.env.ARTIFACT_DIR || 'C:/Users/DELL/.gemini/antigravity/brain/3ef5018b-e9e3-4374-9eca-184b02ff2c4e';
+    await page.screenshot({ path: `${artifactDir}/receiving-completed.png`, fullPage: true });
 
     // 5. Navigate to Directed Putaway
     const putawayNavLink = page.getByRole('link', { name: /Directed Putaway/i });
@@ -329,6 +331,7 @@ test.describe('Phase 7.3: Real Browser E2E Receiving, Directed Putaway & Stock L
     // Success notification should be displayed
     await expect(page.getByTestId('putaway-feedback')).toBeVisible();
     await expect(page.getByText(/Putaway confirmed!/i)).toBeVisible();
+    await page.screenshot({ path: `${artifactDir}/putaway-confirmed.png`, fullPage: true });
 
     // 7. Navigate to Stock on Hand Ledger
     const stockNavLink = page.getByRole('link', { name: /Inventory Balances/i });
@@ -340,5 +343,6 @@ test.describe('Phase 7.3: Real Browser E2E Receiving, Directed Putaway & Stock L
     await expect(page.getByText('SKU-E2E-AUDIO')).toBeVisible();
     await expect(page.getByTestId('metric-total-skus')).toHaveText('1');
     await expect(page.getByText('Staging', { exact: true })).toBeVisible();
+    await page.screenshot({ path: `${artifactDir}/inventory-reconciled.png`, fullPage: true });
   });
 });

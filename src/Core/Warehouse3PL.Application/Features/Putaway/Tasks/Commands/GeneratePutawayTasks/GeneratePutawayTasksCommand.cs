@@ -46,20 +46,29 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
         var scope = await _operationalAuth.ResolveQueryScopeAsync(request.ClientId, request.FacilityId, cancellationToken);
         var effectiveFacilityId = scope.FacilityId ?? throw new ValidationException(nameof(request.FacilityId), "A specific authorized facility is required.");
 
+        return await GenerateTasksInternalAsync(effectiveFacilityId, scope.ClientId, cancellationToken, retryCount: 0);
+    }
+
+    private async Task<List<PutawayTaskDto>> GenerateTasksInternalAsync(
+        Guid effectiveFacilityId,
+        Guid? effectiveClientId,
+        CancellationToken cancellationToken,
+        int retryCount)
+    {
         // 1. Find all sound receipt lines that belong to COMPLETED receiving sessions and reside in staging
         var query = _context.ReceiptLines
             .Include(l => l.ReceivingSession)
             .Include(l => l.Item)
             .Include(l => l.StagingLocation)
             .Where(l => l.ReceivingSession.FacilityId == effectiveFacilityId &&
-                        l.ReceivingSession.Status == ReceivingStatus.Completed && // Only completed sessions
+                        l.ReceivingSession.Status == ReceivingStatus.Completed &&
                         l.StagingLocationId != null &&
                         l.Condition == ReceiptConditionStatus.Sound &&
                         l.QuantityReceived > 0);
 
-        if (scope.ClientId.HasValue)
+        if (effectiveClientId.HasValue)
         {
-            query = query.Where(l => l.ReceivingSession.ClientId == scope.ClientId.Value || l.Item.ClientId == scope.ClientId.Value);
+            query = query.Where(l => l.ReceivingSession.ClientId == effectiveClientId.Value || l.Item.ClientId == effectiveClientId.Value);
         }
 
         var candidateLines = await query.ToListAsync(cancellationToken);
@@ -70,18 +79,19 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
 
         var candidateLineIds = candidateLines.Select(l => l.Id).ToList();
 
-        // 2. Authoritative receipt-line duplicate check:
-        // A receipt line cannot have more than one active putaway task. Cancelled tasks do not block regeneration.
+        // 2. Identify candidate lines that already have active (non-cancelled) tasks
         var existingTasks = await _context.PutawayTasks
+            .Include(t => t.Item)
+            .Include(t => t.SourceLocation)
+            .Include(t => t.SuggestedLocation)
             .AsNoTracking()
             .Where(t => t.FacilityId == effectiveFacilityId &&
                         t.LpnId.HasValue &&
                         candidateLineIds.Contains(t.LpnId.Value) &&
                         t.Status != PutawayTaskStatus.Cancelled)
-            .Select(t => t.LpnId!.Value)
             .ToListAsync(cancellationToken);
 
-        var existingLineIdSet = existingTasks.ToHashSet();
+        var existingLineIdSet = existingTasks.Select(t => t.LpnId!.Value).ToHashSet();
 
         var unassignedLines = candidateLines
             .Where(l => !existingLineIdSet.Contains(l.Id))
@@ -89,12 +99,13 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
 
         if (unassignedLines.Count == 0)
         {
+            // All candidate lines are already assigned; return 0 newly generated tasks
             return [];
         }
 
         try
         {
-            return await _context.ExecuteInTransactionAsync(async () =>
+            var generatedTasks = await _context.ExecuteInTransactionAsync(async () =>
             {
                 // Double check inside transaction to ensure another concurrent generation has not assigned lines
                 var assignedIds = await _context.PutawayTasks
@@ -112,10 +123,10 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
 
                 if (linesToProcess.Count == 0)
                 {
-                    return [];
+                    return new List<PutawayTask>();
                 }
 
-                var generatedTasks = new List<PutawayTask>();
+                var batch = new List<PutawayTask>();
 
                 foreach (var line in linesToProcess)
                 {
@@ -181,34 +192,65 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
                     task.Item = line.Item;
                     task.SourceLocation = line.StagingLocation!;
 
-                    generatedTasks.Add(task);
+                    batch.Add(task);
                     _context.PutawayTasks.Add(task);
                 }
 
-                if (generatedTasks.Count > 0)
+                if (batch.Count > 0)
                 {
                     await _context.SaveChangesAsync(cancellationToken);
                 }
 
-                return generatedTasks.Select(MapToDto).ToList();
+                return batch;
             }, cancellationToken);
-        }
-        catch (DbUpdateException)
-        {
-            // Concurrent generation race condition: another concurrent transaction committed tasks for some or all candidate lines.
-            // Safely reload and return active tasks for these candidate lines.
-            var existingTasksForCandidates = await _context.PutawayTasks
-                .Include(t => t.Item)
-                .Include(t => t.SourceLocation)
-                .Include(t => t.SuggestedLocation)
-                .Where(t => t.FacilityId == effectiveFacilityId &&
-                            t.LpnId.HasValue &&
-                            candidateLineIds.Contains(t.LpnId.Value) &&
-                            t.Status != PutawayTaskStatus.Cancelled)
-                .ToListAsync(cancellationToken);
 
-            return existingTasksForCandidates.Select(MapToDto).ToList();
+            return generatedTasks.Select(MapToDto).ToList();
         }
+        catch (DbUpdateException ex) when (IsReceiptLineUniqueViolation(ex) && retryCount < 3)
+        {
+            // Clear failed tracked entities to prevent dirty state in ChangeTracker
+            _context.ClearChangeTracker();
+
+            // Retry for overlapping generation batches to ensure no unassigned lines are silently omitted
+            return await GenerateTasksInternalAsync(effectiveFacilityId, effectiveClientId, cancellationToken, retryCount + 1);
+        }
+    }
+
+    private static bool IsReceiptLineUniqueViolation(DbUpdateException ex)
+    {
+        var current = ex.InnerException;
+        while (current != null)
+        {
+            var typeName = current.GetType().Name;
+            if (typeName == "PostgresException")
+            {
+                var sqlStateProp = current.GetType().GetProperty("SqlState");
+                var constraintProp = current.GetType().GetProperty("ConstraintName");
+                var sqlState = sqlStateProp?.GetValue(current) as string;
+                var constraint = constraintProp?.GetValue(current) as string;
+
+                // Only recover from PostgreSQL error 23505 on ix_putaway_tasks_lpn_id
+                if (sqlState == "23505" &&
+                    constraint != null &&
+                    constraint.Contains("ix_putaway_tasks_lpn_id", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                return false;
+            }
+            if (typeName == "SqliteException")
+            {
+                // In SQLite, verify the message specifically targets lpn_id
+                if (current.Message.Contains("putaway_tasks.lpn_id", StringComparison.OrdinalIgnoreCase) ||
+                    current.Message.Contains("ix_putaway_tasks_lpn_id", StringComparison.OrdinalIgnoreCase))
+                {
+                    return true;
+                }
+                return false;
+            }
+            current = current.InnerException;
+        }
+        return false;
     }
 
     private static PutawayTaskDto MapToDto(PutawayTask t) => new()
