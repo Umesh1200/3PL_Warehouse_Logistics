@@ -301,7 +301,7 @@ public class ClientsFeatureTests
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, adminUser, dbName);
-        var handler = new UpdateClientCommandHandler(context);
+        var handler = new UpdateClientCommandHandler(context, adminUser);
 
         var command = new UpdateClientCommand
         {
@@ -355,7 +355,7 @@ public class ClientsFeatureTests
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, adminUser, dbName);
-        var handler = new DeactivateClientCommandHandler(context);
+        var handler = new DeactivateClientCommandHandler(context, adminUser);
 
         // Act
         var success = await handler.Handle(new DeactivateClientCommand(clientId), CancellationToken.None);
@@ -372,5 +372,111 @@ public class ClientsFeatureTests
         var queryHandler = new GetClientsQueryHandler(context, adminUser);
         var queryResult = await queryHandler.Handle(new GetClientsQuery { SearchTerm = "DEACT_01" }, CancellationToken.None);
         Assert.Empty(queryResult.Items);
+    }
+
+    [Fact]
+    public async Task NonStaff_WithoutTenantContext_FailsClosedOnAllOperations()
+    {
+        // Arrange
+        var clientId = Guid.NewGuid();
+        var dbName = Guid.NewGuid().ToString();
+        var adminUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var nonStaffNoTenant = new TestCurrentUserContext
+        {
+            UserType = UserType.Client,
+            TenantId = null // Missing tenant context
+        };
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+
+        using (var seedContext = TestDbContextFactory.Create(tenantProvider, adminUser, dbName))
+        {
+            seedContext.Clients.Add(new Client
+            {
+                Id = clientId,
+                CompanyName = "Isolated Client",
+                AccountCode = "ISO_01",
+                Status = ClientStatus.Active,
+                SlaTier = SlaTier.Standard,
+                Currency = "USD"
+            });
+            await seedContext.SaveChangesAsync();
+        }
+
+        using var context = TestDbContextFactory.Create(tenantProvider, nonStaffNoTenant, dbName);
+
+        // 1. GetClientsQuery must throw ForbiddenException
+        var listHandler = new GetClientsQueryHandler(context, nonStaffNoTenant);
+        await Assert.ThrowsAsync<ForbiddenException>(() =>
+            listHandler.Handle(new GetClientsQuery(), CancellationToken.None));
+
+        // 2. GetClientByIdQuery must throw ForbiddenException
+        var detailHandler = new GetClientByIdQueryHandler(context, nonStaffNoTenant);
+        await Assert.ThrowsAsync<ForbiddenException>(() =>
+            detailHandler.Handle(new GetClientByIdQuery(clientId), CancellationToken.None));
+
+        // 3. UpdateClientCommand must throw ForbiddenException
+        var updateHandler = new UpdateClientCommandHandler(context, nonStaffNoTenant);
+        await Assert.ThrowsAsync<ForbiddenException>(() =>
+            updateHandler.Handle(new UpdateClientCommand { Id = clientId, CompanyName = "Hacked" }, CancellationToken.None));
+
+        // 4. DeactivateClientCommand must throw ForbiddenException (staff only)
+        var deactivateHandler = new DeactivateClientCommandHandler(context, nonStaffNoTenant);
+        await Assert.ThrowsAsync<ForbiddenException>(() =>
+            deactivateHandler.Handle(new DeactivateClientCommand(clientId), CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task NonStaff_CrossTenantMutation_ThrowsForbiddenException()
+    {
+        // Arrange
+        var ownTenantId = Guid.NewGuid();
+        var foreignTenantId = Guid.NewGuid();
+        var dbName = Guid.NewGuid().ToString();
+        var adminUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var clientUser = new TestCurrentUserContext
+        {
+            UserType = UserType.Client,
+            TenantId = ownTenantId
+        };
+        var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
+
+        using (var seedContext = TestDbContextFactory.Create(tenantProvider, adminUser, dbName))
+        {
+            seedContext.Clients.AddRange(
+                new Client { Id = ownTenantId, CompanyName = "Own Tenant", AccountCode = "OWN_01", Status = ClientStatus.Active, SlaTier = SlaTier.Standard, Currency = "USD" },
+                new Client { Id = foreignTenantId, CompanyName = "Foreign Tenant", AccountCode = "FOR_01", Status = ClientStatus.Active, SlaTier = SlaTier.Standard, Currency = "USD" }
+            );
+            await seedContext.SaveChangesAsync();
+        }
+
+        using var context = TestDbContextFactory.Create(tenantProvider, clientUser, dbName);
+
+        // Update own tenant should succeed
+        var updateHandler = new UpdateClientCommandHandler(context, clientUser);
+        var ownUpdateResult = await updateHandler.Handle(new UpdateClientCommand
+        {
+            Id = ownTenantId,
+            CompanyName = "Own Tenant Renovated",
+            Currency = "USD",
+            SlaTier = SlaTier.Gold,
+            Status = ClientStatus.Active
+        }, CancellationToken.None);
+        Assert.Equal("Own Tenant Renovated", ownUpdateResult.CompanyName);
+
+        // Update foreign tenant must throw ForbiddenException
+        await Assert.ThrowsAsync<ForbiddenException>(() =>
+            updateHandler.Handle(new UpdateClientCommand
+            {
+                Id = foreignTenantId,
+                CompanyName = "Cross Tenant Tampering",
+                Currency = "USD"
+            }, CancellationToken.None));
+
+        // Deactivate own or foreign tenant must throw ForbiddenException (staff only)
+        var deactivateHandler = new DeactivateClientCommandHandler(context, clientUser);
+        await Assert.ThrowsAsync<ForbiddenException>(() =>
+            deactivateHandler.Handle(new DeactivateClientCommand(ownTenantId), CancellationToken.None));
+        await Assert.ThrowsAsync<ForbiddenException>(() =>
+            deactivateHandler.Handle(new DeactivateClientCommand(foreignTenantId), CancellationToken.None));
     }
 }

@@ -11,6 +11,7 @@ import { RouterProvider } from '../context/RouterContext';
 import { tokenManager } from '../services/apiClient';
 import { schemaService, TEST_CLIENT_SCHEMA_FIXTURE } from '../services/schemaService';
 import { adminApi } from '../services/adminApi';
+import { normalizeClientStatus, normalizeSlaTier, ClientStatus, SlaTier } from '../types/auth';
 
 const testSchema: EntitySchema = {
   name: 'TestItem',
@@ -337,6 +338,48 @@ describe('Metadata-Driven UI Architecture & Component Verification', () => {
       const payload = handleSubmit.mock.calls[0][0];
       expect(payload.secretKey).toBeUndefined();
     });
+
+    it('excludes visible read-only or non-writable fields from generic submission payload', async () => {
+      const readOnlySchema: EntitySchema = {
+        ...testSchema,
+        fields: [
+          ...testSchema.fields,
+          { name: 'readOnlyMetric', label: 'Computed Metric', type: 'string', readOnly: true },
+        ],
+        views: {
+          ...testSchema.views,
+          form: {
+            sections: [
+              {
+                id: 'general',
+                title: 'General',
+                fields: ['code', 'title', 'status', 'tier', 'currency', 'readOnlyMetric'],
+              },
+            ],
+          },
+        },
+      };
+
+      const handleSubmit = vi.fn();
+      render(
+        <DynamicForm
+          schema={readOnlySchema}
+          initialData={{ readOnlyMetric: 'DO_NOT_SUBMIT_THIS' }}
+          onSubmit={handleSubmit}
+        />
+      );
+
+      fireEvent.change(screen.getByLabelText(/Unique Code/i), { target: { value: 'NEW_CODE' } });
+      fireEvent.change(screen.getByLabelText(/Display Name/i), { target: { value: 'New Item' } });
+      fireEvent.click(screen.getByTestId('submit-form-btn'));
+
+      expect(handleSubmit).toHaveBeenCalled();
+      const payload = handleSubmit.mock.calls[0][0];
+      expect(payload.code).toBe('NEW_CODE');
+      expect(payload.title).toBe('New Item');
+      // Read-only metric must NOT enter submission payload
+      expect(payload.readOnlyMetric).toBeUndefined();
+    });
   });
 
   describe('Section D: DynamicList & Metadata Adaptation', () => {
@@ -617,8 +660,8 @@ describe('Metadata-Driven UI Architecture & Component Verification', () => {
         id: 'c1',
         companyName: 'Acme Corp Updated',
         accountCode: 'ACME',
-        status: 1,
-        slaTier: 2,
+        status: 'Suspended',
+        slaTier: 'Gold',
         currency: 'EUR',
       };
       const getClientByIdSpy = vi.spyOn(adminApi, 'getClientById').mockResolvedValue(mockDetail as any);
@@ -680,12 +723,21 @@ describe('Metadata-Driven UI Architecture & Component Verification', () => {
           'c1',
           expect.objectContaining({
             companyName: 'Acme Worldwide',
+            slaTier: SlaTier.Gold, // 3, preserved from string 'Gold' without defaulting to Standard (1)
+            status: ClientStatus.Suspended, // 3, preserved from string 'Suspended' without defaulting to Active (2)
             // accountCode is omitted from update payload (immutable)
           })
         );
         const submittedPayload = updateClientSpy.mock.calls[0][1];
         expect((submittedPayload as any).accountCode).toBeUndefined();
       });
+    });
+
+    it('rejects unknown enum values rather than silently falling back to defaults', () => {
+      expect(() => normalizeClientStatus('UnknownStatus')).toThrow(/Unknown ClientStatus value/i);
+      expect(() => normalizeSlaTier('InvalidTier')).toThrow(/Unknown SlaTier value/i);
+      expect(normalizeClientStatus('Suspended')).toBe(ClientStatus.Suspended);
+      expect(normalizeSlaTier('Gold')).toBe(SlaTier.Gold);
     });
 
     it('fails closed with explicit error message for unsupported entity operations', async () => {

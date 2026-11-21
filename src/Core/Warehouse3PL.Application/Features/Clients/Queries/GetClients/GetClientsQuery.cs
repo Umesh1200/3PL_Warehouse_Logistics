@@ -29,9 +29,13 @@ public class GetClientsQueryHandler : IRequestHandler<GetClientsQuery, PagedResu
             .Where(c => !c.IsDeleted)
             .AsNoTracking();
 
-        // Multi-tenancy isolation: non-staff only see their assigned client
-        if (!_currentUser.IsStaff && _currentUser.TenantId.HasValue)
+        // Multi-tenancy isolation: non-staff only see their assigned client; fail-closed without tenant
+        if (!_currentUser.IsStaff)
         {
+            if (!_currentUser.TenantId.HasValue)
+            {
+                throw new ForbiddenException("Non-staff users without an assigned tenant context are forbidden from accessing client records.");
+            }
             query = query.Where(c => c.Id == _currentUser.TenantId.Value);
         }
 

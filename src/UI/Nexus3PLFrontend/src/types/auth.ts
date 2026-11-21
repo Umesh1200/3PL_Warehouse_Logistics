@@ -144,6 +144,24 @@ export enum ClientStatus {
   Terminated = 4,
 }
 
+export function normalizeClientStatus(val: any): ClientStatus {
+  if (val === undefined || val === null || val === '') {
+    throw new Error('ClientStatus is required.');
+  }
+  if (val === 1 || val === '1') return ClientStatus.Onboarding;
+  if (val === 2 || val === '2') return ClientStatus.Active;
+  if (val === 3 || val === '3') return ClientStatus.Suspended;
+  if (val === 4 || val === '4') return ClientStatus.Terminated;
+
+  const str = String(val).trim().toLowerCase();
+  if (str === 'onboarding') return ClientStatus.Onboarding;
+  if (str === 'active') return ClientStatus.Active;
+  if (str === 'suspended') return ClientStatus.Suspended;
+  if (str === 'terminated') return ClientStatus.Terminated;
+
+  throw new Error(`Unknown ClientStatus value: '${val}'. Valid values: Onboarding, Active, Suspended, Terminated (or 1..4).`);
+}
+
 export function formatClientStatus(status: ClientStatus | number | string | undefined | null): string {
   if (status === 1 || status === 'Onboarding') return 'Onboarding';
   if (status === 2 || status === 'Active') return 'Active';
@@ -157,6 +175,24 @@ export enum SlaTier {
   Silver = 2,
   Gold = 3,
   Platinum = 4,
+}
+
+export function normalizeSlaTier(val: any): SlaTier {
+  if (val === undefined || val === null || val === '') {
+    throw new Error('SlaTier is required.');
+  }
+  if (val === 1 || val === '1') return SlaTier.Standard;
+  if (val === 2 || val === '2') return SlaTier.Silver;
+  if (val === 3 || val === '3') return SlaTier.Gold;
+  if (val === 4 || val === '4') return SlaTier.Platinum;
+
+  const str = String(val).trim().toLowerCase();
+  if (str === 'standard') return SlaTier.Standard;
+  if (str === 'silver') return SlaTier.Silver;
+  if (str === 'gold') return SlaTier.Gold;
+  if (str === 'platinum') return SlaTier.Platinum;
+
+  throw new Error(`Unknown SlaTier value: '${val}'. Valid values: Standard, Silver, Gold, Platinum (or 1..4).`);
 }
 
 export function formatSlaTier(tier: SlaTier | number | string | undefined | null): string {

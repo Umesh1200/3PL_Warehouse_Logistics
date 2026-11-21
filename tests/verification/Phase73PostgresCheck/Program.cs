@@ -1102,14 +1102,28 @@ try
     // Restore full staff authorization
     TestAuthHandler.CustomClaims = null;
 
-    // 4.3 Create Client: POST /api/v1/clients
+    // 4.3a Lowercase AccountCode rejection: POST /api/v1/clients with "pme-01"
+    var lowercasePayload = new
+    {
+        CompanyName = "Postgres Lowercase Validation",
+        AccountCode = "pme-01",
+        SlaTier = 2,
+        Currency = "USD",
+        Status = 2
+    };
+    var lowercaseResponse = await client.PostAsJsonAsync("/api/v1/clients", lowercasePayload);
+    if (lowercaseResponse.StatusCode != HttpStatusCode.BadRequest)
+        throw new InvalidOperationException($"Expected 400 BadRequest for lowercase accountCode, got {lowercaseResponse.StatusCode}");
+    Console.WriteLine("PASS HTTP POST /api/v1/clients with lowercase accountCode -> 400 Bad Request (validator contract verified).");
+
+    // 4.3b Create Client with valid uppercase code: POST /api/v1/clients with Gold SLA and Suspended status
     var createClientPayload = new
     {
         CompanyName = "Postgres Metadata Enterprise",
-        AccountCode = "pme-01",
-        SlaTier = 2, // Silver
-        Currency = "usd",
-        Status = 2 // Active
+        AccountCode = "PME-01",
+        SlaTier = SlaTier.Gold, // 3
+        Currency = "USD",
+        Status = ClientStatus.Suspended // 3
     };
     var createClientResponse = await client.PostAsJsonAsync("/api/v1/clients", createClientPayload);
     if (createClientResponse.StatusCode != HttpStatusCode.Created)
@@ -1124,12 +1138,16 @@ try
         var code = root.GetProperty("accountCode").GetString();
         var cName = root.GetProperty("companyName").GetString();
         var curr = root.GetProperty("currency").GetString();
+        var sla = root.GetProperty("slaTier").GetString();
+        var st = root.GetProperty("status").GetString();
         if (code != "PME-01")
             throw new InvalidOperationException($"AccountCode normalization to uppercase failed: expected 'PME-01', found '{code}'");
         if (cName != "Postgres Metadata Enterprise")
             throw new InvalidOperationException($"CompanyName mismatch: expected 'Postgres Metadata Enterprise', found '{cName}'");
         if (curr != "USD")
             throw new InvalidOperationException($"Currency normalization failed: expected 'USD', found '{curr}'");
+        if (sla != "Gold" || st != "Suspended")
+            throw new InvalidOperationException($"Wire string enum mismatch on create: expected 'Gold'/'Suspended', found '{sla}'/'{st}'");
     }
     Console.WriteLine("PASS HTTP POST /api/v1/clients -> 201 Created, uppercase code normalization & valid UUID verified.");
 
@@ -1155,33 +1173,125 @@ try
         throw new InvalidOperationException($"HTTP GET /api/v1/clients/{createdClientId} failed: {detailResponse.StatusCode}");
     Console.WriteLine("PASS HTTP GET /api/v1/clients/{id} -> 200 OK, authoritative detail retrieval verified.");
 
-    // 4.6 Update Client: PUT /api/v1/clients/{id} (writable fields only; immutable accountCode omitted)
-    var updatePayload = new
+    // 4.6a Update Client with companyName change ONLY: PUT /api/v1/clients/{id}
+    // Wire simulation: retrieved client had string enums 'Gold' and 'Suspended'
+    var updatePayloadOnlyName = new
     {
         Id = createdClientId,
-        CompanyName = "Postgres Metadata Enterprise Global",
-        SlaTier = 3, // Gold
-        Currency = "EUR",
-        Status = 2
+        CompanyName = "Postgres Metadata Enterprise Renamed",
+        SlaTier = "Gold",
+        Status = "Suspended",
+        Currency = "USD"
     };
-    var updateResponse = await client.PutAsJsonAsync($"/api/v1/clients/{createdClientId}", updatePayload);
-    if (updateResponse.StatusCode != HttpStatusCode.OK)
-        throw new InvalidOperationException($"HTTP PUT /api/v1/clients/{createdClientId} failed: {updateResponse.StatusCode} - {await updateResponse.Content.ReadAsStringAsync()}");
+    var updateResponse1 = await client.PutAsJsonAsync($"/api/v1/clients/{createdClientId}", updatePayloadOnlyName);
+    if (updateResponse1.StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException($"HTTP PUT /api/v1/clients/{createdClientId} (only name change) failed: {updateResponse1.StatusCode} - {await updateResponse1.Content.ReadAsStringAsync()}");
 
-    var updateBody = await updateResponse.Content.ReadAsStringAsync();
-    using (var doc = JsonDocument.Parse(updateBody))
+    // 4.6b Re-read PostgreSQL directly to verify Gold and Suspended were preserved without corruption
+    await using (var dbCheck = CreateDb(operationalConn, user))
     {
-        var root = doc.RootElement;
-        var updatedName = root.GetProperty("companyName").GetString();
-        var code = root.GetProperty("accountCode").GetString();
-        if (updatedName != "Postgres Metadata Enterprise Global")
-            throw new InvalidOperationException($"Updated company name mismatch: expected 'Postgres Metadata Enterprise Global', found '{updatedName}'");
-        if (code != "PME-01")
-            throw new InvalidOperationException($"Account code was altered unexpectedly: expected 'PME-01', found '{code}'");
+        var clientInDb = await dbCheck.Clients.SingleAsync(c => c.Id == createdClientId);
+        if (clientInDb.CompanyName != "Postgres Metadata Enterprise Renamed")
+            throw new InvalidOperationException($"Company name not updated in PostgreSQL: found '{clientInDb.CompanyName}'");
+        if (clientInDb.SlaTier != SlaTier.Gold)
+            throw new InvalidOperationException($"SLA Tier corrupted in PostgreSQL: expected 'Gold' (3), found '{clientInDb.SlaTier}'");
+        if (clientInDb.Status != ClientStatus.Suspended)
+            throw new InvalidOperationException($"Status corrupted in PostgreSQL: expected 'Suspended' (3), found '{clientInDb.Status}'");
     }
-    Console.WriteLine("PASS HTTP PUT /api/v1/clients/{id} -> 200 OK, companyName updated, accountCode immutability preserved.");
+    Console.WriteLine("PASS HTTP PUT /api/v1/clients/{id} preserving string enums -> verified in PostgreSQL: Gold & Suspended intact without silent corruption.");
 
-    // 4.7 Soft Delete: DELETE /api/v1/clients/{id}
+    // 4.6c Intentional Enum Update: PUT /api/v1/clients/{id} updating SLA to Platinum and Status to Active
+    var updatePayloadIntentional = new
+    {
+        Id = createdClientId,
+        CompanyName = "Postgres Metadata Enterprise Renamed",
+        SlaTier = SlaTier.Platinum, // 4
+        Status = ClientStatus.Active, // 2
+        Currency = "EUR"
+    };
+    var updateResponse2 = await client.PutAsJsonAsync($"/api/v1/clients/{createdClientId}", updatePayloadIntentional);
+    if (updateResponse2.StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException($"HTTP PUT /api/v1/clients/{createdClientId} (intentional enum change) failed: {updateResponse2.StatusCode}");
+
+    await using (var dbCheck = CreateDb(operationalConn, user))
+    {
+        var clientInDb = await dbCheck.Clients.SingleAsync(c => c.Id == createdClientId);
+        if (clientInDb.SlaTier != SlaTier.Platinum || clientInDb.Status != ClientStatus.Active || clientInDb.Currency != "EUR")
+            throw new InvalidOperationException($"Intentional update failed: SlaTier={clientInDb.SlaTier}, Status={clientInDb.Status}, Currency={clientInDb.Currency}");
+    }
+    Console.WriteLine("PASS HTTP PUT /api/v1/clients/{id} intentional enum change -> verified in PostgreSQL: Platinum & Active persisted accurately.");
+
+    // 4.7 Multi-tenant Isolation & Missing Tenant Fail-Closed Negative Checks (P-META-07)
+    // 4.7a Non-staff user WITHOUT tenant context
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, "ClientUser"),
+        new Claim("user_type", "Client"),
+        new Claim("permissions", "clients:view"),
+        new Claim("permissions", "clients:edit"),
+        new Claim("permissions", "clients:delete")
+        // No tenant_id claim
+    };
+
+    var noTenantList = await client.GetAsync("/api/v1/clients");
+    if (noTenantList.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Expected 403 Forbidden for non-staff without tenant context on list, got {noTenantList.StatusCode}");
+
+    var noTenantDetail = await client.GetAsync($"/api/v1/clients/{createdClientId}");
+    if (noTenantDetail.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Expected 403 Forbidden for non-staff without tenant context on detail, got {noTenantDetail.StatusCode}");
+
+    var noTenantUpdate = await client.PutAsJsonAsync($"/api/v1/clients/{createdClientId}", new { Id = createdClientId, CompanyName = "Spoofed", SlaTier = 1, Status = 2, Currency = "USD" });
+    if (noTenantUpdate.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Expected 403 Forbidden for non-staff without tenant context on update, got {noTenantUpdate.StatusCode}");
+
+    var noTenantDelete = await client.DeleteAsync($"/api/v1/clients/{createdClientId}");
+    if (noTenantDelete.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Expected 403 Forbidden for non-staff without tenant context on delete, got {noTenantDelete.StatusCode}");
+
+    Console.WriteLine("PASS Non-staff without tenant context fail-closed on list, detail, update, delete -> 403 Forbidden verified.");
+
+    // 4.7b Non-staff user assigned to client1Id attempting foreign tenant (createdClientId) access
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, "ClientUser"),
+        new Claim("user_type", "Client"),
+        new Claim("tenant_id", client1Id.ToString()),
+        new Claim("permissions", "clients:view"),
+        new Claim("permissions", "clients:edit"),
+        new Claim("permissions", "clients:delete")
+    };
+
+    var foreignDetail = await client.GetAsync($"/api/v1/clients/{createdClientId}");
+    if (foreignDetail.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Expected 403 Forbidden for cross-tenant detail access, got {foreignDetail.StatusCode}");
+
+    var foreignUpdate = await client.PutAsJsonAsync($"/api/v1/clients/{createdClientId}", new { Id = createdClientId, CompanyName = "CrossTenantHacked", SlaTier = 1, Status = 2, Currency = "USD" });
+    if (foreignUpdate.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Expected 403 Forbidden for cross-tenant update access, got {foreignUpdate.StatusCode}");
+
+    var foreignDelete = await client.DeleteAsync($"/api/v1/clients/{createdClientId}");
+    if (foreignDelete.StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException($"Expected 403 Forbidden for cross-tenant deactivation, got {foreignDelete.StatusCode}");
+
+    var ownList = await client.GetAsync("/api/v1/clients");
+    if (ownList.StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException($"Expected 200 OK for own tenant list, got {ownList.StatusCode}");
+    var ownListBody = await ownList.Content.ReadAsStringAsync();
+    using (var doc = JsonDocument.Parse(ownListBody))
+    {
+        var items = doc.RootElement.GetProperty("items").EnumerateArray().ToList();
+        if (items.Count != 1 || items[0].GetProperty("id").GetGuid() != client1Id)
+            throw new InvalidOperationException("Non-staff tenant list isolation violated: expected only caller's own client record.");
+    }
+    Console.WriteLine("PASS Cross-tenant security isolation verified: foreign detail, update, delete -> 403 Forbidden; list properly partitioned.");
+
+    // Restore full staff authorization
+    TestAuthHandler.CustomClaims = null;
+
+    // 4.8 Soft Delete: DELETE /api/v1/clients/{id} (Staff authorized)
     var deleteResponse = await client.DeleteAsync($"/api/v1/clients/{createdClientId}");
     if (deleteResponse.StatusCode != HttpStatusCode.NoContent)
         throw new InvalidOperationException($"HTTP DELETE /api/v1/clients/{createdClientId} failed: {deleteResponse.StatusCode}");

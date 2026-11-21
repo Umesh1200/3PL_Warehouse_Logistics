@@ -75,6 +75,10 @@ export const TEST_CLIENT_SCHEMA_FIXTURE: EntitySchema = {
         { value: 2, label: 'Silver', variant: 'info' },
         { value: 3, label: 'Gold', variant: 'warning' },
         { value: 4, label: 'Platinum', variant: 'success' },
+        { value: 'Standard', label: 'Standard', variant: 'info' },
+        { value: 'Silver', label: 'Silver', variant: 'info' },
+        { value: 'Gold', label: 'Gold', variant: 'warning' },
+        { value: 'Platinum', label: 'Platinum', variant: 'success' },
       ],
     },
     {

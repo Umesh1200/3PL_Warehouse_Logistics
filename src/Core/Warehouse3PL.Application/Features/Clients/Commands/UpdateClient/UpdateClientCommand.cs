@@ -32,14 +32,29 @@ public class UpdateClientCommandValidator : AbstractValidator<UpdateClientComman
 public class UpdateClientCommandHandler : IRequestHandler<UpdateClientCommand, ClientDto>
 {
     private readonly IApplicationDbContext _context;
+    private readonly ICurrentUserContext _currentUser;
 
-    public UpdateClientCommandHandler(IApplicationDbContext context)
+    public UpdateClientCommandHandler(IApplicationDbContext context, ICurrentUserContext currentUser)
     {
         _context = context;
+        _currentUser = currentUser;
     }
 
     public async Task<ClientDto> Handle(UpdateClientCommand request, CancellationToken cancellationToken)
     {
+        // Enforce tenant boundary for non-staff; fail-closed without tenant
+        if (!_currentUser.IsStaff)
+        {
+            if (!_currentUser.TenantId.HasValue)
+            {
+                throw new ForbiddenException("Non-staff users without an assigned tenant context are forbidden from updating client records.");
+            }
+            if (_currentUser.TenantId.Value != request.Id)
+            {
+                throw new ForbiddenException("You cannot update details for another client tenant.");
+            }
+        }
+
         var client = await _context.Clients
             .Include(c => c.Contacts)
             .Include(c => c.Users)

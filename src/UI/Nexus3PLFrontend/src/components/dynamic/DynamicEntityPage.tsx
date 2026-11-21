@@ -7,6 +7,7 @@ import { Modal } from '../common/Modal';
 import { AppIcon } from '../common/AppIcon';
 import { adminApi } from '../../services/adminApi';
 import { AuthContext } from '../../context/AuthContext';
+import { normalizeClientStatus, normalizeSlaTier } from '../../types/auth';
 
 export interface DynamicEntityPageProps {
   entityName: string;
@@ -198,6 +199,12 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
         let detailData = item;
         if (entityName.toLowerCase() === 'client') {
           detailData = await adminApi.getClientById(primaryKeyVal);
+          // Canonical enum normalization so select elements match schema options
+          detailData = {
+            ...detailData,
+            slaTier: normalizeSlaTier(detailData.slaTier),
+            status: normalizeClientStatus(detailData.status),
+          };
         }
         setEditingItem(detailData);
         setIsFormModalOpen(true);
@@ -230,9 +237,9 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
           const updatePayload = {
             id: primaryKeyVal,
             companyName: formData.companyName?.trim(),
-            slaTier: Number(formData.slaTier) || 1,
+            slaTier: normalizeSlaTier(formData.slaTier),
             currency: (formData.currency?.trim() || 'USD').toUpperCase(),
-            status: Number(formData.status) || 2,
+            status: normalizeClientStatus(formData.status),
           };
           await adminApi.updateClient(primaryKeyVal, updatePayload);
         } else {
@@ -250,9 +257,9 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
           const createPayload = {
             companyName: formData.companyName?.trim(),
             accountCode: formData.accountCode?.trim().toUpperCase(),
-            slaTier: Number(formData.slaTier) || 1,
+            slaTier: normalizeSlaTier(formData.slaTier),
             currency: (formData.currency?.trim() || 'USD').toUpperCase(),
-            status: Number(formData.status) || 2,
+            status: normalizeClientStatus(formData.status),
           };
           await adminApi.createClient(createPayload);
         } else {

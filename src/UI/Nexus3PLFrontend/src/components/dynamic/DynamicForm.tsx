@@ -152,6 +152,17 @@ export const DynamicForm: React.FC<DynamicFormProps> = ({
       for (const fName of sec.fields) {
         const field = fieldMap.get(fName);
         if (field) {
+          // Exclude read-only, primary key, or write-restricted fields from generic mutable submission payload
+          const isFieldReadOnly =
+            field.readOnly ||
+            (mode === 'edit' && field.name === schema.primaryKey) ||
+            (mode === 'edit' && field.name === 'accountCode') ||
+            (!!field.writePermission && !checkPermission(field.writePermission));
+
+          if (isFieldReadOnly) {
+            continue;
+          }
+
           sanitizedData[fName] = formData[fName];
           const err = validateField(field, formData[fName]);
           if (err) {
@@ -390,8 +401,8 @@ export const DynamicForm: React.FC<DynamicFormProps> = ({
             {isSubmitting
               ? 'Saving...'
               : mode === 'create'
-              ? `Create ${schema.title}`
-              : 'Save Changes'}
+                ? `Create ${schema.title}`
+                : 'Save Changes'}
           </span>
         </button>
       </div>

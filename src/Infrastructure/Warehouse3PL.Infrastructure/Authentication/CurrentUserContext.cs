@@ -64,18 +64,22 @@ public class CurrentUserContext : ICurrentUserContext
     {
         get
         {
-            var claim = User?.FindFirst("user_type")?.Value;
+            var claim = User?.FindFirst("user_type")?.Value
+                ?? User?.FindFirst("UserType")?.Value;
             return Enum.TryParse<UserType>(claim, true, out var type) ? type : null;
         }
     }
 
     public IReadOnlyList<string> Roles => User?.FindAll(ClaimTypes.Role)
-        .Concat(User.FindAll("roles"))
+        .Concat(User?.FindAll("roles") ?? [])
+        .Concat(User?.FindAll("role") ?? [])
         .Select(c => c.Value)
         .Distinct()
         .ToList() ?? [];
 
     public IReadOnlyList<string> Permissions => User?.FindAll("permissions")
+        .Concat(User?.FindAll("permission") ?? [])
+        .Concat(User?.FindAll("Permission") ?? [])
         .Select(c => c.Value)
         .Distinct()
         .ToList() ?? [];

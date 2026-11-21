@@ -23,10 +23,17 @@ public class GetClientByIdQueryHandler : IRequestHandler<GetClientByIdQuery, Cli
 
     public async Task<ClientDto> Handle(GetClientByIdQuery request, CancellationToken cancellationToken)
     {
-        // Enforce tenant boundary for non-staff
-        if (!_currentUser.IsStaff && _currentUser.TenantId.HasValue && _currentUser.TenantId.Value != request.Id)
+        // Enforce tenant boundary for non-staff; fail-closed without tenant
+        if (!_currentUser.IsStaff)
         {
-            throw new ForbiddenException("You cannot view details for another client tenant.");
+            if (!_currentUser.TenantId.HasValue)
+            {
+                throw new ForbiddenException("Non-staff users without an assigned tenant context are forbidden from accessing client records.");
+            }
+            if (_currentUser.TenantId.Value != request.Id)
+            {
+                throw new ForbiddenException("You cannot view details for another client tenant.");
+            }
         }
 
         var client = await _context.Clients
