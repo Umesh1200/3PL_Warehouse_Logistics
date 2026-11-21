@@ -819,4 +819,200 @@ describe('Phase 7.3: Receiving, Directed Putaway & Inventory Ledger Integration 
       expect(screen.getByText(/Putaway confirmed!/i)).toBeDefined();
     });
   });
+
+  it('enforces P-RCV-01 scanner validation: rejects empty Item ID and non-positive quantity without dispatching API call', async () => {
+    const mockSession = {
+      id: 'session-val-1',
+      facilityId: mockFacility.id,
+      facilityCode: 'FAC-ORD1',
+      dockDoorId: 'door-1',
+      doorNumber: 'DOOR-01',
+      yardVisitId: 'yv-1',
+      visitNumber: 'YV-01',
+      trailerNumber: 'TR-101',
+      clientId: 'client-1',
+      clientName: 'Apex Retail',
+      asnId: 'asn-1',
+      asnNumber: 'ASN-101',
+      sessionNumber: 'RCV-VAL-001',
+      status: ReceivingStatus.InProgress,
+      startedAtUtc: '2026-11-19T10:00:00Z',
+      completedAtUtc: null,
+      receivedByUserId: 'usr-wh-lead-1',
+      isBlindReceiving: false,
+      requiresSupervisorApproval: false,
+      isSupervisorApproved: false,
+      version: 1,
+      lines: [],
+      discrepancies: [],
+    };
+
+    let lineScanCalls = 0;
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+      if (url.endsWith('/api/v1/auth/me')) {
+        return { ok: true, status: 200, json: async () => mockUserProfile } as Response;
+      }
+      if (url.includes('/api/v1/facilities')) {
+        return { ok: true, status: 200, json: async () => [mockFacility] } as Response;
+      }
+      if (url.includes('/api/v1/receiving/sessions/session-val-1/lines')) {
+        lineScanCalls++;
+        return { ok: true, status: 200, json: async () => ({}) } as Response;
+      }
+      if (url.includes('/api/v1/receiving/sessions/session-val-1')) {
+        return { ok: true, status: 200, json: async () => mockSession } as Response;
+      }
+      if (url.includes('/api/v1/receiving/sessions')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [mockSession],
+            totalCount: 1,
+            pageNumber: 1,
+            pageSize: 10,
+          }),
+        } as Response;
+      }
+      return { ok: false, status: 404 } as Response;
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    setupProviders(<ReceivingPage />, '/app/inbound');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('open-session-session-val-1')).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId('open-session-session-val-1'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('line-scanner-card')).toBeDefined();
+    });
+
+    const itemInput = screen.getByTestId('scan-item-id-input');
+    const qtyInput = screen.getByTestId('scan-qty-input');
+    const submitBtn = screen.getByTestId('submit-line-btn');
+
+    // Case A: Empty Item ID
+    fireEvent.change(itemInput, { target: { value: '   ' } });
+    fireEvent.change(qtyInput, { target: { value: '5' } });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Item ID \(GUID\) is required/i)).toBeDefined();
+    });
+    expect(lineScanCalls).toBe(0);
+
+    // Case B: Zero or negative quantity
+    fireEvent.change(itemInput, { target: { value: '00000000-0000-0000-0000-000000000001' } });
+    fireEvent.change(qtyInput, { target: { value: '0' } });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(screen.getByText(/Quantity received must be a positive number greater than zero/i)).toBeDefined();
+    });
+    expect(lineScanCalls).toBe(0);
+
+    // Case C: Valid Item GUID and positive quantity
+    fireEvent.change(qtyInput, { target: { value: '10' } });
+    fireEvent.click(submitBtn);
+
+    await waitFor(() => {
+      expect(lineScanCalls).toBe(1);
+    });
+  });
+
+  it('enforces P-RF-02 distinct states: displays rf-error-card on failure with retry action, and rf-no-tasks on clean empty', async () => {
+    const mockPutawayTask = {
+      id: 'ptw-step-2',
+      facilityId: mockFacility.id,
+      facilityCode: 'FAC-ORD1',
+      receiptLineId: 'line-step-2',
+      lpnCode: 'LPN-RETRY-01',
+      sku: 'SKU-RETRY-99',
+      itemDescription: 'Retry Recovery Item',
+      quantity: 15,
+      sourceLocationCode: 'STAGE-01',
+      sourceLocationBarcode: 'LOC-STAGE-01',
+      suggestedLocationCode: 'BIN-RETRY-01',
+      suggestedLocationBarcode: 'LOC-BIN-RETRY-01',
+      status: PutawayTaskStatus.Pending,
+      priority: PutawayPriority.Normal,
+      createdAtUtc: new Date().toISOString(),
+      assignedUserId: null,
+      actualLocationCode: null,
+      completedAtUtc: null,
+      version: 1,
+    };
+
+    let failNextRequest = true;
+
+    const fetchSpy = vi.fn(async (input: RequestInfo | URL) => {
+      const url = input.toString();
+
+      if (url.endsWith('/api/v1/auth/me')) {
+        return { ok: true, status: 200, json: async () => mockUserProfile } as Response;
+      }
+      if (url.includes('/api/v1/facilities')) {
+        return { ok: true, status: 200, json: async () => [mockFacility] } as Response;
+      }
+      if (url.includes('/api/v1/putaway/tasks/next')) {
+        if (failNextRequest) {
+          return {
+            ok: false,
+            status: 500,
+            json: async () => ({ error: 'Database transient error' }),
+          } as Response;
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => mockPutawayTask,
+        } as Response;
+      }
+      if (url.includes('/api/v1/putaway/tasks')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({
+            items: [mockPutawayTask],
+            totalCount: 1,
+            pageNumber: 1,
+            pageSize: 10,
+          }),
+        } as Response;
+      }
+      return { ok: false, status: 404 } as Response;
+    });
+    vi.stubGlobal('fetch', fetchSpy);
+
+    setupProviders(<PutawayPage />, '/app/inbound/putaway');
+
+    await waitFor(() => {
+      expect(screen.getByTestId('tab-rf')).toBeDefined();
+    });
+
+    fireEvent.click(screen.getByTestId('tab-rf'));
+
+    // 1. Should display rf-error-card, NOT rf-no-tasks
+    await waitFor(() => {
+      expect(screen.getByTestId('rf-error-card')).toBeDefined();
+      expect(screen.queryByTestId('rf-no-tasks')).toBeNull();
+      expect(screen.getByText('Failed to Load Putaway Task')).toBeDefined();
+    });
+
+    // 2. Click retry action after fixing failure condition
+    failNextRequest = false;
+    fireEvent.click(screen.getByTestId('rf-retry-btn'));
+
+    // 3. Should now display rf-task-card with task details
+    await waitFor(() => {
+      expect(screen.getByTestId('rf-task-card')).toBeDefined();
+      expect(screen.getByText('SKU-RETRY-99')).toBeDefined();
+      expect(screen.queryByTestId('rf-error-card')).toBeNull();
+      expect(screen.queryByTestId('rf-no-tasks')).toBeNull();
+    });
+  });
 });

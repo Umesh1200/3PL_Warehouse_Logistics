@@ -45,6 +45,7 @@ export const PutawayPage: React.FC = () => {
   // RF Next Task state
   const [nextTask, setNextTask] = useState<PutawayTaskDto | null>(null);
   const [loadingNext, setLoadingNext] = useState(false);
+  const [rfError, setRfError] = useState<string | null>(null);
 
   // Dual-scan inputs
   const [scannedLpn, setScannedLpn] = useState('');
@@ -103,15 +104,20 @@ export const PutawayPage: React.FC = () => {
       if (!activeFacility || !canExecute) return;
       try {
         setLoadingNext(true);
+        setRfError(null);
         const task = await putawayApi.getNextTask(activeFacility.id, user?.userId, signal);
-        setNextTask(task);
+        if (task && (!task.id || !task.sku || !task.sourceLocationCode || !task.suggestedLocationCode)) {
+          throw new Error('Received malformed task response from server.');
+        }
+        setNextTask(task || null);
         // Clear scan inputs when next task changes
         setScannedLpn('');
         setScannedLocationBarcode('');
         setAllowOverride(false);
       } catch (err: any) {
         if (err.name !== 'AbortError') {
-          setFeedback({ type: 'error', message: err.message || 'Failed to load next putaway task' });
+          setRfError(err.message || 'Failed to load next putaway task');
+          setNextTask(null);
         }
       } finally {
         setLoadingNext(false);
@@ -427,7 +433,7 @@ export const PutawayPage: React.FC = () => {
               </div>
               <button
                 type="button"
-                className="btn btn-primary btn-action-lg"
+                className="btn btn-primary btn-action-lg btn-generate-manage"
                 disabled={isGenerating}
                 onClick={handleGenerateTasks}
                 data-testid="generate-tasks-btn-manage-workstation"
@@ -540,12 +546,39 @@ export const PutawayPage: React.FC = () => {
       )}
 
       {/* TAB 2: RF DIRECTED WORK CARD */}
+      {activeTab === 'rf' && !canExecute && (
+        <div className="card authorization-required-card" data-testid="rf-auth-required">
+          <AppIcon name="Lock" size="lg" color="muted" />
+          <h3 className="auth-card-title">RF Execution Authorization Required</h3>
+          <p className="auth-card-desc">
+            Your account requires <code>inbound:putaway:execute</code> permission to access the mobile RF execution workstation.
+          </p>
+        </div>
+      )}
+
       {activeTab === 'rf' && canExecute && (
         <div className="rf-view" data-testid="rf-execution-view">
           {loadingNext ? (
             <div className="card loading-card" data-testid="rf-loading">
               <AppIcon name="RefreshCw" size="lg" className="spin-icon" color="primary" />
               <span>Fetching next directed task...</span>
+            </div>
+          ) : rfError ? (
+            <div className="card rf-error-card" data-testid="rf-error-card">
+              <div className="error-icon-wrapper">
+                <AppIcon name="AlertTriangle" size="lg" color="danger" />
+              </div>
+              <h2 className="error-title">Failed to Load Putaway Task</h2>
+              <p className="error-desc">{rfError}</p>
+              <button
+                type="button"
+                className="btn btn-primary btn-action-lg"
+                onClick={() => loadNextTask()}
+                data-testid="rf-retry-btn"
+              >
+                <AppIcon name="RefreshCw" size="md" />
+                <span>Retry Fetching Task</span>
+              </button>
             </div>
           ) : !nextTask ? (
             <div className="card empty-rf-card" data-testid="rf-no-tasks">
@@ -1365,6 +1398,37 @@ export const PutawayPage: React.FC = () => {
           color: var(--text-muted);
           margin: 0 0 12px 0;
         }
+        .rf-error-card {
+          text-align: center;
+          padding: 48px 24px;
+          display: flex;
+          flex-direction: column;
+          align-items: center;
+          gap: 12px;
+          border: 2px solid #ef4444;
+          background: #fef2f2;
+        }
+        .error-icon-wrapper {
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          width: 60px;
+          height: 60px;
+          border-radius: 50%;
+          background: #fee2e2;
+        }
+        .error-title {
+          font-size: 20px;
+          font-weight: 700;
+          color: #b91c1c;
+          margin: 0;
+        }
+        .error-desc {
+          font-size: 14px;
+          color: #7f1d1d;
+          margin: 0 0 12px 0;
+          max-width: 480px;
+        }
         .loading-card {
           text-align: center;
           padding: 48px;
@@ -1499,6 +1563,11 @@ export const PutawayPage: React.FC = () => {
           border-top: 1px solid var(--border-subtle);
           background: #fafbfc;
         }
+        .btn-generate-manage {
+          white-space: normal;
+          text-align: center;
+          min-height: 48px;
+        }
         @media (max-width: 768px) {
           .scan-inputs-grid {
             grid-template-columns: 1fr;
@@ -1517,6 +1586,30 @@ export const PutawayPage: React.FC = () => {
           .manage-action-card {
             flex-direction: column;
             align-items: stretch;
+            padding: 16px;
+          }
+          .btn-generate-manage {
+            width: 100%;
+          }
+        }
+        @media (max-width: 480px) {
+          .putaway-management-workstation {
+            padding: 12px;
+          }
+          .manage-action-card {
+            padding: 12px;
+            width: 100%;
+            box-sizing: border-box;
+          }
+          .manage-action-info {
+            min-width: 0;
+            width: 100%;
+          }
+          .btn-generate-manage {
+            width: 100%;
+            padding: 10px 12px;
+            font-size: 14px;
+            box-sizing: border-box;
           }
         }
       `}</style>

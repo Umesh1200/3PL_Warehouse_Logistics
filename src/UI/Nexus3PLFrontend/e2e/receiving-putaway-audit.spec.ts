@@ -232,25 +232,26 @@ test.describe('Phase 7.3: Receiving & RF Putaway Enterprise UI Audit', () => {
         }
       });
 
-      await page.route('**/api/v1/putaway/tasks/next**', (route) => {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify(mockPutawayTask),
-        });
-      });
-
       await page.route('**/api/v1/putaway/tasks**', (route) => {
-        route.fulfill({
-          status: 200,
-          contentType: 'application/json',
-          body: JSON.stringify({
-            items: [mockPutawayTask],
-            totalCount: 1,
-            pageNumber: 1,
-            pageSize: 10,
-          }),
-        });
+        const url = route.request().url();
+        if (url.includes('/api/v1/putaway/tasks/next')) {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(mockPutawayTask),
+          });
+        } else {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify({
+              items: [mockPutawayTask],
+              totalCount: 1,
+              pageNumber: 1,
+              pageSize: 10,
+            }),
+          });
+        }
       });
 
       // Login Flow
@@ -305,6 +306,17 @@ test.describe('Phase 7.3: Receiving & RF Putaway Enterprise UI Audit', () => {
       await page.click('[data-testid="tab-rf"]');
       await page.waitForSelector('[data-testid="rf-task-card"]', { timeout: 10000 });
       await page.waitForTimeout(400);
+
+      // P-RF-01: Verify RF Task card displays expected values
+      await expect(page.locator('.rf-task-sku')).toHaveText(mockPutawayTask.sku);
+      await expect(page.locator('.rf-task-desc')).toHaveText(mockPutawayTask.itemDescription);
+      await expect(page.locator('.rf-metrics-row')).toContainText(mockPutawayTask.lpnCode);
+      await expect(page.locator('.rf-metrics-row')).toContainText(`${mockPutawayTask.quantity} units`);
+      await expect(page.locator('.source-step .step-val')).toHaveText(mockPutawayTask.sourceLocationCode);
+      await expect(page.locator('.destination-step .step-val')).toHaveText(mockPutawayTask.suggestedLocationCode);
+      await expect(page.locator('.destination-step .barcode-hint')).toContainText(mockPutawayTask.suggestedLocationBarcode);
+      await expect(page.locator('.rf-badges')).toContainText(mockPutawayTask.priority);
+      await expect(page.locator('.rf-badges')).toContainText(mockPutawayTask.status);
 
       // Verify RF scanner inputs height (>= 48px)
       const lpnInputBox = await page.locator('#scan-lpn-input').boundingBox();
@@ -402,6 +414,16 @@ test.describe('Phase 7.3: Receiving & RF Putaway Enterprise UI Audit', () => {
     const overflow320 = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth);
     expect(overflow320).toBe(false);
 
+    // P-MOB-01: Verify button bounding box is strictly contained within .manage-action-card at 320px
+    const cardBox = await page.locator('.manage-action-card').boundingBox();
+    const btnBox = await page.locator('[data-testid="generate-tasks-btn-manage-workstation"]').boundingBox();
+    expect(cardBox).not.toBeNull();
+    expect(btnBox).not.toBeNull();
+    expect(btnBox!.x).toBeGreaterThanOrEqual(cardBox!.x);
+    expect(btnBox!.x + btnBox!.width).toBeLessThanOrEqual(cardBox!.x + cardBox!.width + 1);
+    expect(btnBox!.height).toBeGreaterThanOrEqual(44);
+    expect(btnBox!.width).toBeGreaterThanOrEqual(44);
+
     // Capture manage-only screenshot
     const manageFile = `mobile-320-06-putaway-manage-workstation.png`;
     await page.screenshot({ path: path.join(AUDIT_REPO_DIR, manageFile), fullPage: true });
@@ -413,5 +435,117 @@ test.describe('Phase 7.3: Receiving & RF Putaway Enterprise UI Audit', () => {
     const desktopManageFile = `desktop-06-putaway-manage-workstation.png`;
     await page.screenshot({ path: path.join(AUDIT_REPO_DIR, desktopManageFile), fullPage: true });
     await page.screenshot({ path: path.join(ARTIFACT_DIR, desktopManageFile), fullPage: true });
+  });
+
+  test('distinguishes RF task load errors from completed work and supports retry action (P-RF-02)', async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+
+    let shouldFailNext = true;
+
+    await page.route('**/api/v1/auth/login', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          accessToken: 'mock-access-token',
+          refreshToken: 'mock-refresh-token',
+          tokenType: 'Bearer',
+          expiresIn: 3600,
+          user: {
+            id: 'e2e-user-1',
+            email: 'whlead@3pl.local',
+            firstName: 'Floor',
+            lastName: 'Lead',
+            userType: 1,
+            status: 1,
+            roles: ['OperationsStaff'],
+          },
+        }),
+      });
+    });
+
+    await page.route('**/api/v1/auth/me', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          userId: 'e2e-user-1',
+          email: 'whlead@3pl.local',
+          firstName: 'Floor',
+          lastName: 'Lead',
+          userType: 1,
+          tenantId: null,
+          companyName: 'Nexus3PL Enterprise',
+          roles: ['OperationsStaff'],
+          permissions: ['inbound:view', 'inbound:putaway:execute', 'facilities:view'],
+        }),
+      });
+    });
+
+    await page.route('**/api/v1/facilities', (route) => {
+      route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify([mockFacility]),
+      });
+    });
+
+    await page.route('**/api/v1/putaway/tasks**', (route) => {
+      const url = route.request().url();
+      if (url.includes('/api/v1/putaway/tasks/next')) {
+        if (shouldFailNext) {
+          route.fulfill({
+            status: 500,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: 'Internal server error calculating optimal storage bin' }),
+          });
+        } else {
+          route.fulfill({
+            status: 200,
+            contentType: 'application/json',
+            body: JSON.stringify(mockPutawayTask),
+          });
+        }
+      } else {
+        route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            items: [mockPutawayTask],
+            totalCount: 1,
+            pageNumber: 1,
+            pageSize: 10,
+          }),
+        });
+      }
+    });
+
+    await page.goto('/login');
+    await page.fill('input[type="email"]', 'whlead@3pl.local');
+    await page.fill('input[type="password"]', 'CorrectHorseBatteryStaple123!');
+    await page.click('button[type="submit"]');
+    await page.waitForSelector('.app-shell-container', { timeout: 10000 });
+
+    await page.goto('/app/inbound/putaway');
+    await page.waitForSelector('[data-testid="tab-rf"]', { timeout: 10000 });
+    await page.click('[data-testid="tab-rf"]');
+
+    // 1. Verify failure state displays error card and retry button, not empty "completed" card
+    await page.waitForSelector('[data-testid="rf-error-card"]', { timeout: 10000 });
+    await expect(page.locator('[data-testid="rf-error-card"]')).toBeVisible();
+    await expect(page.locator('[data-testid="rf-retry-btn"]')).toBeVisible();
+    await expect(page.locator('[data-testid="rf-no-tasks"]')).not.toBeVisible();
+    await expect(page.locator('[data-testid="rf-task-card"]')).not.toBeVisible();
+
+    // 2. Clear failure flag and click retry
+    shouldFailNext = false;
+    await page.click('[data-testid="rf-retry-btn"]');
+
+    // 3. Verify task card loads successfully after retry
+    await page.waitForSelector('[data-testid="rf-task-card"]', { timeout: 10000 });
+    await expect(page.locator('[data-testid="rf-task-card"]')).toBeVisible();
+    await expect(page.locator('.rf-task-sku')).toHaveText(mockPutawayTask.sku);
+    await expect(page.locator('[data-testid="rf-error-card"]')).not.toBeVisible();
+    await expect(page.locator('[data-testid="rf-no-tasks"]')).not.toBeVisible();
   });
 });

@@ -76,8 +76,7 @@ export const ReceivingPage: React.FC = () => {
   // Scan Line Form
   const [scanForm, setScanForm] = useState<{
     itemId: string;
-    sku: string;
-    quantityReceived: number;
+    quantityReceived: number | string;
     lpn: string;
     lotNumber: string;
     expirationDate: string;
@@ -85,7 +84,6 @@ export const ReceivingPage: React.FC = () => {
     notes: string;
   }>({
     itemId: '',
-    sku: '',
     quantityReceived: 1,
     lpn: '',
     lotNumber: '',
@@ -265,9 +263,17 @@ export const ReceivingPage: React.FC = () => {
   const handleScanLine = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!sessionDetail || isScanning || inFlightScanRef.current || !canReceive) return;
-    if (!scanForm.itemId.trim()) {
-      setFeedback({ type: 'error', message: 'Item ID / SKU is required to scan receipt line.' });
+
+    const trimmedItemId = scanForm.itemId.trim();
+    if (!trimmedItemId) {
+      setFeedback({ type: 'error', message: 'Item ID (GUID) is required to scan receipt line.' });
       scanItemIdInputRef.current?.focus();
+      return;
+    }
+
+    const qty = Number(scanForm.quantityReceived);
+    if (isNaN(qty) || qty <= 0) {
+      setFeedback({ type: 'error', message: 'Quantity received must be a positive number greater than zero.' });
       return;
     }
 
@@ -277,8 +283,8 @@ export const ReceivingPage: React.FC = () => {
       setFeedback(null);
 
       const req: ScanReceiptLineRequest = {
-        itemId: scanForm.itemId.trim(),
-        quantityReceived: Number(scanForm.quantityReceived) || 1,
+        itemId: trimmedItemId,
+        quantityReceived: qty,
         lpn: scanForm.lpn.trim() || undefined,
         lotNumber: scanForm.lotNumber.trim() || undefined,
         expirationDate: scanForm.expirationDate ? new Date(scanForm.expirationDate).toISOString() : undefined,
@@ -289,7 +295,6 @@ export const ReceivingPage: React.FC = () => {
       await receivingApi.scanLine(sessionDetail.id, req);
       setScanForm({
         itemId: '',
-        sku: '',
         quantityReceived: 1,
         lpn: '',
         lotNumber: '',
@@ -609,14 +614,14 @@ export const ReceivingPage: React.FC = () => {
                     <div>
                       <h2 className="card-title">RF Intake Line Scanner</h2>
                       <p className="scanner-subtitle">
-                        Scan or key item barcode, quantity, and container license plate. Keyboard-wedge scanners supported.
+                        Scan or key catalog Item GUID, quantity, and container license plate. Keyboard-wedge scanners supported.
                       </p>
                     </div>
                   </div>
                   <span className="scanner-station-pill">WORKSTATION ACTIVE</span>
                 </div>
 
-                <form onSubmit={handleScanLine} className="scanner-form">
+                <form onSubmit={handleScanLine} className="scanner-form" noValidate>
                   {/* Group 1: Item Identification & Quantity */}
                   <div className="scanner-section">
                     <div className="section-label-bar">
@@ -626,7 +631,7 @@ export const ReceivingPage: React.FC = () => {
                     <div className="scanner-grid-primary">
                       <div className="form-group flex-2">
                         <label htmlFor="scan-item-id" className="form-label">
-                          Item ID / SKU Identifier *
+                          Item ID (Catalog GUID) *
                         </label>
                         <div className="input-with-icon">
                           <input
@@ -634,7 +639,7 @@ export const ReceivingPage: React.FC = () => {
                             id="scan-item-id"
                             type="text"
                             className="form-input scan-barcode-input"
-                            placeholder="Scan barcode or enter Item ID GUID"
+                            placeholder="Scan or enter authoritative Item GUID"
                             value={scanForm.itemId}
                             onChange={(e) => setScanForm({ ...scanForm, itemId: e.target.value })}
                             required
@@ -643,7 +648,7 @@ export const ReceivingPage: React.FC = () => {
                           />
                         </div>
                         <span className="input-helper-text">
-                          Primary barcode input (min 52px height, monospace). Supports hardware wedge scanner.
+                          Authoritative Item GUID required by backend contract. Scanners must emit catalog Item GUID.
                         </span>
                       </div>
                       <div className="form-group flex-1">
@@ -657,11 +662,11 @@ export const ReceivingPage: React.FC = () => {
                           step="1"
                           className="form-input scan-barcode-input scan-qty-input"
                           value={scanForm.quantityReceived}
-                          onChange={(e) => setScanForm({ ...scanForm, quantityReceived: Number(e.target.value) })}
+                          onChange={(e) => setScanForm({ ...scanForm, quantityReceived: e.target.value === '' ? '' : Number(e.target.value) })}
                           required
                           data-testid="scan-qty-input"
                         />
-                        <span className="input-helper-text">Physical count at dock</span>
+                        <span className="input-helper-text">Positive physical count at dock</span>
                       </div>
                     </div>
                   </div>
