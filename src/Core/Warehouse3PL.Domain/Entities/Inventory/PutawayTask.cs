@@ -87,7 +87,15 @@ public class PutawayTask : AuditableEntity<Guid>, ITenantEntity
     public InventoryLot? Lot { get; set; }
     public Location SourceLocation { get; set; } = null!;
     public Location SuggestedLocation { get; set; } = null!;
-    public Location? TargetLocation { get; set; }
+    public Location? TargetLocation
+    {
+        get => SuggestedLocation;
+        set
+        {
+            if (value != null)
+                SuggestedLocation = value;
+        }
+    }
     public Location? ActualLocation { get; set; }
     public User? AssignedUser { get; set; }
     public ReceiptLine? ReceiptLine { get; set; }

@@ -89,6 +89,7 @@ public class PutawayTaskConfiguration : IEntityTypeConfiguration<PutawayTask>
 
         // Ignored aliases
         builder.Ignore(pt => pt.TargetLocationId);
+        builder.Ignore(pt => pt.TargetLocation);
         builder.Ignore(pt => pt.CompletedAt);
 
         // Auditing

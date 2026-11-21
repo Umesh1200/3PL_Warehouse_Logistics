@@ -12,6 +12,7 @@ using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
+using Warehouse3PL.Domain.Exceptions;
 using Warehouse3PL.Infrastructure.Persistence;
 using Warehouse3PL.Infrastructure.Persistence.Interceptors;
 
@@ -89,6 +90,7 @@ try
 
     // Receiving completion: throw after SaveChanges has issued SQL, then verify the outer
     // production transaction rolls lifecycle, stock and ledger back together.
+    var receivingFaultExercised = false;
     await using (var failing = CreateDb(connectionString, user, new ThrowAfterSaveInterceptor()))
     {
         try
@@ -99,9 +101,11 @@ try
         }
         catch (ForcedRollbackException)
         {
-            // Expected: the transaction must be rolled back.
+            receivingFaultExercised = true;
         }
     }
+    if (!receivingFaultExercised)
+        throw new InvalidOperationException("Receiving completion did not trigger the expected ForcedRollbackException fault.");
 
     await using (var verifyRollback = CreateDb(connectionString, user))
     {
@@ -131,7 +135,28 @@ try
         Console.WriteLine("PASS PostgreSQL receiving retry: status=Completed, staging=10, receive ledger=1");
     }
 
+    // Duplicate receiving completion: verify repeated submissions cannot produce duplicate inventory or ledger effects.
+    await using (var duplicate = CreateDb(connectionString, user))
+    {
+        var auth = new WarehouseOperationalAuthorization(duplicate, user);
+        var duplicateResult = await new CompleteReceivingSessionCommandHandler(duplicate, user, auth).Handle(
+            new CompleteReceivingSessionCommand { ReceivingSessionId = sessionId }, CancellationToken.None);
+        if (duplicateResult.Status != ReceivingStatus.Completed)
+            throw new InvalidOperationException("Duplicate receiving submission returned unexpected status.");
+    }
+
+    await using (var verifyDuplicate = CreateDb(connectionString, user))
+    {
+        var session = await verifyDuplicate.ReceivingSessions.AsNoTracking().SingleAsync(s => s.Id == sessionId);
+        var source = await verifyDuplicate.StockOnHand.AsNoTracking().SingleAsync(s => s.LocationId == stagingId);
+        if (session.Status != ReceivingStatus.Completed || source.QtyAvailable != 10m ||
+            await verifyDuplicate.InventoryTransactions.CountAsync(t => t.ReferenceId == sessionId) != 1)
+            throw new InvalidOperationException("Duplicate receiving submission produced unexpected inventory or ledger effects.");
+        Console.WriteLine("PASS PostgreSQL duplicate receiving idempotency: status=Completed, staging=10, receive ledger=1");
+    }
+
     // Putaway confirmation: force the same post-save failure and verify rollback.
+    var putawayFaultExercised = false;
     await using (var failing = CreateDb(connectionString, user, new ThrowAfterSaveInterceptor()))
     {
         try
@@ -144,9 +169,11 @@ try
         }
         catch (ForcedRollbackException)
         {
-            // Expected.
+            putawayFaultExercised = true;
         }
     }
+    if (!putawayFaultExercised)
+        throw new InvalidOperationException("Putaway confirmation did not trigger the expected ForcedRollbackException fault.");
 
     await using (var verifyRollback = CreateDb(connectionString, user))
     {
@@ -181,6 +208,41 @@ try
             await verifyRetry.InventoryTransactions.CountAsync(t => t.ReferenceId == taskId) != 1)
             throw new InvalidOperationException("Putaway retry violated lifecycle, conservation or ledger exactly-once behavior.");
         Console.WriteLine("PASS PostgreSQL putaway retry: status=Completed, staging=0, destination=10, conserved total=10, ledgers=2");
+    }
+
+    // Duplicate putaway confirmation: verify repeated submissions cannot produce duplicate inventory or ledger effects.
+    var duplicatePutawayThrew = false;
+    await using (var duplicate = CreateDb(connectionString, user))
+    {
+        var auth = new WarehouseOperationalAuthorization(duplicate, user);
+        try
+        {
+            await new ConfirmPutawayTaskCommandHandler(duplicate, user, auth).Handle(new ConfirmPutawayTaskCommand
+            {
+                TaskId = taskId, ScannedLpn = "P73-LPN1", ScannedLocationBarcode = "P73-DST"
+            }, CancellationToken.None);
+        }
+        catch (Warehouse3PL.Domain.Exceptions.ValidationException)
+        {
+            duplicatePutawayThrew = true;
+        }
+    }
+    if (!duplicatePutawayThrew)
+        throw new InvalidOperationException("Duplicate putaway confirmation did not reject already-completed task with ValidationException.");
+
+    await using (var verifyDuplicatePutaway = CreateDb(connectionString, user))
+    {
+        var task = await verifyDuplicatePutaway.PutawayTasks.AsNoTracking().SingleAsync(t => t.Id == taskId);
+        var balances = await verifyDuplicatePutaway.StockOnHand.AsNoTracking().ToListAsync();
+        var source = balances.Single(s => s.LocationId == stagingId);
+        var destination = balances.Single(s => s.LocationId == destinationId);
+        if (task.Status != PutawayTaskStatus.Completed || task.ActualLocationId != destinationId ||
+            source.QtyAvailable != 0m || destination.QtyAvailable != 10m ||
+            balances.Sum(s => s.TotalQuantity) != 10m ||
+            await verifyDuplicatePutaway.InventoryTransactions.CountAsync() != 2 ||
+            await verifyDuplicatePutaway.InventoryTransactions.CountAsync(t => t.ReferenceId == taskId) != 1)
+            throw new InvalidOperationException("Duplicate putaway submission corrupted balances or ledger transactions.");
+        Console.WriteLine("PASS PostgreSQL duplicate putaway prevention: status=Completed, staging=0, destination=10, conserved total=10, ledgers=2");
     }
 }
 finally

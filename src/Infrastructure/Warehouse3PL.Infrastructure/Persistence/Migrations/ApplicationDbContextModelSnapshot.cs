@@ -10731,10 +10731,6 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("suggested_location_id");
 
-                    b.Property<Guid>("TargetLocationId1")
-                        .HasColumnType("uuid")
-                        .HasColumnName("target_location_id1");
-
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at");
@@ -10777,9 +10773,6 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("SuggestedLocationId")
                         .HasDatabaseName("ix_putaway_tasks_suggested_location_id");
-
-                    b.HasIndex("TargetLocationId1")
-                        .HasDatabaseName("ix_putaway_tasks_target_location_id1");
 
                     b.HasIndex("FacilityId", "Status", "Priority")
                         .HasDatabaseName("ix_putaway_tasks_facility_id_status_priority");
@@ -17764,13 +17757,6 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasConstraintName("fk_putaway_tasks_locations_suggested_location_id");
 
-                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Location", "TargetLocation")
-                        .WithMany()
-                        .HasForeignKey("TargetLocationId1")
-                        .OnDelete(DeleteBehavior.Cascade)
-                        .IsRequired()
-                        .HasConstraintName("fk_putaway_tasks_locations_target_location_id1");
-
                     b.Navigation("ActualLocation");
 
                     b.Navigation("AssignedUser");
@@ -17788,8 +17774,6 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("SourceLocation");
 
                     b.Navigation("SuggestedLocation");
-
-                    b.Navigation("TargetLocation");
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Inventory.StockOnHand", b =>
