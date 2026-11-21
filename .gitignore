@@ -24,6 +24,7 @@ bld/
 
 ## Test results
 [Tt]est[Rr]esult*/
+test-results/
 [Bb]uild[Ll]og.*
 
 ## Dotnet artifacts

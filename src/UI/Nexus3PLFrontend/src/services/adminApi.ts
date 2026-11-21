@@ -80,4 +80,43 @@ export const adminApi = {
       signal,
     });
   },
+
+  /**
+   * Retrieve client tenant by UUID.
+   */
+  getClientById: async (id: string, signal?: AbortSignal): Promise<ClientDto> => {
+    return apiClient<ClientDto>(`/api/v1/clients/${id}`, {
+      method: 'GET',
+      signal,
+    });
+  },
+
+  /**
+   * Create a new client tenant partition.
+   */
+  createClient: async (data: any): Promise<ClientDto> => {
+    return apiClient<ClientDto>('/api/v1/clients', {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  },
+
+  /**
+   * Update an existing client tenant.
+   */
+  updateClient: async (id: string, data: any): Promise<ClientDto> => {
+    return apiClient<ClientDto>(`/api/v1/clients/${id}`, {
+      method: 'PUT',
+      body: JSON.stringify({ ...data, id }),
+    });
+  },
+
+  /**
+   * Deactivate / soft delete a client tenant partition.
+   */
+  deactivateClient: async (id: string): Promise<void> => {
+    return apiClient<void>(`/api/v1/clients/${id}`, {
+      method: 'DELETE',
+    });
+  },
 };

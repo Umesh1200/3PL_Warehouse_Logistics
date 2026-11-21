@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { useState } from 'react';
 import { Sidebar } from './Sidebar';
 import { Header } from './Header';
 
@@ -9,11 +9,13 @@ interface AppShellProps {
 }
 
 export const AppShell: React.FC<AppShellProps> = ({ children, pageTitle, breadcrumb }) => {
+  const [isMobileNavOpen, setIsMobileNavOpen] = useState(false);
+
   return (
     <div className="app-shell-container">
-      <Sidebar />
+      <Sidebar isOpen={isMobileNavOpen} onClose={() => setIsMobileNavOpen(false)} />
       <div className="app-shell-main">
-        <Header />
+        <Header onToggleNav={() => setIsMobileNavOpen((prev) => !prev)} />
         <main className="app-content">
           {(pageTitle || breadcrumb) && (
             <div className="content-page-header">
@@ -46,8 +48,8 @@ export const AppShell: React.FC<AppShellProps> = ({ children, pageTitle, breadcr
           margin-bottom: 20px;
         }
         .breadcrumb-text {
-          font-size: 12px;
-          font-weight: 650;
+          font-size: 11.5px;
+          font-weight: 700;
           color: var(--text-muted);
           text-transform: uppercase;
           letter-spacing: 0.05em;
@@ -62,9 +64,6 @@ export const AppShell: React.FC<AppShellProps> = ({ children, pageTitle, breadcr
           min-width: 0;
         }
         @media (max-width: 768px) {
-          .app-shell-container {
-            flex-direction: column;
-          }
           .app-content {
             padding: 16px;
           }

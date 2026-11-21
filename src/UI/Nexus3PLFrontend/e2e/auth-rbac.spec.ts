@@ -137,6 +137,78 @@ test.describe('Phase 7.2: Real Browser E2E Authentication & RBAC Shell Verificat
       });
     });
 
+    // Entity Schema route mock for metadata-driven modules
+    await page.route('**/api/v1/schemas/**', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          name: 'Client',
+          version: '1.0.0',
+          title: 'Client Tenant',
+          pluralTitle: 'Client Tenants',
+          description: 'Multi-tenant accounts, billing currencies, and service level agreements.',
+          icon: 'Building',
+          primaryKey: 'id',
+          endpoints: {
+            list: '/api/v1/clients',
+            get: '/api/v1/clients/{id}',
+            create: '/api/v1/clients',
+            update: '/api/v1/clients/{id}',
+            delete: '/api/v1/clients/{id}',
+          },
+          permissions: {
+            view: 'clients:view',
+            create: 'clients:create',
+            edit: 'clients:edit',
+            delete: 'clients:delete',
+          },
+          fields: [
+            { name: 'id', label: 'Client ID', type: 'string', readOnly: true, hidden: true },
+            { name: 'accountCode', label: 'Client Code', type: 'code', required: true },
+            { name: 'companyName', label: 'Company Name', type: 'string', required: true },
+            {
+              name: 'slaTier',
+              label: 'SLA Tier',
+              type: 'select',
+              options: [
+                { value: 1, label: 'Standard', variant: 'info' },
+                { value: 2, label: 'Silver', variant: 'info' },
+                { value: 3, label: 'Gold', variant: 'warning' },
+                { value: 4, label: 'Platinum', variant: 'success' },
+              ],
+            },
+            { name: 'currency', label: 'Billing Currency', type: 'currency' },
+            {
+              name: 'status',
+              label: 'Status',
+              type: 'select',
+              options: [
+                { value: 1, label: 'Onboarding', variant: 'info' },
+                { value: 2, label: 'Active', variant: 'success' },
+                { value: 3, label: 'Suspended', variant: 'warning' },
+                { value: 4, label: 'Terminated', variant: 'danger' },
+              ],
+            },
+            { name: 'createdAt', label: 'Created At', type: 'date', readOnly: true },
+          ],
+          views: {
+            list: {
+              columns: [
+                { field: 'accountCode', label: 'Client Code', width: '150px', sortable: true, format: 'code' },
+                { field: 'companyName', label: 'Company Name', sortable: true, format: 'text' },
+                { field: 'slaTier', label: 'SLA Tier', width: '130px', format: 'badge' },
+                { field: 'currency', label: 'Currency', width: '110px', align: 'center', format: 'currency' },
+                { field: 'status', label: 'Status', width: '120px', align: 'center', format: 'badge' },
+                { field: 'createdAt', label: 'Created', width: '130px', align: 'right', format: 'date' },
+              ],
+            },
+          },
+          actions: [],
+        }),
+      });
+    });
+
     // Real backend-shaped ClientDto with accountCode, slaTier: 3 (Gold), currency: "EUR"
     await page.route('**/api/v1/clients*', async (route) => {
       return route.fulfill({

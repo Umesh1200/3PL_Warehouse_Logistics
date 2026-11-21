@@ -2,8 +2,13 @@ import React from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useFacility } from '../../context/FacilityContext';
 import { useRouter } from '../../context/RouterContext';
+import { AppIcon } from '../common/AppIcon';
 
-export const Header: React.FC = () => {
+export interface HeaderProps {
+  onToggleNav?: () => void;
+}
+
+export const Header: React.FC<HeaderProps> = ({ onToggleNav }) => {
   const { user, logout } = useAuth();
   const { facilities, activeFacility, setActiveFacility, isLoadingFacilities } = useFacility();
   const { navigate } = useRouter();
@@ -25,6 +30,18 @@ export const Header: React.FC = () => {
   return (
     <header className="app-header">
       <div className="header-left">
+        {onToggleNav && (
+          <button
+            type="button"
+            className="mobile-nav-toggle"
+            onClick={onToggleNav}
+            aria-label="Toggle navigation drawer"
+            data-testid="mobile-nav-toggle"
+          >
+            <AppIcon name="Menu" size="md" color="muted" />
+          </button>
+        )}
+
         {/* Facility Selector Scoped by Tenant */}
         <div className="facility-picker" aria-label="Active Warehouse Facility">
           <span className="picker-label">ACTIVE WAREHOUSE:</span>
@@ -32,6 +49,7 @@ export const Header: React.FC = () => {
             <span className="facility-loading">Loading facilities...</span>
           ) : facilities.length > 0 ? (
             <div className="select-wrapper">
+              <span className="facility-status-dot" aria-hidden="true" />
               <select
                 className="facility-select"
                 value={activeFacility?.id || ''}
@@ -60,7 +78,7 @@ export const Header: React.FC = () => {
         {/* Tenant Organization Tag */}
         {user?.companyName && (
           <div className="tenant-tag" title="Client Tenant Partition">
-            <span className="tenant-icon">&bull;</span>
+            <AppIcon name="Building" size="xs" color="primary" />
             <span className="tenant-name">{user.companyName}</span>
           </div>
         )}
@@ -83,7 +101,8 @@ export const Header: React.FC = () => {
           onClick={handleSignOut}
           aria-label="Sign out of operations portal"
         >
-          Sign Out
+          <AppIcon name="LogOut" size="xs" />
+          <span className="signout-text">Sign Out</span>
         </button>
       </div>
 
@@ -106,6 +125,18 @@ export const Header: React.FC = () => {
           align-items: center;
           gap: 16px;
         }
+        .mobile-nav-toggle {
+          display: none;
+          background: none;
+          border: none;
+          padding: 8px;
+          cursor: pointer;
+          border-radius: var(--radius-xs);
+          color: var(--text-main);
+        }
+        .mobile-nav-toggle:hover {
+          background: #f1f5f9;
+        }
         .facility-picker {
           display: flex;
           align-items: center;
@@ -119,59 +150,58 @@ export const Header: React.FC = () => {
           letter-spacing: 0.05em;
         }
         .select-wrapper {
+          position: relative;
           display: flex;
           align-items: center;
-          gap: 6px;
+          gap: 8px;
+        }
+        .facility-status-dot {
+          width: 8px;
+          height: 8px;
+          border-radius: 50%;
+          background: #10b981;
+          box-shadow: 0 0 6px rgba(16, 185, 129, 0.4);
+          flex-shrink: 0;
         }
         .facility-select {
-          height: 36px;
-          padding: 4px 10px;
+          padding: 6px 12px;
+          border-radius: var(--radius-sm);
           border: 1px solid var(--border-actionable);
-          border-radius: var(--radius-xs);
-          background: #ffffff;
-          color: var(--text-main);
           font-size: 13px;
-          font-weight: 650;
+          font-weight: 600;
+          color: var(--text-main);
+          background: #ffffff;
           cursor: pointer;
-          outline: none;
         }
         .facility-select:focus {
+          outline: none;
           border-color: var(--brand-primary);
-          box-shadow: 0 0 0 2px rgba(82, 84, 230, 0.15);
+          box-shadow: 0 0 0 2px rgba(82, 84, 230, 0.2);
         }
         .facility-tz {
           font-size: 11px;
-          background: #f1f5f9;
-          color: #475569;
-          padding: 2px 6px;
-          border-radius: var(--radius-xs);
-          font-weight: 600;
-        }
-        .facility-empty, .facility-loading {
-          font-size: 13px;
+          font-weight: 650;
           color: var(--text-muted);
-          font-style: italic;
+          background: #f1f5f9;
+          padding: 3px 6px;
+          border-radius: var(--radius-xs);
         }
         .header-right {
           display: flex;
           align-items: center;
-          gap: 18px;
+          gap: 16px;
         }
         .tenant-tag {
           display: flex;
           align-items: center;
           gap: 6px;
-          background: #f8fafc;
-          border: 1px solid var(--border-subtle);
-          padding: 4px 10px;
-          border-radius: var(--radius-xs);
-          font-size: 12.5px;
+          font-size: 12px;
           font-weight: 650;
-          color: var(--text-main);
-        }
-        .tenant-icon {
-          color: var(--brand-accent);
-          font-size: 16px;
+          color: var(--brand-primary);
+          background: var(--brand-primary-light);
+          padding: 4px 10px;
+          border-radius: var(--radius-full);
+          border: 1px solid #c7c9f8;
         }
         .user-profile-badge {
           display: flex;
@@ -179,53 +209,61 @@ export const Header: React.FC = () => {
           gap: 10px;
         }
         .avatar-circle {
-          width: 36px;
-          height: 36px;
+          width: 34px;
+          height: 34px;
           border-radius: 50%;
-          background: var(--brand-primary-light);
-          color: var(--brand-primary);
+          background: #1e293b;
+          color: #ffffff;
           display: flex;
           align-items: center;
           justify-content: center;
-          font-weight: 750;
-          font-size: 13.5px;
-          border: 1px solid rgba(82, 84, 230, 0.2);
+          font-size: 12.5px;
+          font-weight: 700;
         }
         .user-info {
           display: flex;
           flex-direction: column;
-          line-height: 1.25;
         }
         .user-name {
-          font-size: 13.5px;
-          font-weight: 700;
+          font-size: 13px;
+          font-weight: 650;
           color: var(--text-main);
+          line-height: 1.2;
         }
         .role-pill {
           font-size: 10.5px;
           font-weight: 700;
-          color: #4338ca;
-          background: #e0e7ff;
-          padding: 1px 6px;
-          border-radius: 10px;
-          align-self: flex-start;
-          margin-top: 2px;
+          color: var(--brand-primary);
+          text-transform: uppercase;
+          letter-spacing: 0.04em;
         }
         .btn-signout {
-          background: none;
-          border: 1px solid var(--border-actionable);
-          border-radius: var(--radius-xs);
+          display: inline-flex;
+          align-items: center;
+          gap: 6px;
           padding: 6px 12px;
+          border: 1px solid var(--border-actionable);
+          border-radius: var(--radius-sm);
           font-size: 12.5px;
-          font-weight: 650;
-          color: var(--text-main);
-          cursor: pointer;
-          transition: background var(--transition-fast), color var(--transition-fast);
+          font-weight: 600;
+          color: var(--text-muted);
+          background: #ffffff;
         }
         .btn-signout:hover {
-          background: #ffe0db;
-          border-color: #b02a37;
-          color: #b02a37;
+          color: var(--status-danger-text);
+          border-color: var(--status-danger-border);
+          background: var(--status-danger-bg);
+        }
+        @media (max-width: 768px) {
+          .mobile-nav-toggle {
+            display: flex;
+          }
+          .app-header {
+            padding: 0 16px;
+          }
+          .picker-label, .facility-tz, .tenant-tag, .role-pill, .signout-text {
+            display: none;
+          }
         }
       `}</style>
     </header>

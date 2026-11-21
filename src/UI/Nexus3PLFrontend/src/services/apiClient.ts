@@ -355,9 +355,17 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
     if (!response.ok) {
       let errorBody: any = null;
       try {
-        errorBody = await response.json();
+        if (typeof response.json === 'function') {
+          errorBody = await response.json();
+        } else if (typeof response.text === 'function') {
+          errorBody = await response.text();
+        }
       } catch (_) {
-        errorBody = await response.text();
+        try {
+          if (typeof response.text === 'function') {
+            errorBody = await response.text();
+          }
+        } catch (__) {}
       }
       throw new ApiError(
         response.status,
