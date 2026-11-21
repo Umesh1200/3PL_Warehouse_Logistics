@@ -1,5 +1,6 @@
 /* Base & Reset Styles */
 @import './tokens.css';
+@import './dashboard.css';
 
 *, *::before, *::after {
   box-sizing: border-box;

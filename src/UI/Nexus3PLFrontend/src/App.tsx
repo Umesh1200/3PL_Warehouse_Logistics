@@ -29,7 +29,7 @@ const AppRoutes: React.FC = () => {
 
   if (path.startsWith('/app')) {
     let content: React.ReactNode = <DashboardPage />;
-    let pageTitle = 'Operations Dashboard';
+    let pageTitle = 'Operations Dashboard & Control Tower';
     let breadcrumb = 'INTELLIGENCE & OVERSIGHT / CONTROL TOWER';
 
     if (path === '/app/admin/users') {

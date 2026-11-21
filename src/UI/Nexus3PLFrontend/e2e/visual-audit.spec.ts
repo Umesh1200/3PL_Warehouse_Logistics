@@ -478,6 +478,69 @@ test.describe('Nexus3PL Visual Design Audit - Multi-Viewport Capture', () => {
         });
       });
 
+      await page.route('**/api/v1/control-tower/summary**', async (route) => {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            facilityId: mockFacility.id,
+            asOfUtc: '2026-11-21T18:00:00Z',
+            ordersReceivedToday: 148,
+            ordersDispatchedToday: 122,
+            packagesDispatchedToday: 340,
+            unitsPickedToday: 2150,
+            cartonsPackedToday: 480,
+            inboundPalletsReceivedToday: 18,
+            putawayCompletedToday: 14,
+            returnsInspectedToday: 3,
+            unitsPerLaborHourToday: 48.6,
+            averageFulfillmentCycleTimeHours: 1.6,
+            sameDayDispatchAdherencePercent: 99.1,
+            totalBilledRevenueToday: 21800,
+            netFreightMarginToday: 3450,
+            onTimeDeliveryRatePercent: 99.4,
+            activeDeliveryExceptionsCount: 1,
+            palletPositionOccupancyPercent: 82.5,
+            volumetricCubeFillPercent: 68.4,
+          }),
+        });
+      });
+
+      await page.route('**/api/v1/control-tower/bottlenecks**', async (route) => {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            facilityId: mockFacility.id,
+            evaluatedAtUtc: '2026-11-21T18:00:00Z',
+            overallHealthScore: 98,
+            receivingCongestion: { stage: 'Receiving', severity: 'Normal', queueDepth: 1, metricValue: 18, metricUnit: 'pallets', summaryMessage: 'Inflow clear', recommendedAction: 'None' },
+            pickingBacklog: { stage: 'Picking', severity: 'Normal', queueDepth: 3, metricValue: 28, metricUnit: 'orders', summaryMessage: 'Picking pacing balanced', recommendedAction: 'None' },
+            packingDelays: { stage: 'Packing', severity: 'Normal', queueDepth: 2, metricValue: 22, metricUnit: 'cartons', summaryMessage: 'Packing throughput optimal', recommendedAction: 'None' },
+            dispatchDelays: { stage: 'Dispatch', severity: 'Normal', queueDepth: 0, metricValue: 0, metricUnit: 'pallets', summaryMessage: 'Staging lanes clear', recommendedAction: 'None' },
+          }),
+        });
+      });
+
+      await page.route('**/api/v1/control-tower/dock-yard**', async (route) => {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify({
+            totalYardSpotsCount: 24,
+            occupiedYardSpotsCount: 5,
+            yardOccupancyPercent: 20.8,
+            trucksCheckedInCount: 15,
+            trucksDepartedCount: 11,
+            trucksWaitingInYardCount: 2,
+            trucksAtDockCount: 3,
+            averageYardWaitTimeMinutes: 12.5,
+            averageDockServiceTimeMinutes: 26.0,
+            averageTotalTurnTimeMinutes: 38.5,
+          }),
+        });
+      });
+
       // 1. Landing Page
       await page.goto('/');
       await page.waitForLoadState('networkidle');

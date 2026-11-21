@@ -87,6 +87,50 @@ test.describe('Phase 7.2: Real Browser E2E Authentication & RBAC Shell Verificat
       });
     });
 
+    await page.route('**/api/v1/control-tower/**', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          facilityId: 'fac-chi',
+          asOfUtc: '2026-11-21T18:00:00Z',
+          ordersReceivedToday: 120,
+          ordersDispatchedToday: 95,
+          packagesDispatchedToday: 210,
+          unitsPickedToday: 1450,
+          cartonsPackedToday: 320,
+          inboundPalletsReceivedToday: 14,
+          putawayCompletedToday: 11,
+          returnsInspectedToday: 2,
+          unitsPerLaborHourToday: 42.5,
+          averageFulfillmentCycleTimeHours: 1.8,
+          sameDayDispatchAdherencePercent: 98.5,
+          totalBilledRevenueToday: 14500,
+          netFreightMarginToday: 2300,
+          onTimeDeliveryRatePercent: 99.2,
+          activeDeliveryExceptionsCount: 1,
+          palletPositionOccupancyPercent: 78.4,
+          volumetricCubeFillPercent: 64.2,
+        }),
+      });
+    });
+
+    await page.route('**/api/v1/putaway/tasks**', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ items: [], totalCount: 0, pageNumber: 1, pageSize: 5 }),
+      });
+    });
+
+    await page.route('**/api/v1/receiving/sessions**', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({ items: [], totalCount: 0, pageNumber: 1, pageSize: 5 }),
+      });
+    });
+
     await page.route('**/api/v1/facilities/*', async (route) => {
       return route.fulfill({
         status: 200,

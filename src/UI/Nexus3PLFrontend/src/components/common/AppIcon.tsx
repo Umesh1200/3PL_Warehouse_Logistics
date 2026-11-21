@@ -2,6 +2,7 @@ import React from 'react';
 import {
   // Modules / Navigation
   LayoutDashboard,
+  Activity,
   Compass,
   ArrowDownToLine,
   PackageOpen,
@@ -71,6 +72,7 @@ import {
 export const ICON_REGISTRY = {
   // Navigation & Modules
   LayoutDashboard,
+  Activity,
   Compass,
   ArrowDownToLine,
   PackageOpen,

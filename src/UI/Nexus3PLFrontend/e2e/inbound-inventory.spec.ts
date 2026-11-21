@@ -244,6 +244,35 @@ test.describe('Phase 7.3: Real Browser E2E Receiving, Directed Putaway & Stock L
         }),
       });
     });
+
+    // Mock control tower telemetry
+    await page.route('**/api/v1/control-tower/**', async (route) => {
+      return route.fulfill({
+        status: 200,
+        contentType: 'application/json',
+        body: JSON.stringify({
+          facilityId: mockFacility.id,
+          asOfUtc: '2026-11-21T18:00:00Z',
+          ordersReceivedToday: 50,
+          ordersDispatchedToday: 40,
+          packagesDispatchedToday: 80,
+          unitsPickedToday: 500,
+          cartonsPackedToday: 120,
+          inboundPalletsReceivedToday: 6,
+          putawayCompletedToday: 5,
+          returnsInspectedToday: 0,
+          unitsPerLaborHourToday: 35.0,
+          averageFulfillmentCycleTimeHours: 2.1,
+          sameDayDispatchAdherencePercent: 96.0,
+          totalBilledRevenueToday: 5000,
+          netFreightMarginToday: 800,
+          onTimeDeliveryRatePercent: 98.0,
+          activeDeliveryExceptionsCount: 0,
+          palletPositionOccupancyPercent: 70.0,
+          volumetricCubeFillPercent: 55.0,
+        }),
+      });
+    });
   });
 
   test('executes end-to-end receiving intake, complete guard, directed putaway dual-scan, and stock query', async ({ page }) => {

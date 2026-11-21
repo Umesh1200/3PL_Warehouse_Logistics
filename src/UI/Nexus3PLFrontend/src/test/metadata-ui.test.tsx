@@ -221,7 +221,7 @@ describe('Metadata-Driven UI Architecture & Component Verification', () => {
       await expect(schemaService.getSchema('Client')).rejects.toThrow(/malformed/i);
     });
 
-    it('scopes cached schemas by identity and effective permissions and invalidates on clearCache', async () => {
+    it('scopes cached schemas by identity, roles, and effective permissions and invalidates on clearCache', async () => {
       tokenManager.setTokens('tok', 'ref');
       const fetchSpy = vi.fn().mockResolvedValue({
         ok: true,
@@ -230,26 +230,32 @@ describe('Metadata-Driven UI Architecture & Component Verification', () => {
       });
       vi.stubGlobal('fetch', fetchSpy);
 
-      const scopeUserA = { userId: 'user-a', permissions: ['clients:view'] };
-      const scopeUserB = { userId: 'user-b', permissions: ['clients:view', 'clients:create'] };
+      const scopeUserA = { userId: 'user-a', roles: ['WarehouseStaff'], permissions: ['clients:view'] };
+      const scopeUserB = { userId: 'user-b', roles: ['WarehouseStaff'], permissions: ['clients:view', 'clients:create'] };
+      const scopeUserARoleSwitch = { userId: 'user-a', roles: ['WarehouseSupervisor'], permissions: ['clients:view'] };
 
       const schema1 = await schemaService.getSchema('Client', scopeUserA);
       expect(schema1.name).toBe('Client');
       expect(fetchSpy).toHaveBeenCalledTimes(1);
 
-      // Hit cache for same user A
+      // Hit cache for same user A with same role and permissions
       const schemaCached = await schemaService.getSchema('Client', scopeUserA);
       expect(schemaCached).toBe(schema1);
       expect(fetchSpy).toHaveBeenCalledTimes(1);
 
+      // Same user A but with different role context misses cache and fetches anew
+      const schemaRoleChanged = await schemaService.getSchema('Client', scopeUserARoleSwitch);
+      expect(schemaRoleChanged.name).toBe('Client');
+      expect(fetchSpy).toHaveBeenCalledTimes(2);
+
       // Different user / permission scope misses cache and fetches
       await schemaService.getSchema('Client', scopeUserB);
-      expect(fetchSpy).toHaveBeenCalledTimes(2);
+      expect(fetchSpy).toHaveBeenCalledTimes(3);
 
       // Clearing cache forces fresh fetch
       schemaService.clearCache();
       await schemaService.getSchema('Client', scopeUserA);
-      expect(fetchSpy).toHaveBeenCalledTimes(3);
+      expect(fetchSpy).toHaveBeenCalledTimes(4);
     });
 
     it('DynamicEntityPage renders error alert with retry button when schema resolution fails', async () => {

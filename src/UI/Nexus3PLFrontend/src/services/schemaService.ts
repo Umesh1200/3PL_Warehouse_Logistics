@@ -214,8 +214,10 @@ export const schemaService = {
     authScope?: AuthSchemaScope,
     signal?: AbortSignal
   ): Promise<EntitySchema> => {
+    const rolesKey = (authScope?.roles || []).slice().sort().join(',');
+    const permsKey = (authScope?.permissions || []).slice().sort().join(',');
     const scopeKey = authScope?.userId
-      ? `${authScope.userId}:${(authScope.permissions || []).slice().sort().join(',')}`
+      ? `${authScope.userId}:${rolesKey}:${permsKey}`
       : 'anonymous';
     const cacheKey = `${scopeKey}::${entityName.toLowerCase()}`;
 
