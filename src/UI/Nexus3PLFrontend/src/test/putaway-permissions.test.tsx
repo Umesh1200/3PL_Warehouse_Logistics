@@ -489,4 +489,101 @@ describe('Directed Putaway & Control Tower RF Permission Matrix Tests', () => {
       expect(nextCalls.length).toBeGreaterThanOrEqual(1);
     });
   });
+
+  // 5. ORDINARY ADMIN USER (Role: Admin without SuperAdmin privilege)
+  describe('Ordinary Admin User (Role: Admin without SuperAdmin)', () => {
+    it('without explicit grants: cannot view restricted telemetry, cannot access RF execution, cannot see unauthorized launchpad items', async () => {
+      const ordinaryAdminWithoutGrants = createMockUser([], ['Admin']);
+      const { recordedCalls } = setupMockFetch(ordinaryAdminWithoutGrants);
+
+      render(
+        <RouterProvider initialPath="/app">
+          <AuthProvider>
+            <FacilityProvider>
+              <DashboardPage />
+            </FacilityProvider>
+          </AuthProvider>
+        </RouterProvider>
+      );
+
+      // Executive Analytics Restricted banner is shown
+      await waitFor(() => {
+        expect(screen.getByText(/Executive Analytics Restricted/i)).toBeDefined();
+        const notices = screen.getAllByText(/Queue listing requires inbound:view authorization/i);
+        expect(notices.length).toBeGreaterThan(0);
+      });
+
+      // Cannot see RF execution button or launch link
+      expect(screen.queryByRole('button', { name: /Launch RF Putaway Scanner/i })).toBeNull();
+      expect(screen.queryByRole('link', { name: /Launch RF Scanner/i })).toBeNull();
+
+      // Cannot see unauthorized launchpad items (putaway RF, clients, users, roles)
+      expect(screen.queryByTestId('launchpad-putaway')).toBeNull();
+      expect(screen.queryByTestId('launchpad-clients')).toBeNull();
+      expect(screen.queryByTestId('launchpad-users')).toBeNull();
+      expect(screen.queryByTestId('launchpad-roles')).toBeNull();
+
+      // Zero calls to task list query
+      const taskCalls = recordedCalls.filter(c => c.includes('/api/v1/putaway/tasks'));
+      expect(taskCalls.length).toBe(0);
+    });
+
+    it('in PutawayPage without explicit grants: shows authorization required, hides queue, generate button, and RF tab', async () => {
+      const ordinaryAdminWithoutGrants = createMockUser([], ['Admin']);
+      const { recordedCalls } = setupMockFetch(ordinaryAdminWithoutGrants);
+
+      render(
+        <RouterProvider initialPath="/app/inbound/putaway">
+          <AuthProvider>
+            <FacilityProvider>
+              <PutawayPage />
+            </FacilityProvider>
+          </AuthProvider>
+        </RouterProvider>
+      );
+
+      // Shows authorization required card
+      await waitFor(() => {
+        expect(screen.getByText(/Directed Putaway Authorization Required/i)).toBeDefined();
+      });
+
+      // No queue tab, no generate button, no RF tab
+      expect(screen.queryByTestId('tab-queue')).toBeNull();
+      expect(screen.queryByTestId('tab-rf')).toBeNull();
+      expect(screen.queryByTestId('generate-tasks-btn')).toBeNull();
+
+      // Zero calls to next or tasks
+      const nextCalls = recordedCalls.filter(c => c.includes('/api/v1/putaway/tasks/next'));
+      expect(nextCalls.length).toBe(0);
+    });
+
+    it('with explicit grants (e.g. inbound:view, users:view): can access corresponding features only', async () => {
+      const ordinaryAdminWithGrants = createMockUser(['inbound:view', 'users:view'], ['Admin']);
+      const { recordedCalls } = setupMockFetch(ordinaryAdminWithGrants);
+
+      render(
+        <RouterProvider initialPath="/app/inbound/putaway">
+          <AuthProvider>
+            <FacilityProvider>
+              <PutawayPage />
+            </FacilityProvider>
+          </AuthProvider>
+        </RouterProvider>
+      );
+
+      // Can view task queue
+      await waitFor(() => {
+        expect(screen.getByTestId('putaway-queue-view')).toBeDefined();
+        expect(screen.getByText('LPN-MATRIX-01')).toBeDefined();
+      });
+
+      // But still cannot access RF tab or generate tasks
+      expect(screen.queryByTestId('tab-rf')).toBeNull();
+      expect(screen.queryByTestId('generate-tasks-btn')).toBeNull();
+
+      // Never invokes /next
+      const nextCalls = recordedCalls.filter(c => c.includes('/api/v1/putaway/tasks/next'));
+      expect(nextCalls.length).toBe(0);
+    });
+  });
 });

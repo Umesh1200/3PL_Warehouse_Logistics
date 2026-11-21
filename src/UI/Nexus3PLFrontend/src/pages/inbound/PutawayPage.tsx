@@ -15,10 +15,9 @@ import {
 export const PutawayPage: React.FC = () => {
   const { activeFacility } = useFacility();
   const { hasPermission, user, isLoading: isAuthLoading } = useAuth();
-  const isSuperAdmin = user?.roles.some((r) => r.toLowerCase() === 'superadmin' || r.toLowerCase() === 'admin');
-  const canManage = hasPermission('inbound:putaway:manage') || isSuperAdmin;
-  const canExecute = hasPermission('inbound:putaway:execute') || isSuperAdmin;
-  const canViewQueue = hasPermission('inbound:view') || isSuperAdmin;
+  const canManage = hasPermission('inbound:putaway:manage');
+  const canExecute = hasPermission('inbound:putaway:execute');
+  const canViewQueue = hasPermission('inbound:view');
 
   // Execution-only operators default directly to RF mode once auth is resolved
   const [activeTab, setActiveTab] = useState<'queue' | 'rf'>('queue');

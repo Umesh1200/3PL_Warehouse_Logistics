@@ -17,7 +17,7 @@ import {
 import { PutawayTaskDto, ReceivingSessionDto, PutawayTaskStatus, ReceivingStatus } from '../types/inbound';
 
 export const DashboardPage: React.FC = () => {
-  const { user, hasPermission, hasAnyPermission } = useAuth();
+  const { user, hasPermission, hasAnyPermission, hasRole } = useAuth();
   const { activeFacility } = useFacility();
 
   // Metrics telemetry state
@@ -72,20 +72,18 @@ export const DashboardPage: React.FC = () => {
   }, [activeFacility?.id]);
 
   // Backend RBAC permissions
-  const isSuperAdmin = user?.roles.some((r) => r.toLowerCase() === 'superadmin' || r.toLowerCase() === 'admin');
-  const canViewAnalytics = hasPermission('analytics:control-tower:view') || isSuperAdmin;
+  const isSuperAdmin = hasRole('SuperAdmin');
+  const canViewAnalytics = hasPermission('analytics:control-tower:view');
   // Listing queues requires inbound:view per backend controller authorization
-  const canListPutawayQueue = hasPermission('inbound:view') || isSuperAdmin;
-  const canListReceivingQueue = hasPermission('inbound:view') || isSuperAdmin;
+  const canListPutawayQueue = hasPermission('inbound:view');
+  const canListReceivingQueue = hasPermission('inbound:view');
 
   // Execution privileges for floor operators strictly require execution permission or superadmin
   const canExecutePutaway =
-    hasPermission('inbound:putaway:execute') ||
-    isSuperAdmin;
+    hasPermission('inbound:putaway:execute');
 
   const canExecuteReceiving =
-    hasPermission('inbound:receive') ||
-    isSuperAdmin;
+    hasPermission('inbound:receive');
 
   // Immediate facility wipe upon facility change (P-CT-03) and cancel in-flight requests
   useEffect(() => {

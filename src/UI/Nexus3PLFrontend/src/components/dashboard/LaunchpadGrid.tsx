@@ -15,8 +15,8 @@ interface LaunchpadItem {
 }
 
 export const LaunchpadGrid: React.FC = () => {
-  const { hasPermission, hasAnyPermission, user } = useAuth();
-  const isSuperAdmin = user?.roles.some((r) => r.toLowerCase() === 'superadmin' || r.toLowerCase() === 'admin');
+  const { hasPermission, hasAnyPermission, hasRole } = useAuth();
+  const isSuperAdmin = hasRole('SuperAdmin');
 
   const items: LaunchpadItem[] = [
     {

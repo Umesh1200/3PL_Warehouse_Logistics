@@ -207,8 +207,7 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => 
 
         <div className="sidebar-footer">
           <div className="system-pill">
-            <span className="status-dot" aria-hidden="true" />
-            <span>OPERATIONAL CLUSTER ONLINE</span>
+            <span>Nexus3PL Enterprise WMS</span>
           </div>
         </div>
 
