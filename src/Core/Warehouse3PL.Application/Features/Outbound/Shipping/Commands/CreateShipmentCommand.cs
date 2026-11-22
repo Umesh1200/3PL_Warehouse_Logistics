@@ -1,5 +1,6 @@
 using MediatR;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Application.Features.Outbound.Shipping.Commands;
@@ -15,19 +16,24 @@ public class CreateShipmentCommandHandler : IRequestHandler<CreateShipmentComman
 {
     private readonly IShipmentConsolidationService _consolidationService;
     private readonly ICurrentUserContext _currentUser;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
     public CreateShipmentCommandHandler(
         IShipmentConsolidationService consolidationService,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        OutboundOperationalAuthorization outboundAuth)
     {
         _consolidationService = consolidationService;
         _currentUser = currentUser;
+        _outboundAuth = outboundAuth;
     }
 
     public async Task<CreateShipmentResult> Handle(
         CreateShipmentCommand command,
         CancellationToken cancellationToken)
     {
+        _outboundAuth.ValidateStaffMutationFacilityAccess(command.FacilityId, nameof(CreateShipmentCommand));
+
         return await _consolidationService.CreateShipmentAsync(new CreateShipmentRequest
         {
             ClientId = command.ClientId,

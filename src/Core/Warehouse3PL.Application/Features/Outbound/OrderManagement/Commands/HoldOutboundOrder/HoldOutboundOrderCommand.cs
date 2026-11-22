@@ -3,6 +3,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -32,19 +33,24 @@ public class HoldOutboundOrderCommandHandler : IRequestHandler<HoldOutboundOrder
     private readonly IApplicationDbContext _context;
     private readonly ITenantProvider _tenantProvider;
     private readonly ICurrentUserContext _currentUser;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
     public HoldOutboundOrderCommandHandler(
         IApplicationDbContext context,
         ITenantProvider tenantProvider,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        OutboundOperationalAuthorization? outboundAuth = null)
     {
         _context = context;
         _tenantProvider = tenantProvider;
         _currentUser = currentUser;
+        _outboundAuth = outboundAuth ?? new OutboundOperationalAuthorization(context, currentUser, tenantProvider);
     }
 
     public async Task<OutboundOrderDto> Handle(HoldOutboundOrderCommand request, CancellationToken cancellationToken)
     {
+        _outboundAuth.EnsureStaffOperationalIdentity(nameof(HoldOutboundOrderCommand));
+
         var order = await _context.OutboundOrders
             .Include(o => o.ShippingAddress)
             .Include(o => o.Customer)
@@ -59,6 +65,8 @@ public class HoldOutboundOrderCommandHandler : IRequestHandler<HoldOutboundOrder
         {
             throw new EntityNotFoundException(nameof(OutboundOrder), request.OrderId);
         }
+
+        _outboundAuth.ValidateStaffMutationFacilityAccess(order.FacilityId, nameof(HoldOutboundOrderCommand));
 
         var operatorId = _currentUser.UserId ?? Guid.Empty;
         order.Hold(request.Reason.Trim(), operatorId);

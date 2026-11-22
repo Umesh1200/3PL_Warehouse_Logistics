@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Outbound.Picking.DTOs;
 using Warehouse3PL.Domain.Enums;
 
@@ -17,18 +18,36 @@ public record GetPickWavesQuery(
 public class GetPickWavesQueryHandler : IRequestHandler<GetPickWavesQuery, PagedResult<PickWaveDto>>
 {
     private readonly IApplicationDbContext _context;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
-    public GetPickWavesQueryHandler(IApplicationDbContext context)
+    public GetPickWavesQueryHandler(
+        IApplicationDbContext context,
+        OutboundOperationalAuthorization outboundAuth)
     {
         _context = context;
+        _outboundAuth = outboundAuth;
     }
 
     public async Task<PagedResult<PickWaveDto>> Handle(
         GetPickWavesQuery query,
         CancellationToken cancellationToken)
     {
+        _outboundAuth.EnsureStaffOperationalIdentity(nameof(GetPickWavesQuery));
+        var requestedFacility = query.FacilityId == Guid.Empty ? (Guid?)null : query.FacilityId;
+        var scope = await _outboundAuth.ResolveOutboundQueryScopeAsync(
+            null,
+            requestedFacility,
+            allowCrossFacilityRead: true,
+            allowClient: false,
+            cancellationToken);
+
         var dbQuery = _context.PickWaves
-            .Where(w => w.FacilityId == query.FacilityId && !w.IsDeleted);
+            .Where(w => !w.IsDeleted);
+
+        if (scope.FacilityId.HasValue)
+        {
+            dbQuery = dbQuery.Where(w => w.FacilityId == scope.FacilityId.Value);
+        }
 
         if (query.Status.HasValue)
         {

@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Enums;
@@ -16,20 +17,24 @@ public class CheckOrderStockAvailabilityQueryHandler : IRequestHandler<CheckOrde
     private readonly IApplicationDbContext _context;
     private readonly ITenantProvider _tenantProvider;
     private readonly ICurrentUserContext _currentUser;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
     public CheckOrderStockAvailabilityQueryHandler(
         IApplicationDbContext context,
         ITenantProvider tenantProvider,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        OutboundOperationalAuthorization? outboundAuth = null)
     {
         _context = context;
         _tenantProvider = tenantProvider;
         _currentUser = currentUser;
+        _outboundAuth = outboundAuth ?? new OutboundOperationalAuthorization(context, currentUser, tenantProvider);
     }
 
     public async Task<StockAvailabilityAssessmentDto> Handle(CheckOrderStockAvailabilityQuery request, CancellationToken cancellationToken)
     {
-        var tenantId = _tenantProvider.TenantId;
+        _outboundAuth.EnsureIdentityAllowed(allowClient: true, nameof(CheckOrderStockAvailabilityQuery));
+
         var order = await _context.OutboundOrders
             .Include(o => o.Lines)
                 .ThenInclude(l => l.Item)
@@ -41,10 +46,14 @@ public class CheckOrderStockAvailabilityQueryHandler : IRequestHandler<CheckOrde
             throw new EntityNotFoundException(nameof(OutboundOrder), request.OrderId);
         }
 
-        if (tenantId.HasValue && !_currentUser.IsStaff && order.ClientId != tenantId.Value)
-        {
-            throw new EntityNotFoundException(nameof(OutboundOrder), request.OrderId);
-        }
+        await _outboundAuth.ValidateEntityReadOrClientMutationAsync(
+            nameof(OutboundOrder),
+            order.Id,
+            order.ClientId,
+            order.FacilityId,
+            allowClient: true,
+            isMutation: false,
+            cancellationToken);
 
         var itemIds = order.Lines.Select(l => l.ItemId).Distinct().ToList();
 

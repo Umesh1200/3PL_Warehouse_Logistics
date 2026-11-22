@@ -4,6 +4,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Outbound.OrderManagement.Commands.CreateOutboundOrder;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Enums;
@@ -38,32 +39,53 @@ public class ImportOutboundOrdersBulkCommandHandler : IRequestHandler<ImportOutb
     private readonly IApplicationDbContext _context;
     private readonly ITenantProvider _tenantProvider;
     private readonly ICurrentUserContext _currentUser;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
     public ImportOutboundOrdersBulkCommandHandler(
         IApplicationDbContext context,
         ITenantProvider tenantProvider,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        OutboundOperationalAuthorization? outboundAuth = null)
     {
         _context = context;
         _tenantProvider = tenantProvider;
         _currentUser = currentUser;
+        _outboundAuth = outboundAuth ?? new OutboundOperationalAuthorization(context, currentUser, tenantProvider);
     }
 
     public async Task<OrderImportBatchDto> Handle(ImportOutboundOrdersBulkCommand request, CancellationToken cancellationToken)
     {
-        var tenantId = _tenantProvider.TenantId;
-        if (!tenantId.HasValue && !_currentUser.IsStaff)
+        _outboundAuth.EnsureAuthenticated();
+
+        if (!_currentUser.IsSuperAdmin &&
+            _currentUser.UserType != UserType.Staff &&
+            _currentUser.UserType != UserType.Client)
         {
-            throw new UnauthorizedException("Tenant context is required for bulk order import.");
+            throw new ForbiddenException("User identity type is not authorized for bulk order import.");
         }
 
-        var clientId = tenantId ?? _currentUser.TenantId ?? throw new UnauthorizedException("Client identifier could not be determined.");
+        Guid clientId;
+        if (_currentUser.UserType == UserType.Client && !_currentUser.IsSuperAdmin)
+        {
+            clientId = _outboundAuth.ResolveValidatedClientTenantId(null);
+        }
+        else
+        {
+            _outboundAuth.ValidateStaffMutationFacilityAccess(request.FacilityId, nameof(ImportOutboundOrdersBulkCommand));
+            clientId = _tenantProvider.TenantId ?? _currentUser.TenantId
+                ?? throw new Domain.Exceptions.ValidationException(nameof(request.FacilityId), "Client tenant header (X-Tenant-Id) is required when staff import outbound orders.");
+        }
 
         // Check facility exists
         var facility = await _context.Facilities.FirstOrDefaultAsync(f => f.Id == request.FacilityId, cancellationToken);
         if (facility == null)
         {
             throw new EntityNotFoundException(nameof(Domain.Entities.Facilities.Facility), request.FacilityId);
+        }
+
+        if (_currentUser.UserType == UserType.Client && !_currentUser.IsSuperAdmin)
+        {
+            await _outboundAuth.EnsureClientHasActiveFacilityAccessAsync(clientId, request.FacilityId, cancellationToken);
         }
 
         var batchNumber = $"BATCH-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("N")[..6].ToUpper()}";

@@ -87,6 +87,8 @@ public interface IApplicationDbContext
     DbSet<ShipmentCustodyTransfer> ShipmentCustodyTransfers { get; }
     DbSet<ShipmentAuditLog> ShipmentAuditLogs { get; }
     DbSet<CarrierOperationLog> CarrierOperationLogs { get; }
+    DbSet<CarrierWebhookNonce> CarrierWebhookNonces { get; }
+    DbSet<CarrierWebhookAuditLog> CarrierWebhookAuditLogs { get; }
 
     // Outbound Tracking & Delivery Confirmation (Phase 4.5)
     DbSet<ShipmentTrackingEvent> ShipmentTrackingEvents { get; }

@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -10,6 +11,7 @@ namespace Warehouse3PL.Application.Features.Outbound.OrderManagement.Queries.Get
 
 public record GetOutboundOrdersQuery : IRequest<PagedResult<OutboundOrderDto>>
 {
+    public Guid? ClientId { get; init; }
     public Guid? FacilityId { get; init; }
     public OutboundOrderStatus? Status { get; init; }
     public OutboundOrderType? OrderType { get; init; }
@@ -27,26 +29,28 @@ public class GetOutboundOrdersQueryHandler : IRequestHandler<GetOutboundOrdersQu
     private readonly IApplicationDbContext _context;
     private readonly ITenantProvider _tenantProvider;
     private readonly ICurrentUserContext _currentUser;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
     public GetOutboundOrdersQueryHandler(
         IApplicationDbContext context,
         ITenantProvider tenantProvider,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        OutboundOperationalAuthorization? outboundAuth = null)
     {
         _context = context;
         _tenantProvider = tenantProvider;
         _currentUser = currentUser;
+        _outboundAuth = outboundAuth ?? new OutboundOperationalAuthorization(context, currentUser, tenantProvider);
     }
 
     public async Task<PagedResult<OutboundOrderDto>> Handle(GetOutboundOrdersQuery request, CancellationToken cancellationToken)
     {
-        var tenantId = _tenantProvider.TenantId;
-        if (!tenantId.HasValue && !_currentUser.IsStaff)
-        {
-            throw new UnauthorizedException("Tenant context is required to query outbound orders.");
-        }
-
-        var clientId = tenantId ?? _currentUser.TenantId;
+        var scope = await _outboundAuth.ResolveOutboundQueryScopeAsync(
+            request.ClientId,
+            request.FacilityId,
+            allowCrossFacilityRead: true,
+            allowClient: true,
+            cancellationToken);
 
         var query = _context.OutboundOrders
             .Include(o => o.ShippingAddress)
@@ -58,14 +62,18 @@ public class GetOutboundOrdersQueryHandler : IRequestHandler<GetOutboundOrdersQu
             .AsNoTracking()
             .AsQueryable();
 
-        if (clientId.HasValue)
+        if (scope.ClientId.HasValue)
         {
-            query = query.Where(o => o.ClientId == clientId.Value);
+            query = query.Where(o => o.ClientId == scope.ClientId.Value);
         }
 
-        if (request.FacilityId.HasValue)
+        if (scope.FacilityId.HasValue)
         {
-            query = query.Where(o => o.FacilityId == request.FacilityId.Value);
+            query = query.Where(o => o.FacilityId == scope.FacilityId.Value);
+        }
+        else if (scope.AuthorizedFacilityIds != null)
+        {
+            query = query.Where(o => scope.AuthorizedFacilityIds.Contains(o.FacilityId));
         }
 
         if (request.Status.HasValue)

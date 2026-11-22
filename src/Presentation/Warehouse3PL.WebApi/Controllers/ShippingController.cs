@@ -6,7 +6,9 @@ using Warehouse3PL.Application.Features.Outbound.Shipping.Queries;
 using Warehouse3PL.Application.Features.Outbound.Tracking.Commands;
 using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Enums;
+using Warehouse3PL.Domain.Exceptions;
 using Warehouse3PL.Infrastructure.Authorization;
+using Warehouse3PL.WebApi.Security;
 
 namespace Warehouse3PL.WebApi.Controllers;
 
@@ -102,19 +104,31 @@ public class ShippingController : BaseApiController
 
     /// <summary>
     /// Ingests carrier webhook tracking events for Return-To-Sender (RTS) shipments.
+    /// Authenticated via carrier-specific HMAC-SHA256 signature, 5-minute timestamp window, and DB-backed nonce replay prevention.
     /// Operates idempotently and monotonically. Automatically creates inbound receiving handoff upon carrier dock delivery.
     /// </summary>
     [HttpPost("returns/tracking/webhook")]
     [AllowAnonymous]
+    [CarrierWebhookHmacAuth]
     [ProducesResponseType(typeof(IngestReturnTrackingResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> IngestReturnTrackingWebhook(
         [FromBody] IngestReturnTrackingRequest request,
         CancellationToken ct)
     {
-        var result = await Mediator.Send(new IngestReturnTrackingEventCommand(request), ct);
-        return Ok(result);
+        try
+        {
+            var result = await Mediator.Send(new IngestReturnTrackingEventCommand(request), ct);
+            return Ok(result);
+        }
+        catch (UnauthorizedException ex)
+        {
+            // Signature auth already passed in CarrierWebhookHmacAuth; a downstream tenant mismatch is 403 Forbidden.
+            throw new ForbiddenException(ex.Message);
+        }
     }
 }
 

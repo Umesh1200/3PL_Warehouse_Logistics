@@ -10,6 +10,7 @@ using Warehouse3PL.Infrastructure.Authentication;
 using Warehouse3PL.Infrastructure.Authorization;
 using Warehouse3PL.Infrastructure.BackgroundJobs;
 using Warehouse3PL.Infrastructure.Caching;
+using Warehouse3PL.Infrastructure.Configuration;
 using Warehouse3PL.Infrastructure.Persistence;
 using Warehouse3PL.Infrastructure.Persistence.Interceptors;
 using Warehouse3PL.Infrastructure.Persistence.Seed;
@@ -96,9 +97,11 @@ public static class DependencyInjection
         services.AddScoped<IProfitabilityIntelligenceService, Warehouse3PL.Infrastructure.Services.Analytics.ProfitabilityIntelligenceService>();
         services.AddScoped<IFreightCostVarianceService, Warehouse3PL.Infrastructure.Services.Analytics.FreightCostVarianceService>();
 
-        // Private Object Storage (Phase 4.5 Step 3A)
+        // Private Object Storage & Carrier Webhook Config
         services.Configure<Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions>(
             configuration.GetSection(Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions.SectionName));
+        services.Configure<CarrierWebhookOptions>(
+            configuration.GetSection(CarrierWebhookOptions.SectionName));
         services.AddSingleton<IObjectStorageService, Warehouse3PL.Infrastructure.Services.Storage.PrivateObjectStorageService>();
 
         // 2. Persistence (PostgreSQL + EF Core)

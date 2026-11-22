@@ -1,5 +1,6 @@
 using MediatR;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 
 namespace Warehouse3PL.Application.Features.Outbound.Packing.Queries;
 
@@ -14,16 +15,22 @@ public record GetCartonizationRecommendationQuery(
 public class GetCartonizationRecommendationQueryHandler : IRequestHandler<GetCartonizationRecommendationQuery, CartonizationRecommendation>
 {
     private readonly ICartonizationService _cartonizationService;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
-    public GetCartonizationRecommendationQueryHandler(ICartonizationService cartonizationService)
+    public GetCartonizationRecommendationQueryHandler(
+        ICartonizationService cartonizationService,
+        OutboundOperationalAuthorization outboundAuth)
     {
         _cartonizationService = cartonizationService;
+        _outboundAuth = outboundAuth;
     }
 
     public async Task<CartonizationRecommendation> Handle(
         GetCartonizationRecommendationQuery query,
         CancellationToken cancellationToken)
     {
+        _outboundAuth.ValidateStaffReadFacilityAccess(query.FacilityId, nameof(GetCartonizationRecommendationQuery));
+
         return await _cartonizationService.RecommendCartonizationAsync(new CartonizationRequest
         {
             ClientId = query.ClientId,

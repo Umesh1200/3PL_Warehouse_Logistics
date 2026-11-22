@@ -2,6 +2,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -14,20 +15,24 @@ public class GetOutboundOrderByIdQueryHandler : IRequestHandler<GetOutboundOrder
     private readonly IApplicationDbContext _context;
     private readonly ITenantProvider _tenantProvider;
     private readonly ICurrentUserContext _currentUser;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
     public GetOutboundOrderByIdQueryHandler(
         IApplicationDbContext context,
         ITenantProvider tenantProvider,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        OutboundOperationalAuthorization? outboundAuth = null)
     {
         _context = context;
         _tenantProvider = tenantProvider;
         _currentUser = currentUser;
+        _outboundAuth = outboundAuth ?? new OutboundOperationalAuthorization(context, currentUser, tenantProvider);
     }
 
     public async Task<OutboundOrderDto> Handle(GetOutboundOrderByIdQuery request, CancellationToken cancellationToken)
     {
-        var tenantId = _tenantProvider.TenantId;
+        _outboundAuth.EnsureIdentityAllowed(allowClient: true, nameof(GetOutboundOrderByIdQuery));
+
         var order = await _context.OutboundOrders
             .Include(o => o.ShippingAddress)
             .Include(o => o.Customer)
@@ -44,10 +49,14 @@ public class GetOutboundOrderByIdQueryHandler : IRequestHandler<GetOutboundOrder
             throw new EntityNotFoundException(nameof(OutboundOrder), request.Id);
         }
 
-        if (tenantId.HasValue && !_currentUser.IsStaff && order.ClientId != tenantId.Value)
-        {
-            throw new EntityNotFoundException(nameof(OutboundOrder), request.Id);
-        }
+        await _outboundAuth.ValidateEntityReadOrClientMutationAsync(
+            nameof(OutboundOrder),
+            order.Id,
+            order.ClientId,
+            order.FacilityId,
+            allowClient: true,
+            isMutation: false,
+            cancellationToken);
 
         return new OutboundOrderDto
         {

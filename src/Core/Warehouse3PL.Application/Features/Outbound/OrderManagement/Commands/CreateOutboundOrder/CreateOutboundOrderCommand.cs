@@ -3,6 +3,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -105,44 +106,53 @@ public class CreateOutboundOrderCommandHandler : IRequestHandler<CreateOutboundO
     private readonly IApplicationDbContext _context;
     private readonly ITenantProvider _tenantProvider;
     private readonly ICurrentUserContext _currentUser;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
     public CreateOutboundOrderCommandHandler(
         IApplicationDbContext context,
         ITenantProvider tenantProvider,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        OutboundOperationalAuthorization? outboundAuth = null)
     {
         _context = context;
         _tenantProvider = tenantProvider;
         _currentUser = currentUser;
+        _outboundAuth = outboundAuth ?? new OutboundOperationalAuthorization(context, currentUser, tenantProvider);
     }
 
     public async Task<OutboundOrderDto> Handle(CreateOutboundOrderCommand request, CancellationToken cancellationToken)
     {
-        var tenantId = _tenantProvider.TenantId;
-        if (!tenantId.HasValue && !_currentUser.IsStaff)
+        _outboundAuth.EnsureAuthenticated();
+
+        if (!_currentUser.IsSuperAdmin &&
+            _currentUser.UserType != UserType.Staff &&
+            _currentUser.UserType != UserType.Client)
         {
-            throw new UnauthorizedException("Tenant context is required to create an outbound order.");
+            throw new ForbiddenException("User identity type is not authorized to create outbound orders.");
         }
 
-        var clientId = tenantId ?? _currentUser.TenantId ?? throw new UnauthorizedException("Client identifier could not be determined.");
+        Guid clientId;
+        if (_currentUser.UserType == UserType.Client && !_currentUser.IsSuperAdmin)
+        {
+            clientId = _outboundAuth.ResolveValidatedClientTenantId(null);
+        }
+        else
+        {
+            _outboundAuth.ValidateStaffMutationFacilityAccess(request.FacilityId, nameof(CreateOutboundOrderCommand));
+            clientId = _tenantProvider.TenantId ?? _currentUser.TenantId
+                ?? throw new ValidationException(nameof(request.FacilityId), "Client tenant header (X-Tenant-Id) is required when staff create an outbound order.");
+        }
 
-        // 1. Validate Facility Access
+        // 1. Validate Facility Existence & Client Active Facility Access
         var sourceFacility = await _context.Facilities.FirstOrDefaultAsync(f => f.Id == request.FacilityId, cancellationToken);
         if (sourceFacility == null)
         {
             throw new EntityNotFoundException(nameof(Domain.Entities.Facilities.Facility), request.FacilityId);
         }
 
-        if (!_currentUser.IsStaff)
+        if (_currentUser.UserType == UserType.Client && !_currentUser.IsSuperAdmin)
         {
-            var hasAccess = await _context.ClientFacilityAccesses.AnyAsync(
-                a => a.ClientId == clientId && a.FacilityId == request.FacilityId,
-                cancellationToken);
-
-            if (!hasAccess)
-            {
-                throw new ForbiddenException($"Client '{clientId}' does not have authorized access to facility '{sourceFacility.FacilityCode}'.");
-            }
+            await _outboundAuth.EnsureClientHasActiveFacilityAccessAsync(clientId, request.FacilityId, cancellationToken);
         }
 
         // 2. Validate Stock Transfer Destination Facility
@@ -160,16 +170,9 @@ public class CreateOutboundOrderCommandHandler : IRequestHandler<CreateOutboundO
                 throw new EntityNotFoundException(nameof(Domain.Entities.Facilities.Facility), request.DestinationFacilityId.Value);
             }
 
-            if (!_currentUser.IsStaff)
+            if (_currentUser.UserType == UserType.Client && !_currentUser.IsSuperAdmin)
             {
-                var hasDestAccess = await _context.ClientFacilityAccesses.AnyAsync(
-                    a => a.ClientId == clientId && a.FacilityId == request.DestinationFacilityId.Value,
-                    cancellationToken);
-
-                if (!hasDestAccess)
-                {
-                    throw new ForbiddenException($"Client '{clientId}' does not have authorized access to destination facility '{destFacility.FacilityCode}'.");
-                }
+                await _outboundAuth.EnsureClientHasActiveFacilityAccessAsync(clientId, request.DestinationFacilityId.Value, cancellationToken);
             }
         }
 

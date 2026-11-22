@@ -122,6 +122,8 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<ShipmentCustodyTransfer> ShipmentCustodyTransfers => Set<ShipmentCustodyTransfer>();
     public DbSet<ShipmentAuditLog> ShipmentAuditLogs => Set<ShipmentAuditLog>();
     public DbSet<CarrierOperationLog> CarrierOperationLogs => Set<CarrierOperationLog>();
+    public DbSet<CarrierWebhookNonce> CarrierWebhookNonces => Set<CarrierWebhookNonce>();
+    public DbSet<CarrierWebhookAuditLog> CarrierWebhookAuditLogs => Set<CarrierWebhookAuditLog>();
 
     // Outbound Tracking & Delivery Confirmation (Phase 4.5)
     public DbSet<ShipmentTrackingEvent> ShipmentTrackingEvents => Set<ShipmentTrackingEvent>();

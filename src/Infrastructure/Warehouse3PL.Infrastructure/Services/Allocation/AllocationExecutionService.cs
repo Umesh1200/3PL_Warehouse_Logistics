@@ -69,7 +69,7 @@ public class AllocationExecutionService : IAllocationExecutionService
                     if (order.ClientId != _tenantProvider.TenantId.Value)
                     {
                         await _context.RollbackTransactionAsync(cancellationToken);
-                        throw new UnauthorizedAccessException($"Cross-tenant allocation attempt rejected for order '{order.OrderNumber}'.");
+                        throw new ForbiddenException($"Cross-tenant allocation attempt rejected for order '{order.OrderNumber}'.");
                     }
                 }
 
@@ -268,7 +268,7 @@ public class AllocationExecutionService : IAllocationExecutionService
                 if (order.ClientId != _tenantProvider.TenantId.Value)
                 {
                     await _context.RollbackTransactionAsync(cancellationToken);
-                    throw new UnauthorizedAccessException($"Cross-tenant deallocation rejected for order '{order.OrderNumber}'.");
+                    throw new ForbiddenException($"Cross-tenant deallocation rejected for order '{order.OrderNumber}'.");
                 }
             }
 
@@ -358,7 +358,7 @@ public class AllocationExecutionService : IAllocationExecutionService
                 if (order.ClientId != _tenantProvider.TenantId.Value)
                 {
                     await _context.RollbackTransactionAsync(cancellationToken);
-                    throw new UnauthorizedAccessException($"Cross-tenant allocation release rejected.");
+                    throw new ForbiddenException("Cross-tenant allocation release rejected.");
                 }
             }
 

@@ -1,6 +1,7 @@
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Outbound.Picking.DTOs;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Exceptions;
@@ -14,15 +15,18 @@ public class GeneratePickWaveCommandHandler : IRequestHandler<GeneratePickWaveCo
     private readonly IPickWaveGenerator _waveGenerator;
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserContext _currentUser;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
     public GeneratePickWaveCommandHandler(
         IPickWaveGenerator waveGenerator,
         IApplicationDbContext context,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        OutboundOperationalAuthorization outboundAuth)
     {
         _waveGenerator = waveGenerator;
         _context = context;
         _currentUser = currentUser;
+        _outboundAuth = outboundAuth;
     }
 
     public async Task<PickWaveDto> Handle(
@@ -30,6 +34,7 @@ public class GeneratePickWaveCommandHandler : IRequestHandler<GeneratePickWaveCo
         CancellationToken cancellationToken)
     {
         var request = command.Request;
+        _outboundAuth.ValidateStaffMutationFacilityAccess(request.FacilityId, nameof(GeneratePickWaveCommand));
 
         // Execute wave planning and task generation (read-only calculation & graph construction)
         var result = await _waveGenerator.GenerateWaveAsync(request, cancellationToken);

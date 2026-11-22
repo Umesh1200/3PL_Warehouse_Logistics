@@ -1,6 +1,8 @@
 using System.Net;
 using System.Net.Http.Json;
 using System.Security.Claims;
+using System.Security.Cryptography;
+using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authentication;
 using Microsoft.AspNetCore.Authorization;
@@ -11,6 +13,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
@@ -31,14 +34,21 @@ using Warehouse3PL.Domain.Entities.Dock;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Entities.Inventory;
+using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
 using Warehouse3PL.Infrastructure.Authentication;
 using Warehouse3PL.Infrastructure.Authorization;
+using Warehouse3PL.Infrastructure.Configuration;
 using Warehouse3PL.Infrastructure.Persistence;
 using Warehouse3PL.Infrastructure.Persistence.Interceptors;
+using Warehouse3PL.Infrastructure.Persistence.Seed;
 using Warehouse3PL.Infrastructure.Services;
+using Warehouse3PL.Infrastructure.Services.Allocation;
+using Warehouse3PL.Infrastructure.Services.Packing;
+using Warehouse3PL.Infrastructure.Services.Picking;
+using Warehouse3PL.Infrastructure.Services.Shipping;
 using Warehouse3PL.WebApi.Controllers;
 using Warehouse3PL.WebApi.Middleware;
 
@@ -143,6 +153,25 @@ try
                 ('{task3Differing}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc2}', NULL, 30, 'Pending', 'Normal', 'Differing task', 1, NOW(), NOW()),
                 ('{taskDup1}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', '{dupLineId}', 15, 'Pending', 'Normal', 'Pre-migration duplicate task 1', 1, NOW() - INTERVAL '1 hour', NOW()),
                 ('{taskDup2}', '{clientId}', '{facilityId}', '{itemId}', '{stagingLoc}', '{loc1}', '{loc1}', '{dupLineId}', 15, 'Pending', 'Normal', 'Pre-migration duplicate task 2', 1, NOW(), NOW());
+
+            -- Seed legacy ClientAdmin role containing obsolete floor execution permissions before Phase 7.4.0A migration
+            INSERT INTO roles (role_name, description, is_system_role, created_at)
+            VALUES ('ClientAdmin', 'Legacy seeded ClientAdmin role', TRUE, NOW())
+            ON CONFLICT (role_name) DO NOTHING;
+
+            INSERT INTO role_permissions (role_id, permission_key, access_level, created_at)
+            SELECT r.role_id, v.permission_key, 'Admin', NOW()
+            FROM roles r
+            CROSS JOIN (VALUES
+                ('outbound:pick'),
+                ('outbound:ship'),
+                ('outbound:pack'),
+                ('outbound:tasks:manage'),
+                ('outbound:waves:manage'),
+                ('outbound:orders:allocate')
+            ) AS v(permission_key)
+            WHERE r.role_name = 'ClientAdmin'
+            ON CONFLICT (role_id, permission_key) DO NOTHING;
         ", sqlConn))
         {
             await cmd.ExecuteNonQueryAsync();
@@ -179,6 +208,26 @@ try
                 throw new InvalidOperationException($"Post-migration catalog check failed: col={colExists}, fk={fkExists}, idx={idxExists}");
             if (uniqueIdxExists != 1)
                 throw new InvalidOperationException("Partial unique index ix_putaway_tasks_lpn_id was not created on putaway_tasks.");
+        }
+
+        // 4a-bis. Verify Phase 7.4.0A migration removed obsolete ClientAdmin permissions, added order permissions, and created webhook tables/indexes
+        await using (var p74Cmd = new NpgsqlCommand(@"
+            SELECT
+                (SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.role_id = rp.role_id WHERE r.role_name = 'ClientAdmin' AND rp.permission_key IN ('outbound:pick','outbound:ship','outbound:pack','outbound:tasks:manage','outbound:waves:manage','outbound:orders:allocate')) AS obsolete_count,
+                (SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.role_id = rp.role_id WHERE r.role_name = 'ClientAdmin' AND rp.permission_key IN ('outbound:orders:view','outbound:orders:create','outbound:orders:import','outbound:orders:cancel')) AS allowed_order_count,
+                (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'carrier_webhook_nonces' AND indexname = 'ix_carrier_webhook_nonces_carrier_code_nonce') AS nonce_idx_exists,
+                (SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'carrier_webhook_audit_logs') AS audit_tbl_exists;
+        ", sqlConn))
+        {
+            await using var r = await p74Cmd.ExecuteReaderAsync();
+            await r.ReadAsync();
+            var obsoleteCount = r.GetInt64(0);
+            var allowedOrderCount = r.GetInt64(1);
+            var nonceIdxExists = r.GetInt64(2);
+            var auditTblExists = r.GetInt64(3);
+            if (obsoleteCount != 0 || allowedOrderCount != 4 || nonceIdxExists != 1 || auditTblExists != 1)
+                throw new InvalidOperationException($"Phase 7.4.0A migration check failed: obsolete={obsoleteCount}, allowedOrders={allowedOrderCount}, nonceIdx={nonceIdxExists}, auditTbl={auditTblExists}");
+            Console.WriteLine("PASS Phase 7.4.0A migration reconciled ClientAdmin permissions and created carrier_webhook_nonces/audit_logs on PostgreSQL.");
         }
 
         // 4b. Verify matching and differing location values:
@@ -1431,8 +1480,445 @@ try
     // Restore full permissions
     TestAuthHandler.CustomClaims = null;
 
+    // ------------------------------------------------------------------------------------------------
+    // SECTION 6: PHASE 7.4.0A OUTBOUND SECURITY, RBAC RECONCILIATION & WEBHOOK HMAC (POSTGRESQL)
+    // ------------------------------------------------------------------------------------------------
+    Console.WriteLine("\n[6/6] Running Phase 7.4.0A Outbound Security, ClientAdmin Reconciliation & Carrier Webhook Verification on PostgreSQL...");
+
+    // 6.1 Seed legacy ClientAdmin permissions and verify DbInitializer reconciles idempotently on PostgreSQL
+    await using (var reconDb = CreateDb(operationalConn, user))
+    {
+        var legacyRole = new Role
+        {
+            RoleName = SystemRoles.ClientAdmin,
+            Description = "Client admin role",
+            IsSystemRole = true
+        };
+        legacyRole.RolePermissions.Add(new RolePermission { PermissionKey = Permissions.Outbound.Pick, AccessLevel = AccessLevel.Admin });
+        legacyRole.RolePermissions.Add(new RolePermission { PermissionKey = Permissions.Outbound.Ship, AccessLevel = AccessLevel.Admin });
+        legacyRole.RolePermissions.Add(new RolePermission { PermissionKey = Permissions.Outbound.Pack, AccessLevel = AccessLevel.Admin });
+        reconDb.Roles.Add(legacyRole);
+        await reconDb.SaveChangesAsync();
+
+        var initializer = new DbInitializer(reconDb, new PasswordHasher(), NullLogger<DbInitializer>.Instance);
+        await initializer.SeedAsync();
+        await initializer.SeedAsync(); // Idempotency pass
+
+        var refreshed = await reconDb.Roles.Include(r => r.RolePermissions)
+            .SingleAsync(r => r.RoleName == SystemRoles.ClientAdmin);
+        var permSet = refreshed.RolePermissions.Select(p => p.PermissionKey).ToList();
+        if (permSet.Contains(Permissions.Outbound.Pick) ||
+            permSet.Contains(Permissions.Outbound.Ship) ||
+            permSet.Contains(Permissions.Outbound.Pack) ||
+            !permSet.Contains(Permissions.Outbound.OrdersView) ||
+            !permSet.Contains(Permissions.Outbound.OrdersCreate))
+        {
+            throw new InvalidOperationException("DbInitializer idempotent ClientAdmin reconciliation check failed on PostgreSQL.");
+        }
+        if (permSet.Distinct(StringComparer.OrdinalIgnoreCase).Count() != permSet.Count)
+        {
+            throw new InvalidOperationException("Duplicate RolePermission entries found after DbInitializer idempotent run.");
+        }
+    }
+    Console.WriteLine("PASS PostgreSQL DbInitializer.SeedAsync() reconciles legacy ClientAdmin permissions idempotently.");
+
+    // 6.2 Seed Outbound, Packing, Shipping & Return entities with valid PostgreSQL FKs
+    var p74FacB = Guid.NewGuid();
+    var p74LocB = Guid.NewGuid();
+    var p74OrderC1FacA = Guid.NewGuid();
+    var p74OrderC1FacB = Guid.NewGuid();
+    var p74OrderC2FacA = Guid.NewGuid();
+    var p74OrderLineId = Guid.NewGuid();
+    var p74AllocId = Guid.NewGuid();
+    var p74WaveFacB = Guid.NewGuid();
+    var p74TaskFacB = Guid.NewGuid();
+    var p74ShipFacB = Guid.NewGuid();
+    var p74HuC1FacA = Guid.NewGuid();
+    var p74HuC2FacA = Guid.NewGuid();
+    var p74PkgC1FacA = Guid.NewGuid();
+    var p74PkgC2FacA = Guid.NewGuid();
+    var p74DelivExcId = Guid.NewGuid();
+    var p74ReturnShipId = Guid.NewGuid();
+    var p74Tracking = $"TRK-PG-RTS-{Guid.NewGuid():N}"[..20].ToUpperInvariant();
+
+    await using (var p74Db = CreateDb(operationalConn, user))
+    {
+        var stockId = await p74Db.StockOnHand
+            .Where(s => s.ClientId == client1Id)
+            .Select(s => s.Id)
+            .FirstAsync();
+
+        p74Db.Facilities.Add(new Facility
+        {
+            Id = p74FacB,
+            FacilityCode = "PG-FAC-B",
+            Name = "Postgres Secondary Facility B",
+            AddressLine1 = "500 Secondary Way",
+            City = "Dallas",
+            Timezone = "America/Chicago",
+            CountryCode = "US",
+            IsActive = true
+        });
+        p74Db.Locations.Add(new Location
+        {
+            Id = p74LocB,
+            FacilityId = p74FacB,
+            LocationCode = "PG-B-01",
+            Barcode = "PG-B-01",
+            LocationType = LocationType.Bin,
+            IsActive = true,
+            IsPickable = true
+        });
+        p74Db.ClientFacilityAccesses.AddRange(
+            new ClientFacilityAccess { ClientId = client1Id, FacilityId = facilityId, Status = FacilityAccessStatus.Active },
+            new ClientFacilityAccess { ClientId = client2Id, FacilityId = facilityId, Status = FacilityAccessStatus.Active });
+
+        var ord1 = new OutboundOrder { Id = p74OrderC1FacA, ClientId = client1Id, FacilityId = facilityId, OrderNumber = "PG-ORD-1A", CustomerName = "PG C1", Status = OutboundOrderStatus.Released };
+        var ord2 = new OutboundOrder { Id = p74OrderC1FacB, ClientId = client1Id, FacilityId = p74FacB, OrderNumber = "PG-ORD-1B", CustomerName = "PG C1B", Status = OutboundOrderStatus.Released };
+        var ord3 = new OutboundOrder { Id = p74OrderC2FacA, ClientId = client2Id, FacilityId = facilityId, OrderNumber = "PG-ORD-2A", CustomerName = "PG C2", Status = OutboundOrderStatus.Released };
+        p74Db.OutboundOrders.AddRange(ord1, ord2, ord3);
+
+        p74Db.OutboundOrderLines.Add(new OutboundOrderLine
+        {
+            Id = p74OrderLineId,
+            OutboundOrderId = p74OrderC1FacB,
+            ItemId = item1Id,
+            LineNumber = 1,
+            QuantityOrdered = 5m,
+            QuantityAllocated = 5m
+        });
+        p74Db.InventoryAllocations.Add(new InventoryAllocation
+        {
+            Id = p74AllocId,
+            ClientId = client1Id,
+            FacilityId = p74FacB,
+            OutboundOrderId = p74OrderC1FacB,
+            OutboundOrderLineId = p74OrderLineId,
+            StockOnHandId = stockId,
+            ItemId = item1Id,
+            LocationId = p74LocB,
+            QuantityRequested = 5m,
+            QuantityAllocated = 5m,
+            Status = AllocationStatus.Allocated
+        });
+        p74Db.PickWaves.Add(new PickWave { Id = p74WaveFacB, ClientId = client1Id, FacilityId = p74FacB, WaveNumber = "PG-WV-B", Status = PickWaveStatus.Planning });
+        p74Db.PickTasks.Add(new PickTask
+        {
+            Id = p74TaskFacB,
+            ClientId = client1Id,
+            FacilityId = p74FacB,
+            PickWaveId = p74WaveFacB,
+            OutboundOrderId = p74OrderC1FacB,
+            OutboundOrderLineId = p74OrderLineId,
+            InventoryAllocationId = p74AllocId,
+            StockOnHandId = stockId,
+            ItemId = item1Id,
+            SourceLocationId = p74LocB,
+            QuantityToPick = 5m,
+            PickSequence = 1,
+            Status = PickTaskStatus.Pending
+        });
+
+        p74Db.Shipments.Add(new Shipment
+        {
+            Id = p74ShipFacB,
+            ClientId = client1Id,
+            FacilityId = p74FacB,
+            ShipmentNumber = "PG-SHP-B1",
+            CarrierCode = "SIM-FEDEX",
+            Status = ShipmentStatus.Draft
+        });
+
+        p74Db.HandlingUnits.AddRange(
+            new HandlingUnit { Id = p74HuC1FacA, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-CARTON-1A", UnitType = HandlingUnitType.ShippingCarton },
+            new HandlingUnit { Id = p74HuC2FacA, ClientId = client2Id, FacilityId = facilityId, LpnCode = "PG-CARTON-2A", UnitType = HandlingUnitType.ShippingCarton });
+        p74Db.Packages.AddRange(
+            new Package { Id = p74PkgC1FacA, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = p74OrderC1FacA, HandlingUnitId = p74HuC1FacA, PackageNumber = "PG-PKG-1A", CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-PG-C1A", Status = PackageStatus.LabelPrinted },
+            new Package { Id = p74PkgC2FacA, ClientId = client2Id, FacilityId = facilityId, OutboundOrderId = p74OrderC2FacA, HandlingUnitId = p74HuC2FacA, PackageNumber = "PG-PKG-2A", CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-PG-C2A", Status = PackageStatus.LabelPrinted });
+
+        p74Db.ShipmentDeliveryExceptions.Add(new ShipmentDeliveryException
+        {
+            Id = p74DelivExcId,
+            ClientId = client1Id,
+            FacilityId = facilityId,
+            PackageId = p74PkgC1FacA,
+            CarrierCode = "SIM-FEDEX",
+            TrackingNumber = "TRK-PG-C1A",
+            CarrierExceptionCode = "CUSTOMER_REFUSED",
+            ExceptionType = DeliveryExceptionType.CustomerRefused,
+            Severity = DeliveryExceptionSeverity.High,
+            CarrierDescription = "Customer refused delivery",
+            OccurredAtUtc = DateTime.UtcNow.AddHours(-3),
+            Status = DeliveryExceptionStatus.PendingReturnAuthorization
+        });
+
+        var p74Auth = ReturnAuthorization.Create(
+            clientId: client1Id,
+            originFacilityId: facilityId,
+            destinationFacilityId: facilityId,
+            orderId: p74OrderC1FacA,
+            originalShipmentId: null,
+            packageId: p74PkgC1FacA,
+            deliveryExceptionId: p74DelivExcId,
+            authorizationNumber: "PG-RTS-740A",
+            reason: ReturnReason.CustomerRefused,
+            notes: "PG RTS verification",
+            authorizedByUserId: user.UserId!.Value,
+            rmaNumber: "PG-RMA-01");
+        p74Auth.LinkReturnShipment(p74ReturnShipId);
+        p74Db.ReturnAuthorizations.Add(p74Auth);
+
+        p74Db.ReturnShipments.Add(new ReturnShipment
+        {
+            Id = p74ReturnShipId,
+            ClientId = client1Id,
+            OriginFacilityId = facilityId,
+            DestinationFacilityId = facilityId,
+            OrderId = p74OrderC1FacA,
+            PackageId = p74PkgC1FacA,
+            DeliveryExceptionId = p74DelivExcId,
+            ReturnAuthorizationId = p74Auth.Id,
+            ReturnRmaNumber = p74Auth.RmaNumber!,
+            Reason = ReturnReason.CustomerRefused,
+            AuthorizedByUserId = user.UserId!.Value,
+            AuthorizedAtUtc = DateTime.UtcNow,
+            CarrierCode = "SIM-FEDEX",
+            TrackingNumber = p74Tracking,
+            CarrierServiceLevel = "StandardGround",
+            Status = ReturnShipmentStatus.Authorized
+        });
+
+        await p74Db.SaveChangesAsync();
+    }
+
+    // 6.3 Build dedicated WebApi TestServer with real TenantProvider + Outbound services against live PostgreSQL
+    const string pgPrimarySecret = "pg-ci-fedex-primary-secret";
+    const string pgSecondarySecret = "pg-ci-fedex-secondary-secret";
+    var p74WebBuilder = WebApplication.CreateBuilder();
+    p74WebBuilder.Host.UseDefaultServiceProvider(o => o.ValidateOnBuild = false);
+    p74WebBuilder.Logging.ClearProviders();
+    p74WebBuilder.WebHost.UseTestServer();
+    p74WebBuilder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+    {
+        ["CarrierWebhooks:TimestampToleranceSeconds"] = "300",
+        ["CarrierWebhooks:Carriers:SIM-FEDEX:PrimarySecret"] = pgPrimarySecret,
+        ["CarrierWebhooks:Carriers:SIM-FEDEX:SecondarySecret"] = pgSecondarySecret,
+        ["CarrierWebhooks:Carriers:SIM-FEDEX:SecondarySecretExpiresAtUtc"] = DateTimeOffset.UtcNow.AddHours(1).ToString("O")
+    });
+    p74WebBuilder.Services.Configure<CarrierWebhookOptions>(
+        p74WebBuilder.Configuration.GetSection(CarrierWebhookOptions.SectionName));
+    p74WebBuilder.Services.AddControllers()
+        .AddApplicationPart(typeof(OutboundOrdersController).Assembly)
+        .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
+    p74WebBuilder.Services.AddApplicationServices();
+    p74WebBuilder.Services.AddAuthentication("TestAuth")
+        .AddScheme<AuthenticationSchemeOptions, TestAuthHandler>("TestAuth", _ => { });
+    p74WebBuilder.Services.AddAuthorization();
+    p74WebBuilder.Services.AddSingleton<IAuthorizationPolicyProvider, PermissionPolicyProvider>();
+    p74WebBuilder.Services.AddScoped<IAuthorizationHandler, PermissionAuthorizationHandler>();
+    p74WebBuilder.Services.AddHttpContextAccessor();
+    p74WebBuilder.Services.AddScoped<ICurrentUserContext, CurrentUserContext>();
+    p74WebBuilder.Services.AddScoped<ITenantProvider, TenantProvider>();
+    p74WebBuilder.Services.AddScoped<IDateTimeProvider, VerificationClock>();
+    p74WebBuilder.Services.AddScoped<AuditableEntityInterceptor>();
+    p74WebBuilder.Services.AddScoped<IAllocationCandidateFilter, AllocationCandidateFilter>();
+    p74WebBuilder.Services.AddScoped<IAllocationStrategy, FifoAllocationStrategy>();
+    p74WebBuilder.Services.AddScoped<IAllocationStrategy, FefoAllocationStrategy>();
+    p74WebBuilder.Services.AddScoped<IAllocationStrategy, ManualAllocationStrategy>();
+    p74WebBuilder.Services.AddScoped<IAllocationStrategyResolver, AllocationStrategyResolver>();
+    p74WebBuilder.Services.AddScoped<IAllocationEngine, AllocationEngine>();
+    p74WebBuilder.Services.AddScoped<IAllocationExecutionService, AllocationExecutionService>();
+    p74WebBuilder.Services.AddScoped<IPickRouteOptimizer, SerpentineRouteOptimizer>();
+    p74WebBuilder.Services.AddScoped<IPickTaskGenerator, PickTaskGenerator>();
+    p74WebBuilder.Services.AddScoped<IPickWaveGenerator, PickWaveGenerator>();
+    p74WebBuilder.Services.AddScoped<IPickExecutionService, PickExecutionService>();
+    p74WebBuilder.Services.AddScoped<ICartonizationService, CartonizationService>();
+    p74WebBuilder.Services.AddScoped<IPackingExecutionService, PackingExecutionService>();
+    p74WebBuilder.Services.AddScoped<IShippingCarrierService, SimulatedCarrierService>();
+    p74WebBuilder.Services.AddScoped<IShippingLabelService, ShippingLabelService>();
+    p74WebBuilder.Services.AddScoped<IShipmentConsolidationService, ShipmentConsolidationService>();
+    p74WebBuilder.Services.AddScoped<IReturnTrackingService, ReturnTrackingService>();
+    p74WebBuilder.Services.AddDbContext<ApplicationDbContext>((sp, opts) =>
+        opts.UseNpgsql(operationalConn).UseSnakeCaseNamingConvention()
+            .AddInterceptors(sp.GetRequiredService<AuditableEntityInterceptor>()));
+    p74WebBuilder.Services.AddScoped<IApplicationDbContext>(sp => sp.GetRequiredService<ApplicationDbContext>());
+
+    using var p74App = p74WebBuilder.Build();
+    p74App.UseMiddleware<ExceptionHandlingMiddleware>();
+    p74App.UseRouting();
+    p74App.UseAuthenticatedTenantResolution();
+    p74App.UseAuthorization();
+    p74App.MapControllers();
+    await p74App.StartAsync();
+    var p74Client = p74App.GetTestClient();
+
+    // 6.4 ClientAdmin with legacy outbound:pick & outbound:ship rejected (403) on execution, allowed on own track (200), concealed on foreign track (404)
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, SystemRoles.ClientAdmin),
+        new Claim("user_type", "Client"),
+        new Claim("tenant_id", client1Id.ToString()),
+        new Claim("permissions", Permissions.Outbound.OrdersView),
+        new Claim("permissions", Permissions.Outbound.Pick),
+        new Claim("permissions", Permissions.Outbound.Ship),
+        new Claim("permissions", Permissions.Outbound.Pack),
+        new Claim("permissions", Permissions.Outbound.OrdersAllocate),
+        new Claim("permissions", Permissions.Outbound.TasksView)
+    };
+    foreach (var resp in new[]
+    {
+        await p74Client.PostAsJsonAsync($"/api/v1/outbound/orders/{p74OrderC1FacA}/allocate", new { }),
+        await p74Client.PostAsJsonAsync($"/api/v1/outbound/pick-tasks/{p74TaskFacB}/confirm", new { scannedLocationBarcode = "PG-B-01", scannedItemBarcode = "X", scannedToteLpn = "T1", quantity = 1m }),
+        await p74Client.GetAsync($"/api/v1/outbound/shipments/{p74ShipFacB}"),
+        await p74Client.PostAsJsonAsync("/api/v1/outbound/shipping/rates", new { packageId = p74PkgC1FacA })
+    })
+    {
+        if (resp.StatusCode != HttpStatusCode.Forbidden)
+            throw new InvalidOperationException($"Expected 403 Forbidden for legacy ClientAdmin floor request, got {resp.StatusCode}");
+    }
+    if ((await p74Client.GetAsync($"/api/v1/outbound/shipping/packages/{p74PkgC1FacA}/track")).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Expected 200 OK for owning ClientAdmin package tracking transition.");
+    if ((await p74Client.GetAsync($"/api/v1/outbound/shipping/packages/{p74PkgC2FacA}/track")).StatusCode != HttpStatusCode.NotFound)
+        throw new InvalidOperationException("Expected 404 NotFound for foreign tenant package tracking.");
+    Console.WriteLine("PASS PostgreSQL ClientAdmin legacy claim rejection (403), own track transition (200), and foreign concealment (404).");
+
+    // 6.5 Driver & unassigned staff rejections (403) + MultiFacilityView read-only vs write separation
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, SystemRoles.Driver),
+        new Claim("user_type", "Driver"),
+        new Claim("facility_id", facilityId.ToString()),
+        new Claim("permissions", Permissions.Outbound.OrdersView),
+        new Claim("permissions", Permissions.Outbound.Ship)
+    };
+    if ((await p74Client.GetAsync($"/api/v1/outbound/orders/{p74OrderC1FacA}")).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.GetAsync($"/api/v1/outbound/shipping/packages/{p74PkgC1FacA}/track")).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Driver identity was not rejected with 403 Forbidden.");
+
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim("user_type", "Staff"),
+        new Claim("permissions", Permissions.Outbound.OrdersView)
+    };
+    if ((await p74Client.GetAsync($"/api/v1/outbound/orders/{p74OrderC1FacA}")).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Unassigned staff was not rejected with 403 Forbidden.");
+
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim("user_type", "Staff"),
+        new Claim("facility_id", facilityId.ToString()),
+        new Claim("permissions", Permissions.Analytics.MultiFacilityView),
+        new Claim("permissions", Permissions.Outbound.OrdersView),
+        new Claim("permissions", Permissions.Outbound.Ship),
+        new Claim("permissions", Permissions.Outbound.OrdersAllocate)
+    };
+    if ((await p74Client.GetAsync($"/api/v1/outbound/shipments/{p74ShipFacB}")).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("MultiFacilityView staff should read cross-facility shipment with 200 OK.");
+    if ((await p74Client.PostAsJsonAsync($"/api/v1/outbound/orders/{p74OrderC1FacB}/allocate", new { })).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("MultiFacilityView staff must still be rejected (403) on cross-facility mutation.");
+    Console.WriteLine("PASS PostgreSQL Driver (403), Unassigned Staff (403), and MultiFacilityView read (200) vs mutation (403).");
+
+    // 6.6 Carrier Webhook HMAC-SHA256, replay constraint (23505), secret rotation, cross-tenant 403, and audit logs
+    TestAuthHandler.CustomClaims = null;
+    static HttpRequestMessage SignWebhook(string carrier, string secret, string body, string ts, string nonce)
+    {
+        var canonical = $"{ts}.{nonce}.{body}";
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+        var sig = Convert.ToHexStringLower(hmac.ComputeHash(Encoding.UTF8.GetBytes(canonical)));
+        var req = new HttpRequestMessage(HttpMethod.Post, "/api/v1/outbound/shipping/returns/tracking/webhook")
+        {
+            Content = new StringContent(body, Encoding.UTF8, "application/json")
+        };
+        req.Headers.Add("X-Carrier-Id", carrier);
+        req.Headers.Add("X-Webhook-Timestamp", ts);
+        req.Headers.Add("X-Webhook-Nonce", nonce);
+        req.Headers.Add("X-Webhook-Signature", sig);
+        return req;
+    }
+
+    var whBody1 = JsonSerializer.Serialize(new
+    {
+        carrierCode = "SIM-FEDEX",
+        trackingNumber = p74Tracking,
+        carrierEventId = "PG-EVT-1",
+        carrierEventCode = "IN_TRANSIT",
+        carrierDescription = "Departed origin hub",
+        occurredAtUtc = DateTime.UtcNow
+    });
+
+    if ((await p74Client.PostAsync("/api/v1/outbound/shipping/returns/tracking/webhook", new StringContent(whBody1, Encoding.UTF8, "application/json"))).StatusCode != HttpStatusCode.Unauthorized)
+        throw new InvalidOperationException("Unsigned webhook must return 401.");
+    if ((await p74Client.SendAsync(SignWebhook("SIM-FEDEX", "bad-secret", whBody1, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(), "pg-nonce-bad"))).StatusCode != HttpStatusCode.Unauthorized)
+        throw new InvalidOperationException("Invalid HMAC signature must return 401.");
+    if ((await p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, whBody1, DateTimeOffset.UtcNow.AddSeconds(-400).ToUnixTimeSeconds().ToString(), "pg-nonce-exp"))).StatusCode != HttpStatusCode.Unauthorized)
+        throw new InvalidOperationException("Expired webhook timestamp must return 401.");
+
+    if ((await p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, whBody1, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(), "pg-nonce-1"))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Valid HMAC webhook failed.");
+    if ((await p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, whBody1, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(), "pg-nonce-1"))).StatusCode != HttpStatusCode.Unauthorized)
+        throw new InvalidOperationException("Replayed webhook nonce must return 401.");
+
+    var whBody2 = JsonSerializer.Serialize(new
+    {
+        carrierCode = "SIM-FEDEX",
+        trackingNumber = p74Tracking,
+        carrierEventId = "PG-EVT-2",
+        carrierEventCode = "OUT_FOR_DELIVERY",
+        carrierDescription = "Out for delivery",
+        occurredAtUtc = DateTime.UtcNow
+    });
+    if ((await p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgSecondarySecret, whBody2, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(), "pg-nonce-2"))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Secondary rotation secret webhook failed.");
+
+    var whCrossTenant = JsonSerializer.Serialize(new
+    {
+        carrierCode = "SIM-FEDEX",
+        trackingNumber = p74Tracking,
+        carrierEventId = "PG-EVT-3",
+        carrierEventCode = "IN_TRANSIT",
+        carrierDescription = "Cross tenant attempt",
+        occurredAtUtc = DateTime.UtcNow,
+        tenantIdOverride = client2Id
+    });
+    if ((await p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, whCrossTenant, DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString(), "pg-nonce-3"))).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Cross-tenant TenantIdOverride webhook must return 403 Forbidden.");
+
+    await using (var p74VerifyDb = CreateDb(operationalConn, user))
+    {
+        var eventCount = await p74VerifyDb.ReturnTrackingEvents.CountAsync(e => e.ReturnShipmentId == p74ReturnShipId);
+        var auditCount = await p74VerifyDb.CarrierWebhookAuditLogs.CountAsync();
+        if (eventCount != 2 || auditCount < 7)
+            throw new InvalidOperationException($"Unexpected PostgreSQL webhook counts: events={eventCount}, audits={auditCount}");
+
+        // Direct DB unique-index (23505) assertion on carrier_webhook_nonces
+        p74VerifyDb.CarrierWebhookNonces.Add(new CarrierWebhookNonce
+        {
+            CarrierCode = "SIM-FEDEX",
+            Nonce = "pg-nonce-1",
+            PayloadSha256 = new string('0', 64),
+            WebhookTimestampUtc = DateTime.UtcNow,
+            ReceivedAtUtc = DateTime.UtcNow
+        });
+        var dupNonceCaught = false;
+        try
+        {
+            await p74VerifyDb.SaveChangesAsync();
+        }
+        catch (DbUpdateException ex) when (ex.InnerException is PostgresException pg && pg.SqlState == "23505")
+        {
+            dupNonceCaught = true;
+        }
+        if (!dupNonceCaught)
+            throw new InvalidOperationException("PostgreSQL unique constraint ix_carrier_webhook_nonces_carrier_code_nonce did not raise 23505.");
+    }
+    Console.WriteLine("PASS PostgreSQL Carrier Webhook HMAC-SHA256, replay 23505 protection, secret rotation, cross-tenant 403, and audit logging verified.");
+
     Console.WriteLine("\n================================================================================");
-    Console.WriteLine("ALL PHASE 7.3 POSTGRESQL & BACKEND-CONNECTED JOURNEYS PASSED CLEANLY!");
+    Console.WriteLine("ALL PHASE 7.3 & PHASE 7.4.0A POSTGRESQL VERIFICATIONS PASSED CLEANLY!");
     Console.WriteLine("================================================================================");
 }
 finally

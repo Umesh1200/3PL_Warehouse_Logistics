@@ -1,6 +1,7 @@
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Outbound.Picking.DTOs;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -12,19 +13,24 @@ public class ReleasePickWaveCommandHandler : IRequestHandler<ReleasePickWaveComm
 {
     private readonly IApplicationDbContext _context;
     private readonly ICurrentUserContext _currentUser;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
     public ReleasePickWaveCommandHandler(
         IApplicationDbContext context,
-        ICurrentUserContext currentUser)
+        ICurrentUserContext currentUser,
+        OutboundOperationalAuthorization outboundAuth)
     {
         _context = context;
         _currentUser = currentUser;
+        _outboundAuth = outboundAuth;
     }
 
     public async Task<PickWaveDto> Handle(
         ReleasePickWaveCommand command,
         CancellationToken cancellationToken)
     {
+        _outboundAuth.EnsureStaffOperationalIdentity(nameof(ReleasePickWaveCommand));
+
         var wave = await _context.PickWaves
             .Include(w => w.WaveOrders)
                 .ThenInclude(wo => wo.OutboundOrder)
@@ -38,6 +44,8 @@ public class ReleasePickWaveCommandHandler : IRequestHandler<ReleasePickWaveComm
         {
             throw new EntityNotFoundException(nameof(wave), command.PickWaveId);
         }
+
+        _outboundAuth.ValidateStaffMutationFacilityAccess(wave.FacilityId, nameof(ReleasePickWaveCommand));
 
         wave.Release(_currentUser.UserId ?? Guid.Empty);
         await _context.SaveChangesAsync(cancellationToken);

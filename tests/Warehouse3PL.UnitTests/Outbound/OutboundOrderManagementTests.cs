@@ -373,8 +373,8 @@ public class OutboundOrderManagementTests
         var facilityId = Guid.NewGuid();
         var orderId = Guid.NewGuid();
 
-        var tenantProvider = new TestTenantProvider { TenantId = clientId, BypassTenantFilter = false };
-        var currentUser = new TestCurrentUserContext { TenantId = clientId, UserType = UserType.Client };
+        var tenantProvider = new TestTenantProvider { TenantId = clientId, BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facilityId };
 
         using (var seed = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName))
         {
@@ -440,6 +440,7 @@ public class OutboundOrderManagementTests
         {
             seed.Clients.Add(new Client { Id = clientId, CompanyName = "Apex", AccountCode = "APX" });
             seed.Facilities.Add(new Facility { Id = facilityId, Name = "Dallas Hub", FacilityCode = "DFW-01" });
+            seed.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientId, FacilityId = facilityId, Status = FacilityAccessStatus.Active });
             seed.OutboundOrders.Add(new OutboundOrder
             {
                 Id = inProgressOrderId, ClientId = clientId, FacilityId = facilityId,
@@ -498,6 +499,7 @@ public class OutboundOrderManagementTests
         {
             seed.Clients.Add(new Client { Id = clientId, CompanyName = "Apex", AccountCode = "APX" });
             seed.Facilities.Add(new Facility { Id = facilityId, Name = "Dallas Hub", FacilityCode = "DFW-01" });
+            seed.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientId, FacilityId = facilityId, Status = FacilityAccessStatus.Active });
 
             seed.Locations.Add(new Location { Id = locPickableId, FacilityId = facilityId, LocationCode = "BIN-SOUND-01", IsActive = true, IsPickable = true, IsDamaged = false });
             seed.Locations.Add(new Location { Id = locDamagedId, FacilityId = facilityId, LocationCode = "BIN-DMG-01", IsActive = true, IsPickable = true, IsDamaged = true });

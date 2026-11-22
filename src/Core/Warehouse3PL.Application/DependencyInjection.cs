@@ -22,6 +22,7 @@ public static class DependencyInjection
 
         // Register Operational Authorization
         services.AddScoped<WarehouseOperationalAuthorization>();
+        services.AddScoped<OutboundOperationalAuthorization>();
 
         // Register MediatR & Pipeline Behaviors
         services.AddMediatR(cfg =>

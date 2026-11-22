@@ -69,6 +69,12 @@ public class ExceptionHandlingMiddleware
                 errorCode = forbEx.Code ?? "FORBIDDEN";
                 break;
 
+            case UnauthorizedAccessException:
+                statusCode = HttpStatusCode.Forbidden;
+                title = "Access forbidden";
+                errorCode = "FORBIDDEN";
+                break;
+
             case EntityNotFoundException notFoundEx:
                 statusCode = HttpStatusCode.NotFound;
                 title = "Resource not found";

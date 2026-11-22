@@ -1,6 +1,7 @@
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Outbound.Shipping.DTOs;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Exceptions;
@@ -12,16 +13,22 @@ public record GetShipmentByIdQuery(Guid Id) : IRequest<ShipmentDto>;
 public class GetShipmentByIdQueryHandler : IRequestHandler<GetShipmentByIdQuery, ShipmentDto>
 {
     private readonly IApplicationDbContext _context;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
-    public GetShipmentByIdQueryHandler(IApplicationDbContext context)
+    public GetShipmentByIdQueryHandler(
+        IApplicationDbContext context,
+        OutboundOperationalAuthorization outboundAuth)
     {
         _context = context;
+        _outboundAuth = outboundAuth;
     }
 
     public async Task<ShipmentDto> Handle(
         GetShipmentByIdQuery query,
         CancellationToken cancellationToken)
     {
+        _outboundAuth.EnsureStaffOperationalIdentity(nameof(GetShipmentByIdQuery));
+
         var shipment = await _context.Shipments
             .Include(s => s.Packages)
             .AsNoTracking()
@@ -31,6 +38,8 @@ public class GetShipmentByIdQueryHandler : IRequestHandler<GetShipmentByIdQuery,
         {
             throw new EntityNotFoundException(nameof(Shipment), query.Id);
         }
+
+        _outboundAuth.ValidateStaffReadFacilityAccess(shipment.FacilityId, nameof(GetShipmentByIdQuery));
 
         return new ShipmentDto
         {

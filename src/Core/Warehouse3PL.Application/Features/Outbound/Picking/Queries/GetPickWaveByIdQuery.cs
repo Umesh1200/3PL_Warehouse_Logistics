@@ -1,6 +1,7 @@
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Outbound.Picking.DTOs;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -11,16 +12,22 @@ public record GetPickWaveByIdQuery(Guid Id) : IRequest<PickWaveDto>;
 public class GetPickWaveByIdQueryHandler : IRequestHandler<GetPickWaveByIdQuery, PickWaveDto>
 {
     private readonly IApplicationDbContext _context;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
-    public GetPickWaveByIdQueryHandler(IApplicationDbContext context)
+    public GetPickWaveByIdQueryHandler(
+        IApplicationDbContext context,
+        OutboundOperationalAuthorization outboundAuth)
     {
         _context = context;
+        _outboundAuth = outboundAuth;
     }
 
     public async Task<PickWaveDto> Handle(
         GetPickWaveByIdQuery query,
         CancellationToken cancellationToken)
     {
+        _outboundAuth.EnsureStaffOperationalIdentity(nameof(GetPickWaveByIdQuery));
+
         var wave = await _context.PickWaves
             .Include(w => w.WaveOrders)
                 .ThenInclude(wo => wo.OutboundOrder)
@@ -37,6 +44,8 @@ public class GetPickWaveByIdQueryHandler : IRequestHandler<GetPickWaveByIdQuery,
         {
             throw new EntityNotFoundException(nameof(wave), query.Id);
         }
+
+        _outboundAuth.ValidateStaffReadFacilityAccess(wave.FacilityId, nameof(GetPickWaveByIdQuery));
 
         return new PickWaveDto
         {

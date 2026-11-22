@@ -1,6 +1,7 @@
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Outbound.Picking.DTOs;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -13,16 +14,22 @@ public record AssignPickTaskCommand(
 public class AssignPickTaskCommandHandler : IRequestHandler<AssignPickTaskCommand, PickTaskDto>
 {
     private readonly IApplicationDbContext _context;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
-    public AssignPickTaskCommandHandler(IApplicationDbContext context)
+    public AssignPickTaskCommandHandler(
+        IApplicationDbContext context,
+        OutboundOperationalAuthorization outboundAuth)
     {
         _context = context;
+        _outboundAuth = outboundAuth;
     }
 
     public async Task<PickTaskDto> Handle(
         AssignPickTaskCommand command,
         CancellationToken cancellationToken)
     {
+        _outboundAuth.EnsureStaffOperationalIdentity(nameof(AssignPickTaskCommand));
+
         var task = await _context.PickTasks
             .Include(t => t.SourceLocation)
             .Include(t => t.Item)
@@ -32,6 +39,8 @@ public class AssignPickTaskCommandHandler : IRequestHandler<AssignPickTaskComman
         {
             throw new EntityNotFoundException(nameof(task), command.PickTaskId);
         }
+
+        _outboundAuth.ValidateStaffMutationFacilityAccess(task.FacilityId, nameof(AssignPickTaskCommand));
 
         task.Assign(command.OperatorUserId);
         await _context.SaveChangesAsync(cancellationToken);

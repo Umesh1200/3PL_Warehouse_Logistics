@@ -1,6 +1,7 @@
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Outbound.Shipping.DTOs;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Exceptions;
@@ -12,16 +13,22 @@ public record GetBillOfLadingByIdQuery(Guid Id) : IRequest<BillOfLadingDto>;
 public class GetBillOfLadingByIdQueryHandler : IRequestHandler<GetBillOfLadingByIdQuery, BillOfLadingDto>
 {
     private readonly IApplicationDbContext _context;
+    private readonly OutboundOperationalAuthorization _outboundAuth;
 
-    public GetBillOfLadingByIdQueryHandler(IApplicationDbContext context)
+    public GetBillOfLadingByIdQueryHandler(
+        IApplicationDbContext context,
+        OutboundOperationalAuthorization outboundAuth)
     {
         _context = context;
+        _outboundAuth = outboundAuth;
     }
 
     public async Task<BillOfLadingDto> Handle(
         GetBillOfLadingByIdQuery query,
         CancellationToken cancellationToken)
     {
+        _outboundAuth.EnsureStaffOperationalIdentity(nameof(GetBillOfLadingByIdQuery));
+
         var bol = await _context.BillsOfLading
             .AsNoTracking()
             .FirstOrDefaultAsync(b => b.Id == query.Id && !b.IsDeleted, cancellationToken);
@@ -30,6 +37,8 @@ public class GetBillOfLadingByIdQueryHandler : IRequestHandler<GetBillOfLadingBy
         {
             throw new EntityNotFoundException(nameof(BillOfLading), query.Id);
         }
+
+        _outboundAuth.ValidateStaffReadFacilityAccess(bol.FacilityId, nameof(GetBillOfLadingByIdQuery));
 
         return new BillOfLadingDto
         {

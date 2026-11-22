@@ -11372,6 +11372,109 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.ToTable("carrier_operation_logs", (string)null);
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Outbound.CarrierWebhookAuditLog", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("audit_log_id");
+
+                    b.Property<string>("CarrierCode")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("carrier_code");
+
+                    b.Property<string>("FailureReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("failure_reason");
+
+                    b.Property<int>("HttpStatusCode")
+                        .HasColumnType("integer")
+                        .HasColumnName("http_status_code");
+
+                    b.Property<string>("Nonce")
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)")
+                        .HasColumnName("nonce");
+
+                    b.Property<string>("Outcome")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)")
+                        .HasColumnName("outcome");
+
+                    b.Property<DateTime>("RecordedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("recorded_at_utc");
+
+                    b.Property<string>("SourceIp")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("source_ip");
+
+                    b.Property<string>("TraceId")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("trace_id");
+
+                    b.Property<string>("TrackingNumber")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("tracking_number");
+
+                    b.HasKey("Id")
+                        .HasName("pk_carrier_webhook_audit_logs");
+
+                    b.HasIndex("CarrierCode", "RecordedAtUtc")
+                        .HasDatabaseName("ix_carrier_webhook_audit_logs_carrier_recorded_at");
+
+                    b.ToTable("carrier_webhook_audit_logs", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Outbound.CarrierWebhookNonce", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("uuid")
+                        .HasColumnName("nonce_id");
+
+                    b.Property<string>("CarrierCode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("carrier_code");
+
+                    b.Property<string>("Nonce")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)")
+                        .HasColumnName("nonce");
+
+                    b.Property<string>("PayloadSha256")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("payload_sha256");
+
+                    b.Property<DateTime>("ReceivedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("received_at_utc");
+
+                    b.Property<DateTime>("WebhookTimestampUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("webhook_timestamp_utc");
+
+                    b.HasKey("Id")
+                        .HasName("pk_carrier_webhook_nonces");
+
+                    b.HasIndex("CarrierCode", "Nonce")
+                        .IsUnique()
+                        .HasDatabaseName("ix_carrier_webhook_nonces_carrier_code_nonce");
+
+                    b.ToTable("carrier_webhook_nonces", (string)null);
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Outbound.Customer", b =>
                 {
                     b.Property<Guid>("Id")

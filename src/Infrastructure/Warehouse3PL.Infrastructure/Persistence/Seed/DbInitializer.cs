@@ -96,10 +96,34 @@ public class DbInitializer
             _context.Roles.Add(superAdminRole);
         }
 
-        // 2. ClientAdmin Role
+        // 2. ClientAdmin Role (reconcile idempotently — never leave legacy floor execution grants)
         var clientAdminRole = await _context.Roles
             .Include(r => r.RolePermissions)
             .FirstOrDefaultAsync(r => r.RoleName == SystemRoles.ClientAdmin);
+
+        var allowedClientAdminPermissions = new[]
+        {
+            Permissions.Clients.View,
+            Permissions.Users.View, Permissions.Users.Create, Permissions.Users.Edit, Permissions.Users.AssignRoles,
+            Permissions.Facilities.View,
+            Permissions.Inventory.View, Permissions.Inventory.Adjust, Permissions.Inventory.Count,
+            Permissions.Inbound.View, Permissions.Inbound.Receive,
+            Permissions.Outbound.View, Permissions.Outbound.Create,
+            Permissions.Outbound.OrdersView, Permissions.Outbound.OrdersCreate,
+            Permissions.Outbound.OrdersImport, Permissions.Outbound.OrdersCancel,
+            Permissions.Billing.View,
+            Permissions.Dispatch.View
+        };
+
+        var obsoleteClientExecutionPermissions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            Permissions.Outbound.Pick,
+            Permissions.Outbound.Pack,
+            Permissions.Outbound.Ship,
+            Permissions.Outbound.TasksManage,
+            Permissions.Outbound.WavesManage,
+            Permissions.Outbound.OrdersAllocate
+        };
 
         if (clientAdminRole == null)
         {
@@ -110,19 +134,7 @@ public class DbInitializer
                 IsSystemRole = true
             };
 
-            var clientPermissions = new[]
-            {
-                Permissions.Clients.View,
-                Permissions.Users.View, Permissions.Users.Create, Permissions.Users.Edit, Permissions.Users.AssignRoles,
-                Permissions.Facilities.View,
-                Permissions.Inventory.View, Permissions.Inventory.Adjust, Permissions.Inventory.Count,
-                Permissions.Inbound.View, Permissions.Inbound.Receive,
-                Permissions.Outbound.View, Permissions.Outbound.Create, Permissions.Outbound.Pick, Permissions.Outbound.Ship,
-                Permissions.Billing.View,
-                Permissions.Dispatch.View
-            };
-
-            foreach (var permission in clientPermissions)
+            foreach (var permission in allowedClientAdminPermissions)
             {
                 clientAdminRole.RolePermissions.Add(new RolePermission
                 {
@@ -133,6 +145,31 @@ public class DbInitializer
             }
 
             _context.Roles.Add(clientAdminRole);
+        }
+        else if (clientAdminRole.IsSystemRole)
+        {
+            var toRemove = clientAdminRole.RolePermissions
+                .Where(rp => obsoleteClientExecutionPermissions.Contains(rp.PermissionKey))
+                .ToList();
+
+            if (toRemove.Count > 0)
+            {
+                _context.RolePermissions.RemoveRange(toRemove);
+            }
+
+            foreach (var permission in allowedClientAdminPermissions)
+            {
+                if (!clientAdminRole.RolePermissions.Any(rp =>
+                    string.Equals(rp.PermissionKey, permission, StringComparison.OrdinalIgnoreCase)))
+                {
+                    clientAdminRole.RolePermissions.Add(new RolePermission
+                    {
+                        Role = clientAdminRole,
+                        PermissionKey = permission,
+                        AccessLevel = AccessLevel.Admin
+                    });
+                }
+            }
         }
 
         // 3. ClientUser Role
