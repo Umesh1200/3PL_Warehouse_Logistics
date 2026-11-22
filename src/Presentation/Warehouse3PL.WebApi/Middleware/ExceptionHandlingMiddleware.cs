@@ -81,6 +81,18 @@ public class ExceptionHandlingMiddleware
                 errorCode = notFoundEx.Code ?? "NOT_FOUND";
                 break;
 
+            case ConcurrencyException concEx:
+                statusCode = HttpStatusCode.Conflict;
+                title = "Concurrency conflict";
+                errorCode = concEx.Code ?? "CONCURRENCY_CONFLICT";
+                break;
+
+            case Microsoft.EntityFrameworkCore.DbUpdateConcurrencyException:
+                statusCode = HttpStatusCode.Conflict;
+                title = "Concurrency conflict";
+                errorCode = "CONCURRENCY_CONFLICT";
+                break;
+
             case DomainException domainEx:
                 statusCode = HttpStatusCode.UnprocessableEntity;
                 title = "Domain rule violation";

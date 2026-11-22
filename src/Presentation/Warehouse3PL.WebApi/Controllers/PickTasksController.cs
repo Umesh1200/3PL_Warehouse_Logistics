@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Application.Features.Outbound.Picking.Commands;
 using Warehouse3PL.Application.Features.Outbound.Picking.DTOs;
 using Warehouse3PL.Application.Features.Outbound.Picking.Queries;
@@ -12,6 +13,50 @@ namespace Warehouse3PL.WebApi.Controllers;
 [Route("api/v1/outbound/pick-tasks")]
 public class PickTasksController : BaseApiController
 {
+    /// <summary>
+    /// Retrieves a paginated pick-task queue for warehouse supervisors and viewers.
+    /// </summary>
+    [HttpGet]
+    [HasPermission(Permissions.Outbound.TasksView)]
+    [ProducesResponseType(typeof(PagedResult<PickTaskDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetTasks([FromQuery] GetPickTasksQuery query, CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Strictly read-only query returning the next eligible pick task for the authenticated operator.
+    /// Never implicitly claims tasks or exposes another operator's assigned tasks.
+    /// </summary>
+    [HttpGet("next")]
+    [HasPermission(Permissions.Outbound.Pick)]
+    [ProducesResponseType(typeof(PickTaskDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status204NoContent)]
+    public async Task<IActionResult> GetNextTask([FromQuery] Guid? facilityId, CancellationToken ct)
+    {
+        var result = await Mediator.Send(new GetNextPickTaskQuery(facilityId), ct);
+        if (result == null)
+        {
+            return NoContent();
+        }
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Atomically self-claims an unassigned Pending pick task for the authenticated RF operator.
+    /// </summary>
+    [HttpPost("{id:guid}/claim")]
+    [HasPermission(Permissions.Outbound.Pick)]
+    [ProducesResponseType(typeof(PickTaskDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> ClaimTask([FromRoute] Guid id, CancellationToken ct)
+    {
+        var result = await Mediator.Send(new ClaimPickTaskCommand(id), ct);
+        return Ok(result);
+    }
 
     /// <summary>
     /// Assigns a pick task to an RF warehouse operator.

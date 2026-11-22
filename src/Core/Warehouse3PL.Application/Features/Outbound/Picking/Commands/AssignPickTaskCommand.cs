@@ -32,8 +32,11 @@ public class AssignPickTaskCommandHandler : IRequestHandler<AssignPickTaskComman
 
         var task = await _context.PickTasks
             .Include(t => t.SourceLocation)
+            .Include(t => t.DestinationLocation)
             .Include(t => t.Item)
-            .FirstOrDefaultAsync(t => t.Id == command.PickTaskId, cancellationToken);
+            .Include(t => t.Lot)
+            .Include(t => t.OutboundOrder)
+            .FirstOrDefaultAsync(t => t.Id == command.PickTaskId && !t.IsDeleted, cancellationToken);
 
         if (task == null)
         {
@@ -42,28 +45,24 @@ public class AssignPickTaskCommandHandler : IRequestHandler<AssignPickTaskComman
 
         _outboundAuth.ValidateStaffMutationFacilityAccess(task.FacilityId, nameof(AssignPickTaskCommand));
 
+        var targetUser = await _context.Users
+            .AsNoTracking()
+            .Select(u => new { u.Id, u.UserType, u.Status, u.IsDeleted })
+            .FirstOrDefaultAsync(u => u.Id == command.OperatorUserId && !u.IsDeleted, cancellationToken);
+
+        if (targetUser == null ||
+            targetUser.UserType != Domain.Enums.UserType.Staff ||
+            targetUser.Status != Domain.Enums.UserStatus.Active)
+        {
+            throw new ValidationException(nameof(command.OperatorUserId),
+                "Target operator must be an active warehouse staff user.");
+        }
+
         task.Assign(command.OperatorUserId);
+        task.Version = unchecked(task.Version + 1u);
         await _context.SaveChangesAsync(cancellationToken);
 
-        return new PickTaskDto
-        {
-            Id = task.Id,
-            PickWaveId = task.PickWaveId,
-            OutboundOrderId = task.OutboundOrderId,
-            OutboundOrderLineId = task.OutboundOrderLineId,
-            InventoryAllocationId = task.InventoryAllocationId,
-            StockOnHandId = task.StockOnHandId,
-            ItemId = task.ItemId,
-            Sku = task.Item?.Sku ?? string.Empty,
-            SourceLocationId = task.SourceLocationId,
-            SourceLocationCode = task.SourceLocation?.LocationCode ?? string.Empty,
-            QuantityToPick = task.QuantityToPick,
-            QuantityPicked = task.QuantityPicked,
-            ShortPickQuantity = task.ShortPickQuantity,
-            PickSequence = task.PickSequence,
-            Status = task.Status,
-            AssignedUserId = task.AssignedUserId
-        };
+        return PickTaskMappings.ToDto(task);
     }
 }
 

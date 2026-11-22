@@ -46,21 +46,37 @@ public class ReportShortPickCommandHandler : IRequestHandler<ReportShortPickComm
 
         var task = await _context.PickTasks
             .AsNoTracking()
-            .Select(t => new { t.Id, t.FacilityId, t.AssignedUserId })
+            .Select(t => new { t.Id, t.FacilityId, t.AssignedUserId, t.Status })
             .FirstOrDefaultAsync(t => t.Id == command.PickTaskId, cancellationToken)
             ?? throw new EntityNotFoundException(nameof(PickTask), command.PickTaskId);
 
         _outboundAuth.ValidateStaffMutationFacilityAccess(task.FacilityId, nameof(ReportShortPickCommand));
 
-        if (task.AssignedUserId.HasValue &&
-            task.AssignedUserId.Value != _currentUser.UserId &&
-            !_currentUser.IsSuperAdmin &&
-            !_currentUser.HasPermission(Permissions.Outbound.TasksManage))
+        var callerUserId = _currentUser.UserId;
+        var isSupervisorOverride = _currentUser.IsSuperAdmin || _currentUser.HasPermission(Permissions.Outbound.TasksManage);
+
+        if (!isSupervisorOverride)
         {
-            throw new ForbiddenException("This pick task is assigned to another operator.");
+            if (!callerUserId.HasValue || callerUserId.Value == Guid.Empty)
+            {
+                throw new ForbiddenException("Authenticated staff operator identity is required to report short-pick.");
+            }
+
+            if (!task.AssignedUserId.HasValue)
+            {
+                throw new ForbiddenException("Pick task must be explicitly claimed by the operator before reporting a short-pick.");
+            }
+
+            if (task.AssignedUserId.Value != callerUserId.Value)
+            {
+                throw new ForbiddenException("This pick task is assigned to another operator.");
+            }
         }
 
-        return await _executionService.ReportShortPickAsync(new ReportShortPickRequest
+        var usedOverride = isSupervisorOverride &&
+                           (!task.AssignedUserId.HasValue || task.AssignedUserId.Value != callerUserId);
+
+        var result = await _executionService.ReportShortPickAsync(new ReportShortPickRequest
         {
             PickTaskId = command.PickTaskId,
             QuantityPicked = command.QuantityPicked,
@@ -69,9 +85,25 @@ public class ReportShortPickCommandHandler : IRequestHandler<ReportShortPickComm
             ScannedLocationBarcode = command.ScannedLocationBarcode,
             ScannedItemBarcode = command.ScannedItemBarcode,
             ScannedToteLpn = command.ScannedToteLpn,
-            UserId = _currentUser.UserId ?? Guid.Empty,
+            UserId = callerUserId ?? Guid.Empty,
             IdempotencyKey = command.IdempotencyKey
         }, cancellationToken);
+
+        if (usedOverride)
+        {
+            _context.PickTaskStatusHistories.Add(new PickTaskStatusHistory
+            {
+                PickTaskId = task.Id,
+                FromStatus = task.Status,
+                ToStatus = result.TaskStatus,
+                Reason = $"Task-management override short-pick by supervisor '{callerUserId}' (prior assignee: '{task.AssignedUserId?.ToString() ?? "unassigned"}').",
+                ChangedByUserId = callerUserId ?? Guid.Empty,
+                ChangedAtUtc = DateTime.UtcNow
+            });
+            await _context.SaveChangesAsync(cancellationToken);
+        }
+
+        return result;
     }
 }
 

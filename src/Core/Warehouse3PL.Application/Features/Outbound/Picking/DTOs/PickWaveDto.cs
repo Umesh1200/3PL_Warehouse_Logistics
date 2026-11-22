@@ -70,5 +70,42 @@ public class PickTaskDto
     public Guid? AssignedUserId { get; set; }
     public DateTime? StartedAtUtc { get; set; }
     public DateTime? CompletedAtUtc { get; set; }
+    public uint Version { get; set; }
+}
+
+public static class PickTaskMappings
+{
+    public static PickTaskDto ToDto(Domain.Entities.Outbound.PickTask t) => new()
+    {
+        Id = t.Id,
+        PickWaveId = t.PickWaveId,
+        OutboundOrderId = t.OutboundOrderId,
+        OrderNumber = t.OutboundOrder?.OrderNumber ?? string.Empty,
+        OutboundOrderLineId = t.OutboundOrderLineId,
+        InventoryAllocationId = t.InventoryAllocationId,
+        StockOnHandId = t.StockOnHandId,
+        ItemId = t.ItemId,
+        Sku = t.Item?.Sku ?? string.Empty,
+        ItemDescription = t.Item?.Description ?? string.Empty,
+        SourceLocationId = t.SourceLocationId,
+        SourceLocationCode = t.SourceLocation?.LocationCode ?? string.Empty,
+        DestinationLocationId = t.DestinationLocationId,
+        DestinationLocationCode = t.DestinationLocation?.LocationCode,
+        LotId = t.LotId,
+        LotNumber = t.Lot?.LotNumber,
+        ExpectedLpnCode = t.ExpectedLpnCode,
+        TargetHandlingUnitId = t.TargetHandlingUnitId,
+        TargetToteBarcode = t.TargetToteBarcode,
+        QuantityToPick = t.QuantityToPick,
+        QuantityPicked = t.QuantityPicked,
+        ShortPickQuantity = t.ShortPickQuantity,
+        PickSequence = t.PickSequence,
+        Status = t.Status,
+        ShortPickReason = t.ShortPickReason,
+        AssignedUserId = t.AssignedUserId,
+        StartedAtUtc = t.StartedAtUtc,
+        CompletedAtUtc = t.CompletedAtUtc,
+        Version = t.Version
+    };
 }
 

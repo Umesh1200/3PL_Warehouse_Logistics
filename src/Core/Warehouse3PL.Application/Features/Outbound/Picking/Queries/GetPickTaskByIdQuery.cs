@@ -43,36 +43,6 @@ public class GetPickTaskByIdQueryHandler : IRequestHandler<GetPickTaskByIdQuery,
 
         _outboundAuth.ValidateStaffReadFacilityAccess(task.FacilityId, nameof(GetPickTaskByIdQuery));
 
-        return new PickTaskDto
-        {
-            Id = task.Id,
-            PickWaveId = task.PickWaveId,
-            OutboundOrderId = task.OutboundOrderId,
-            OrderNumber = task.OutboundOrder?.OrderNumber ?? string.Empty,
-            OutboundOrderLineId = task.OutboundOrderLineId,
-            InventoryAllocationId = task.InventoryAllocationId,
-            StockOnHandId = task.StockOnHandId,
-            ItemId = task.ItemId,
-            Sku = task.Item?.Sku ?? string.Empty,
-            ItemDescription = task.Item?.Description ?? string.Empty,
-            SourceLocationId = task.SourceLocationId,
-            SourceLocationCode = task.SourceLocation?.LocationCode ?? string.Empty,
-            DestinationLocationId = task.DestinationLocationId,
-            DestinationLocationCode = task.DestinationLocation?.LocationCode,
-            LotId = task.LotId,
-            LotNumber = task.Lot?.LotNumber,
-            ExpectedLpnCode = task.ExpectedLpnCode,
-            TargetHandlingUnitId = task.TargetHandlingUnitId,
-            TargetToteBarcode = task.TargetToteBarcode,
-            QuantityToPick = task.QuantityToPick,
-            QuantityPicked = task.QuantityPicked,
-            ShortPickQuantity = task.ShortPickQuantity,
-            PickSequence = task.PickSequence,
-            Status = task.Status,
-            ShortPickReason = task.ShortPickReason,
-            AssignedUserId = task.AssignedUserId,
-            StartedAtUtc = task.StartedAtUtc,
-            CompletedAtUtc = task.CompletedAtUtc
-        };
+        return PickTaskMappings.ToDto(task);
     }
 }

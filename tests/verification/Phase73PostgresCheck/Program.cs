@@ -2165,8 +2165,211 @@ try
     }
     Console.WriteLine("PASS PostgreSQL Two-Worker Lease Fencing (forward-fail, forward-ok, reverse completion) verified cleanly.");
 
+    // ------------------------------------------------------------------------------------------------
+    // SECTION 7: PHASE 7.4.0B READ/QUEUE APIS & ATOMIC RF CLAIM CONCURRENCY (POSTGRESQL)
+    // ------------------------------------------------------------------------------------------------
+    Console.WriteLine("\n[7/7] Running Phase 7.4.0B Read/Queue APIs & Two-Operator Claim Race on PostgreSQL...");
+
+    var bOpAId = Guid.NewGuid();
+    var bOpBId = Guid.NewGuid();
+    var bSupId = user.UserId!.Value;
+    var bPackStationId = Guid.NewGuid();
+    var bOrderId = Guid.NewGuid();
+    var bOrderLineId = Guid.NewGuid();
+    var bStockId = Guid.NewGuid();
+    var bAlloc1Id = Guid.NewGuid();
+    var bAlloc2Id = Guid.NewGuid();
+    var bWaveId = Guid.NewGuid();
+    var bTaskClaimId = Guid.NewGuid();
+    var bTaskShortId = Guid.NewGuid();
+    var bToteId = Guid.NewGuid();
+    var bPackSessionId = Guid.NewGuid();
+    var bHuCartonElig = Guid.NewGuid();
+    var bPkgEligId = Guid.NewGuid();
+
+    await using (var bDb = CreateDb(operationalConn, user))
+    {
+        bDb.Users.AddRange(
+            new User { Id = bOpAId, Email = "pg-opa@740b.test", FirstName = "Pg", LastName = "OpA", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
+            new User { Id = bOpBId, Email = "pg-opb@740b.test", FirstName = "Pg", LastName = "OpB", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" });
+
+        bDb.Locations.Add(new Location
+        {
+            Id = bPackStationId, FacilityId = facilityId, LocationCode = "PG-PK-01", Barcode = "PG-PK-01",
+            LocationType = LocationType.PackingStation, IsActive = true
+        });
+
+        var bOrder = new OutboundOrder { Id = bOrderId, ClientId = client1Id, FacilityId = facilityId, OrderNumber = "PG-740B-ORD1", CustomerName = "PG Buyer", Status = OutboundOrderStatus.Allocated };
+        var bLine = new OutboundOrderLine { Id = bOrderLineId, OutboundOrderId = bOrderId, ItemId = item1Id, LineNumber = 1, QuantityOrdered = 10m, QuantityAllocated = 10m };
+        bOrder.Lines.Add(bLine);
+        bDb.OutboundOrders.Add(bOrder);
+
+        bDb.StockOnHand.Add(new StockOnHand
+        {
+            Id = bStockId, ClientId = client1Id, FacilityId = facilityId, ItemId = item1Id, LocationId = bin1Id,
+            QtyAvailable = 30m, QtyAllocated = 10m, Version = 1
+        });
+        bDb.InventoryAllocations.AddRange(
+            new InventoryAllocation { Id = bAlloc1Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = bAlloc2Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated });
+
+        bDb.PickWaves.Add(new PickWave { Id = bWaveId, ClientId = client1Id, FacilityId = facilityId, WaveNumber = "PG-740B-WV1", Priority = 3, Status = PickWaveStatus.Released });
+        bDb.PickTasks.AddRange(
+            new PickTask { Id = bTaskClaimId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAlloc1Id, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Pending, Version = 1 },
+            new PickTask { Id = bTaskShortId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAlloc2Id, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 2, Status = PickTaskStatus.Pending, Version = 1 });
+
+        bDb.HandlingUnits.AddRange(
+            new HandlingUnit { Id = bToteId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-TOTE-740B", UnitType = HandlingUnitType.Tote, Status = HandlingUnitStatus.Available, CurrentOutboundOrderId = bOrderId },
+            new HandlingUnit { Id = bHuCartonElig, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-CTN-740B", UnitType = HandlingUnitType.ShippingCarton });
+
+        bDb.PackingSessions.Add(new PackingSession { Id = bPackSessionId, ClientId = client1Id, FacilityId = facilityId, PackingStationLocationId = bPackStationId, OutboundOrderId = bOrderId, OperatorUserId = bSupId, Status = PackingSessionStatus.Active });
+        bDb.Packages.Add(new Package { Id = bPkgEligId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, HandlingUnitId = bHuCartonElig, PackageNumber = "PG-PKG-ELIG", CartonSequence = 1, Status = PackageStatus.Packed, CarrierCode = "SIM-FEDEX", PackedAtUtc = DateTime.UtcNow });
+        bDb.PackageLines.Add(new PackageLine { PackageId = bPkgEligId, OutboundOrderLineId = bOrderLineId, ItemId = item1Id, Quantity = 3m, InventoryAllocationId = bAlloc1Id });
+
+        await bDb.SaveChangesAsync();
+    }
+
+    static HttpRequestMessage StaffReq(HttpMethod method, string path, Guid userId, Guid? facId, string permsCsv, object? body = null)
+    {
+        var req = new HttpRequestMessage(method, path);
+        req.Headers.Add("X-Test-Actor-UserId", userId.ToString());
+        if (facId.HasValue) req.Headers.Add("X-Test-Actor-FacilityId", facId.Value.ToString());
+        req.Headers.Add("X-Test-Actor-Permissions", permsCsv);
+        if (body != null) req.Content = JsonContent.Create(body);
+        return req;
+    }
+
+    // 7.1 Strictly read-only /next (leaves Pending untouched & returns 204 when empty)
+    using (var nextReq = StaffReq(HttpMethod.Get, $"/api/v1/outbound/pick-tasks/next?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.Pick))
+    using (var nextResp = await p74Client.SendAsync(nextReq))
+    {
+        if (nextResp.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Expected 200 OK from /pick-tasks/next, got {nextResp.StatusCode}");
+        using var doc = JsonDocument.Parse(await nextResp.Content.ReadAsStringAsync());
+        if (doc.RootElement.GetProperty("id").GetGuid() != bTaskClaimId)
+            throw new InvalidOperationException("/next did not select lowest sequence Pending task bTaskClaimId.");
+    }
+    await using (var chkRo = CreateDb(operationalConn, user))
+    {
+        var roTask = await chkRo.PickTasks.AsNoTracking().SingleAsync(t => t.Id == bTaskClaimId);
+        if (roTask.Status != PickTaskStatus.Pending || roTask.AssignedUserId.HasValue || roTask.Version != 1u)
+            throw new InvalidOperationException("/pick-tasks/next implicitly mutated task state.");
+    }
+
+    // 7.2 Concurrent Two-Operator Claim Race on PostgreSQL (1x 200 + 1x 409)
+    var claimTaskA = p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskClaimId}/claim", bOpAId, facilityId, Permissions.Outbound.Pick, new { operatorUserId = bOpBId }));
+    var claimTaskB = p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskClaimId}/claim", bOpBId, facilityId, Permissions.Outbound.Pick, new { }));
+    var claimResps = await Task.WhenAll(claimTaskA, claimTaskB);
+    if (claimResps.Count(r => r.StatusCode == HttpStatusCode.OK) != 1 ||
+        claimResps.Count(r => r.StatusCode == HttpStatusCode.Conflict) != 1)
+        throw new InvalidOperationException($"PostgreSQL two-operator claim race failed: {string.Join(",", claimResps.Select(r => r.StatusCode))}");
+
+    var winClaim = claimResps.Single(r => r.StatusCode == HttpStatusCode.OK);
+    Guid pgClaimWinnerId;
+    uint pgClaimWinVersion;
+    using (var doc = JsonDocument.Parse(await winClaim.Content.ReadAsStringAsync()))
+    {
+        pgClaimWinnerId = doc.RootElement.GetProperty("assignedUserId").GetGuid();
+        pgClaimWinVersion = doc.RootElement.GetProperty("version").GetUInt32();
+    }
+    var pgClaimLoserId = pgClaimWinnerId == bOpAId ? bOpBId : bOpAId;
+    foreach (var r in claimResps) r.Dispose();
+
+    // Repeated same-operator claim is idempotent (200, same version); loser gets 409
+    using (var repResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskClaimId}/claim", pgClaimWinnerId, facilityId, Permissions.Outbound.Pick, new { })))
+    {
+        if (repResp.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Repeated same-operator claim should return 200 OK, got {repResp.StatusCode}");
+        using var doc = JsonDocument.Parse(await repResp.Content.ReadAsStringAsync());
+        if (doc.RootElement.GetProperty("version").GetUInt32() != pgClaimWinVersion)
+            throw new InvalidOperationException("Repeated same-operator claim unexpectedly bumped Version.");
+    }
+    using (var loseResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskClaimId}/claim", pgClaimLoserId, facilityId, Permissions.Outbound.Pick, new { })))
+    {
+        if (loseResp.StatusCode != HttpStatusCode.Conflict)
+            throw new InvalidOperationException($"Loser re-claim should return 409 Conflict, got {loseResp.StatusCode}");
+    }
+
+    // 7.3 Ownership & Unclaimed Execution Enforcement + Stock/Ledger Conservation on PostgreSQL
+    string binBarcode;
+    string itemSku;
+    await using (var lookupDb = CreateDb(operationalConn, user))
+    {
+        binBarcode = (await lookupDb.Locations.AsNoTracking().SingleAsync(l => l.Id == bin1Id)).Barcode ?? "OP-BIN1";
+        itemSku = (await lookupDb.Items.AsNoTracking().SingleAsync(i => i.Id == item1Id)).Sku;
+    }
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskShortId}/confirm", pgClaimWinnerId, facilityId, Permissions.Outbound.Pick,
+        new { scannedLocationBarcode = binBarcode, scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-740B", quantity = 5m }))).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Unclaimed task execution by ordinary operator must return 403 Forbidden.");
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskClaimId}/confirm", pgClaimLoserId, facilityId, Permissions.Outbound.Pick,
+        new { scannedLocationBarcode = binBarcode, scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-740B", quantity = 5m }))).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Foreign operator execution must return 403 Forbidden.");
+
+    // Owner confirms cleanly + duplicate confirm is idempotent -> 1 Pick ledger tx & conserved balances
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskClaimId}/confirm", pgClaimWinnerId, facilityId, Permissions.Outbound.Pick,
+        new { scannedLocationBarcode = binBarcode, scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-740B", quantity = 5m, idempotencyKey = "pg-idem-1" }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Claimed owner pick confirmation failed on PostgreSQL.");
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskClaimId}/confirm", pgClaimWinnerId, facilityId, Permissions.Outbound.Pick,
+        new { scannedLocationBarcode = binBarcode, scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-740B", quantity = 5m, idempotencyKey = "pg-idem-1" }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Duplicate owner pick confirmation should succeed idempotently.");
+
+    // Supervisor explicit auditable override on unclaimed bTaskShortId
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskShortId}/short-pick", bSupId, facilityId, $"{Permissions.Outbound.Pick},{Permissions.Outbound.TasksManage}",
+        new { quantityPicked = 0m, reason = 1, notes = "PG supervisor override verification" }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Supervisor override short-pick failed on PostgreSQL.");
+
+    await using (var bVerifyDb = CreateDb(operationalConn, user))
+    {
+        var bSrc = await bVerifyDb.StockOnHand.SingleAsync(s => s.Id == bStockId);
+        var bTote = await bVerifyDb.StockOnHand.SingleAsync(s => s.HandlingUnitId == bToteId);
+        if (bSrc.QtyAvailable != 30m || bSrc.QtyAllocated != 0m || bTote.QtyAllocated != 5m || bTote.QtyAvailable != 0m)
+            throw new InvalidOperationException($"PostgreSQL stock conservation mismatch: srcAvail={bSrc.QtyAvailable}, srcAlloc={bSrc.QtyAllocated}, toteAlloc={bTote.QtyAllocated}");
+
+        var pickTxCount = await bVerifyDb.InventoryTransactions.CountAsync(t => t.ReferenceId == bTaskClaimId && t.TxType == InventoryTxType.Pick);
+        if (pickTxCount != 1)
+            throw new InvalidOperationException($"Expected 1 Pick ledger transaction, found {pickTxCount}");
+
+        var claimHistCount = await bVerifyDb.PickTaskStatusHistories.CountAsync(h => h.PickTaskId == bTaskClaimId && h.ToStatus == PickTaskStatus.Assigned);
+        var overrideHistCount = await bVerifyDb.PickTaskStatusHistories.CountAsync(h => h.PickTaskId == bTaskShortId && h.Reason != null && h.Reason.Contains("Task-management override"));
+        if (claimHistCount != 1 || overrideHistCount != 1)
+            throw new InvalidOperationException($"PostgreSQL task history mismatch: claimHist={claimHistCount}, overrideHist={overrideHistCount}");
+    }
+
+    // 7.4 Read endpoints & RBAC separation matrix on PostgreSQL
+    foreach (var checkPath in new[]
+    {
+        $"/api/v1/outbound/pick-tasks?facilityId={facilityId}",
+        $"/api/v1/outbound/shipments?facilityId={facilityId}",
+        $"/api/v1/outbound/shipments/eligible-packages?facilityId={facilityId}",
+        $"/api/v1/outbound/packing/sessions?facilityId={facilityId}",
+        $"/api/v1/outbound/packing/sessions/{bPackSessionId}",
+        $"/api/v1/outbound/packing/packages?packingSessionId={bPackSessionId}"
+    })
+    {
+        if ((await p74Client.SendAsync(StaffReq(HttpMethod.Get, checkPath, bSupId, facilityId,
+            $"{Permissions.Outbound.TasksView},{Permissions.Outbound.Ship},{Permissions.Outbound.Pack}"))).StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Phase 7.4.0B read endpoint failed on PostgreSQL: {checkPath}");
+    }
+
+    // View-only denied /next & /claim; exec-only denied queue & /assign; manage-only denied execution; MultiFacilityView reads allowed vs /claim denied
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/pick-tasks/next?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.TasksView))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/pick-tasks?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.Pick))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskClaimId}/claim", bSupId, facilityId, $"{Permissions.Outbound.TasksView},{Permissions.Outbound.TasksManage}", new { }))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/pick-tasks?facilityId={p74FacB}", bSupId, facilityId, $"{Permissions.Analytics.MultiFacilityView},{Permissions.Outbound.TasksView}"))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{p74TaskFacB}/claim", bSupId, facilityId, $"{Permissions.Analytics.MultiFacilityView},{Permissions.Outbound.Pick}", new { }))).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Phase 7.4.0B RBAC separation assertion failed on PostgreSQL.");
+
+    // /next returns 204 when no pending/assigned tasks remain in facility
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/pick-tasks/next?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.Pick))).StatusCode != HttpStatusCode.NoContent)
+        throw new InvalidOperationException("Expected 204 NoContent from /pick-tasks/next when no eligible tasks remain.");
+
+    Console.WriteLine("PASS PostgreSQL Phase 7.4.0B Read/Queue APIs, Two-Operator Claim Race (200/409), Read-Only /next, Ownership Enforcement, and Stock Conservation.");
+
     Console.WriteLine("\n================================================================================");
-    Console.WriteLine("ALL PHASE 7.3 & PHASE 7.4.0A POSTGRESQL VERIFICATIONS PASSED CLEANLY!");
+    Console.WriteLine("ALL PHASE 7.3, 7.4.0A & PHASE 7.4.0B POSTGRESQL VERIFICATIONS PASSED CLEANLY!");
     Console.WriteLine("================================================================================");
 }
 finally
@@ -2264,6 +2467,33 @@ sealed class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
+        var actorUserId = Request.Headers["X-Test-Actor-UserId"].FirstOrDefault();
+        if (!string.IsNullOrWhiteSpace(actorUserId))
+        {
+            var actorClaims = new List<Claim>
+            {
+                new Claim(ClaimTypes.NameIdentifier, actorUserId),
+                new Claim("UserType", "Staff"),
+                new Claim("user_type", "Staff")
+            };
+            var actorFac = Request.Headers["X-Test-Actor-FacilityId"].FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(actorFac))
+            {
+                actorClaims.Add(new Claim("facility_id", actorFac));
+            }
+            var actorPerms = Request.Headers["X-Test-Actor-Permissions"].FirstOrDefault();
+            if (!string.IsNullOrWhiteSpace(actorPerms))
+            {
+                foreach (var p in actorPerms.Split(',', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries))
+                {
+                    actorClaims.Add(new Claim("permissions", p));
+                }
+            }
+            var actorIdentity = new ClaimsIdentity(actorClaims, "TestAuth");
+            return Task.FromResult(AuthenticateResult.Success(
+                new AuthenticationTicket(new ClaimsPrincipal(actorIdentity), "TestAuth")));
+        }
+
         var userId = CurrentUserId != Guid.Empty ? CurrentUserId.ToString() : Guid.NewGuid().ToString();
         var claims = CustomClaims ?? new List<Claim>
         {

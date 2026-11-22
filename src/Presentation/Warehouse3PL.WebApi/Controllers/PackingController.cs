@@ -1,6 +1,8 @@
 using Microsoft.AspNetCore.Mvc;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Application.Features.Outbound.Packing.Commands;
+using Warehouse3PL.Application.Features.Outbound.Packing.DTOs;
 using Warehouse3PL.Application.Features.Outbound.Packing.Queries;
 using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Infrastructure.Authorization;
@@ -11,6 +13,43 @@ namespace Warehouse3PL.WebApi.Controllers;
 [Route("api/v1/outbound/packing")]
 public class PackingController : BaseApiController
 {
+    /// <summary>
+    /// Retrieves paginated packing sessions for workbench resumption and supervisor oversight.
+    /// </summary>
+    [HttpGet("sessions")]
+    [HasPermission(Permissions.Outbound.Pack)]
+    [ProducesResponseType(typeof(PagedResult<PackingSessionSummaryDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetSessions([FromQuery] GetPackingSessionsQuery query, CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Retrieves full packing session detail including line progress, packages, and picked totes.
+    /// </summary>
+    [HttpGet("sessions/{id:guid}")]
+    [HasPermission(Permissions.Outbound.Pack)]
+    [ProducesResponseType(typeof(PackingSessionDetailDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    public async Task<IActionResult> GetSessionById([FromRoute] Guid id, CancellationToken ct)
+    {
+        var result = await Mediator.Send(new GetPackingSessionByIdQuery(id), ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Retrieves paginated packages scoped to packing workbench hydration.
+    /// </summary>
+    [HttpGet("packages")]
+    [HasPermission(Permissions.Outbound.Pack)]
+    [ProducesResponseType(typeof(PagedResult<PackageSummaryDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetPackages([FromQuery] GetPackingPackagesQuery query, CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
+        return Ok(result);
+    }
+
     /// <summary>
     /// Starts or resumes a packing session at a packing station workbench for an outbound order.
     /// Prevents concurrent conflicting packing sessions on the same order.

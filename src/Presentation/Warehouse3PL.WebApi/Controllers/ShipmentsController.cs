@@ -1,5 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Features.Outbound.Packing.DTOs;
 using Warehouse3PL.Application.Features.Outbound.Shipping.Commands;
 using Warehouse3PL.Application.Features.Outbound.Shipping.DTOs;
 using Warehouse3PL.Application.Features.Outbound.Shipping.Queries;
@@ -13,6 +15,30 @@ namespace Warehouse3PL.WebApi.Controllers;
 [Route("api/v1/outbound/shipments")]
 public class ShipmentsController : BaseApiController
 {
+    /// <summary>
+    /// Searches and paginates outbound shipments with facility, status, carrier, and date filters.
+    /// </summary>
+    [HttpGet]
+    [HasPermission(Permissions.Outbound.Ship)]
+    [ProducesResponseType(typeof(PagedResult<ShipmentDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetShipments([FromQuery] GetShipmentsQuery query, CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Retrieves paginated Packed or LabelPrinted packages not yet consolidated into any shipment.
+    /// </summary>
+    [HttpGet("eligible-packages")]
+    [HasPermission(Permissions.Outbound.Ship)]
+    [ProducesResponseType(typeof(PagedResult<PackageSummaryDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetEligiblePackages([FromQuery] GetEligibleShipmentPackagesQuery query, CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
+        return Ok(result);
+    }
+
     /// <summary>
     /// Creates a new outbound master freight shipment for consolidation.
     /// </summary>

@@ -6,6 +6,23 @@ on:
   workflow_dispatch:
 
 jobs:
+  dotnet-tests:
+    name: .NET Unit & Security Regression Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+      - name: Run full .NET test suite
+        run: dotnet test tests/Warehouse3PL.UnitTests/Warehouse3PL.UnitTests.csproj --configuration Release --logger "trx;LogFileName=Warehouse3PL.UnitTests.trx" --results-directory TestResults
+      - name: Upload .NET test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: Warehouse3PL-UnitTests-trx
+          path: TestResults/Warehouse3PL.UnitTests.trx
+
   rollback-retry:
     runs-on: ubuntu-latest
     services:
