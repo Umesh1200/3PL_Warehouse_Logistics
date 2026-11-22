@@ -2179,6 +2179,8 @@ try
     var bInactiveOpId = Guid.NewGuid();
     var bSupId = user.UserId!.Value;
     var bPackStationId = Guid.NewGuid();
+    var bBinId = Guid.NewGuid();
+    var bBinShortId = Guid.NewGuid();
     var bOrderId = Guid.NewGuid();
     var bOrderLineId = Guid.NewGuid();
     var bStockId = Guid.NewGuid();
@@ -2212,11 +2214,22 @@ try
             new User { Id = bUnassignedOpId, AssignedFacilityId = null, Email = "pg-nofac@740b.test", FirstName = "Pg", LastName = "NoFac", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
             new User { Id = bInactiveOpId, AssignedFacilityId = facilityId, Email = "pg-inact@740b.test", FirstName = "Pg", LastName = "Inactive", UserType = UserType.Staff, Status = UserStatus.Inactive, PasswordHash = "x" });
 
-        bDb.Locations.Add(new Location
-        {
-            Id = bPackStationId, FacilityId = facilityId, LocationCode = "PG-PK-01", Barcode = "PG-PK-01",
-            LocationType = LocationType.PackingStation, IsActive = true
-        });
+        bDb.Locations.AddRange(
+            new Location
+            {
+                Id = bPackStationId, FacilityId = facilityId, LocationCode = "PG-PK-01", Barcode = "PG-PK-01",
+                LocationType = LocationType.PackingStation, IsActive = true
+            },
+            new Location
+            {
+                Id = bBinId, FacilityId = facilityId, LocationCode = "PG-740B-BIN1", Barcode = "PG-740B-BIN1",
+                LocationType = LocationType.Bin, IsActive = true, IsPickable = true
+            },
+            new Location
+            {
+                Id = bBinShortId, FacilityId = facilityId, LocationCode = "PG-740B-SHORT", Barcode = "PG-740B-SHORT",
+                LocationType = LocationType.Bin, IsActive = true, IsPickable = true
+            });
 
         var bOrder = new OutboundOrder { Id = bOrderId, ClientId = client1Id, FacilityId = facilityId, OrderNumber = "PG-740B-ORD1", CustomerName = "PG Buyer", Status = OutboundOrderStatus.Allocated };
         var bLine = new OutboundOrderLine { Id = bOrderLineId, OutboundOrderId = bOrderId, ItemId = item1Id, LineNumber = 1, QuantityOrdered = 30m, QuantityAllocated = 30m };
@@ -2225,16 +2238,16 @@ try
 
         bDb.StockOnHand.Add(new StockOnHand
         {
-            Id = bStockId, ClientId = client1Id, FacilityId = facilityId, ItemId = item1Id, LocationId = bin1Id,
+            Id = bStockId, ClientId = client1Id, FacilityId = facilityId, ItemId = item1Id, LocationId = bBinId,
             QtyAvailable = 30m, QtyAllocated = 30m, Version = 1
         });
         bDb.InventoryAllocations.AddRange(
-            new InventoryAllocation { Id = bAlloc1Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
-            new InventoryAllocation { Id = bAlloc2Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
-            new InventoryAllocation { Id = bAllocRaceId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
-            new InventoryAllocation { Id = bAllocPlanId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
-            new InventoryAllocation { Id = bAllocCancId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
-            new InventoryAllocation { Id = bAllocOverFailId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated });
+            new InventoryAllocation { Id = bAlloc1Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bBinId, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = bAlloc2Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bBinShortId, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = bAllocRaceId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bBinId, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = bAllocPlanId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bBinId, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = bAllocCancId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bBinId, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = bAllocOverFailId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bBinId, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated });
 
         bDb.PickWaves.AddRange(
             new PickWave { Id = bWaveId, ClientId = client1Id, FacilityId = facilityId, WaveNumber = "PG-740B-WV1", Priority = 3, Status = PickWaveStatus.Released },
@@ -2242,13 +2255,13 @@ try
             new PickWave { Id = bCancWaveId, ClientId = client1Id, FacilityId = facilityId, WaveNumber = "PG-740B-CANC", Priority = 10, Status = PickWaveStatus.Cancelled });
 
         bDb.PickTasks.AddRange(
-            new PickTask { Id = bTaskClaimId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAlloc1Id, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Pending, Version = 1 },
-            new PickTask { Id = bTaskShortId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAlloc2Id, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 2, Status = PickTaskStatus.Pending, Version = 1 },
-            new PickTask { Id = bTaskRaceId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocRaceId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 3, Status = PickTaskStatus.Pending, Version = 1 },
-            new PickTask { Id = bTaskOverFailId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocOverFailId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 4, Status = PickTaskStatus.Pending, Version = 1 },
-            new PickTask { Id = bTaskPlanAssignedId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bPlanWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocPlanId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Assigned, AssignedUserId = bOpAId, Version = 1 },
-            new PickTask { Id = bTaskPlanPendingId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bPlanWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocPlanId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 2, Status = PickTaskStatus.Pending, Version = 1 },
-            new PickTask { Id = bTaskCancAssignedId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bCancWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocCancId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Assigned, AssignedUserId = bOpAId, Version = 1 });
+            new PickTask { Id = bTaskClaimId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAlloc1Id, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bBinId, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Pending, Version = 1 },
+            new PickTask { Id = bTaskShortId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAlloc2Id, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bBinShortId, QuantityToPick = 5m, PickSequence = 2, Status = PickTaskStatus.Pending, Version = 1 },
+            new PickTask { Id = bTaskRaceId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocRaceId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bBinId, QuantityToPick = 5m, PickSequence = 3, Status = PickTaskStatus.Pending, Version = 1 },
+            new PickTask { Id = bTaskOverFailId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocOverFailId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bBinId, QuantityToPick = 5m, PickSequence = 4, Status = PickTaskStatus.Pending, Version = 1 },
+            new PickTask { Id = bTaskPlanAssignedId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bPlanWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocPlanId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bBinId, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Assigned, AssignedUserId = bOpAId, Version = 1 },
+            new PickTask { Id = bTaskPlanPendingId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bPlanWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocPlanId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bBinId, QuantityToPick = 5m, PickSequence = 2, Status = PickTaskStatus.Pending, Version = 1 },
+            new PickTask { Id = bTaskCancAssignedId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bCancWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocCancId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bBinId, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Assigned, AssignedUserId = bOpAId, Version = 1 });
 
         bDb.HandlingUnits.AddRange(
             new HandlingUnit { Id = bToteId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-TOTE-740B", UnitType = HandlingUnitType.Tote, Status = HandlingUnitStatus.Available, CurrentOutboundOrderId = bOrderId },
@@ -2327,7 +2340,7 @@ try
     string itemSku;
     await using (var lookupDb = CreateDb(operationalConn, user))
     {
-        binBarcode = (await lookupDb.Locations.AsNoTracking().SingleAsync(l => l.Id == bin1Id)).Barcode ?? "OP-BIN1";
+        binBarcode = (await lookupDb.Locations.AsNoTracking().SingleAsync(l => l.Id == bBinId)).Barcode ?? "PG-740B-BIN1";
         itemSku = (await lookupDb.Items.AsNoTracking().SingleAsync(i => i.Id == item1Id)).Sku;
     }
 
