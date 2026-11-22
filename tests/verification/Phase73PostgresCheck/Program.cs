@@ -3103,11 +3103,17 @@ try
         var failConfSvc = new Warehouse3PL.Infrastructure.Services.Shipping.DeliveryConfirmationService(
             failConfirmDb, new VerificationTenant(), new VerificationIdentity(facilityId), NullLogger<Warehouse3PL.Infrastructure.Services.Shipping.DeliveryConfirmationService>.Instance);
         var rolled = false;
+        await failConfirmDb.BeginTransactionAsync();
         try
         {
             await failConfSvc.ConfirmDeliveryAsync(new ConfirmPackageDeliveryRequest { PackageId = cPkg1Id, ProofOfDeliveryId = pgPod1Id });
+            await failConfirmDb.CommitTransactionAsync();
         }
-        catch (ForcedRollbackException) { rolled = true; }
+        catch (ForcedRollbackException)
+        {
+            await failConfirmDb.RollbackTransactionAsync();
+            rolled = true;
+        }
         if (!rolled) throw new InvalidOperationException("Expected ForcedRollbackException in POD confirmation rollback check.");
     }
 
@@ -3157,9 +3163,10 @@ try
         throw new InvalidOperationException("Phase 7.4.0C Client read/concealment assertions failed on PostgreSQL.");
     TestAuthHandler.CustomClaims = null;
 
-    static HttpRequestMessage SignDispatchWebhook(string url, string carrier, string secret, string body, string nonce)
+    string SignDispatchTs() => new DateTimeOffset(p74Clock.UtcNow).ToUnixTimeSeconds().ToString();
+    HttpRequestMessage SignDispatchWebhook(string url, string carrier, string secret, string body, string nonce)
     {
-        var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+        var ts = SignDispatchTs();
         using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
         var sig = Convert.ToHexStringLower(hmac.ComputeHash(Encoding.UTF8.GetBytes($"{ts}.{nonce}.{body}")));
         var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
@@ -3170,10 +3177,24 @@ try
         return req;
     }
 
+    var trkWebhookBody = JsonSerializer.Serialize(new
+    {
+        carrierCode = "SIM-FEDEX",
+        trackingNumber = "TRK-PG-C1A",
+        carrierEventId = "PG-740C-TRK-1",
+        carrierEventCode = "IT",
+        carrierDescription = "Departed sort facility",
+        occurredAtUtc = DateTime.UtcNow.AddMinutes(-3)
+    });
+    if ((await p74Client.SendAsync(SignDispatchWebhook("/api/v1/outbound/dispatch/webhooks/carrier-tracking", "SIM-FEDEX", pgPrimarySecret, trkWebhookBody, "pg-740c-trk-1"))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(SignDispatchWebhook("/api/v1/outbound/dispatch/webhooks/carrier-tracking", "SIM-FEDEX", pgPrimarySecret, trkWebhookBody, "pg-740c-trk-1"))).StatusCode != HttpStatusCode.Unauthorized ||
+        (await p74Client.SendAsync(SignDispatchWebhook("/api/v1/outbound/dispatch/webhooks/carrier-tracking", "SIM-FEDEX", pgPrimarySecret, trkWebhookBody, "pg-740c-trk-2"))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Phase 7.4.0C signed carrier-tracking webhook checks failed on PostgreSQL.");
+
     var excWebhookBody = JsonSerializer.Serialize(new
     {
         carrierCode = "SIM-FEDEX",
-        trackingNumber = p74Tracking,
+        trackingNumber = "TRK-PG-C1A",
         carrierEventId = "PG-740C-EXC-1",
         carrierExceptionCode = "WEA01",
         carrierDescription = "Snow delay at sort center",
