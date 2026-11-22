@@ -10,6 +10,7 @@ public record CurrentUserDto
     public string LastName { get; init; } = string.Empty;
     public UserType UserType { get; init; }
     public Guid? TenantId { get; init; }
+    public Guid? AssignedFacilityId { get; init; }
     public string? CompanyName { get; init; }
     public IReadOnlyList<string> Roles { get; init; } = [];
     public IReadOnlyList<string> Permissions { get; init; } = [];

@@ -99,243 +99,14 @@ public class PickExecutionService : IPickExecutionService
 
             ValidateReleasedWaveForExecution(task);
 
-            // 3. Scan Validation — Location
-            if (string.IsNullOrWhiteSpace(request.ScannedLocationBarcode))
-            {
-                throw new ValidationException(nameof(request.ScannedLocationBarcode), "Scanned location barcode is required.");
-            }
-
-            var locBarcode = request.ScannedLocationBarcode.Trim();
-            var locMatch = string.Equals(locBarcode, task.SourceLocation.Barcode, StringComparison.OrdinalIgnoreCase) ||
-                           string.Equals(locBarcode, task.SourceLocation.LocationCode, StringComparison.OrdinalIgnoreCase);
-
-            if (!locMatch)
-            {
-                throw new ValidationException(nameof(request.ScannedLocationBarcode),
-                    $"Scanned location barcode '{locBarcode}' does not match expected location '{task.SourceLocation.LocationCode}' (Barcode: '{task.SourceLocation.Barcode}').");
-            }
-
-            if (task.SourceLocation.IsLocked || task.SourceLocation.IsDamaged || !task.SourceLocation.IsActive)
-            {
-                throw new ValidationException(nameof(request.ScannedLocationBarcode),
-                    $"Source location '{task.SourceLocation.LocationCode}' is currently locked, damaged, or inactive.");
-            }
-
-            // 4. Scan Validation — Item / SKU
-            if (string.IsNullOrWhiteSpace(request.ScannedItemBarcode))
-            {
-                throw new ValidationException(nameof(request.ScannedItemBarcode), "Scanned item barcode is required.");
-            }
-
-            var itemBarcode = request.ScannedItemBarcode.Trim();
-            var itemMatch = string.Equals(itemBarcode, task.Item.Sku, StringComparison.OrdinalIgnoreCase) ||
-                            task.Item.Barcodes.Any(b => string.Equals(b.BarcodeValue, itemBarcode, StringComparison.OrdinalIgnoreCase));
-
-            if (!itemMatch)
-            {
-                throw new ValidationException(nameof(request.ScannedItemBarcode),
-                    $"Scanned item barcode '{itemBarcode}' does not match expected SKU '{task.Item.Sku}'.");
-            }
-
-            // 5. Scan Validation — Lot
-            if (task.LotId.HasValue || task.Item.IsLotTracked)
-            {
-                if (task.Lot != null && !string.IsNullOrWhiteSpace(request.ScannedLotNumber))
-                {
-                    if (!string.Equals(task.Lot.LotNumber.Trim(), request.ScannedLotNumber.Trim(), StringComparison.OrdinalIgnoreCase))
-                    {
-                        throw new ValidationException(nameof(request.ScannedLotNumber),
-                            $"Scanned lot number '{request.ScannedLotNumber}' does not match expected lot '{task.Lot.LotNumber}'.");
-                    }
-                }
-            }
-
-            // 6. Scan Validation — Target Tote / Handling Unit
-            if (string.IsNullOrWhiteSpace(request.ScannedToteLpn))
-            {
-                throw new ValidationException(nameof(request.ScannedToteLpn), "Target tote / handling unit LPN is required.");
-            }
-
-            var toteLpn = request.ScannedToteLpn.Trim();
-            var tote = await _context.HandlingUnits
-                .FirstOrDefaultAsync(h => h.FacilityId == task.FacilityId &&
-                                          h.LpnCode == toteLpn &&
-                                          !h.IsDeleted, cancellationToken);
-
-            if (tote == null)
-            {
-                throw new ValidationException(nameof(request.ScannedToteLpn),
-                    $"Handling unit with LPN '{toteLpn}' was not found in facility.");
-            }
-
-            if (tote.Status == HandlingUnitStatus.Damaged)
-            {
-                throw new ValidationException(nameof(request.ScannedToteLpn),
-                    $"Target tote '{toteLpn}' is Damaged and cannot accept picked inventory.");
-            }
-
-            if (tote.CurrentPickWaveId.HasValue && tote.CurrentPickWaveId.Value != task.PickWaveId)
-            {
-                throw new ValidationException(nameof(request.ScannedToteLpn),
-                    $"Target tote '{toteLpn}' is already assigned to a different pick wave.");
-            }
-
-            // Assign tote to wave if available
-            if (tote.Status == HandlingUnitStatus.Available)
-            {
-                tote.AssignToWave(task.PickWaveId, task.OutboundOrderId);
-            }
-
-            // 7. Quantity Validation
-            if (request.Quantity <= 0)
-            {
-                throw new ValidationException(nameof(request.Quantity), "Picked quantity must be greater than zero.");
-            }
-
-            var remainingTaskQty = task.QuantityToPick - task.QuantityPicked;
-            if (request.Quantity > remainingTaskQty)
-            {
-                throw new ValidationException(nameof(request.Quantity),
-                    $"Picked quantity {request.Quantity} exceeds remaining task demand {remainingTaskQty}.");
-            }
-
-            var allocation = task.InventoryAllocation;
-            if (allocation == null)
-            {
-                throw new DomainException($"Pick task '{task.Id}' has no associated inventory allocation.");
-            }
-
-            if (request.Quantity > allocation.RemainingToPickQuantity)
-            {
-                throw new ValidationException(nameof(request.Quantity),
-                    $"Picked quantity {request.Quantity} exceeds allocation remaining unpicked quantity {allocation.RemainingToPickQuantity}.");
-            }
-
-            // 8. Atomic Physical Stock Movement & Conservation
-            var sourceStock = await _context.StockOnHand
-                .FirstOrDefaultAsync(s => s.Id == task.StockOnHandId, cancellationToken);
-
-            if (sourceStock == null)
-            {
-                throw new DomainException($"Source stock record '{task.StockOnHandId}' was not found.");
-            }
-
-            if (sourceStock.QtyAllocated < request.Quantity)
-            {
-                throw new DomainException(
-                    $"Source stock '{task.StockOnHandId}' has insufficient allocated quantity ({sourceStock.QtyAllocated}) " +
-                    $"to satisfy pick confirmation of {request.Quantity} units.");
-            }
-
-            // Deduct from source storage bin: QtyAllocated -= Q, QtyAvailable unchanged
-            sourceStock.QtyAllocated -= request.Quantity;
-            sourceStock.Version++;
-
-            // Destination Tote Stock: Find existing compatible stock or create new record
-            var destStock = await _context.StockOnHand
-                .FirstOrDefaultAsync(s => s.HandlingUnitId == tote.Id &&
-                                          s.ItemId == task.ItemId &&
-                                          s.LotId == task.LotId, cancellationToken);
-
-            if (destStock != null)
-            {
-                // Increment allocated quantity in tote
-                destStock.QtyAllocated += request.Quantity;
-                destStock.Version++;
-            }
-            else
-            {
-                destStock = new StockOnHand
-                {
-                    Id = Guid.NewGuid(),
-                    ClientId = task.ClientId,
-                    FacilityId = task.FacilityId,
-                    ItemId = task.ItemId,
-                    LocationId = tote.CurrentLocationId ?? task.DestinationLocationId ?? task.SourceLocationId,
-                    LotId = task.LotId,
-                    HandlingUnitId = tote.Id,
-                    LpnCode = tote.LpnCode,
-                    QtyAvailable = 0m, // Crucial: picked stock remains allocated, NOT freely allocatable
-                    QtyAllocated = request.Quantity,
-                    ReceivedAtUtc = DateTime.UtcNow,
-                    Version = 1
-                };
-                _context.StockOnHand.Add(destStock);
-            }
-
-            // 9. Update Allocation and Task
-            allocation.RecordPick(request.Quantity, destStock.Id, tote.Id, tote.LpnCode);
-            task.ConfirmPick(request.Quantity, tote.LpnCode, tote.Id, request.UserId);
-            task.Version = unchecked(task.Version + 1u);
-
-            if (requiresOverrideAudit)
-            {
-                AddSupervisorOverrideAudit(
-                    task,
-                    originalStatus,
-                    originalAssignedUserId,
-                    request.UserId,
-                    request.OverrideReason,
-                    "pick confirmation");
-            }
-
-            // 10. Record Immutable Inventory Transaction Ledger
-            var tx = new InventoryTransaction
-            {
-                ClientId = task.ClientId,
-                FacilityId = task.FacilityId,
-                ItemId = task.ItemId,
-                LotId = task.LotId,
-                FromLocationId = task.SourceLocationId,
-                ToLocationId = destStock.LocationId,
-                TxType = InventoryTxType.Pick,
-                Quantity = request.Quantity,
-                ReferenceType = "PickTask",
-                ReferenceId = task.Id,
-                UserId = request.UserId,
-                Notes = $"Pick confirmed: Task '{task.Id}', Wave '{task.PickWave.WaveNumber}', Tote '{tote.LpnCode}'",
-                TxTimestamp = DateTime.UtcNow
-            };
-            _context.InventoryTransactions.Add(tx);
-
-            // 11. Wave Lifecycle Progression
-            var wave = task.PickWave;
-            var allTasksFinished = wave.Tasks.All(t => t.Status == PickTaskStatus.Completed ||
-                                                      t.Status == PickTaskStatus.ShortPicked ||
-                                                      t.Status == PickTaskStatus.Cancelled);
-
-            if (allTasksFinished)
-            {
-                wave.Status = PickWaveStatus.Completed;
-                wave.CompletedAtUtc = DateTime.UtcNow;
-            }
-            else if (wave.Status == PickWaveStatus.Released)
-            {
-                wave.Status = PickWaveStatus.InProgress;
-                wave.StartedAtUtc ??= DateTime.UtcNow;
-            }
-
-            await _context.SaveChangesAsync(cancellationToken);
-
-            _logger.LogInformation(
-                "Pick confirmed for Task '{TaskId}': {Qty} units into Tote '{Tote}'. TxId: {TxId}, WaveStatus: {WaveStatus}",
-                task.Id, request.Quantity, tote.LpnCode, tx.Id, wave.Status);
-
-            return new PickConfirmationResult
-            {
-                IsSuccess = true,
-                PickTaskId = task.Id,
-                TaskStatus = task.Status,
-                QuantityPicked = task.QuantityPicked,
-                ShortPickQuantity = task.ShortPickQuantity,
-                DestinationStockId = destStock.Id,
-                DestinationHandlingUnitId = tote.Id,
-                DestinationToteBarcode = tote.LpnCode,
-                InventoryTransactionId = tx.Id,
-                WaveCompleted = wave.Status == PickWaveStatus.Completed,
-                OrderCompleted = task.OutboundOrder?.Status == OutboundOrderStatus.Completed,
-                Message = $"Successfully picked {request.Quantity} units into tote '{tote.LpnCode}'."
-            };
+            return await ExecuteConfirmPickCoreAsync(
+                task,
+                request,
+                persistAndFinalize: true,
+                requiresOverrideAudit,
+                originalStatus,
+                originalAssignedUserId,
+                cancellationToken);
         }, cancellationToken);
     }
 
@@ -350,6 +121,7 @@ public class PickExecutionService : IPickExecutionService
             var task = await _context.PickTasks
                 .Include(t => t.SourceLocation)
                 .Include(t => t.Item)
+                    .ThenInclude(i => i.Barcodes)
                 .Include(t => t.Lot)
                 .Include(t => t.InventoryAllocation)
                 .Include(t => t.PickWave)
@@ -398,7 +170,7 @@ public class PickExecutionService : IPickExecutionService
 
             var discrepancyQty = task.QuantityToPick - pickedQty;
 
-            // 1. If partial quantity was found, physically pick it first
+            // 1. If partial quantity was found, physically pick it inside the SAME outer transaction without committing early
             if (pickedQty > 0)
             {
                 if (string.IsNullOrWhiteSpace(request.ScannedToteLpn))
@@ -407,18 +179,25 @@ public class PickExecutionService : IPickExecutionService
                         "Target tote LPN is required when confirming partial picked quantity on short pick.");
                 }
 
-                await ConfirmPickAsync(new ConfirmPickRequest
-                {
-                    PickTaskId = task.Id,
-                    ScannedLocationBarcode = request.ScannedLocationBarcode ?? task.SourceLocation.Barcode,
-                    ScannedItemBarcode = request.ScannedItemBarcode ?? task.Item.Sku,
-                    ScannedToteLpn = request.ScannedToteLpn,
-                    Quantity = pickedQty,
-                    UserId = request.UserId,
-                    IdempotencyKey = request.IdempotencyKey,
-                    RequireAssignedOwnership = false,
-                    AllowSupervisorOverride = false
-                }, cancellationToken);
+                await ExecuteConfirmPickCoreAsync(
+                    task,
+                    new ConfirmPickRequest
+                    {
+                        PickTaskId = task.Id,
+                        ScannedLocationBarcode = request.ScannedLocationBarcode ?? task.SourceLocation.Barcode,
+                        ScannedItemBarcode = request.ScannedItemBarcode ?? task.Item.Sku,
+                        ScannedToteLpn = request.ScannedToteLpn,
+                        Quantity = pickedQty,
+                        UserId = request.UserId,
+                        IdempotencyKey = request.IdempotencyKey,
+                        RequireAssignedOwnership = false,
+                        AllowSupervisorOverride = false
+                    },
+                    persistAndFinalize: false,
+                    requiresOverrideAudit: false,
+                    originalStatus,
+                    originalAssignedUserId,
+                    cancellationToken);
             }
 
             // 2. Adjust remaining reservation on source allocation for the shortfall
@@ -433,7 +212,10 @@ public class PickExecutionService : IPickExecutionService
                 if (sourceStock != null)
                 {
                     sourceStock.QtyAllocated = Math.Max(0m, sourceStock.QtyAllocated - qtyToRelease);
-                    sourceStock.Version++;
+                    if (pickedQty == 0)
+                    {
+                        sourceStock.Version++;
+                    }
                 }
             }
 
@@ -553,6 +335,253 @@ public class PickExecutionService : IPickExecutionService
                 Message = $"Short-pick recorded ({request.Reason}). Discrepancy of {discrepancyQty} units reported."
             };
         }, cancellationToken);
+    }
+
+    private async Task<PickConfirmationResult> ExecuteConfirmPickCoreAsync(
+        PickTask task,
+        ConfirmPickRequest request,
+        bool persistAndFinalize,
+        bool requiresOverrideAudit,
+        PickTaskStatus originalStatus,
+        Guid? originalAssignedUserId,
+        CancellationToken cancellationToken)
+    {
+        // Scan Validation — Location
+        if (string.IsNullOrWhiteSpace(request.ScannedLocationBarcode))
+        {
+            throw new ValidationException(nameof(request.ScannedLocationBarcode), "Scanned location barcode is required.");
+        }
+
+        var locBarcode = request.ScannedLocationBarcode.Trim();
+        var locMatch = string.Equals(locBarcode, task.SourceLocation.Barcode, StringComparison.OrdinalIgnoreCase) ||
+                       string.Equals(locBarcode, task.SourceLocation.LocationCode, StringComparison.OrdinalIgnoreCase);
+
+        if (!locMatch)
+        {
+            throw new ValidationException(nameof(request.ScannedLocationBarcode),
+                $"Scanned location barcode '{locBarcode}' does not match expected location '{task.SourceLocation.LocationCode}' (Barcode: '{task.SourceLocation.Barcode}').");
+        }
+
+        if (task.SourceLocation.IsLocked || task.SourceLocation.IsDamaged || !task.SourceLocation.IsActive)
+        {
+            throw new ValidationException(nameof(request.ScannedLocationBarcode),
+                $"Source location '{task.SourceLocation.LocationCode}' is currently locked, damaged, or inactive.");
+        }
+
+        // Scan Validation — Item / SKU
+        if (string.IsNullOrWhiteSpace(request.ScannedItemBarcode))
+        {
+            throw new ValidationException(nameof(request.ScannedItemBarcode), "Scanned item barcode is required.");
+        }
+
+        var itemBarcode = request.ScannedItemBarcode.Trim();
+        var itemMatch = string.Equals(itemBarcode, task.Item.Sku, StringComparison.OrdinalIgnoreCase) ||
+                        task.Item.Barcodes.Any(b => string.Equals(b.BarcodeValue, itemBarcode, StringComparison.OrdinalIgnoreCase));
+
+        if (!itemMatch)
+        {
+            throw new ValidationException(nameof(request.ScannedItemBarcode),
+                $"Scanned item barcode '{itemBarcode}' does not match expected SKU '{task.Item.Sku}'.");
+        }
+
+        // Scan Validation — Lot
+        if (task.LotId.HasValue || task.Item.IsLotTracked)
+        {
+            if (task.Lot != null && !string.IsNullOrWhiteSpace(request.ScannedLotNumber))
+            {
+                if (!string.Equals(task.Lot.LotNumber.Trim(), request.ScannedLotNumber.Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    throw new ValidationException(nameof(request.ScannedLotNumber),
+                        $"Scanned lot number '{request.ScannedLotNumber}' does not match expected lot '{task.Lot.LotNumber}'.");
+                }
+            }
+        }
+
+        // Scan Validation — Target Tote / Handling Unit
+        if (string.IsNullOrWhiteSpace(request.ScannedToteLpn))
+        {
+            throw new ValidationException(nameof(request.ScannedToteLpn), "Target tote / handling unit LPN is required.");
+        }
+
+        var toteLpn = request.ScannedToteLpn.Trim();
+        var tote = await _context.HandlingUnits
+            .FirstOrDefaultAsync(h => h.FacilityId == task.FacilityId &&
+                                      h.LpnCode == toteLpn &&
+                                      !h.IsDeleted, cancellationToken);
+
+        if (tote == null)
+        {
+            throw new ValidationException(nameof(request.ScannedToteLpn),
+                $"Handling unit with LPN '{toteLpn}' was not found in facility.");
+        }
+
+        if (tote.Status == HandlingUnitStatus.Damaged)
+        {
+            throw new ValidationException(nameof(request.ScannedToteLpn),
+                $"Target tote '{toteLpn}' is Damaged and cannot accept picked inventory.");
+        }
+
+        if (tote.CurrentPickWaveId.HasValue && tote.CurrentPickWaveId.Value != task.PickWaveId)
+        {
+            throw new ValidationException(nameof(request.ScannedToteLpn),
+                $"Target tote '{toteLpn}' is already assigned to a different pick wave.");
+        }
+
+        if (tote.Status == HandlingUnitStatus.Available)
+        {
+            tote.AssignToWave(task.PickWaveId, task.OutboundOrderId);
+        }
+
+        // Quantity Validation
+        if (request.Quantity <= 0)
+        {
+            throw new ValidationException(nameof(request.Quantity), "Picked quantity must be greater than zero.");
+        }
+
+        var remainingTaskQty = task.QuantityToPick - task.QuantityPicked;
+        if (request.Quantity > remainingTaskQty)
+        {
+            throw new ValidationException(nameof(request.Quantity),
+                $"Picked quantity {request.Quantity} exceeds remaining task demand {remainingTaskQty}.");
+        }
+
+        var allocation = task.InventoryAllocation;
+        if (allocation == null)
+        {
+            throw new DomainException($"Pick task '{task.Id}' has no associated inventory allocation.");
+        }
+
+        if (request.Quantity > allocation.RemainingToPickQuantity)
+        {
+            throw new ValidationException(nameof(request.Quantity),
+                $"Picked quantity {request.Quantity} exceeds allocation remaining unpicked quantity {allocation.RemainingToPickQuantity}.");
+        }
+
+        // Atomic Physical Stock Movement & Conservation
+        var sourceStock = await _context.StockOnHand
+            .FirstOrDefaultAsync(s => s.Id == task.StockOnHandId, cancellationToken);
+
+        if (sourceStock == null)
+        {
+            throw new DomainException($"Source stock record '{task.StockOnHandId}' was not found.");
+        }
+
+        if (sourceStock.QtyAllocated < request.Quantity)
+        {
+            throw new DomainException(
+                $"Source stock '{task.StockOnHandId}' has insufficient allocated quantity ({sourceStock.QtyAllocated}) " +
+                $"to satisfy pick confirmation of {request.Quantity} units.");
+        }
+
+        sourceStock.QtyAllocated -= request.Quantity;
+        sourceStock.Version++;
+
+        var destStock = await _context.StockOnHand
+            .FirstOrDefaultAsync(s => s.HandlingUnitId == tote.Id &&
+                                      s.ItemId == task.ItemId &&
+                                      s.LotId == task.LotId, cancellationToken);
+
+        if (destStock != null)
+        {
+            destStock.QtyAllocated += request.Quantity;
+            destStock.Version++;
+        }
+        else
+        {
+            destStock = new StockOnHand
+            {
+                Id = Guid.NewGuid(),
+                ClientId = task.ClientId,
+                FacilityId = task.FacilityId,
+                ItemId = task.ItemId,
+                LocationId = tote.CurrentLocationId ?? task.DestinationLocationId ?? task.SourceLocationId,
+                LotId = task.LotId,
+                HandlingUnitId = tote.Id,
+                LpnCode = tote.LpnCode,
+                QtyAvailable = 0m,
+                QtyAllocated = request.Quantity,
+                ReceivedAtUtc = DateTime.UtcNow,
+                Version = 1
+            };
+            _context.StockOnHand.Add(destStock);
+        }
+
+        // Update Allocation and Task
+        allocation.RecordPick(request.Quantity, destStock.Id, tote.Id, tote.LpnCode);
+        task.ConfirmPick(request.Quantity, tote.LpnCode, tote.Id, request.UserId);
+
+        // Record Immutable Inventory Transaction Ledger
+        var tx = new InventoryTransaction
+        {
+            ClientId = task.ClientId,
+            FacilityId = task.FacilityId,
+            ItemId = task.ItemId,
+            LotId = task.LotId,
+            FromLocationId = task.SourceLocationId,
+            ToLocationId = destStock.LocationId,
+            TxType = InventoryTxType.Pick,
+            Quantity = request.Quantity,
+            ReferenceType = "PickTask",
+            ReferenceId = task.Id,
+            UserId = request.UserId,
+            Notes = $"Pick confirmed: Task '{task.Id}', Wave '{task.PickWave.WaveNumber}', Tote '{tote.LpnCode}'",
+            TxTimestamp = DateTime.UtcNow
+        };
+        _context.InventoryTransactions.Add(tx);
+
+        if (persistAndFinalize)
+        {
+            task.Version = unchecked(task.Version + 1u);
+
+            if (requiresOverrideAudit)
+            {
+                AddSupervisorOverrideAudit(
+                    task,
+                    originalStatus,
+                    originalAssignedUserId,
+                    request.UserId,
+                    request.OverrideReason,
+                    "pick confirmation");
+            }
+
+            var wave = task.PickWave;
+            var allTasksFinished = wave.Tasks.All(t => t.Status == PickTaskStatus.Completed ||
+                                                      t.Status == PickTaskStatus.ShortPicked ||
+                                                      t.Status == PickTaskStatus.Cancelled);
+
+            if (allTasksFinished)
+            {
+                wave.Status = PickWaveStatus.Completed;
+                wave.CompletedAtUtc = DateTime.UtcNow;
+            }
+            else if (wave.Status == PickWaveStatus.Released)
+            {
+                wave.Status = PickWaveStatus.InProgress;
+                wave.StartedAtUtc ??= DateTime.UtcNow;
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            _logger.LogInformation(
+                "Pick confirmed for Task '{TaskId}': {Qty} units into Tote '{Tote}'. TxId: {TxId}, WaveStatus: {WaveStatus}",
+                task.Id, request.Quantity, tote.LpnCode, tx.Id, wave.Status);
+        }
+
+        return new PickConfirmationResult
+        {
+            IsSuccess = true,
+            PickTaskId = task.Id,
+            TaskStatus = task.Status,
+            QuantityPicked = task.QuantityPicked,
+            ShortPickQuantity = task.ShortPickQuantity,
+            DestinationStockId = destStock.Id,
+            DestinationHandlingUnitId = tote.Id,
+            DestinationToteBarcode = tote.LpnCode,
+            InventoryTransactionId = tx.Id,
+            WaveCompleted = task.PickWave.Status == PickWaveStatus.Completed,
+            OrderCompleted = task.OutboundOrder?.Status == OutboundOrderStatus.Completed,
+            Message = $"Successfully picked {request.Quantity} units into tote '{tote.LpnCode}'."
+        };
     }
 
     private static bool ValidateExecutionOwnership(

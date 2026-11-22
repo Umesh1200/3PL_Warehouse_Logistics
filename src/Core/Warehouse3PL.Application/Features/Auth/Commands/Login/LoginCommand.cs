@@ -54,7 +54,7 @@ public class LoginCommandHandler : IRequestHandler<LoginCommand, AuthResponseDto
             .Include(u => u.UserRoles)
                 .ThenInclude(ur => ur.Role)
                     .ThenInclude(r => r.RolePermissions)
-            .FirstOrDefaultAsync(u => u.Email.ToLower() == request.Email.ToLower().Trim(), cancellationToken);
+            .FirstOrDefaultAsync(u => u.Email.ToLower() == request.Email.ToLower().Trim() && !u.IsDeleted, cancellationToken);
 
         if (user == null || !_passwordHasher.VerifyPassword(request.Password, user.PasswordHash))
         {

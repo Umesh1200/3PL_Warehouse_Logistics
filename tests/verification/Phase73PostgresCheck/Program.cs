@@ -1,3 +1,4 @@
+using System.IdentityModel.Tokens.Jwt;
 using System.Net;
 using System.Net.Http.Json;
 using System.Security.Claims;
@@ -24,6 +25,8 @@ using Warehouse3PL.Application;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Application.Common.Security;
+using Warehouse3PL.Application.Features.Auth.Commands.Login;
+using Warehouse3PL.Application.Features.Auth.Commands.RefreshToken;
 using Warehouse3PL.Application.Features.Inbound.Receiving.Commands.CompleteReceivingSession;
 using Warehouse3PL.Application.Features.Inventory.Queries.GetStockOnHand;
 using Warehouse3PL.Application.Features.Putaway.Tasks.Commands.ConfirmPutawayTask;
@@ -1724,6 +1727,8 @@ try
     p74WebBuilder.Services.AddSingleton<IAuthorizationPolicyProvider, PermissionPolicyProvider>();
     p74WebBuilder.Services.AddScoped<IAuthorizationHandler, PermissionAuthorizationHandler>();
     p74WebBuilder.Services.AddHttpContextAccessor();
+    p74WebBuilder.Services.AddSingleton<IPasswordHasher, PasswordHasher>();
+    p74WebBuilder.Services.AddSingleton<ITokenService, JwtTokenService>();
     p74WebBuilder.Services.AddScoped<ICurrentUserContext, CurrentUserContext>();
     p74WebBuilder.Services.AddScoped<ITenantProvider, TenantProvider>();
     var p74Clock = new PgControllableClock();
@@ -2545,6 +2550,236 @@ try
         throw new InvalidOperationException("Expected 204 NoContent from /pick-tasks/next when no eligible tasks remain.");
 
     Console.WriteLine("PASS PostgreSQL Phase 7.4.0B Read/Queue APIs, Two-Operator Claim Race (200/409), Read-Only /next, Ownership Enforcement, and Stock Conservation.");
+
+    // 7.5 P74-0B-05 Atomic Positive-Quantity Short-Pick Execution + P74-0B-04 PostgreSQL Staff Facility Provisioning
+    var p5BinOkId = Guid.NewGuid();
+    var p5BinFailId = Guid.NewGuid();
+    var p5BinRaceId = Guid.NewGuid();
+    var p5OrderId = Guid.NewGuid();
+    var p5LineId = Guid.NewGuid();
+    var p5StockId = Guid.NewGuid();
+    var p5AllocOkId = Guid.NewGuid();
+    var p5AllocFailId = Guid.NewGuid();
+    var p5AllocRaceId = Guid.NewGuid();
+    var p5WaveId = Guid.NewGuid();
+    var p5TaskOkId = Guid.NewGuid();
+    var p5TaskFailId = Guid.NewGuid();
+    var p5TaskRaceId = Guid.NewGuid();
+    var p5ToteId = Guid.NewGuid();
+
+    await using (var p5Db = CreateDb(operationalConn, user))
+    {
+        p5Db.Locations.AddRange(
+            new Location { Id = p5BinOkId, FacilityId = facilityId, LocationCode = "PG-P5-OK", Barcode = "PG-P5-OK", LocationType = LocationType.Bin, IsActive = true, IsPickable = true },
+            new Location { Id = p5BinFailId, FacilityId = facilityId, LocationCode = "PG-P5-FAIL", Barcode = "PG-P5-FAIL", LocationType = LocationType.Bin, IsActive = true, IsPickable = true },
+            new Location { Id = p5BinRaceId, FacilityId = facilityId, LocationCode = "PG-P5-RACE", Barcode = "PG-P5-RACE", LocationType = LocationType.Bin, IsActive = true, IsPickable = true });
+
+        var p5Order = new OutboundOrder { Id = p5OrderId, ClientId = client1Id, FacilityId = facilityId, OrderNumber = "PG-P5-ORD1", CustomerName = "P5 Buyer", Status = OutboundOrderStatus.Allocated };
+        p5Order.Lines.Add(new OutboundOrderLine { Id = p5LineId, OutboundOrderId = p5OrderId, ItemId = item1Id, LineNumber = 1, QuantityOrdered = 15m, QuantityAllocated = 15m });
+        p5Db.OutboundOrders.Add(p5Order);
+
+        p5Db.StockOnHand.Add(new StockOnHand { Id = p5StockId, ClientId = client1Id, FacilityId = facilityId, ItemId = item1Id, LocationId = p5BinOkId, QtyAvailable = 20m, QtyAllocated = 15m, Version = 1 });
+        p5Db.InventoryAllocations.AddRange(
+            new InventoryAllocation { Id = p5AllocOkId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = p5OrderId, OutboundOrderLineId = p5LineId, StockOnHandId = p5StockId, ItemId = item1Id, LocationId = p5BinOkId, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = p5AllocFailId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = p5OrderId, OutboundOrderLineId = p5LineId, StockOnHandId = p5StockId, ItemId = item1Id, LocationId = p5BinFailId, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = p5AllocRaceId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = p5OrderId, OutboundOrderLineId = p5LineId, StockOnHandId = p5StockId, ItemId = item1Id, LocationId = p5BinRaceId, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated });
+
+        p5Db.PickWaves.Add(new PickWave { Id = p5WaveId, ClientId = client1Id, FacilityId = facilityId, WaveNumber = "PG-P5-WV", Priority = 5, Status = PickWaveStatus.Released });
+        p5Db.PickTasks.AddRange(
+            new PickTask { Id = p5TaskOkId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = p5WaveId, OutboundOrderId = p5OrderId, OutboundOrderLineId = p5LineId, InventoryAllocationId = p5AllocOkId, StockOnHandId = p5StockId, ItemId = item1Id, SourceLocationId = p5BinOkId, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Assigned, AssignedUserId = bOpAId, Version = 1 },
+            new PickTask { Id = p5TaskFailId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = p5WaveId, OutboundOrderId = p5OrderId, OutboundOrderLineId = p5LineId, InventoryAllocationId = p5AllocFailId, StockOnHandId = p5StockId, ItemId = item1Id, SourceLocationId = p5BinFailId, QuantityToPick = 5m, PickSequence = 2, Status = PickTaskStatus.Pending, Version = 1 },
+            new PickTask { Id = p5TaskRaceId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = p5WaveId, OutboundOrderId = p5OrderId, OutboundOrderLineId = p5LineId, InventoryAllocationId = p5AllocRaceId, StockOnHandId = p5StockId, ItemId = item1Id, SourceLocationId = p5BinRaceId, QuantityToPick = 5m, PickSequence = 3, Status = PickTaskStatus.Assigned, AssignedUserId = bOpAId, Version = 1 });
+
+        p5Db.HandlingUnits.Add(new HandlingUnit { Id = p5ToteId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-TOTE-P5", UnitType = HandlingUnitType.Tote, Status = HandlingUnitStatus.Available, CurrentOutboundOrderId = p5OrderId });
+        await p5Db.SaveChangesAsync();
+    }
+
+    // 7.5a Positive-quantity short-pick (2m picked + 3m discrepancy) executes cleanly via HTTP in one atomic transaction
+    using (var okShortResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{p5TaskOkId}/short-pick", bOpAId, facilityId, Permissions.Outbound.Pick,
+        new { quantityPicked = 2m, reason = (int)ShortPickReason.DamagedStock, notes = "PG partial pick 2/5", scannedLocationBarcode = "PG-P5-OK", scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-P5" })))
+    {
+        if (okShortResp.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"P74-0B-05: positive-quantity short-pick failed with {okShortResp.StatusCode}: {await okShortResp.Content.ReadAsStringAsync()}");
+    }
+
+    await using (var p5CheckOk = CreateDb(operationalConn, user))
+    {
+        var s = await p5CheckOk.StockOnHand.SingleAsync(x => x.Id == p5StockId);
+        var toteS = await p5CheckOk.StockOnHand.SingleAsync(x => x.HandlingUnitId == p5ToteId);
+        var locOk = await p5CheckOk.Locations.SingleAsync(l => l.Id == p5BinOkId);
+        var pickTx = await p5CheckOk.InventoryTransactions.Where(t => t.ReferenceId == p5TaskOkId && t.TxType == InventoryTxType.Pick).ToListAsync();
+        var exc = await p5CheckOk.PickExceptions.Where(e => e.PickTaskId == p5TaskOkId).ToListAsync();
+        if (s.QtyAllocated != 10m || toteS.QtyAllocated != 2m || toteS.QtyAvailable != 0m || !locOk.IsLocked ||
+            pickTx.Count != 1 || pickTx[0].Quantity != 2m || exc.Count != 1 || exc[0].ActualQuantityPicked != 2m ||
+            !await p5CheckOk.CycleCounts.AnyAsync(c => c.Id == exc[0].GeneratedCycleCountId) ||
+            !await p5CheckOk.LocationLocks.AnyAsync(ll => ll.LocationId == p5BinOkId))
+            throw new InvalidOperationException("P74-0B-05: positive-quantity short-pick persisted incomplete state.");
+    }
+
+    // 7.5b Forced exception AFTER partial stock movement & SaveChanges inside outer transaction -> ZERO partial commit allowed!
+    await using (var p5FailDb = CreateDb(operationalConn, user, new ThrowAfterSaveInterceptor()))
+    {
+        var p5FailSvc = new PickExecutionService(p5FailDb, NullLogger<PickExecutionService>.Instance);
+        var rolledBack = false;
+        try
+        {
+            await p5FailSvc.ReportShortPickAsync(new ReportShortPickRequest
+            {
+                PickTaskId = p5TaskFailId,
+                QuantityPicked = 2m,
+                Reason = ShortPickReason.BinEmpty,
+                Notes = "PG forced rollback after partial pick",
+                ScannedLocationBarcode = "PG-P5-FAIL",
+                ScannedItemBarcode = itemSku,
+                ScannedToteLpn = "PG-TOTE-P5",
+                UserId = bSupId,
+                RequireAssignedOwnership = true,
+                AllowSupervisorOverride = true,
+                OverrideReason = "PG positive short-pick rollback test"
+            });
+        }
+        catch (ForcedRollbackException)
+        {
+            rolledBack = true;
+        }
+        if (!rolledBack)
+            throw new InvalidOperationException("P74-0B-05: expected ForcedRollbackException on positive-quantity short-pick rollback test.");
+    }
+
+    await using (var p5CheckAfterRollback = CreateDb(operationalConn, user))
+    {
+        var s = await p5CheckAfterRollback.StockOnHand.SingleAsync(x => x.Id == p5StockId);
+        var toteS = await p5CheckAfterRollback.StockOnHand.SingleAsync(x => x.HandlingUnitId == p5ToteId);
+        var failTask = await p5CheckAfterRollback.PickTasks.SingleAsync(t => t.Id == p5TaskFailId);
+        var locFail = await p5CheckAfterRollback.Locations.SingleAsync(l => l.Id == p5BinFailId);
+        if (s.QtyAllocated != 10m || toteS.QtyAllocated != 2m || failTask.Status != PickTaskStatus.Pending || locFail.IsLocked ||
+            await p5CheckAfterRollback.InventoryTransactions.AnyAsync(t => t.ReferenceId == p5TaskFailId) ||
+            await p5CheckAfterRollback.PickExceptions.AnyAsync(e => e.PickTaskId == p5TaskFailId) ||
+            await p5CheckAfterRollback.LocationLocks.AnyAsync(ll => ll.LocationId == p5BinFailId) ||
+            await p5CheckAfterRollback.PickTaskStatusHistories.AnyAsync(h => h.PickTaskId == p5TaskFailId))
+            throw new InvalidOperationException("P74-0B-05: forced rollback leaked partial stock, ledger, exception, lock, or audit data!");
+    }
+
+    // 7.5c Clean retry after rollback (with atomic supervisor override audit) + duplicate terminal retry blocked
+    using (var retryOkResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{p5TaskFailId}/short-pick", bSupId, facilityId,
+        $"{Permissions.Outbound.Pick},{Permissions.Outbound.TasksManage}",
+        new { quantityPicked = 2m, reason = (int)ShortPickReason.BinEmpty, notes = "PG clean retry", scannedLocationBarcode = "PG-P5-FAIL", scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-P5" })))
+    {
+        if (retryOkResp.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"P74-0B-05: retry after rollback failed with {retryOkResp.StatusCode}");
+    }
+
+    using (var retryDupResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{p5TaskFailId}/short-pick", bSupId, facilityId,
+        $"{Permissions.Outbound.Pick},{Permissions.Outbound.TasksManage}",
+        new { quantityPicked = 2m, reason = (int)ShortPickReason.BinEmpty, notes = "dup retry", scannedLocationBarcode = "PG-P5-FAIL", scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-P5" })))
+    {
+        if (retryDupResp.StatusCode != HttpStatusCode.UnprocessableEntity)
+            throw new InvalidOperationException($"P74-0B-05: duplicate terminal short-pick retry should return 422, got {retryDupResp.StatusCode}");
+    }
+
+    // 7.5d Live PostgreSQL concurrent reassignment during positive-quantity short-pick (DbUpdateConcurrencyException -> full atomic rollback)
+    var p5RaceInterceptor = new ConcurrentReassignInterceptor(() =>
+    {
+        using var r = StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{p5TaskRaceId}/assign", bSupId, facilityId,
+            $"{Permissions.Outbound.TasksView},{Permissions.Outbound.TasksManage}", new { operatorUserId = bOpBId });
+        using var resp = p74Client.SendAsync(r).GetAwaiter().GetResult();
+        if (resp.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"P74-0B-05 concurrent /assign failed with {resp.StatusCode}");
+    });
+
+    await using (var p5RaceDb = CreateDb(operationalConn, user, p5RaceInterceptor))
+    {
+        var p5RaceSvc = new PickExecutionService(p5RaceDb, NullLogger<PickExecutionService>.Instance);
+        var concThrown = false;
+        try
+        {
+            await p5RaceSvc.ReportShortPickAsync(new ReportShortPickRequest
+            {
+                PickTaskId = p5TaskRaceId,
+                QuantityPicked = 2m,
+                Reason = ShortPickReason.BinEmpty,
+                Notes = "PG concurrent reassign positive short-pick",
+                ScannedLocationBarcode = "PG-P5-RACE",
+                ScannedItemBarcode = itemSku,
+                ScannedToteLpn = "PG-TOTE-P5",
+                UserId = bOpAId,
+                RequireAssignedOwnership = true,
+                AllowSupervisorOverride = false
+            });
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            concThrown = true;
+        }
+        if (!concThrown)
+            throw new InvalidOperationException("P74-0B-05: expected DbUpdateConcurrencyException during concurrent positive short-pick reassignment.");
+    }
+
+    // Displaced bOpAId gets 403; new assignee bOpBId executes cleanly -> full conservation & exact override audit
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{p5TaskRaceId}/short-pick", bOpAId, facilityId, Permissions.Outbound.Pick,
+        new { quantityPicked = 2m, reason = (int)ShortPickReason.BinEmpty, notes = "displaced", scannedLocationBarcode = "PG-P5-RACE", scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-P5" }))).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("P74-0B-05: displaced bOpAId must be rejected 403.");
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{p5TaskRaceId}/short-pick", bOpBId, facilityId, Permissions.Outbound.Pick,
+        new { quantityPicked = 2m, reason = (int)ShortPickReason.BinEmpty, notes = "new owner short-pick", scannedLocationBarcode = "PG-P5-RACE", scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-P5" }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("P74-0B-05: new assignee bOpBId positive short-pick failed.");
+
+    await using (var p5FinalDb = CreateDb(operationalConn, user))
+    {
+        var s = await p5FinalDb.StockOnHand.SingleAsync(x => x.Id == p5StockId);
+        var toteS = await p5FinalDb.StockOnHand.SingleAsync(x => x.HandlingUnitId == p5ToteId);
+        var pickTxs = await p5FinalDb.InventoryTransactions.Where(t => (t.ReferenceId == p5TaskOkId || t.ReferenceId == p5TaskFailId || t.ReferenceId == p5TaskRaceId) && t.TxType == InventoryTxType.Pick).ToListAsync();
+        var overrideAudits = await p5FinalDb.PickTaskStatusHistories.Where(h => h.PickTaskId == p5TaskFailId && h.Reason != null && h.Reason.Contains("Task-management override")).ToListAsync();
+        var raceTxs = pickTxs.Where(t => t.ReferenceId == p5TaskRaceId).ToList();
+
+        if (s.QtyAvailable != 20m || s.QtyAllocated != 0m || toteS.QtyAllocated != 6m || toteS.QtyAvailable != 0m ||
+            pickTxs.Count != 3 || overrideAudits.Count != 1 || raceTxs.Count != 1 || raceTxs[0].UserId != bOpBId)
+            throw new InvalidOperationException($"P74-0B-05 final PostgreSQL reconciliation failed: srcAlloc={s.QtyAllocated}, toteAlloc={toteS.QtyAllocated}, pickTxs={pickTxs.Count}, overrides={overrideAudits.Count}");
+    }
+
+    // 7.5e P74-0B-04 PostgreSQL Staff Facility Provisioning, Assigned-Facility Update & Real JWT Claim Roundtrip
+    Guid provUserId;
+    using (var rCreateStaff = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/users", bSupId, facilityId, Permissions.Users.Create, new
+    {
+        email = "pg-provisioned-staff@740b.test",
+        password = "Password123!",
+        firstName = "Pg",
+        lastName = "Provisioned",
+        userType = UserType.Staff,
+        assignedFacilityId = facilityId,
+        roles = new[] { SystemRoles.WarehouseOperator }
+    })))
+    {
+        if (rCreateStaff.StatusCode != HttpStatusCode.Created)
+            throw new InvalidOperationException($"P74-0B-04 PostgreSQL /api/v1/users create failed: {rCreateStaff.StatusCode} - {await rCreateStaff.Content.ReadAsStringAsync()}");
+        using var doc = JsonDocument.Parse(await rCreateStaff.Content.ReadAsStringAsync());
+        provUserId = doc.RootElement.GetProperty("id").GetGuid();
+        if (doc.RootElement.GetProperty("assignedFacilityId").GetGuid() != facilityId)
+            throw new InvalidOperationException("P74-0B-04: created staff AssignedFacilityId mismatch.");
+    }
+
+    await using (var pgJwtDb = CreateDb(operationalConn, user))
+    {
+        var jwtSvc = new JwtTokenService(Options.Create(new JwtOptions { SecretKey = "Pg-740B-Verification-SigningKey-2026!!", Issuer = "pg-test", Audience = "pg-test", ExpiryMinutes = 60 }), new VerificationClock());
+        var loginHandler = new LoginCommandHandler(pgJwtDb, new PasswordHasher(), jwtSvc, new VerificationClock());
+        var loginRes = await loginHandler.Handle(new LoginCommand { Email = "pg-provisioned-staff@740b.test", Password = "Password123!" }, CancellationToken.None);
+        var jwt1 = new JwtSecurityTokenHandler().ReadJwtToken(loginRes.AccessToken);
+        if (jwt1.Claims.FirstOrDefault(c => c.Type == "facility_id")?.Value != facilityId.ToString())
+            throw new InvalidOperationException("P74-0B-04 PostgreSQL login JWT missing expected facility_id claim.");
+
+        using var rReassignUser = await p74Client.SendAsync(StaffReq(HttpMethod.Put, $"/api/v1/users/{provUserId}/assigned-facility", bSupId, facilityId, Permissions.Users.Edit, new { facilityId = p74FacB }));
+        if (rReassignUser.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"P74-0B-04 PostgreSQL PUT /assigned-facility failed: {rReassignUser.StatusCode}");
+
+        pgJwtDb.ClearChangeTracker();
+        var refreshHandler = new RefreshTokenCommandHandler(pgJwtDb, jwtSvc, new VerificationClock());
+        var refreshRes = await refreshHandler.Handle(new RefreshTokenCommand { AccessToken = loginRes.AccessToken, RefreshToken = loginRes.RefreshToken }, CancellationToken.None);
+        var jwt2 = new JwtSecurityTokenHandler().ReadJwtToken(refreshRes.AccessToken);
+        if (jwt2.Claims.FirstOrDefault(c => c.Type == "facility_id")?.Value != p74FacB.ToString())
+            throw new InvalidOperationException("P74-0B-04 PostgreSQL refresh-token JWT did not pick up updated p74FacB facility_id.");
+    }
+
+    Console.WriteLine("PASS PostgreSQL P74-0B-04 (Staff Provisioning & JWT Claims) & P74-0B-05 (Atomic Positive Short-Pick, Forced Rollback, Retry, Concurrency Race) verified cleanly.");
 
     Console.WriteLine("\n================================================================================");
     Console.WriteLine("ALL PHASE 7.3, 7.4.0A & PHASE 7.4.0B POSTGRESQL VERIFICATIONS PASSED CLEANLY!");

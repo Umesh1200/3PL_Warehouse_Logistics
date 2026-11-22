@@ -7,6 +7,7 @@ using Microsoft.IdentityModel.Tokens;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Domain.Entities.Security;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Infrastructure.Authentication;
 
@@ -40,6 +41,13 @@ public class JwtTokenService : ITokenService
         {
             claims.Add(new Claim("tenant_id", user.ClientId.Value.ToString()));
             claims.Add(new Claim("client_id", user.ClientId.Value.ToString()));
+        }
+
+        if (user.UserType == UserType.Staff &&
+            user.AssignedFacilityId.HasValue &&
+            user.AssignedFacilityId.Value != Guid.Empty)
+        {
+            claims.Add(new Claim("facility_id", user.AssignedFacilityId.Value.ToString()));
         }
 
         foreach (var role in roleList)
@@ -85,6 +93,7 @@ public class JwtTokenService : ITokenService
             {
                 Id = user.Id,
                 ClientId = user.ClientId,
+                AssignedFacilityId = user.UserType == UserType.Staff ? user.AssignedFacilityId : null,
                 CompanyName = user.Client?.CompanyName,
                 Email = user.Email,
                 FirstName = user.FirstName,

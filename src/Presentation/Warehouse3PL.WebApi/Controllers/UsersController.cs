@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Features.Users.Commands.AssignUserFacility;
 using Warehouse3PL.Application.Features.Users.Commands.AssignUserRoles;
 using Warehouse3PL.Application.Features.Users.Commands.CreateUser;
 using Warehouse3PL.Application.Features.Users.Queries.GetUserById;
@@ -62,5 +63,25 @@ public class UsersController : BaseApiController
         await Mediator.Send(new AssignUserRolesCommand { UserId = id, Roles = roles }, ct);
         return Ok(new { message = "User roles updated successfully." });
     }
+
+    /// <summary>
+    /// Assign, reassign, or revoke the operational warehouse facility for a Staff user.
+    /// </summary>
+    [HttpPut("{id:guid}/assigned-facility")]
+    [HasPermission(Permissions.Users.Edit)]
+    [ProducesResponseType(typeof(UserDto), StatusCodes.Status200OK)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
+    public async Task<ActionResult<UserDto>> AssignFacility(
+        [FromRoute] Guid id,
+        [FromBody] AssignUserFacilityRequest request,
+        CancellationToken ct)
+    {
+        var response = await Mediator.Send(new AssignUserFacilityCommand(id, request.FacilityId), ct);
+        return Ok(response);
+    }
 }
+
+public record AssignUserFacilityRequest(Guid? FacilityId);
 

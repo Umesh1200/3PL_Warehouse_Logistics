@@ -4,6 +4,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -20,6 +21,7 @@ public record CreateUserCommand : IRequest<UserDto>
     public string? PhoneNumber { get; init; }
     public UserType UserType { get; init; } = UserType.Client;
     public Guid? ClientId { get; init; }
+    public Guid? AssignedFacilityId { get; init; }
     public List<string> Roles { get; init; } = [];
 }
 
@@ -41,6 +43,14 @@ public class CreateUserCommandValidator : AbstractValidator<CreateUserCommand>
         When(x => x.UserType == UserType.Client, () =>
         {
             RuleFor(x => x.ClientId).NotEmpty().WithMessage("Client ID is required for Client user type.");
+            RuleFor(x => x.AssignedFacilityId).Null()
+                .WithMessage("AssignedFacilityId is restricted to warehouse Staff users.");
+        });
+
+        When(x => x.UserType == UserType.Driver, () =>
+        {
+            RuleFor(x => x.AssignedFacilityId).Null()
+                .WithMessage("AssignedFacilityId is restricted to warehouse Staff users.");
         });
     }
 }
@@ -66,7 +76,7 @@ public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserD
 
     public async Task<UserDto> Handle(CreateUserCommand request, CancellationToken cancellationToken)
     {
-        // Enforce tenant boundary: non-staff can only create users in their own tenant
+        // Enforce tenant boundary: non-staff can only create Client users in their own tenant
         var targetClientId = request.ClientId;
         if (!_currentUser.IsStaff)
         {
@@ -74,7 +84,44 @@ public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserD
             {
                 throw new ForbiddenException("Cannot create users without a tenant context.");
             }
+            if (request.UserType != UserType.Client || request.AssignedFacilityId.HasValue)
+            {
+                throw new ForbiddenException("Only authorized warehouse staff administrators can create Staff/Driver accounts or assign facilities.");
+            }
             targetClientId = _currentUser.TenantId.Value;
+        }
+
+        Guid? validatedFacilityId = null;
+        if (request.AssignedFacilityId.HasValue)
+        {
+            if (request.UserType != UserType.Staff)
+            {
+                throw new ValidationException(nameof(request.AssignedFacilityId),
+                    "AssignedFacilityId can only be configured for warehouse Staff users.");
+            }
+
+            if (request.AssignedFacilityId.Value == Guid.Empty)
+            {
+                throw new ValidationException(nameof(request.AssignedFacilityId),
+                    "AssignedFacilityId must be a valid facility identifier.");
+            }
+
+            var facility = await _context.Facilities
+                .AsNoTracking()
+                .FirstOrDefaultAsync(f => f.Id == request.AssignedFacilityId.Value && !f.IsDeleted, cancellationToken);
+
+            if (facility == null)
+            {
+                throw new EntityNotFoundException(nameof(Facility), request.AssignedFacilityId.Value);
+            }
+
+            if (!facility.IsActive)
+            {
+                throw new ValidationException(nameof(request.AssignedFacilityId),
+                    $"Facility '{facility.Id}' is inactive and cannot be assigned.");
+            }
+
+            validatedFacilityId = facility.Id;
         }
 
         var normalizedEmail = request.Email.Trim().ToLowerInvariant();
@@ -96,7 +143,8 @@ public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserD
             PhoneNumber = request.PhoneNumber,
             UserType = request.UserType,
             Status = UserStatus.Active,
-            ClientId = targetClientId
+            ClientId = request.UserType == UserType.Staff ? null : targetClientId,
+            AssignedFacilityId = request.UserType == UserType.Staff ? validatedFacilityId : null
         };
 
         // Assign roles

@@ -160,6 +160,11 @@ public static class DependencyInjection
                     ClockSkew = TimeSpan.Zero
                 };
             }
+
+            options.Events = new JwtBearerEvents
+            {
+                OnTokenValidated = JwtStaffFacilityValidator.ValidateAsync
+            };
         });
 
         // 4. RBAC & Dynamic Permission Authorization

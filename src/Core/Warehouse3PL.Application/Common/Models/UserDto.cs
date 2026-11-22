@@ -6,6 +6,7 @@ public record UserDto
 {
     public Guid Id { get; init; }
     public Guid? ClientId { get; init; }
+    public Guid? AssignedFacilityId { get; init; }
     public string? CompanyName { get; init; }
     public string Email { get; init; } = string.Empty;
     public string FirstName { get; init; } = string.Empty;

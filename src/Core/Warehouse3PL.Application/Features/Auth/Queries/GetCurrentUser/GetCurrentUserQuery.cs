@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Domain.Entities.Security;
+using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
 
 namespace Warehouse3PL.Application.Features.Auth.Queries.GetCurrentUser;
@@ -54,6 +55,7 @@ public class GetCurrentUserQueryHandler : IRequestHandler<GetCurrentUserQuery, C
             LastName = user.LastName,
             UserType = user.UserType,
             TenantId = user.ClientId,
+            AssignedFacilityId = user.UserType == UserType.Staff ? user.AssignedFacilityId : null,
             CompanyName = user.Client?.CompanyName,
             Roles = roles,
             Permissions = permissions
