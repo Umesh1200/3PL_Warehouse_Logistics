@@ -9,10 +9,10 @@ This directory contains inspectable, multi-viewport visual audit captures of the
 | Property | Value | Notes |
 | :--- | :--- | :--- |
 | **Branch** | `feature/phase-7-enterprise-frontend` | Phase 7.3 Enterprise Frontend Refinements |
-| **Accepted Baseline** | `5997e842bdc6938a4d92f033477aa1bff87208bf` | CI Run `44917440053` passed; Control Tower baseline closed |
+| **Accepted Baseline** | `1a67a71640df28dfbd1c5cdd5363f2a0e77a45c5` | CI Run `44923374233` passed; Receiving & RF Putaway UI refined & accepted |
 | **Data Mode** | **Mocked Demonstration Data (E2E Test Fixtures)** | Captured via Playwright automated browser test suite using authoritative schema and backend contract test fixtures |
 | **Capture Engine** | Playwright Chromium (Headless) | Built and served via production preview server (`vite build` + `vite preview`) |
-| **Test Command** | `npx playwright test e2e/receiving-putaway-audit.spec.ts` | 4/4 suites passing across Desktop, Tablet, and Mobile viewports |
+| **Test Command** | `npx playwright test e2e/receiving-putaway-audit.spec.ts` | 5/5 suites passing across Desktop, Tablet, Mobile, and Retry Viewports |
 | **Capture Date** | November 21, 2026 | Captured under Phase 7.3 Receiving & RF Putaway refinement review |
 
 ---
@@ -119,12 +119,13 @@ This directory contains inspectable, multi-viewport visual audit captures of the
 ## 5. Playwright Test Execution Summary
 
 ```text
-Running 4 tests using 1 worker
+Running 5 tests using 1 worker
 
-  ok 1 [chromium] › e2e\receiving-putaway-audit.spec.ts:103:5 › captures multi-viewport visual evidence for desktop (1440x900) (7.7s)
-  ok 2 [chromium] › e2e\receiving-putaway-audit.spec.ts:103:5 › captures multi-viewport visual evidence for tablet (768x1024) (6.5s)
-  ok 3 [chromium] › e2e\receiving-putaway-audit.spec.ts:103:5 › captures multi-viewport visual evidence for mobile (375x812) (7.8s)
-  ok 4 [chromium] › e2e\receiving-putaway-audit.spec.ts:338:3 › captures manage-only workstation experience and verifies 320x568 reflow (2.9s)
+  ok 1 [chromium] › e2e\receiving-putaway-audit.spec.ts:103:5 › captures multi-viewport visual evidence for desktop (1440x900) (6.7s)
+  ok 2 [chromium] › e2e\receiving-putaway-audit.spec.ts:103:5 › captures multi-viewport visual evidence for tablet (768x1024) (6.3s)
+  ok 3 [chromium] › e2e\receiving-putaway-audit.spec.ts:103:5 › captures multi-viewport visual evidence for mobile (375x812) (5.8s)
+  ok 4 [chromium] › e2e\receiving-putaway-audit.spec.ts:350:3 › captures manage-only workstation experience and verifies 320x568 reflow (2.9s)
+  ok 5 [chromium] › e2e\receiving-putaway-audit.spec.ts:440:3 › distinguishes RF task load errors from completed work and supports retry action (P-RF-02) (1.7s)
 
-  4 passed (58.2s)
+  5 passed (23.4s)
 ```
