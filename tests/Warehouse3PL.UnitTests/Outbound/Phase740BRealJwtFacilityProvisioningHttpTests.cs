@@ -170,8 +170,9 @@ public sealed class Phase740BRealJwtFacilityProvisioningHttpTests : IAsyncLifeti
     private static void SeedData(ApplicationDbContext db, IPasswordHasher hasher)
     {
         db.Clients.AddRange(
-            new Client { Id = ClientA, CompanyName = "RealJwt Client", AccountCode = "JWT-A" },
-            new Client { Id = ClientB, CompanyName = "Foreign Client B", AccountCode = "JWT-B" });
+            new Client { Id = ClientA, CompanyName = "RealJwt Client", AccountCode = "JWT-A", Status = ClientStatus.Active },
+            new Client { Id = ClientB, CompanyName = "Foreign Client B", AccountCode = "JWT-B", Status = ClientStatus.Active },
+            new Client { Id = Guid.Parse("740c0001-0000-0000-0000-000000000003"), CompanyName = "Suspended Client C", AccountCode = "JWT-SUSP", Status = ClientStatus.Suspended });
 
         db.Facilities.AddRange(
             new Facility { Id = FacilityA, FacilityCode = "JWT-FAC-A", Name = "Facility A", AddressLine1 = "1 Main", City = "Chicago", CountryCode = "US", IsActive = true },
@@ -703,6 +704,65 @@ public sealed class Phase740BRealJwtFacilityProvisioningHttpTests : IAsyncLifeti
         Assert.Throws<Warehouse3PL.Domain.Exceptions.ForbiddenException>(() => outAuth.ValidateStaffMutationFacilityAccess(FacilityA, "ClientSpoofedSuperAdmin"));
         await Assert.ThrowsAsync<Warehouse3PL.Domain.Exceptions.ForbiddenException>(async () =>
             await outAuth.ResolveOutboundQueryScopeAsync(null, FacilityA, allowCrossFacilityRead: true, allowClient: false));
+    }
+
+    [Fact]
+    public async Task AnonymousRegistration_DisabledAndRejected_ZeroUsersRolesOrTokensCreated()
+    {
+        var clientAEmail = "anon-clientadmin@jwt.test";
+        var clientBEmail = "anon-foreignclient@jwt.test";
+        var staffEmail = "anon-staff@jwt.test";
+        var driverEmail = "anon-driver@jwt.test";
+        var (adminToken, _, _) = await LoginAsync("superadmin@jwt.test", "Password123!");
+
+        // 1. Anonymous attempts (Client+ClientA, Client+ForeignClientB, Staff, Driver) are ALL rejected (403 Forbidden) with zero tokens issued
+        foreach (var payload in new object[]
+        {
+            new { email = clientAEmail, password = "Password123!", firstName = "Anon", lastName = "Admin", userType = UserType.Client, clientId = ClientA },
+            new { email = clientBEmail, password = "Password123!", firstName = "Anon", lastName = "Foreign", userType = UserType.Client, clientId = ClientB },
+            new { email = staffEmail, password = "Password123!", firstName = "Anon", lastName = "Staff", userType = UserType.Staff },
+            new { email = driverEmail, password = "Password123!", firstName = "Anon", lastName = "Driver", userType = UserType.Driver }
+        })
+        {
+            using var resp = await _http.PostAsJsonAsync("/api/v1/auth/register", payload);
+            Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+            var body = await resp.Content.ReadAsStringAsync();
+            Assert.DoesNotContain("accessToken", body, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("refreshToken", body, StringComparison.OrdinalIgnoreCase);
+        }
+
+        // 2. Verify zero persisted Users or UserRoles from rejected attempts, and login fails 401
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var emails = new[] { clientAEmail, clientBEmail, staffEmail, driverEmail };
+            Assert.Empty(await db.Users.Where(u => emails.Contains(u.Email)).ToListAsync());
+        }
+        using (var rLoginFail = await _http.PostAsJsonAsync("/api/v1/auth/login", new { email = clientAEmail, password = "Password123!" }))
+            Assert.Equal(HttpStatusCode.Unauthorized, rLoginFail.StatusCode);
+
+        // 3. Provisioning via POST /api/v1/users enforces active tenant status (400 Suspended, 404 NonExistent, 400 ClientId on Staff)
+        var suspendedClientId = Guid.Parse("740c0001-0000-0000-0000-000000000003");
+        using (var rSusp = await _http.SendAsync(BearerRequest(HttpMethod.Post, "/api/v1/users", adminToken, new
+        {
+            email = "susp-client@jwt.test", password = "Password123!", firstName = "S", lastName = "C",
+            userType = UserType.Client, clientId = suspendedClientId, roles = new[] { SystemRoles.ClientUser }
+        })))
+            Assert.Equal(HttpStatusCode.BadRequest, rSusp.StatusCode);
+
+        using (var rMissTenant = await _http.SendAsync(BearerRequest(HttpMethod.Post, "/api/v1/users", adminToken, new
+        {
+            email = "miss-client@jwt.test", password = "Password123!", firstName = "M", lastName = "C",
+            userType = UserType.Client, clientId = Guid.NewGuid(), roles = new[] { SystemRoles.ClientUser }
+        })))
+            Assert.Equal(HttpStatusCode.NotFound, rMissTenant.StatusCode);
+
+        using (var rStaffWithClient = await _http.SendAsync(BearerRequest(HttpMethod.Post, "/api/v1/users", adminToken, new
+        {
+            email = "staff-with-client@jwt.test", password = "Password123!", firstName = "St", lastName = "Cl",
+            userType = UserType.Staff, clientId = ClientA, assignedFacilityId = FacilityA
+        })))
+            Assert.Equal(HttpStatusCode.BadRequest, rStaffWithClient.StatusCode);
     }
 
     public async Task DisposeAsync()

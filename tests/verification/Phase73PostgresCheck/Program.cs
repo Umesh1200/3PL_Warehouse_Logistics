@@ -2875,6 +2875,56 @@ try
 
     Console.WriteLine("PASS PostgreSQL P74-AUTH-01 Role-Escalation Prevention, Client/Driver Privileged-Role Reconciliation & Audit Evidence verified cleanly.");
 
+    // 7.5g P74-AUTH-02 Disabled Anonymous Registration & Active Tenant Provisioning Validation on PostgreSQL
+    var pgAnonEmails = new[]
+    {
+        "pg-anon-clientadmin@740b.test",
+        "pg-anon-foreign@740b.test",
+        "pg-anon-staff@740b.test",
+        "pg-anon-driver@740b.test"
+    };
+    foreach (var payload in new object[]
+    {
+        new { email = pgAnonEmails[0], password = "Password123!", firstName = "Anon", lastName = "Client", userType = UserType.Client, clientId = client1Id },
+        new { email = pgAnonEmails[1], password = "Password123!", firstName = "Anon", lastName = "Foreign", userType = UserType.Client, clientId = client2Id },
+        new { email = pgAnonEmails[2], password = "Password123!", firstName = "Anon", lastName = "Staff", userType = UserType.Staff },
+        new { email = pgAnonEmails[3], password = "Password123!", firstName = "Anon", lastName = "Driver", userType = UserType.Driver }
+    })
+    {
+        using var anonReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/auth/register") { Content = JsonContent.Create(payload) };
+        anonReq.Headers.Add("X-Test-Anonymous", "true");
+        using var anonResp = await p74Client.SendAsync(anonReq);
+        if (anonResp.StatusCode != HttpStatusCode.Forbidden)
+            throw new InvalidOperationException($"P74-AUTH-02 expected 403 Forbidden for anonymous /auth/register on PostgreSQL, got {anonResp.StatusCode}");
+        var anonBody = await anonResp.Content.ReadAsStringAsync();
+        if (anonBody.Contains("accessToken", StringComparison.OrdinalIgnoreCase) || anonBody.Contains("refreshToken", StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("P74-AUTH-02: rejected anonymous registration unexpectedly returned token fields.");
+    }
+
+    var pgSuspClientId = Guid.NewGuid();
+    await using (var regCheckDb = CreateDb(operationalConn, user))
+    {
+        if (await regCheckDb.Users.AnyAsync(u => pgAnonEmails.Contains(u.Email)))
+            throw new InvalidOperationException("P74-AUTH-02: prohibited anonymous registration persisted user record(s) in PostgreSQL.");
+
+        regCheckDb.Clients.Add(new Client { Id = pgSuspClientId, CompanyName = "PG Suspended", AccountCode = "PGSUSP", Status = ClientStatus.Suspended });
+        await regCheckDb.SaveChangesAsync();
+    }
+
+    if ((await p74Client.PostAsJsonAsync("/api/v1/users", new
+    {
+        email = "pg-susp-user@740b.test", password = "Password123!", firstName = "S", lastName = "C",
+        userType = UserType.Client, clientId = pgSuspClientId, roles = new[] { SystemRoles.ClientUser }
+    })).StatusCode != HttpStatusCode.BadRequest ||
+        (await p74Client.PostAsJsonAsync("/api/v1/users", new
+    {
+        email = "pg-missing-client-user@740b.test", password = "Password123!", firstName = "M", lastName = "C",
+        userType = UserType.Client, clientId = Guid.NewGuid(), roles = new[] { SystemRoles.ClientUser }
+    })).StatusCode != HttpStatusCode.NotFound)
+        throw new InvalidOperationException("P74-AUTH-02: PostgreSQL active-tenant validation on POST /api/v1/users failed.");
+
+    Console.WriteLine("PASS PostgreSQL P74-AUTH-02 Disabled Anonymous Registration (Zero Users/Tokens Persisted) & Active Tenant Check verified cleanly.");
+
     Console.WriteLine("\n================================================================================");
     Console.WriteLine("ALL PHASE 7.3, 7.4.0A & PHASE 7.4.0B POSTGRESQL VERIFICATIONS PASSED CLEANLY!");
     Console.WriteLine("================================================================================");
@@ -2987,6 +3037,11 @@ sealed class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
 
     protected override Task<AuthenticateResult> HandleAuthenticateAsync()
     {
+        if (Request.Headers.ContainsKey("X-Test-Anonymous"))
+        {
+            return Task.FromResult(AuthenticateResult.NoResult());
+        }
+
         var actorUserId = Request.Headers["X-Test-Actor-UserId"].FirstOrDefault();
         if (!string.IsNullOrWhiteSpace(actorUserId))
         {

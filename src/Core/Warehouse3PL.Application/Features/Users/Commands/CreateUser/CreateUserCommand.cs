@@ -96,6 +96,35 @@ public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserD
             targetClientId = _currentUser.TenantId.Value;
         }
 
+        if (request.UserType == UserType.Staff && request.ClientId.HasValue)
+        {
+            throw new ValidationException(nameof(request.ClientId),
+                "ClientId cannot be assigned to warehouse Staff accounts.");
+        }
+
+        if (request.UserType == UserType.Client || (request.UserType == UserType.Driver && targetClientId.HasValue))
+        {
+            if (!targetClientId.HasValue || targetClientId.Value == Guid.Empty)
+            {
+                throw new ValidationException(nameof(request.ClientId), "A valid ClientId is required.");
+            }
+
+            var tenant = await _context.Clients
+                .AsNoTracking()
+                .FirstOrDefaultAsync(c => c.Id == targetClientId.Value && !c.IsDeleted, cancellationToken);
+
+            if (tenant == null)
+            {
+                throw new EntityNotFoundException(nameof(Client), targetClientId.Value);
+            }
+
+            if (tenant.Status != ClientStatus.Active)
+            {
+                throw new ValidationException(nameof(request.ClientId),
+                    $"Client tenant '{tenant.Id}' is '{tenant.Status}' and must be Active to provision users.");
+            }
+        }
+
         // Enforce server-side role assignment policy prior to persisting user or roles
         var effectiveClientId = request.UserType == UserType.Staff ? (Guid?)null : targetClientId;
         var resolvedRoles = await RoleAssignmentPolicy.ValidateAndResolveRolesAsync(

@@ -1,13 +1,8 @@
 using FluentValidation;
 using MediatR;
-using Microsoft.EntityFrameworkCore;
-using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
-using Warehouse3PL.Domain.Constants;
-using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
-using ValidationException = Warehouse3PL.Domain.Exceptions.ValidationException;
 
 namespace Warehouse3PL.Application.Features.Auth.Commands.Register;
 
@@ -53,103 +48,9 @@ public class RegisterCommandValidator : AbstractValidator<RegisterCommand>
 
 public class RegisterCommandHandler : IRequestHandler<RegisterCommand, AuthResponseDto>
 {
-    private readonly IApplicationDbContext _context;
-    private readonly IPasswordHasher _passwordHasher;
-    private readonly ITokenService _tokenService;
-    private readonly IDateTimeProvider _dateTimeProvider;
-
-    public RegisterCommandHandler(
-        IApplicationDbContext context,
-        IPasswordHasher passwordHasher,
-        ITokenService tokenService,
-        IDateTimeProvider dateTimeProvider)
+    public Task<AuthResponseDto> Handle(RegisterCommand request, CancellationToken cancellationToken)
     {
-        _context = context;
-        _passwordHasher = passwordHasher;
-        _tokenService = tokenService;
-        _dateTimeProvider = dateTimeProvider;
-    }
-
-    public async Task<AuthResponseDto> Handle(RegisterCommand request, CancellationToken cancellationToken)
-    {
-        if (request.UserType == UserType.Staff)
-        {
-            throw new ForbiddenException("Self-registration cannot create warehouse Staff or SuperAdmin accounts.");
-        }
-
-        var emailNormalized = request.Email.Trim().ToLower();
-
-        var existingUser = await _context.Users
-            .AnyAsync(u => u.Email.ToLower() == emailNormalized, cancellationToken);
-
-        if (existingUser)
-        {
-            throw new ValidationException(nameof(request.Email), "A user with this email address already exists.");
-        }
-
-        Client? client = null;
-        if (request.ClientId.HasValue)
-        {
-            client = await _context.Clients
-                .FirstOrDefaultAsync(c => c.Id == request.ClientId.Value && !c.IsDeleted, cancellationToken);
-
-            if (client == null)
-            {
-                throw new EntityNotFoundException(nameof(Client), request.ClientId.Value);
-            }
-        }
-
-        var user = new User
-        {
-            Email = emailNormalized,
-            PasswordHash = _passwordHasher.HashPassword(request.Password),
-            FirstName = request.FirstName.Trim(),
-            LastName = request.LastName.Trim(),
-            PhoneNumber = request.PhoneNumber,
-            UserType = request.UserType,
-            Status = UserStatus.Active,
-            ClientId = request.ClientId
-        };
-
-        // Assign default role based on user type
-        var defaultRoleName = request.UserType switch
-        {
-            UserType.Staff => SystemRoles.SuperAdmin,
-            UserType.Client => SystemRoles.ClientAdmin,
-            UserType.Driver => SystemRoles.Driver,
-            _ => SystemRoles.ClientUser
-        };
-
-        var defaultRole = await _context.Roles
-            .Include(r => r.RolePermissions)
-            .FirstOrDefaultAsync(r => r.RoleName == defaultRoleName, cancellationToken);
-
-        if (defaultRole != null)
-        {
-            user.UserRoles.Add(new UserRole
-            {
-                User = user,
-                Role = defaultRole,
-                AssignedAt = _dateTimeProvider.UtcNow
-            });
-        }
-
-        _context.Users.Add(user);
-        await _context.SaveChangesAsync(cancellationToken);
-
-        var roles = user.UserRoles.Select(ur => ur.Role.RoleName).ToList();
-        var permissions = user.UserRoles
-            .SelectMany(ur => ur.Role.RolePermissions)
-            .Select(rp => rp.PermissionKey)
-            .Distinct()
-            .ToList();
-
-        var authResponse = _tokenService.GenerateTokens(user, roles, permissions);
-
-        user.RefreshToken = authResponse.RefreshToken;
-        user.RefreshTokenExpiryTime = _dateTimeProvider.UtcNow.AddDays(7);
-        await _context.SaveChangesAsync(cancellationToken);
-
-        return authResponse;
+        throw new ForbiddenException(
+            "Public self-registration is disabled. All user accounts must be provisioned by an authorized administrator via POST /api/v1/users.");
     }
 }

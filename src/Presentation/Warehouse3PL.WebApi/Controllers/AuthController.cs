@@ -5,6 +5,7 @@ using Warehouse3PL.Application.Features.Auth.Commands.Login;
 using Warehouse3PL.Application.Features.Auth.Commands.RefreshToken;
 using Warehouse3PL.Application.Features.Auth.Commands.Register;
 using Warehouse3PL.Application.Features.Auth.Queries.GetCurrentUser;
+using Warehouse3PL.Domain.Exceptions;
 
 namespace Warehouse3PL.WebApi.Controllers;
 
@@ -25,16 +26,15 @@ public class AuthController : BaseApiController
     }
 
     /// <summary>
-    /// Register a new user under a specific client tenant or as staff.
+    /// Disabled: anonymous self-registration is not permitted. Provision accounts via authorized POST /api/v1/users.
     /// </summary>
     [HttpPost("register")]
     [AllowAnonymous]
-    [ProducesResponseType(typeof(AuthResponseDto), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<AuthResponseDto>> Register([FromBody] RegisterCommand command, CancellationToken ct)
+    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status403Forbidden)]
+    public Task<ActionResult<AuthResponseDto>> Register([FromBody] RegisterCommand command, CancellationToken ct)
     {
-        var response = await Mediator.Send(command, ct);
-        return Ok(response);
+        throw new ForbiddenException(
+            "Public anonymous registration is disabled. All user accounts must be provisioned by an authorized administrator via POST /api/v1/users.");
     }
 
     /// <summary>
