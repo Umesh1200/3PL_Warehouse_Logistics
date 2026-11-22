@@ -188,6 +188,7 @@ public interface IApplicationDbContext
     Task CommitTransactionAsync(CancellationToken cancellationToken = default);
     Task RollbackTransactionAsync(CancellationToken cancellationToken = default);
     Task<TResult> ExecuteInTransactionAsync<TResult>(Func<Task<TResult>> action, CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithShipmentLockAsync<TResult>(Guid? shipmentId, Func<Task<TResult>> action, CancellationToken cancellationToken = default);
     void ClearChangeTracker();
     bool AllowExplicitAuditTimestamps { get; set; }
 }

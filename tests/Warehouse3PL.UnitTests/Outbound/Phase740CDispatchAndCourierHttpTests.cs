@@ -86,6 +86,7 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
     private WebApplication _app = null!;
     private HttpClient _http = null!;
     private string _storageDir = null!;
+    private RaceStorageState _raceStorageState = null!;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
@@ -124,7 +125,10 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
 
         builder.Services.AddSingleton<IPasswordHasher, PasswordHasher>();
         builder.Services.AddSingleton<ITokenService, JwtTokenService>();
-        builder.Services.AddSingleton<IObjectStorageService, PrivateObjectStorageService>();
+        _raceStorageState = new RaceStorageState();
+        builder.Services.AddSingleton(_raceStorageState);
+        builder.Services.AddSingleton<PrivateObjectStorageService>();
+        builder.Services.AddSingleton<IObjectStorageService, RaceControllableObjectStorageService>();
         builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
             .AddJwtBearer(options =>
             {
@@ -251,9 +255,9 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
             new OutboundOrder { Id = OrderClientAFacB, ClientId = ClientA, FacilityId = FacilityB, OrderNumber = "ORD-740C-AB", CustomerName = "Buyer AB", Status = OutboundOrderStatus.Completed, DeliveryStatus = OrderDeliveryStatus.Dispatched });
 
         db.Shipments.AddRange(
-            new Shipment { Id = ShipmentDraftId, ClientId = ClientA, FacilityId = FacilityA, ShipmentNumber = "SHP-740C-DRAFT", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.ReadyForDispatch, Version = 1 },
-            new Shipment { Id = ShipmentDispatchedId, ClientId = ClientA, FacilityId = FacilityA, ShipmentNumber = "SHP-740C-DISP", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, DeliveryStatus = TrackingMilestoneStatus.OutForDelivery, AssignedDriverUserId = DriverAId, DispatchedAtUtc = DateTime.UtcNow.AddHours(-1), Version = 2 },
-            new Shipment { Id = ShipmentFacBId, ClientId = ClientA, FacilityId = FacilityB, ShipmentNumber = "SHP-740C-FACB", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, DeliveryStatus = TrackingMilestoneStatus.InTransit, AssignedDriverUserId = DriverAId, DispatchedAtUtc = DateTime.UtcNow.AddHours(-1), Version = 1 });
+            new Shipment { Id = ShipmentDraftId, ClientId = ClientA, FacilityId = FacilityA, ShipmentNumber = "SHP-740C-DRAFT", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.ReadyForDispatch, CustodyStatus = ShipmentCustodyStatus.Unassigned, Version = 1 },
+            new Shipment { Id = ShipmentDispatchedId, ClientId = ClientA, FacilityId = FacilityA, ShipmentNumber = "SHP-740C-DISP", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, CustodyStatus = ShipmentCustodyStatus.Confirmed, DeliveryStatus = TrackingMilestoneStatus.OutForDelivery, AssignedDriverUserId = DriverAId, DispatchedAtUtc = DateTime.UtcNow.AddHours(-1), Version = 2 },
+            new Shipment { Id = ShipmentFacBId, ClientId = ClientA, FacilityId = FacilityB, ShipmentNumber = "SHP-740C-FACB", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, CustodyStatus = ShipmentCustodyStatus.Confirmed, DeliveryStatus = TrackingMilestoneStatus.InTransit, AssignedDriverUserId = DriverAId, DispatchedAtUtc = DateTime.UtcNow.AddHours(-1), Version = 1 });
 
         db.ShipmentCustodyTransfers.Add(new ShipmentCustodyTransfer
         {
@@ -456,17 +460,74 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
             })))
         {
             Assert.Equal(HttpStatusCode.OK, rAuditedReassign.StatusCode);
+            var reassignRes = await rAuditedReassign.Content.ReadFromJsonAsync<AssignShipmentDriverResult>(JsonOptions);
+            Assert.Equal(ShipmentCustodyStatus.PendingHandover, reassignRes!.CustodyStatus);
         }
 
-        // Old driver (DriverA) is now 403 Forbidden; new driver (DriverB) holds latest custody transfer
+        // Old driver (DriverA) is now 403 Forbidden; new driver (DriverB) ALSO gets 403 until explicit custody handover acknowledgment
         using (var rOldDriver = await _http.SendAsync(BearerRequest(HttpMethod.Post,
             $"/api/v1/outbound/dispatch/packages/{PkgDraftId}/confirm-delivery", driverAToken, new { })))
             Assert.Equal(HttpStatusCode.Forbidden, rOldDriver.StatusCode);
 
-        // Revoking driver (DriverUserId = null with reason) preserves history but blocks DriverB immediately too
+        using (var rPendingNewDriver = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{PkgDraftId}/pod", driverBToken, new { recipientName = "Before Ack" })))
+            Assert.Equal(HttpStatusCode.Forbidden, rPendingNewDriver.StatusCode);
+
+        // Non-driver, wrong driver, empty/synthetic signature, and stale version rejected on acknowledge-custody
+        using (var rStaffAck = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/shipments/{ShipmentDraftId}/acknowledge-custody", supAToken, new { driverSignature = "SIG-STAFF" })))
+            Assert.Equal(HttpStatusCode.Forbidden, rStaffAck.StatusCode);
+
+        using (var rWrongDriverAck = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/shipments/{ShipmentDraftId}/acknowledge-custody", driverAToken, new { driverSignature = "SIG-WRONG-DRV" })))
+            Assert.Equal(HttpStatusCode.Forbidden, rWrongDriverAck.StatusCode);
+
+        using (var rSyntheticSig = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/shipments/{ShipmentDraftId}/acknowledge-custody", driverBToken, new { driverSignature = "SUPERVISOR_CUSTODY_REASSIGNMENT:fake" })))
+            Assert.Equal(HttpStatusCode.BadRequest, rSyntheticSig.StatusCode);
+
+        using (var rStaleAck = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/shipments/{ShipmentDraftId}/acknowledge-custody", driverBToken, new { driverSignature = "SIG-DRIVER-B-REAL", expectedVersion = 999u })))
+            Assert.Equal(HttpStatusCode.Conflict, rStaleAck.StatusCode);
+
+        // Authentic DriverB acknowledges handover -> CustodyStatus becomes Confirmed, preserving DriverA's original immutable transfer row
+        using (var rAckOk = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/shipments/{ShipmentDraftId}/acknowledge-custody", driverBToken, new { driverSignature = "SIG-DRIVER-B-REAL", driverLicenseNumber = "DL-BETA-01" })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rAckOk.StatusCode);
+            var ackRes = await rAckOk.Content.ReadFromJsonAsync<AcknowledgeShipmentCustodyResult>(JsonOptions);
+            Assert.Equal(ShipmentCustodyStatus.Confirmed, ackRes!.CustodyStatus);
+            Assert.Equal(DriverBId, ackRes.AssignedDriverUserId);
+        }
+
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var xfers = await db.ShipmentCustodyTransfers.IgnoreQueryFilters()
+                .Where(t => t.ShipmentId == ShipmentDraftId)
+                .OrderBy(t => t.TransferredAtUtc)
+                .ToListAsync();
+            Assert.Equal(2, xfers.Count);
+            Assert.Equal(DriverAId, xfers[0].AssignedDriverUserId);
+            Assert.Equal("SIG-ALPHA", xfers[0].DriverSignatureAcknowledgment);
+            Assert.Equal(DriverBId, xfers[1].AssignedDriverUserId);
+            Assert.Equal("SIG-DRIVER-B-REAL", xfers[1].DriverSignatureAcknowledgment);
+            Assert.All(xfers, t => Assert.Equal(ShipmentCustodyStatus.Confirmed, t.CustodyStatus));
+        }
+
+        // DriverB can now submit DriverHandheld POD cleanly
+        using (var rDriverBPodAfterAck = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{PkgDraftId}/pod", driverBToken, new { recipientName = "Consignee After Handover", evidenceSource = PodEvidenceSource.DriverHandheld })))
+            Assert.Equal(HttpStatusCode.OK, rDriverBPodAfterAck.StatusCode);
+
+        // Revoking driver (DriverUserId = null with reason) preserves history but blocks DriverB immediately
         using (var rRevoke = await _http.SendAsync(BearerRequest(HttpMethod.Post,
             $"/api/v1/outbound/dispatch/shipments/{ShipmentDraftId}/assign-driver", supAToken, new { driverUserId = (Guid?)null, reason = "Held at depot" })))
+        {
             Assert.Equal(HttpStatusCode.OK, rRevoke.StatusCode);
+            var revRes = await rRevoke.Content.ReadFromJsonAsync<AssignShipmentDriverResult>(JsonOptions);
+            Assert.Equal(ShipmentCustodyStatus.Revoked, revRes!.CustodyStatus);
+        }
 
         using (var rRevokedDriver = await _http.SendAsync(BearerRequest(HttpMethod.Post,
             $"/api/v1/outbound/dispatch/packages/{PkgDraftId}/confirm-delivery", driverBToken, new { })))
@@ -727,6 +788,208 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
         using (var rMismatchCarrier = await _http.SendAsync(SignedWebhook(
             "/api/v1/outbound/dispatch/webhooks/carrier-tracking", mismatchedPayload, "SIM-FEDEX", FedExSecret, $"nonce-mis-{Guid.NewGuid():N}")))
             Assert.Equal(HttpStatusCode.Unauthorized, rMismatchCarrier.StatusCode);
+    }
+
+    [Fact]
+    public async Task PodEvidenceSourceAuthorization_DriverCannotSubmitSpoofedSources_And_StaffCannotSubmitIntegrationSourcesInteractively()
+    {
+        var driverAToken = await LoginAsync("drivera@740c.test");
+        var supAToken = await LoginAsync("supa@740c.test");
+
+        // 1. Driver A with confirmed custody CANNOT submit ManualVerification, CarrierApi, or ConsigneePortal via JSON or Multipart
+        foreach (var badPayload in new object[]
+        {
+            new { evidenceSource = PodEvidenceSource.ManualVerification, verificationReason = "Spoofed manual override", recipientName = "Consignee" },
+            new { evidenceSource = PodEvidenceSource.CarrierApi, carrierConfirmationNumber = "FDX-SPOOF-1", recipientName = "Consignee" },
+            new { evidenceSource = PodEvidenceSource.ConsigneePortal, consigneeAcknowledgmentText = "Spoofed portal ack", recipientName = "Consignee" }
+        })
+        {
+            using var resp = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+                $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", driverAToken, badPayload));
+            Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+        }
+
+        using (var mpSpoof = new MultipartFormDataContent())
+        {
+            var png = new ByteArrayContent(CreateValidPngBytes());
+            png.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+            mpSpoof.Add(png, "signature", "spoof.png");
+            mpSpoof.Add(new StringContent(nameof(PodEvidenceSource.ManualVerification)), "evidenceSource");
+            mpSpoof.Add(new StringContent("Spoofed via form"), "verificationReason");
+            using var req = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod") { Content = mpSpoof };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", driverAToken);
+            using var rMp = await _http.SendAsync(req);
+            Assert.Equal(HttpStatusCode.Forbidden, rMp.StatusCode);
+        }
+
+        // 2. Staff on interactive courier endpoint CANNOT submit CarrierApi or ConsigneePortal; ManualVerification requires reason
+        foreach (var staffBadSource in new object[]
+        {
+            new { evidenceSource = PodEvidenceSource.CarrierApi, carrierConfirmationNumber = "FDX-STAFF-SPOOF", recipientName = "Consignee" },
+            new { evidenceSource = PodEvidenceSource.ConsigneePortal, consigneeAcknowledgmentText = "Portal spoof", recipientName = "Consignee" }
+        })
+        {
+            using var rStaffBad = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+                $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", supAToken, staffBadSource));
+            Assert.Equal(HttpStatusCode.Forbidden, rStaffBad.StatusCode);
+        }
+
+        using (var rMissingReason = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", supAToken,
+            new { evidenceSource = PodEvidenceSource.ManualVerification, recipientName = "No reason" })))
+            Assert.Equal(HttpStatusCode.BadRequest, rMissingReason.StatusCode);
+
+        // Zero POD rows or storage artifacts created from all rejected attempts
+        Assert.Empty(Directory.GetFiles(_storageDir, "*", SearchOption.AllDirectories));
+
+        // Authorized Staff CAN execute ManualVerification with auditable reason
+        using (var rStaffManualOk = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", supAToken,
+            new { evidenceSource = PodEvidenceSource.ManualVerification, verificationReason = "Dispatcher verified signed paper manifest", recipientName = "Dock Clerk" })))
+            Assert.Equal(HttpStatusCode.OK, rStaffManualOk.StatusCode);
+
+        // Service-layer enforcement (direct ProofOfDeliveryService): Driver cannot submit ManualVerification / CarrierApi / ConsigneePortal
+        using (var scope = _app.Services.CreateScope())
+        {
+            var scopedTenant = scope.ServiceProvider.GetRequiredService<ITenantProvider>();
+            scopedTenant.SetTenantId(ClientA);
+            var svcDb = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var svcStorage = scope.ServiceProvider.GetRequiredService<IObjectStorageService>();
+            var drvCtx = new Warehouse3PL.UnitTests.Common.TestCurrentUserContext { UserId = DriverAId, UserType = UserType.Driver };
+            var directSvc = new ProofOfDeliveryService(svcDb, svcStorage, scopedTenant, drvCtx, Microsoft.Extensions.Logging.Abstractions.NullLogger<ProofOfDeliveryService>.Instance);
+
+            foreach (var badSrc in new[] { PodEvidenceSource.ManualVerification, PodEvidenceSource.CarrierApi, PodEvidenceSource.ConsigneePortal })
+            {
+                await Assert.ThrowsAsync<Warehouse3PL.Domain.Exceptions.ForbiddenException>(() => directSvc.SubmitProofOfDeliveryAsync(new SubmitProofOfDeliveryRequest
+                {
+                    PackageId = Pkg2DispatchedId,
+                    EvidenceSource = badSrc,
+                    VerificationReason = "Direct spoof",
+                    CarrierConfirmationNumber = "FDX-DIRECT",
+                    ConsigneeAcknowledgmentText = "Portal direct spoof",
+                    RecipientName = "Direct"
+                }));
+            }
+        }
+    }
+
+    [Fact]
+    public async Task CustodyRevocationRace_BothCompletionOrders_EnforceFencingAndCleanStagedStorage()
+    {
+        var supAToken = await LoginAsync("supa@740c.test");
+        var driverAToken = await LoginAsync("drivera@740c.test");
+
+        // Order 1: Revocation commits WHILE DriverA POD upload is in-flight after staging temp file -> must fail 403 + delete temp file
+        var entered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _raceStorageState.NextStageHook = (entered, release);
+
+        Task<HttpResponseMessage> podInFlightTask;
+        using (var form = new MultipartFormDataContent())
+        {
+            var sig = new ByteArrayContent(CreateValidPngBytes());
+            sig.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+            form.Add(sig, "signature", "race-sig.png");
+            form.Add(new StringContent("Race Consignee"), "recipientName");
+            form.Add(new StringContent("true"), "isSigned");
+            var req = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod") { Content = form };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", driverAToken);
+            podInFlightTask = _http.SendAsync(req);
+
+            await entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+            // While DriverA pauses post-staging, supervisor revokes DriverA custody on ShipmentDispatchedId
+            using (var rRevoke = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+                $"/api/v1/outbound/dispatch/shipments/{ShipmentDispatchedId}/assign-driver", supAToken,
+                new { driverUserId = (Guid?)null, reason = "Emergency recall during route" })))
+                Assert.Equal(HttpStatusCode.OK, rRevoke.StatusCode);
+
+            release.TrySetResult(true);
+            using var podResp = await podInFlightTask;
+            Assert.Equal(HttpStatusCode.Forbidden, podResp.StatusCode);
+        }
+
+        // Verify zero POD persisted and zero orphaned temp/final storage files remain
+        Assert.Empty(Directory.GetFiles(_storageDir, "*", SearchOption.AllDirectories));
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            Assert.Empty(await db.ProofOfDeliveries.IgnoreQueryFilters().Where(p => p.PackageId == Pkg1DispatchedId).ToListAsync());
+        }
+
+        // Order 2: Re-assign DriverA -> DriverA acknowledges -> POD + ConfirmDelivery commits FIRST -> subsequent revocation rejected (422)
+        using (var rReassign = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/shipments/{ShipmentDispatchedId}/assign-driver", supAToken,
+            new { driverUserId = DriverAId, reason = "Re-dispatched after recall" })))
+            Assert.Equal(HttpStatusCode.OK, rReassign.StatusCode);
+
+        using (var rAck = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/shipments/{ShipmentDispatchedId}/acknowledge-custody", driverAToken,
+            new { driverSignature = "SIG-DRIVER-A-RESUMED" })))
+            Assert.Equal(HttpStatusCode.OK, rAck.StatusCode);
+
+        using (var rPodCommit = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", driverAToken,
+            new { recipientName = "Committed Consignee", evidenceSource = PodEvidenceSource.DriverHandheld })))
+            Assert.Equal(HttpStatusCode.OK, rPodCommit.StatusCode);
+
+        using (var rConfirmCommit = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/confirm-delivery", driverAToken, new { })))
+            Assert.Equal(HttpStatusCode.OK, rConfirmCommit.StatusCode);
+
+        // Revocation after delivery must fail cleanly (422) and preserve Delivered + POD state
+        using (var rLateRevoke = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/shipments/{ShipmentDispatchedId}/assign-driver", supAToken,
+            new { driverUserId = (Guid?)null, reason = "Late revoke after delivery" })))
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rLateRevoke.StatusCode);
+
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var pkg1 = await db.Packages.IgnoreQueryFilters().SingleAsync(p => p.Id == Pkg1DispatchedId);
+            Assert.Equal(TrackingMilestoneStatus.Delivered, pkg1.CurrentTrackingStatus);
+            Assert.Single(await db.ProofOfDeliveries.IgnoreQueryFilters().Where(p => p.PackageId == Pkg1DispatchedId && !p.IsSuperseded).ToListAsync());
+        }
+    }
+
+    private sealed class RaceStorageState
+    {
+        public (TaskCompletionSource<bool> Entered, TaskCompletionSource<bool> Release)? NextStageHook { get; set; }
+    }
+
+    private sealed class RaceControllableObjectStorageService(
+        PrivateObjectStorageService inner,
+        RaceStorageState state) : IObjectStorageService
+    {
+        public async Task<StagedUploadResult> UploadStagedAsync(string tempObjectKey, Stream contentStream, string contentType, CancellationToken cancellationToken = default)
+        {
+            var res = await inner.UploadStagedAsync(tempObjectKey, contentStream, contentType, cancellationToken);
+            var hook = state.NextStageHook;
+            if (hook.HasValue)
+            {
+                state.NextStageHook = null;
+                hook.Value.Entered.TrySetResult(true);
+                await hook.Value.Release.Task;
+            }
+            return res;
+        }
+
+        public Task<ObjectStorageMetadata> FinalizeObjectAsync(string tempObjectKey, string finalObjectKey, CancellationToken cancellationToken = default)
+            => inner.FinalizeObjectAsync(tempObjectKey, finalObjectKey, cancellationToken);
+        public Task<Stream?> DownloadAsync(string objectKey, CancellationToken cancellationToken = default)
+            => inner.DownloadAsync(objectKey, cancellationToken);
+        public Task<PreSignedUrlResult> GeneratePreSignedDownloadUrlAsync(string objectKey, TimeSpan? expiry = null, CancellationToken cancellationToken = default)
+            => inner.GeneratePreSignedDownloadUrlAsync(objectKey, expiry, cancellationToken);
+        public bool ValidatePreSignedToken(string objectKey, string token, DateTime utcNow)
+            => inner.ValidatePreSignedToken(objectKey, token, utcNow);
+        public Task<bool> DeleteAsync(string objectKey, CancellationToken cancellationToken = default)
+            => inner.DeleteAsync(objectKey, cancellationToken);
+        public Task<bool> ExistsAsync(string objectKey, CancellationToken cancellationToken = default)
+            => inner.ExistsAsync(objectKey, cancellationToken);
+        public Task<ObjectStorageMetadata?> GetMetadataAsync(string objectKey, CancellationToken cancellationToken = default)
+            => inner.GetMetadataAsync(objectKey, cancellationToken);
+        public Task<int> CleanupOrphanedTempObjectsAsync(TimeSpan olderThan, CancellationToken cancellationToken = default)
+            => inner.CleanupOrphanedTempObjectsAsync(olderThan, cancellationToken);
     }
 
     public async Task DisposeAsync()

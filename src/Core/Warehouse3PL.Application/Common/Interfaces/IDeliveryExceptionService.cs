@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Enums;
 
@@ -28,6 +29,9 @@ public class ReportDriverExceptionRequest
     public decimal? Longitude { get; set; }
     public Guid? DriverUserId { get; set; }
     public Guid? TenantIdOverride { get; set; }
+
+    [JsonIgnore]
+    public Func<CancellationToken, Task>? BeforeCommitCustodyValidationAsync { get; set; }
 }
 
 public class ResolveDeliveryExceptionRequest

@@ -33,6 +33,7 @@ public class Shipment : AuditableEntity<Guid>, ITenantEntity, ISoftDeletable
 
     public Guid? StagingLocationId { get; set; }
     public Guid? AssignedDriverUserId { get; set; }
+    public ShipmentCustodyStatus CustodyStatus { get; set; } = ShipmentCustodyStatus.Unassigned;
 
     public string? TrailerNumber { get; set; }
     public string? SealNumber { get; set; }

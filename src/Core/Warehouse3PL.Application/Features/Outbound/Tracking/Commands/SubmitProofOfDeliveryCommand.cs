@@ -27,10 +27,19 @@ public class SubmitProofOfDeliveryCommandHandler : IRequestHandler<SubmitProofOf
 
     public async Task<SubmitProofOfDeliveryResult> Handle(SubmitProofOfDeliveryCommand command, CancellationToken cancellationToken)
     {
-        // Authorize BEFORE any staged evidence upload executes in ProofOfDeliveryService
+        // Authorize identity, evidence source, and courier custody BEFORE any staged evidence upload executes
+        command.Request.IsInteractiveSubmission = true;
+        WarehouseOperationalAuthorization.ValidatePodEvidenceSourceAuthorization(
+            _currentUser,
+            command.Request.EvidenceSource,
+            command.Request.VerificationReason,
+            enforceInteractivePolicy: true);
+
         var authorizedPackage = await _warehouseAuth.ValidateCourierPackageAccessByIdAsync(command.Request.PackageId, cancellationToken);
         OutboundOperationalAuthorization.BindValidatedCourierTenant(_tenantProvider, _currentUser, authorizedPackage.ClientId);
         command.Request.TenantIdOverride = null;
+        command.Request.BeforeCommitCustodyValidationAsync = async ct =>
+            await _warehouseAuth.ValidateCourierPackageAccessByIdAsync(command.Request.PackageId, ct);
 
         return await _podService.SubmitProofOfDeliveryAsync(command.Request, cancellationToken);
     }

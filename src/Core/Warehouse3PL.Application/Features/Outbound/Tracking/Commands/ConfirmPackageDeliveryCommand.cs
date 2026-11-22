@@ -30,6 +30,8 @@ public class ConfirmPackageDeliveryCommandHandler : IRequestHandler<ConfirmPacka
         var authorizedPackage = await _warehouseAuth.ValidateCourierPackageAccessByIdAsync(command.Request.PackageId, cancellationToken);
         OutboundOperationalAuthorization.BindValidatedCourierTenant(_tenantProvider, _currentUser, authorizedPackage.ClientId);
         command.Request.TenantIdOverride = null;
+        command.Request.BeforeCommitCustodyValidationAsync = async ct =>
+            await _warehouseAuth.ValidateCourierPackageAccessByIdAsync(command.Request.PackageId, ct);
 
         return await _deliveryConfirmationService.ConfirmDeliveryAsync(command.Request, cancellationToken);
     }

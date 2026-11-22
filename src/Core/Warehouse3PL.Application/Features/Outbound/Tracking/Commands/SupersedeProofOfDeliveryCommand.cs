@@ -13,21 +13,34 @@ public class SupersedeProofOfDeliveryCommandHandler : IRequestHandler<SupersedeP
 {
     private readonly IProofOfDeliveryService _podService;
     private readonly IApplicationDbContext _context;
+    private readonly ICurrentUserContext _currentUser;
     private readonly OutboundOperationalAuthorization _outboundAuth;
 
     public SupersedeProofOfDeliveryCommandHandler(
         IProofOfDeliveryService podService,
         IApplicationDbContext context,
+        ICurrentUserContext currentUser,
         OutboundOperationalAuthorization outboundAuth)
     {
         _podService = podService;
         _context = context;
+        _currentUser = currentUser;
         _outboundAuth = outboundAuth;
     }
 
     public async Task<SubmitProofOfDeliveryResult> Handle(SupersedeProofOfDeliveryCommand command, CancellationToken cancellationToken)
     {
         _outboundAuth.EnsureStaffOperationalIdentity(nameof(SupersedeProofOfDeliveryCommand));
+
+        if (command.Request.ReplacementSubmission != null)
+        {
+            command.Request.ReplacementSubmission.IsInteractiveSubmission = true;
+            WarehouseOperationalAuthorization.ValidatePodEvidenceSourceAuthorization(
+                _currentUser,
+                command.Request.ReplacementSubmission.EvidenceSource,
+                command.Request.ReplacementSubmission.VerificationReason,
+                enforceInteractivePolicy: true);
+        }
 
         var existingPod = await _context.ProofOfDeliveries
             .IgnoreQueryFilters()

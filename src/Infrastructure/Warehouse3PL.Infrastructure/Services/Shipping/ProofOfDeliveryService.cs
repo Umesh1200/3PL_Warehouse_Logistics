@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -106,11 +107,17 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
         ProofOfDelivery? existingPodToSupersede,
         CancellationToken cancellationToken)
     {
-        // 1. Package Lookup & Validation
+        // 1. Package & Evidence-Source Authorization (fail-closed before DB lookup or staged upload)
         if (request.PackageId == Guid.Empty)
         {
             throw new ValidationException(nameof(request.PackageId), "Package ID must be provided.");
         }
+
+        WarehouseOperationalAuthorization.ValidatePodEvidenceSourceAuthorization(
+            _currentUserContext,
+            request.EvidenceSource,
+            request.VerificationReason,
+            request.IsInteractiveSubmission);
 
         var package = await _context.Packages
             .Include(p => p.Shipment)
@@ -258,8 +265,30 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
 
         try
         {
-            _context.ProofOfDeliveries.Add(pod);
-            await _context.SaveChangesAsync(cancellationToken);
+            await _context.ExecuteWithShipmentLockAsync(package.ShipmentId, async () =>
+            {
+                if (request.BeforeCommitCustodyValidationAsync != null)
+                {
+                    await request.BeforeCommitCustodyValidationAsync(cancellationToken);
+                }
+
+                if (!isSupersession)
+                {
+                    var racedActivePod = await _context.ProofOfDeliveries
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(p => p.PackageId == package.Id && !p.IsSuperseded, cancellationToken);
+
+                    if (racedActivePod != null)
+                    {
+                        throw new ValidationException(nameof(request.PackageId),
+                            $"Package '{package.PackageNumber}' already has an active authoritative Proof of Delivery ('{racedActivePod.Id}').");
+                    }
+                }
+
+                _context.ProofOfDeliveries.Add(pod);
+                await _context.SaveChangesAsync(cancellationToken);
+                return true;
+            }, cancellationToken);
         }
         catch (Exception ex)
         {

@@ -8,9 +8,23 @@ public sealed record AssignShipmentDriverResult
     public Guid ShipmentId { get; init; }
     public string ShipmentNumber { get; init; } = string.Empty;
     public ShipmentStatus ShipmentStatus { get; init; }
+    public ShipmentCustodyStatus CustodyStatus { get; init; }
     public Guid? AssignedDriverUserId { get; init; }
     public string? AssignedDriverName { get; init; }
     public string? AssignedDriverEmail { get; init; }
+    public uint Version { get; init; }
+    public string Message { get; init; } = string.Empty;
+}
+
+public sealed record AcknowledgeShipmentCustodyResult
+{
+    public bool IsSuccess { get; init; }
+    public Guid ShipmentId { get; init; }
+    public string ShipmentNumber { get; init; } = string.Empty;
+    public Guid AssignedDriverUserId { get; init; }
+    public ShipmentCustodyStatus CustodyStatus { get; init; }
+    public Guid CustodyTransferId { get; init; }
+    public DateTime TransferredAtUtc { get; init; }
     public uint Version { get; init; }
     public string Message { get; init; } = string.Empty;
 }
@@ -40,6 +54,7 @@ public sealed record DispatchBoardShipmentDto
     public string CarrierCode { get; init; } = string.Empty;
     public CarrierServiceLevel CarrierServiceLevel { get; init; }
     public ShipmentStatus Status { get; init; }
+    public ShipmentCustodyStatus CustodyStatus { get; init; }
     public TrackingMilestoneStatus DeliveryStatus { get; init; }
     public DateTime? DeliveryStatusUpdatedAtUtc { get; init; }
     public DateTime? DispatchedAtUtc { get; init; }

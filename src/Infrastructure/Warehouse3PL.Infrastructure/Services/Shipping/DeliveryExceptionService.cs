@@ -315,134 +315,149 @@ public class DeliveryExceptionService : IDeliveryExceptionService
             throw new ForbiddenException("Only authorized drivers or warehouse operations staff can report delivery exceptions.");
         }
 
-        // 3. Lookup Package with Shipment and Order
-        var package = await _context.Packages
-            .Include(p => p.Shipment)
-            .Include(p => p.OutboundOrder)
-                .ThenInclude(o => o.Packages)
-            .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
+        var shipmentIdForLock = await _context.Packages
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(p => p.Id == request.PackageId && !p.IsDeleted)
+            .Select(p => p.ShipmentId)
+            .FirstOrDefaultAsync(cancellationToken);
 
-        if (package == null)
+        return await _context.ExecuteWithShipmentLockAsync(shipmentIdForLock, async () =>
         {
-            throw new EntityNotFoundException(nameof(Package), request.PackageId);
-        }
+            if (request.BeforeCommitCustodyValidationAsync != null)
+            {
+                await request.BeforeCommitCustodyValidationAsync(cancellationToken);
+            }
 
-        // Cross-Tenant Validation
-        if (request.TenantIdOverride.HasValue && request.TenantIdOverride.Value != package.ClientId)
-        {
-            throw new UnauthorizedException($"Package '{package.PackageNumber}' belongs to a different client tenant. Cross-tenant access rejected.");
-        }
+            // 3. Lookup Package with Shipment and Order
+            var package = await _context.Packages
+                .Include(p => p.Shipment)
+                .Include(p => p.OutboundOrder)
+                    .ThenInclude(o => o.Packages)
+                .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
 
-        if (_tenantProvider.TenantId.HasValue &&
-            !_tenantProvider.BypassTenantFilter &&
-            _tenantProvider.TenantId.Value != package.ClientId)
-        {
-            throw new UnauthorizedException("Unauthorized cross-tenant driver exception reporting attempt.");
-        }
+            if (package == null)
+            {
+                throw new EntityNotFoundException(nameof(Package), request.PackageId);
+            }
 
-        // Facility Authorization
-        if (_currentUserContext.FacilityId.HasValue &&
-            _currentUserContext.FacilityId.Value != package.FacilityId &&
-            !_currentUserContext.IsSuperAdmin)
-        {
-            throw new ForbiddenException($"User is not authorized for package facility '{package.FacilityId}'.");
-        }
+            // Cross-Tenant Validation
+            if (request.TenantIdOverride.HasValue && request.TenantIdOverride.Value != package.ClientId)
+            {
+                throw new UnauthorizedException($"Package '{package.PackageNumber}' belongs to a different client tenant. Cross-tenant access rejected.");
+            }
 
-        // Package State Validation: Cannot report exception on cancelled or open package
-        if (package.Status == PackageStatus.Cancelled || package.Status == PackageStatus.Open)
-        {
-            throw new InvalidDomainStateException($"Cannot report exception for package '{package.PackageNumber}' in status '{package.Status}'.");
-        }
+            if (_tenantProvider.TenantId.HasValue &&
+                !_tenantProvider.BypassTenantFilter &&
+                _tenantProvider.TenantId.Value != package.ClientId)
+            {
+                throw new UnauthorizedException("Unauthorized cross-tenant driver exception reporting attempt.");
+            }
 
-        // 4. Create Driver Delivery Exception
-        var severity = ShipmentDeliveryException.DetermineDefaultSeverity(request.ExceptionType);
-        var carrierCode = string.IsNullOrWhiteSpace(package.CarrierCode) ? "DRIVER" : package.CarrierCode.Trim().ToUpperInvariant();
-        var trackingNumber = package.TrackingNumber ?? package.PackageNumber;
+            // Facility Authorization
+            if (_currentUserContext.FacilityId.HasValue &&
+                _currentUserContext.FacilityId.Value != package.FacilityId &&
+                !_currentUserContext.IsSuperAdmin)
+            {
+                throw new ForbiddenException($"User is not authorized for package facility '{package.FacilityId}'.");
+            }
 
-        var driverFingerprint = ShipmentDeliveryException.ComputeEventFingerprint(
-            package.ClientId,
-            carrierCode,
-            trackingNumber,
-            $"DRIVER_{driverUserId}_{request.OccurredAtUtc:yyyyMMddHHmmss}",
-            request.ExceptionType.ToString(),
-            request.OccurredAtUtc);
+            // Package State Validation: Cannot report exception on cancelled or open package
+            if (package.Status == PackageStatus.Cancelled || package.Status == PackageStatus.Open)
+            {
+                throw new InvalidDomainStateException($"Cannot report exception for package '{package.PackageNumber}' in status '{package.Status}'.");
+            }
 
-        var deliveryException = new ShipmentDeliveryException
-        {
-            ClientId = package.ClientId,
-            FacilityId = package.FacilityId,
-            PackageId = package.Id,
-            ShipmentId = package.ShipmentId,
-            OrderId = package.OutboundOrderId,
-            TrackingNumber = trackingNumber,
-            CarrierCode = carrierCode,
-            ExceptionType = request.ExceptionType,
-            Status = DeliveryExceptionStatus.Open,
-            Severity = severity,
-            CarrierExceptionCode = "DRIVER_REPORTED",
-            CarrierDescription = request.DriverNotes.Trim(),
-            OccurredAtUtc = request.OccurredAtUtc,
-            Source = DeliveryExceptionSource.DriverHandheld,
-            ReportedByUserId = driverUserId,
-            Latitude = request.Latitude,
-            Longitude = request.Longitude,
-            EventFingerprint = driverFingerprint
-        };
+            // 4. Create Driver Delivery Exception
+            var severity = ShipmentDeliveryException.DetermineDefaultSeverity(request.ExceptionType);
+            var carrierCode = string.IsNullOrWhiteSpace(package.CarrierCode) ? "DRIVER" : package.CarrierCode.Trim().ToUpperInvariant();
+            var trackingNumber = package.TrackingNumber ?? package.PackageNumber;
 
-        deliveryException.ValidateRelationships(package, package.Shipment, package.OutboundOrder);
-        _context.ShipmentDeliveryExceptions.Add(deliveryException);
+            var driverFingerprint = ShipmentDeliveryException.ComputeEventFingerprint(
+                package.ClientId,
+                carrierCode,
+                trackingNumber,
+                $"DRIVER_{driverUserId}_{request.OccurredAtUtc:yyyyMMddHHmmss}",
+                request.ExceptionType.ToString(),
+                request.OccurredAtUtc);
 
-        // 5. Append Immutable Tracking Event
-        var trackingFp = ComputeTrackingFingerprint(package.ClientId, carrierCode, trackingNumber, null, $"DRIVER_EXC_{request.OccurredAtUtc.Ticks}", request.OccurredAtUtc);
-        _context.ShipmentTrackingEvents.Add(new ShipmentTrackingEvent
-        {
-            ClientId = package.ClientId,
-            FacilityId = package.FacilityId,
-            PackageId = package.Id,
-            ShipmentId = package.ShipmentId,
-            TrackingNumber = trackingNumber,
-            CarrierCode = carrierCode,
-            CarrierEventCode = "DRIVER_REPORTED",
-            MilestoneStatus = TrackingMilestoneStatus.DeliveryException,
-            CarrierDescription = request.DriverNotes.Trim(),
-            OccurredAtUtc = request.OccurredAtUtc,
-            ReceivedAtUtc = DateTime.UtcNow,
-            EventFingerprint = trackingFp
-        });
+            var deliveryException = new ShipmentDeliveryException
+            {
+                ClientId = package.ClientId,
+                FacilityId = package.FacilityId,
+                PackageId = package.Id,
+                ShipmentId = package.ShipmentId,
+                OrderId = package.OutboundOrderId,
+                TrackingNumber = trackingNumber,
+                CarrierCode = carrierCode,
+                ExceptionType = request.ExceptionType,
+                Status = DeliveryExceptionStatus.Open,
+                Severity = severity,
+                CarrierExceptionCode = "DRIVER_REPORTED",
+                CarrierDescription = request.DriverNotes.Trim(),
+                OccurredAtUtc = request.OccurredAtUtc,
+                Source = DeliveryExceptionSource.DriverHandheld,
+                ReportedByUserId = driverUserId,
+                Latitude = request.Latitude,
+                Longitude = request.Longitude,
+                EventFingerprint = driverFingerprint
+            };
 
-        // 6. Update Package Tracking Status & Rollup
-        package.CurrentTrackingStatus = TrackingMilestoneStatus.DeliveryException;
-        package.TrackingStatusUpdatedAtUtc = DateTime.UtcNow;
+            deliveryException.ValidateRelationships(package, package.Shipment, package.OutboundOrder);
+            _context.ShipmentDeliveryExceptions.Add(deliveryException);
 
-        if (package.Shipment != null)
-        {
-            package.Shipment.RecalculateDeliveryStatus();
-        }
+            // 5. Append Immutable Tracking Event
+            var trackingFp = ComputeTrackingFingerprint(package.ClientId, carrierCode, trackingNumber, null, $"DRIVER_EXC_{request.OccurredAtUtc.Ticks}", request.OccurredAtUtc);
+            _context.ShipmentTrackingEvents.Add(new ShipmentTrackingEvent
+            {
+                ClientId = package.ClientId,
+                FacilityId = package.FacilityId,
+                PackageId = package.Id,
+                ShipmentId = package.ShipmentId,
+                TrackingNumber = trackingNumber,
+                CarrierCode = carrierCode,
+                CarrierEventCode = "DRIVER_REPORTED",
+                MilestoneStatus = TrackingMilestoneStatus.DeliveryException,
+                CarrierDescription = request.DriverNotes.Trim(),
+                OccurredAtUtc = request.OccurredAtUtc,
+                ReceivedAtUtc = DateTime.UtcNow,
+                EventFingerprint = trackingFp
+            });
 
-        if (package.OutboundOrder != null)
-        {
-            package.OutboundOrder.RecalculateDeliveryStatus();
-        }
+            // 6. Update Package Tracking Status & Rollup
+            package.CurrentTrackingStatus = TrackingMilestoneStatus.DeliveryException;
+            package.TrackingStatusUpdatedAtUtc = DateTime.UtcNow;
 
-        await _context.SaveChangesAsync(cancellationToken);
+            if (package.Shipment != null)
+            {
+                package.Shipment.RecalculateDeliveryStatus();
+            }
 
-        return new DeliveryExceptionResult
-        {
-            IsSuccess = true,
-            IsDuplicate = false,
-            ExceptionId = deliveryException.Id,
-            PackageId = package.Id,
-            ShipmentId = package.ShipmentId,
-            OrderId = package.OutboundOrderId,
-            TrackingNumber = trackingNumber,
-            CarrierCode = carrierCode,
-            ExceptionType = request.ExceptionType,
-            Status = deliveryException.Status,
-            Severity = severity,
-            PackageTrackingStatus = package.CurrentTrackingStatus,
-            OrderDeliveryStatus = package.OutboundOrder?.DeliveryStatus ?? OrderDeliveryStatus.DeliveryException,
-            Message = "Driver delivery exception recorded successfully."
-        };
+            if (package.OutboundOrder != null)
+            {
+                package.OutboundOrder.RecalculateDeliveryStatus();
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return new DeliveryExceptionResult
+            {
+                IsSuccess = true,
+                IsDuplicate = false,
+                ExceptionId = deliveryException.Id,
+                PackageId = package.Id,
+                ShipmentId = package.ShipmentId,
+                OrderId = package.OutboundOrderId,
+                TrackingNumber = trackingNumber,
+                CarrierCode = carrierCode,
+                ExceptionType = request.ExceptionType,
+                Status = deliveryException.Status,
+                Severity = severity,
+                PackageTrackingStatus = package.CurrentTrackingStatus,
+                OrderDeliveryStatus = package.OutboundOrder?.DeliveryStatus ?? OrderDeliveryStatus.DeliveryException,
+                Message = "Driver delivery exception recorded successfully."
+            };
+        }, cancellationToken);
     }
 
     public async Task<DeliveryExceptionResult> ResolveExceptionAsync(

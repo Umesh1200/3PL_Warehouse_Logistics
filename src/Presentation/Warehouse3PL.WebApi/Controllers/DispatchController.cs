@@ -112,6 +112,30 @@ public class DispatchController : BaseApiController
         return Ok(result);
     }
 
+    [HttpPost("shipments/{id:guid}/acknowledge-custody")]
+    [HasPermission(Permissions.Dispatch.ExecuteDelivery)]
+    [ProducesResponseType(typeof(AcknowledgeShipmentCustodyResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    public async Task<IActionResult> AcknowledgeCustody(
+        [FromRoute] Guid id,
+        [FromBody] AcknowledgeShipmentCustodyApiRequest request,
+        CancellationToken ct)
+    {
+        var result = await Mediator.Send(new AcknowledgeShipmentCustodyCommand(
+            id,
+            request.DriverSignature,
+            request.DriverLicenseNumber,
+            request.TrailerNumber,
+            request.SealNumber,
+            request.ExpectedVersion,
+            request.Notes), ct);
+
+        return Ok(result);
+    }
+
     [HttpPost("shipments/{shipmentId:guid}/sync-tracking")]
     [HasPermission(Permissions.Dispatch.ManageRuns)]
     [ProducesResponseType(typeof(SyncShipmentTrackingResult), StatusCodes.Status200OK)]
@@ -648,6 +672,14 @@ public sealed record AssignShipmentDriverApiRequest(
     Guid? DriverUserId,
     uint? ExpectedVersion = null,
     string? Reason = null);
+
+public sealed record AcknowledgeShipmentCustodyApiRequest(
+    string DriverSignature,
+    string? DriverLicenseNumber = null,
+    string? TrailerNumber = null,
+    string? SealNumber = null,
+    uint? ExpectedVersion = null,
+    string? Notes = null);
 
 public sealed record SubmitProofOfDeliveryApiRequest
 {

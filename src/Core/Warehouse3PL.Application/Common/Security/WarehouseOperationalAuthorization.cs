@@ -324,7 +324,8 @@ public class WarehouseOperationalAuthorization
                     s.ClientId,
                     s.FacilityId,
                     s.Status,
-                    s.AssignedDriverUserId
+                    s.AssignedDriverUserId,
+                    s.CustodyStatus
                 })
                 .FirstOrDefaultAsync(ct);
 
@@ -347,6 +348,12 @@ public class WarehouseOperationalAuthorization
                     $"Driver '{driverUserId}' is not currently assigned to shipment '{shipment.Id}'.");
             }
 
+            if (shipment.CustodyStatus != ShipmentCustodyStatus.Confirmed)
+            {
+                throw new ForbiddenException(
+                    $"Driver '{driverUserId}' has not completed custody handover acknowledgment for shipment '{shipment.Id}' (status: '{shipment.CustodyStatus}').");
+            }
+
             var latestCustodyTransfer = await _db.ShipmentCustodyTransfers
                 .IgnoreQueryFilters()
                 .AsNoTracking()
@@ -355,12 +362,21 @@ public class WarehouseOperationalAuthorization
                             t.FacilityId == shipment.FacilityId)
                 .OrderByDescending(t => t.TransferredAtUtc)
                 .ThenByDescending(t => t.Id)
-                .Select(t => new { t.Id, t.AssignedDriverUserId })
+                .Select(t => new
+                {
+                    t.Id,
+                    t.AssignedDriverUserId,
+                    t.CustodyStatus,
+                    t.DriverSignatureAcknowledgment
+                })
                 .FirstOrDefaultAsync(ct);
 
             if (latestCustodyTransfer == null ||
                 !latestCustodyTransfer.AssignedDriverUserId.HasValue ||
-                latestCustodyTransfer.AssignedDriverUserId.Value != driverUserId)
+                latestCustodyTransfer.AssignedDriverUserId.Value != driverUserId ||
+                latestCustodyTransfer.CustodyStatus != ShipmentCustodyStatus.Confirmed ||
+                string.IsNullOrWhiteSpace(latestCustodyTransfer.DriverSignatureAcknowledgment) ||
+                latestCustodyTransfer.DriverSignatureAcknowledgment.StartsWith("SUPERVISOR_CUSTODY_REASSIGNMENT:", StringComparison.OrdinalIgnoreCase))
             {
                 throw new ForbiddenException(
                     $"Driver '{driverUserId}' does not hold verified active custody transfer for shipment '{shipment.Id}'.");
@@ -402,6 +418,74 @@ public class WarehouseOperationalAuthorization
 
         await ValidateCourierPackageAccessAsync(package, ct);
         return package;
+    }
+
+    /// <summary>
+    /// Enforces authoritative POD evidence source authorization bound to caller identity and operation context:
+    /// - Driver: strictly DriverHandheld only.
+    /// - Client: denied in interactive courier/supervisor operations; outside interactive courier endpoints only ConsigneePortal is allowed.
+    /// - Staff/SuperAdmin: in interactive operations, strictly ManualVerification (with auditable reason) or DriverHandheld;
+    ///   CarrierApi and ConsigneePortal are reserved for their respective trusted integrations.
+    /// </summary>
+    public static void ValidatePodEvidenceSourceAuthorization(
+        ICurrentUserContext currentUser,
+        PodEvidenceSource evidenceSource,
+        string? verificationReason,
+        bool enforceInteractivePolicy)
+    {
+        if (!currentUser.IsAuthenticated)
+        {
+            throw new UnauthorizedException("Authentication is required to submit Proof of Delivery evidence.");
+        }
+
+        if (currentUser.UserType == UserType.Driver)
+        {
+            if (evidenceSource != PodEvidenceSource.DriverHandheld)
+            {
+                throw new ForbiddenException(
+                    $"Drivers may submit only '{PodEvidenceSource.DriverHandheld}' Proof of Delivery evidence (attempted: '{evidenceSource}').");
+            }
+
+            return;
+        }
+
+        if (currentUser.UserType == UserType.Client)
+        {
+            if (enforceInteractivePolicy || evidenceSource != PodEvidenceSource.ConsigneePortal)
+            {
+                throw new ForbiddenException(
+                    $"Client accounts are not permitted to submit '{evidenceSource}' Proof of Delivery evidence on this operation.");
+            }
+
+            return;
+        }
+
+        var isAuthorizedStaffOrAdmin =
+            currentUser.UserType == UserType.Staff ||
+            (currentUser.IsSuperAdmin && currentUser.UserType == UserType.Staff);
+
+        if (!isAuthorizedStaffOrAdmin)
+        {
+            throw new ForbiddenException("Caller identity type is not authorized for Proof of Delivery submission.");
+        }
+
+        if (enforceInteractivePolicy)
+        {
+            if (evidenceSource != PodEvidenceSource.ManualVerification &&
+                evidenceSource != PodEvidenceSource.DriverHandheld)
+            {
+                throw new ForbiddenException(
+                    $"Evidence source '{evidenceSource}' must originate from its trusted integration and cannot be submitted through interactive courier/dispatch endpoints.");
+            }
+
+            if (evidenceSource == PodEvidenceSource.ManualVerification &&
+                string.IsNullOrWhiteSpace(verificationReason))
+            {
+                throw new Warehouse3PL.Domain.Exceptions.ValidationException(
+                    nameof(verificationReason),
+                    "Manual verification requires an auditable operational reason.");
+            }
+        }
     }
 }
 

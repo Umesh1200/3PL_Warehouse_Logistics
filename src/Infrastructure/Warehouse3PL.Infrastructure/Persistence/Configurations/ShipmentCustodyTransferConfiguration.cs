@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Warehouse3PL.Domain.Entities.Outbound;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Infrastructure.Persistence.Configurations;
 
@@ -73,6 +74,13 @@ public class ShipmentCustodyTransferConfiguration : IEntityTypeConfiguration<Shi
 
         builder.Property(c => c.AssignedDriverUserId)
             .HasColumnName("assigned_driver_user_id");
+
+        builder.Property(c => c.CustodyStatus)
+            .HasColumnName("custody_status")
+            .HasConversion<string>()
+            .HasMaxLength(30)
+            .HasDefaultValue(ShipmentCustodyStatus.Confirmed)
+            .IsRequired();
 
         builder.Property(c => c.TransferredAtUtc)
             .HasColumnName("transferred_at_utc")

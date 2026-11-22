@@ -642,6 +642,7 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
             TotalWeightKg = shipment.TotalWeightKg,
             AuthorizedByUserId = request.AuthorizedUserId,
             AssignedDriverUserId = effectiveAssignedDriverUserId,
+            CustodyStatus = ShipmentCustodyStatus.Confirmed,
             TransferredAtUtc = DateTime.UtcNow,
             Notes = request.Notes
         };
@@ -650,6 +651,9 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
         // 5. Update Shipment to Dispatched (Zero physical inventory quantity modification)
         shipment.Status = ShipmentStatus.Dispatched;
         shipment.AssignedDriverUserId = effectiveAssignedDriverUserId;
+        shipment.CustodyStatus = effectiveAssignedDriverUserId.HasValue
+            ? ShipmentCustodyStatus.Confirmed
+            : ShipmentCustodyStatus.Unassigned;
         shipment.TrailerNumber = custody.TrailerNumber;
         shipment.SealNumber = custody.SealNumber;
         shipment.DispatchedAtUtc = custody.TransferredAtUtc;

@@ -1,6 +1,7 @@
 using Warehouse3PL.Domain.Common;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Security;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Domain.Entities.Outbound;
 
@@ -28,6 +29,7 @@ public class ShipmentCustodyTransfer : BaseEntity<Guid>, ITenantEntity
 
     public Guid AuthorizedByUserId { get; set; }
     public Guid? AssignedDriverUserId { get; set; }
+    public ShipmentCustodyStatus CustodyStatus { get; set; } = ShipmentCustodyStatus.Confirmed;
     public DateTime TransferredAtUtc { get; set; } = DateTime.UtcNow;
     public string? Notes { get; set; }
 

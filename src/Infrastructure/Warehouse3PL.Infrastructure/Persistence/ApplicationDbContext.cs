@@ -1,3 +1,4 @@
+using System.Collections.Concurrent;
 using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -23,6 +24,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private readonly ICurrentUserContext _currentUser;
     private readonly AuditableEntityInterceptor _auditableEntityInterceptor;
     private IDbContextTransaction? _currentTransaction;
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryShipmentLocks = new();
 
     public ApplicationDbContext(
         DbContextOptions<ApplicationDbContext> options,
@@ -291,6 +293,67 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             await RollbackTransactionAsync(cancellationToken);
             throw;
         }
+    }
+
+    public async Task<TResult> ExecuteWithShipmentLockAsync<TResult>(
+        Guid? shipmentId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Database.IsRelational())
+        {
+            SemaphoreSlim? inMemoryGate = null;
+            if (shipmentId.HasValue && shipmentId.Value != Guid.Empty)
+            {
+                inMemoryGate = InMemoryShipmentLocks.GetOrAdd(shipmentId.Value, _ => new SemaphoreSlim(1, 1));
+                await inMemoryGate.WaitAsync(cancellationToken);
+            }
+
+            try
+            {
+                return await action();
+            }
+            finally
+            {
+                inMemoryGate?.Release();
+            }
+        }
+
+        // Reuse an active caller-owned transaction without invoking nested execution strategy retries.
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            if (shipmentId.HasValue && shipmentId.Value != Guid.Empty)
+            {
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM shipments WHERE shipment_id = {shipmentId.Value} FOR UPDATE",
+                    cancellationToken);
+            }
+
+            return await action();
+        }
+
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                if (shipmentId.HasValue && shipmentId.Value != Guid.Empty)
+                {
+                    await Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT 1 FROM shipments WHERE shipment_id = {shipmentId.Value} FOR UPDATE",
+                        cancellationToken);
+                }
+
+                var result = await action();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
     }
 
     public void ClearChangeTracker()

@@ -31,6 +31,8 @@ public class ReportDriverDeliveryExceptionCommandHandler : IRequestHandler<Repor
         OutboundOperationalAuthorization.BindValidatedCourierTenant(_tenantProvider, _currentUser, authorizedPackage.ClientId);
         command.Request.TenantIdOverride = null;
         command.Request.DriverUserId = _currentUser.UserId;
+        command.Request.BeforeCommitCustodyValidationAsync = async ct =>
+            await _warehouseAuth.ValidateCourierPackageAccessByIdAsync(command.Request.PackageId, ct);
 
         return await _deliveryExceptionService.ReportDriverExceptionAsync(command.Request, cancellationToken);
     }

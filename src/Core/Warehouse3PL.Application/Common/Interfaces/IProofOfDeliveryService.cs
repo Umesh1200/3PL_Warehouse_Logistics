@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Application.Common.Interfaces;
@@ -80,6 +81,12 @@ public class SubmitProofOfDeliveryRequest
     // Source-specific audit fields
     public string? VerificationReason { get; set; }
     public string? ConsigneeAcknowledgmentText { get; set; }
+
+    [JsonIgnore]
+    public bool IsInteractiveSubmission { get; set; }
+
+    [JsonIgnore]
+    public Func<CancellationToken, Task>? BeforeCommitCustodyValidationAsync { get; set; }
 }
 
 public class SubmitProofOfDeliveryResult

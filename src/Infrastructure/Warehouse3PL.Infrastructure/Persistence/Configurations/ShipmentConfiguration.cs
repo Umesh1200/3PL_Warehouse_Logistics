@@ -82,6 +82,13 @@ public class ShipmentConfiguration : IEntityTypeConfiguration<Shipment>
         builder.Property(s => s.AssignedDriverUserId)
             .HasColumnName("assigned_driver_user_id");
 
+        builder.Property(s => s.CustodyStatus)
+            .HasColumnName("custody_status")
+            .HasConversion<string>()
+            .HasMaxLength(30)
+            .HasDefaultValue(ShipmentCustodyStatus.Unassigned)
+            .IsRequired();
+
         builder.Property(s => s.TrailerNumber)
             .HasColumnName("trailer_number")
             .HasMaxLength(100);

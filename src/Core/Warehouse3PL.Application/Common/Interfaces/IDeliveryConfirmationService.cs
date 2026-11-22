@@ -1,3 +1,4 @@
+using System.Text.Json.Serialization;
 using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Application.Common.Interfaces;
@@ -32,6 +33,9 @@ public class ConfirmPackageDeliveryRequest
     public DateTime? DeliveredAtUtcOverride { get; set; }
     public string? ConfirmationNotes { get; set; }
     public Guid? TenantIdOverride { get; set; }
+
+    [JsonIgnore]
+    public Func<CancellationToken, Task>? BeforeCommitCustodyValidationAsync { get; set; }
 }
 
 public class DeliveryConfirmationResult
