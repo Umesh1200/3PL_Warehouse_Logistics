@@ -2596,7 +2596,7 @@ try
 
     // 7.5a Positive-quantity short-pick (2m picked + 3m discrepancy) executes cleanly via HTTP in one atomic transaction
     using (var okShortResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{p5TaskOkId}/short-pick", bOpAId, facilityId, Permissions.Outbound.Pick,
-        new { quantityPicked = 2m, reason = (int)ShortPickReason.DamagedStock, notes = "PG partial pick 2/5", scannedLocationBarcode = "PG-P5-OK", scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-P5" })))
+        new { quantityPicked = 2m, reason = (int)ShortPickReason.BinEmpty, notes = "PG partial pick 2/5", scannedLocationBarcode = "PG-P5-OK", scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-P5" })))
     {
         if (okShortResp.StatusCode != HttpStatusCode.OK)
             throw new InvalidOperationException($"P74-0B-05: positive-quantity short-pick failed with {okShortResp.StatusCode}: {await okShortResp.Content.ReadAsStringAsync()}");
