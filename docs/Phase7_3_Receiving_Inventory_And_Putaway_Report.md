@@ -1,12 +1,17 @@
 # Phase 7.3: Goods Receiving, Directed Putaway, and Inventory Stock Ledger Integration — Consolidated Closure Report
 
 **Target Subphase:** Phase 7.3  
-**Status:** CONSOLIDATED FINAL CLOSURE SIGN-OFF / FULLY VERIFIED & SUBMITTED FOR FORMAL PHASE ACCEPTANCE  
+**Status:** FORMALLY ACCEPTED & CLOSED (Independent Audit Sign-Off: November 22, 2026)  
 **Branch:** `feature/phase-7-enterprise-frontend`  
-**Accepted Baseline Commit SHA:** [`1a67a71640df28dfbd1c5cdd5363f2a0e77a45c5`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/commit/1a67a71640df28dfbd1c5cdd5363f2a0e77a45c5)  
-**Parent Specification:** [Phase7_3_Receiving_Inventory_And_Putaway_Specification.md](file:///C:/Users/DELL/.gemini/antigravity/brain/3ef5018b-e9e3-4374-9eca-184b02ff2c4e/Phase7_3_Receiving_Inventory_And_Putaway_Specification.md)  
-**Upstream Integration Specification:** [Phase7_Enterprise_Frontend_Integration_Specification.md](file:///C:/Users/DELL/.gemini/antigravity/brain/3ef5018b-e9e3-4374-9eca-184b02ff2c4e/Phase7_Enterprise_Frontend_Integration_Specification.md)  
-**GitHub Actions PostgreSQL CI Run:** [Run 44923374233 / Success Workflow](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/44923374233)  
+**Accepted Implementation Baseline SHA:** [`1a67a71640df28dfbd1c5cdd5363f2a0e77a45c5`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/commit/1a67a71640df28dfbd1c5cdd5363f2a0e77a45c5)  
+**Consolidated Documentation Baseline SHA:** [`147d14e9e5a651bca908b0ab8f4887c8b7655268`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/commit/147d14e9e5a651bca908b0ab8f4887c8b7655268)  
+**Repository Architecture & Audit References:**  
+- [ADR-007: Metadata-Driven UI Architecture](adr/ADR-007-Metadata-Driven-UI-Architecture.md)  
+- [Control Tower Visual Audit](audits/control-tower/README.md)  
+- [Receiving & RF Putaway Visual Audit](audits/receiving-putaway/README.md)  
+- [Phase 7.3 PostgreSQL Verifier](../tests/verification/Phase73PostgresCheck/Program.cs) ([CI Workflow](../.github/workflows/phase73-postgres-verification.yml))  
+**Specifications (External Audit Reference):** `Phase7_3_Receiving_Inventory_And_Putaway_Specification.md`, `Phase7_Enterprise_Frontend_Integration_Specification.md`  
+**GitHub Actions PostgreSQL CI Runs:** [Run 44923374233](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/44923374233) (implementation baseline) | [Run 44987222683](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/44987222683) (documentation baseline)  
 **Review Date:** November 22, 2026  
 
 ---
@@ -26,16 +31,16 @@ This consolidated report unites all five core sub-workstreams of Phase 7.3:
 
 ## 2. Consolidated Verification Metrics by Test Tier
 
-All test tiers have passed with zero failures across live PostgreSQL CI and local test harnesses:
+All test tiers passed across remote PostgreSQL CI and reported local test executions:
 
-| Test Tier / Suite | Target Environment | Result | Scope / Coverage |
+| Test Tier / Suite | Target Environment / Evidence Source | Result | Scope / Coverage |
 | :--- | :--- | :---: | :--- |
-| **Real PostgreSQL Verification Program** (`Phase73PostgresCheck`) | Linux Docker PostgreSQL (GitHub Actions CI Run [44923374233](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/44923374233)) | **3 / 3 Sections PASSED** | Live database validation against commit `1a67a71`:<br>• **Section 1:** Migration upgrade safety from preceding migration, canonical precedence over legacy shadow column, duplicate task deduplication, and partial unique index validation.<br>• **Section 2:** Operational receiving and putaway lifecycle with fault injection rollbacks, retry, 5× parallel concurrent generation requests, multi-item pallets, cross-client shared LPNs, normalized uppercase lot tracking, dual-scan confirmation, duplicate rejection, and stock ledger conservation (100m total conserved).<br>• **Section 2.5:** Targeted PostgreSQL 23505 collision recovery with `ChangeTracker` isolation, exponential backoff with jitter, overlapping generation batches without omission, and strict propagation of unrelated constraint errors.<br>• **Section 3:** Live ASP.NET Core `TestServer` authenticated WebApi journey against PostgreSQL (`PATCH .../complete`, `POST .../generate`, `POST .../confirm`, `GET .../stock`). |
-| **Backend Unit & Integration Tests** (`Warehouse3PL.UnitTests`) | .NET 10 xUnit Test Engine | **1,316 / 1,316 PASSED** | Complete domain, application, and infrastructure suite (zero failures, zero skipped), including 14 dedicated operational lifecycle tests in `GoodsReceivingStockAndPutawayLifecycleTests.cs`. |
-| **Frontend Unit Tests** (`Nexus3PLFrontend Vitest`) | jsdom / Vitest (`src/test/`) | **72 / 72 PASSED** | 6 test suites passing: RBAC shell (`auth-rbac.test.tsx`), metadata UI (`dynamic-metadata.test.tsx`), Control Tower (`control-tower.test.tsx`), inbound inventory & dual-scan (`inbound-inventory.test.tsx`), putaway permissions matrix (`putaway-permissions.test.tsx`), and landing simulator (`landing.test.tsx`). |
-| **Frontend Production Build** | TypeScript + Vite (`npm run build`) | **PASSED** | `tsc --noEmit && vite build`: zero TypeScript errors, clean tree-shaking, production bundle `dist/assets/index-KO0zLFJb.js` (528 kB minified). |
-| **Browser E2E & Accessibility Tests** (`Playwright Chromium`) | Headless Chromium (`e2e/`) | **21 / 21 PASSED** | Real browser verification across Desktop, Tablet, Mobile (375px), and Small Mobile (320px): WCAG 2.1 AA / 2.2 accessibility, auth session lifecycle, inbound receiving flow, modal keyboard trapping, and responsive reflow. |
-| **Visual Audit Evidence Suite** | `docs/audits/receiving-putaway/` | **17 / 17 ACCEPTED** | Complete multi-viewport screenshot matrix verified by independent audit on GitHub at commit `1a67a71`. |
+| **Real PostgreSQL Verification Program** (`Phase73PostgresCheck`) | Linux Docker PostgreSQL — Independently verified in GitHub Actions CI ([Run 44923374233](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/44923374233) & [Run 44987222683](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/44987222683)) | **5 / 5 Sections PASSED** | Live PostgreSQL & `WebApplication` `TestServer` verification:<br>• **Section 1:** Migration upgrade safety from preceding migration, canonical precedence over legacy shadow column, duplicate task deduplication, and partial unique index validation.<br>• **Section 2 (& 2.5):** Operational receiving and putaway lifecycle with fault injection rollbacks, retry, 5× parallel concurrent generation requests, multi-item pallets, cross-client shared LPNs, normalized uppercase lot tracking, dual-scan confirmation, duplicate rejection, stock ledger conservation, and PostgreSQL `23505` collision recovery with `ChangeTracker` isolation, overlapping batches without omission, and strict propagation of unrelated constraint errors.<br>• **Section 3:** Live ASP.NET Core `TestServer` authenticated inbound WebApi journey against PostgreSQL (`PATCH .../complete`, `POST .../generate`, `POST .../confirm`, `GET .../stock`).<br>• **Section 4:** Authoritative metadata schema resolution (`GET /api/v1/schemas/Client`), negative `403` authorization checks, lowercase `AccountCode` `400` validation, `POST /api/v1/clients`, server-side filtering/sorting, string enum preservation on `PUT`, non-staff multi-tenant fail-closed `403` isolation, and soft delete.<br>• **Section 5:** Control Tower summary (`GET /api/v1/control-tower/summary`), negative analytics `403` check, active putaway queue filtering (`Pending`, `Assigned`, `InTransit`), and floor-operator RBAC & facility isolation checks on `/api/v1/putaway/tasks/next` and `/api/v1/receiving/sessions`. |
+| **Backend Unit & Integration Tests** (`Warehouse3PL.UnitTests`) | .NET 10 xUnit Test Engine (Reported local execution) | **1,316 / 1,316 PASSED** | Complete domain, application, and infrastructure suite (zero failures, zero skipped), including 14 dedicated operational lifecycle tests in `GoodsReceivingStockAndPutawayLifecycleTests.cs`. |
+| **Frontend Unit Tests** (`Nexus3PLFrontend Vitest`) | jsdom / Vitest (`src/test/`) (Reported local execution) | **72 / 72 PASSED** | 6 test suites passing: RBAC shell (`auth-rbac.test.tsx`), metadata UI (`metadata-ui.test.tsx`), Control Tower (`control-tower.test.tsx`), inbound inventory & dual-scan (`inbound-inventory.test.tsx`), putaway permissions matrix (`putaway-permissions.test.tsx`), and landing simulator (`landing.test.tsx`). |
+| **Frontend Production Build** | TypeScript + Vite (`npm run build`) (Reported local execution) | **PASSED** | `tsc --noEmit && vite build`: zero TypeScript errors, clean tree-shaking, production bundle output cleanly verified. |
+| **Browser E2E & Automated Accessibility Tests** (`Playwright Chromium`) | Headless Chromium (`e2e/`) (Reported local execution) | **21 / 21 PASSED** | Real browser verification across Desktop, Tablet, Mobile (375px), and Small Mobile (320px): targeted automated accessibility checks, auth session lifecycle, inbound receiving flow, modal keyboard trapping, and responsive reflow. |
+| **Visual Audit Evidence Suite** | `docs/audits/receiving-putaway/` (Independently inspected on GitHub) | **17 / 17 ACCEPTED** | Complete multi-viewport screenshot matrix verified by independent audit on GitHub at commit `1a67a71`. |
 
 ---
 
@@ -126,6 +131,8 @@ The independent auditor identified two non-blocking hardening opportunities. As 
 
 ---
 
-## 7. Closure Recommendation
+## 7. Formal Closure Decision
 
-Based on the verified results across live PostgreSQL CI ([Run 44923374233](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/44923374233)), 1,316 backend tests, 72 frontend unit tests, 21 browser E2E tests, and the 17 accepted GitHub visual artifacts at baseline [`1a67a71`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/commit/1a67a71640df28dfbd1c5cdd5363f2a0e77a45c5), **Phase 7.3 is fully ready for final phase-level sign-off and closure.**
+Based on independent verification across live PostgreSQL CI ([Run 44923374233](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/44923374233) & [Run 44987222683](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/44987222683)), 1,316 backend tests, 72 frontend unit tests, 21 browser E2E tests, and the 17 accepted GitHub visual artifacts at baseline [`1a67a71`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/commit/1a67a71640df28dfbd1c5cdd5363f2a0e77a45c5), **Phase 7.3 is formally accepted and closed as of November 22, 2026.**
+
+The next planning gate may evaluate **Phase 7.4 (Outbound, Transportation & Courier Operations)** readiness (scope, dependencies, API contracts, permissions, and integration gates); Phase 7.4 implementation remains strictly held until separately authorized.
