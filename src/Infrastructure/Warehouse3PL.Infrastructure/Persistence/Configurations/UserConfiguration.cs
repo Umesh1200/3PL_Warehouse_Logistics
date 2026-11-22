@@ -22,6 +22,12 @@ public class UserConfiguration : IEntityTypeConfiguration<User>
         // B-Tree index on client_id per DB-SPEC-3PL-2026
         builder.HasIndex(u => u.ClientId);
 
+        builder.Property(u => u.AssignedFacilityId)
+            .HasColumnName("assigned_facility_id")
+            .IsRequired(false);
+
+        builder.HasIndex(u => u.AssignedFacilityId);
+
         builder.Property(u => u.Email)
             .HasColumnName("email")
             .HasMaxLength(255)
@@ -83,6 +89,11 @@ public class UserConfiguration : IEntityTypeConfiguration<User>
         builder.Property(u => u.UpdatedBy).HasColumnName("updated_by");
 
         // Relationships
+        builder.HasOne(u => u.AssignedFacility)
+            .WithMany()
+            .HasForeignKey(u => u.AssignedFacilityId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         builder.HasMany(u => u.UserRoles)
             .WithOne(ur => ur.User)
             .HasForeignKey(ur => ur.UserId)

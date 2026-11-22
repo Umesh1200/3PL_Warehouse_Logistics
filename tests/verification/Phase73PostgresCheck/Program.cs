@@ -217,7 +217,8 @@ try
                 (SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.role_id = rp.role_id WHERE r.role_name = 'ClientAdmin' AND rp.permission_key IN ('outbound:orders:view','outbound:orders:create','outbound:orders:import','outbound:orders:cancel','dispatch:view')) AS allowed_order_count,
                 (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'carrier_webhook_nonces' AND indexname = 'ix_carrier_webhook_nonces_carrier_code_nonce') AS nonce_idx_exists,
                 (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'carrier_webhook_nonces' AND column_name IN ('status','attempt_count','processing_lease_expires_at_utc','processed_at_utc','claim_token')) AS nonce_state_cols,
-                (SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'carrier_webhook_audit_logs') AS audit_tbl_exists;
+                (SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'carrier_webhook_audit_logs') AS audit_tbl_exists,
+                (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'assigned_facility_id') AS user_fac_col;
         ", sqlConn))
         {
             await using var r = await p74Cmd.ExecuteReaderAsync();
@@ -227,9 +228,10 @@ try
             var nonceIdxExists = r.GetInt64(2);
             var nonceStateCols = r.GetInt64(3);
             var auditTblExists = r.GetInt64(4);
-            if (obsoleteCount != 0 || allowedOrderCount != 5 || nonceIdxExists != 1 || nonceStateCols != 5 || auditTblExists != 1)
-                throw new InvalidOperationException($"Phase 7.4.0A migration check failed: obsolete={obsoleteCount}, allowed={allowedOrderCount}, nonceIdx={nonceIdxExists}, nonceStateCols={nonceStateCols}, auditTbl={auditTblExists}");
-            Console.WriteLine("PASS Phase 7.4.0A migrations reconciled ClientAdmin (including dispatch:view) and created carrier_webhook_nonces state machine/audit_logs on PostgreSQL.");
+            var userFacCol = r.GetInt64(5);
+            if (obsoleteCount != 0 || allowedOrderCount != 5 || nonceIdxExists != 1 || nonceStateCols != 5 || auditTblExists != 1 || userFacCol != 1)
+                throw new InvalidOperationException($"Phase 7.4.0A/B migration check failed: obsolete={obsoleteCount}, allowed={allowedOrderCount}, nonceIdx={nonceIdxExists}, nonceStateCols={nonceStateCols}, auditTbl={auditTblExists}, userFacCol={userFacCol}");
+            Console.WriteLine("PASS Phase 7.4.0A/B migrations reconciled ClientAdmin, webhook state/audit, and users.assigned_facility_id on PostgreSQL.");
         }
 
         // 4b. Verify matching and differing location values:
@@ -2172,6 +2174,9 @@ try
 
     var bOpAId = Guid.NewGuid();
     var bOpBId = Guid.NewGuid();
+    var bForeignOpId = Guid.NewGuid();
+    var bUnassignedOpId = Guid.NewGuid();
+    var bInactiveOpId = Guid.NewGuid();
     var bSupId = user.UserId!.Value;
     var bPackStationId = Guid.NewGuid();
     var bOrderId = Guid.NewGuid();
@@ -2179,9 +2184,20 @@ try
     var bStockId = Guid.NewGuid();
     var bAlloc1Id = Guid.NewGuid();
     var bAlloc2Id = Guid.NewGuid();
+    var bAllocRaceId = Guid.NewGuid();
+    var bAllocPlanId = Guid.NewGuid();
+    var bAllocCancId = Guid.NewGuid();
+    var bAllocOverFailId = Guid.NewGuid();
     var bWaveId = Guid.NewGuid();
+    var bPlanWaveId = Guid.NewGuid();
+    var bCancWaveId = Guid.NewGuid();
     var bTaskClaimId = Guid.NewGuid();
     var bTaskShortId = Guid.NewGuid();
+    var bTaskRaceId = Guid.NewGuid();
+    var bTaskOverFailId = Guid.NewGuid();
+    var bTaskPlanAssignedId = Guid.NewGuid();
+    var bTaskPlanPendingId = Guid.NewGuid();
+    var bTaskCancAssignedId = Guid.NewGuid();
     var bToteId = Guid.NewGuid();
     var bPackSessionId = Guid.NewGuid();
     var bHuCartonElig = Guid.NewGuid();
@@ -2190,8 +2206,11 @@ try
     await using (var bDb = CreateDb(operationalConn, user))
     {
         bDb.Users.AddRange(
-            new User { Id = bOpAId, Email = "pg-opa@740b.test", FirstName = "Pg", LastName = "OpA", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
-            new User { Id = bOpBId, Email = "pg-opb@740b.test", FirstName = "Pg", LastName = "OpB", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" });
+            new User { Id = bOpAId, AssignedFacilityId = facilityId, Email = "pg-opa@740b.test", FirstName = "Pg", LastName = "OpA", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
+            new User { Id = bOpBId, AssignedFacilityId = facilityId, Email = "pg-opb@740b.test", FirstName = "Pg", LastName = "OpB", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
+            new User { Id = bForeignOpId, AssignedFacilityId = p74FacB, Email = "pg-for@740b.test", FirstName = "Pg", LastName = "Foreign", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
+            new User { Id = bUnassignedOpId, AssignedFacilityId = null, Email = "pg-nofac@740b.test", FirstName = "Pg", LastName = "NoFac", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
+            new User { Id = bInactiveOpId, AssignedFacilityId = facilityId, Email = "pg-inact@740b.test", FirstName = "Pg", LastName = "Inactive", UserType = UserType.Staff, Status = UserStatus.Inactive, PasswordHash = "x" });
 
         bDb.Locations.Add(new Location
         {
@@ -2200,23 +2219,36 @@ try
         });
 
         var bOrder = new OutboundOrder { Id = bOrderId, ClientId = client1Id, FacilityId = facilityId, OrderNumber = "PG-740B-ORD1", CustomerName = "PG Buyer", Status = OutboundOrderStatus.Allocated };
-        var bLine = new OutboundOrderLine { Id = bOrderLineId, OutboundOrderId = bOrderId, ItemId = item1Id, LineNumber = 1, QuantityOrdered = 10m, QuantityAllocated = 10m };
+        var bLine = new OutboundOrderLine { Id = bOrderLineId, OutboundOrderId = bOrderId, ItemId = item1Id, LineNumber = 1, QuantityOrdered = 30m, QuantityAllocated = 30m };
         bOrder.Lines.Add(bLine);
         bDb.OutboundOrders.Add(bOrder);
 
         bDb.StockOnHand.Add(new StockOnHand
         {
             Id = bStockId, ClientId = client1Id, FacilityId = facilityId, ItemId = item1Id, LocationId = bin1Id,
-            QtyAvailable = 30m, QtyAllocated = 10m, Version = 1
+            QtyAvailable = 30m, QtyAllocated = 30m, Version = 1
         });
         bDb.InventoryAllocations.AddRange(
             new InventoryAllocation { Id = bAlloc1Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
-            new InventoryAllocation { Id = bAlloc2Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated });
+            new InventoryAllocation { Id = bAlloc2Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = bAllocRaceId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = bAllocPlanId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = bAllocCancId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+            new InventoryAllocation { Id = bAllocOverFailId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, StockOnHandId = bStockId, ItemId = item1Id, LocationId = bin1Id, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated });
 
-        bDb.PickWaves.Add(new PickWave { Id = bWaveId, ClientId = client1Id, FacilityId = facilityId, WaveNumber = "PG-740B-WV1", Priority = 3, Status = PickWaveStatus.Released });
+        bDb.PickWaves.AddRange(
+            new PickWave { Id = bWaveId, ClientId = client1Id, FacilityId = facilityId, WaveNumber = "PG-740B-WV1", Priority = 3, Status = PickWaveStatus.Released },
+            new PickWave { Id = bPlanWaveId, ClientId = client1Id, FacilityId = facilityId, WaveNumber = "PG-740B-PLAN", Priority = 10, Status = PickWaveStatus.Planning },
+            new PickWave { Id = bCancWaveId, ClientId = client1Id, FacilityId = facilityId, WaveNumber = "PG-740B-CANC", Priority = 10, Status = PickWaveStatus.Cancelled });
+
         bDb.PickTasks.AddRange(
             new PickTask { Id = bTaskClaimId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAlloc1Id, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Pending, Version = 1 },
-            new PickTask { Id = bTaskShortId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAlloc2Id, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 2, Status = PickTaskStatus.Pending, Version = 1 });
+            new PickTask { Id = bTaskShortId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAlloc2Id, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 2, Status = PickTaskStatus.Pending, Version = 1 },
+            new PickTask { Id = bTaskRaceId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocRaceId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 3, Status = PickTaskStatus.Pending, Version = 1 },
+            new PickTask { Id = bTaskOverFailId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocOverFailId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 4, Status = PickTaskStatus.Pending, Version = 1 },
+            new PickTask { Id = bTaskPlanAssignedId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bPlanWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocPlanId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Assigned, AssignedUserId = bOpAId, Version = 1 },
+            new PickTask { Id = bTaskPlanPendingId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bPlanWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocPlanId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 2, Status = PickTaskStatus.Pending, Version = 1 },
+            new PickTask { Id = bTaskCancAssignedId, ClientId = client1Id, FacilityId = facilityId, PickWaveId = bCancWaveId, OutboundOrderId = bOrderId, OutboundOrderLineId = bOrderLineId, InventoryAllocationId = bAllocCancId, StockOnHandId = bStockId, ItemId = item1Id, SourceLocationId = bin1Id, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Assigned, AssignedUserId = bOpAId, Version = 1 });
 
         bDb.HandlingUnits.AddRange(
             new HandlingUnit { Id = bToteId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-TOTE-740B", UnitType = HandlingUnitType.Tote, Status = HandlingUnitStatus.Available, CurrentOutboundOrderId = bOrderId },
@@ -2325,7 +2357,7 @@ try
     {
         var bSrc = await bVerifyDb.StockOnHand.SingleAsync(s => s.Id == bStockId);
         var bTote = await bVerifyDb.StockOnHand.SingleAsync(s => s.HandlingUnitId == bToteId);
-        if (bSrc.QtyAvailable != 30m || bSrc.QtyAllocated != 0m || bTote.QtyAllocated != 5m || bTote.QtyAvailable != 0m)
+        if (bSrc.QtyAvailable != 30m || bSrc.QtyAllocated != 20m || bTote.QtyAllocated != 5m || bTote.QtyAvailable != 0m)
             throw new InvalidOperationException($"PostgreSQL stock conservation mismatch: srcAvail={bSrc.QtyAvailable}, srcAlloc={bSrc.QtyAllocated}, toteAlloc={bTote.QtyAllocated}");
 
         var pickTxCount = await bVerifyDb.InventoryTransactions.CountAsync(t => t.ReferenceId == bTaskClaimId && t.TxType == InventoryTxType.Pick);
@@ -2336,6 +2368,139 @@ try
         var overrideHistCount = await bVerifyDb.PickTaskStatusHistories.CountAsync(h => h.PickTaskId == bTaskShortId && h.Reason != null && h.Reason.Contains("Task-management override"));
         if (claimHistCount != 1 || overrideHistCount != 1)
             throw new InvalidOperationException($"PostgreSQL task history mismatch: claimHist={claimHistCount}, overrideHist={overrideHistCount}");
+    }
+
+    // 7.3b P74-0B-01 Released-Wave Enforcement (Planning & Cancelled blocked across /next, /assign, /claim, /confirm, /short-pick)
+    foreach (var blockedId in new[] { bTaskPlanAssignedId, bTaskPlanPendingId, bTaskCancAssignedId })
+    {
+        if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{blockedId}/assign", bSupId, facilityId,
+            $"{Permissions.Outbound.TasksView},{Permissions.Outbound.TasksManage}", new { operatorUserId = bOpBId }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+            throw new InvalidOperationException($"P74-0B-01: expected 422 on /assign for unreleased/cancelled wave task {blockedId}.");
+
+        if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{blockedId}/claim", bOpAId, facilityId,
+            Permissions.Outbound.Pick, new { }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+            throw new InvalidOperationException($"P74-0B-01: expected 422 on /claim for unreleased/cancelled wave task {blockedId}.");
+    }
+    foreach (var blockedAssignedId in new[] { bTaskPlanAssignedId, bTaskCancAssignedId })
+    {
+        if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{blockedAssignedId}/confirm", bOpAId, facilityId,
+            Permissions.Outbound.Pick, new { scannedLocationBarcode = binBarcode, scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-740B", quantity = 5m }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+            throw new InvalidOperationException($"P74-0B-01: expected 422 on /confirm for unreleased/cancelled wave task {blockedAssignedId}.");
+
+        if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{blockedAssignedId}/short-pick", bOpAId, facilityId,
+            Permissions.Outbound.Pick, new { quantityPicked = 0m, reason = 1, notes = "blocked wave" }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+            throw new InvalidOperationException($"P74-0B-01: expected 422 on /short-pick for unreleased/cancelled wave task {blockedAssignedId}.");
+    }
+
+    // 7.3c P74-0B-03 Assignee Facility Authorization (/assign)
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskRaceId}/assign", bSupId, facilityId,
+        $"{Permissions.Outbound.TasksView},{Permissions.Outbound.TasksManage}", new { operatorUserId = bForeignOpId }))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskRaceId}/assign", bSupId, facilityId,
+        $"{Permissions.Outbound.TasksView},{Permissions.Outbound.TasksManage}", new { operatorUserId = bUnassignedOpId }))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskRaceId}/assign", bSupId, facilityId,
+        $"{Permissions.Outbound.TasksView},{Permissions.Outbound.TasksManage}", new { operatorUserId = bInactiveOpId }))).StatusCode != HttpStatusCode.BadRequest)
+        throw new InvalidOperationException("P74-0B-03: assignee facility/status rejection failed on PostgreSQL.");
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskRaceId}/assign", bSupId, facilityId,
+        $"{Permissions.Outbound.TasksView},{Permissions.Outbound.TasksManage}", new { operatorUserId = bOpAId }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("P74-0B-03: valid same-facility staff /assign failed on PostgreSQL.");
+
+    // 7.3d P74-0B-02 Live PostgreSQL Mid-Flight Reassignment Race & Atomic Supervisor Override Rollback
+    // Concurrent reassignment to bOpBId right as bOpAId tries to commit PickExecutionService.ConfirmPickAsync -> DbUpdateConcurrencyException rolls back cleanly!
+    var pgRaceInterceptor = new ConcurrentReassignInterceptor(() =>
+    {
+        using var r = StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskRaceId}/assign", bSupId, facilityId,
+            $"{Permissions.Outbound.TasksView},{Permissions.Outbound.TasksManage}", new { operatorUserId = bOpBId });
+        using var resp = p74Client.SendAsync(r).GetAwaiter().GetResult();
+        if (resp.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Concurrent PostgreSQL /assign failed with {resp.StatusCode}");
+    });
+
+    await using (var raceDb = CreateDb(operationalConn, user, pgRaceInterceptor))
+    {
+        var raceSvc = new PickExecutionService(raceDb, NullLogger<PickExecutionService>.Instance);
+        var concurrencyThrown = false;
+        try
+        {
+            await raceSvc.ConfirmPickAsync(new ConfirmPickRequest
+            {
+                PickTaskId = bTaskRaceId,
+                ScannedLocationBarcode = binBarcode,
+                ScannedItemBarcode = itemSku,
+                ScannedToteLpn = "PG-TOTE-740B",
+                Quantity = 5m,
+                UserId = bOpAId,
+                RequireAssignedOwnership = true,
+                AllowSupervisorOverride = false
+            });
+        }
+        catch (DbUpdateConcurrencyException)
+        {
+            concurrencyThrown = true;
+        }
+        if (!concurrencyThrown)
+            throw new InvalidOperationException("P74-0B-02: expected DbUpdateConcurrencyException on PostgreSQL mid-flight reassignment race.");
+    }
+
+    // Subsequent HTTP /confirm by displaced bOpAId returns 403 Forbidden; new owner bOpBId executes cleanly!
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskRaceId}/confirm", bOpAId, facilityId,
+        Permissions.Outbound.Pick, new { scannedLocationBarcode = binBarcode, scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-740B", quantity = 5m }))).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("P74-0B-02: displaced bOpAId must receive 403 Forbidden after reassignment.");
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskRaceId}/confirm", bOpBId, facilityId,
+        Permissions.Outbound.Pick, new { scannedLocationBarcode = binBarcode, scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-740B", quantity = 5m }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("P74-0B-02: new assignee bOpBId /confirm failed.");
+
+    // Atomic supervisor override rollback verification (ThrowAfterSaveInterceptor rolls back BOTH stock movement AND PickTaskStatusHistory override audit row!)
+    await using (var overFailDb = CreateDb(operationalConn, user, new ThrowAfterSaveInterceptor()))
+    {
+        var overFailSvc = new PickExecutionService(overFailDb, NullLogger<PickExecutionService>.Instance);
+        var rolledBack = false;
+        try
+        {
+            await overFailSvc.ConfirmPickAsync(new ConfirmPickRequest
+            {
+                PickTaskId = bTaskOverFailId,
+                ScannedLocationBarcode = binBarcode,
+                ScannedItemBarcode = itemSku,
+                ScannedToteLpn = "PG-TOTE-740B",
+                Quantity = 5m,
+                UserId = bSupId,
+                RequireAssignedOwnership = true,
+                AllowSupervisorOverride = true,
+                OverrideReason = "PG atomic override rollback check"
+            });
+        }
+        catch (ForcedRollbackException)
+        {
+            rolledBack = true;
+        }
+        if (!rolledBack)
+            throw new InvalidOperationException("P74-0B-02: expected ForcedRollbackException on supervisor override rollback test.");
+    }
+
+    // Complete bTaskOverFailId legitimately via supervisor override so NO active tasks remain in facilityId
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{bTaskOverFailId}/short-pick", bSupId, facilityId,
+        $"{Permissions.Outbound.Pick},{Permissions.Outbound.TasksManage}", new { quantityPicked = 0m, reason = 1, notes = "cleanup override" }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Supervisor override short-pick on bTaskOverFailId failed.");
+
+    await using (var p74BCheckDb = CreateDb(operationalConn, user))
+    {
+        // Stock conservation: 30m - 5m (bTaskClaimId) - 5m (bTaskShortId released) - 5m (bTaskRaceId) - 5m (bTaskOverFailId released) = 10m (bPlan + bCanc); tote = 10m
+        var chkSrc = await p74BCheckDb.StockOnHand.SingleAsync(s => s.Id == bStockId);
+        var chkTote = await p74BCheckDb.StockOnHand.SingleAsync(s => s.HandlingUnitId == bToteId);
+        if (chkSrc.QtyAvailable != 30m || chkSrc.QtyAllocated != 10m || chkTote.QtyAllocated != 10m)
+            throw new InvalidOperationException($"PostgreSQL post-remediation stock conservation mismatch: srcAvail={chkSrc.QtyAvailable}, srcAlloc={chkSrc.QtyAllocated}, toteAlloc={chkTote.QtyAllocated}");
+
+        // Verify zero failed override Pick ledger or Confirm-override history on bTaskOverFailId
+        if (await p74BCheckDb.InventoryTransactions.AnyAsync(t => t.ReferenceId == bTaskOverFailId && t.TxType == InventoryTxType.Pick) ||
+            await p74BCheckDb.PickTaskStatusHistories.AnyAsync(h => h.PickTaskId == bTaskOverFailId && h.Reason != null && h.Reason.Contains("PG atomic override rollback check")))
+            throw new InvalidOperationException("P74-0B-02: rolled-back supervisor override leaked ledger or audit rows in PostgreSQL!");
+
+        // Verify exact single Pick ledger tx for bTaskRaceId (from bOpBId only!)
+        var raceTxs = await p74BCheckDb.InventoryTransactions.Where(t => t.ReferenceId == bTaskRaceId && t.TxType == InventoryTxType.Pick).ToListAsync();
+        if (raceTxs.Count != 1 || raceTxs[0].UserId != bOpBId)
+            throw new InvalidOperationException($"P74-0B-02: expected exactly 1 Pick tx by bOpBId for bTaskRaceId, found {raceTxs.Count}.");
     }
 
     // 7.4 Read endpoints & RBAC separation matrix on PostgreSQL
@@ -2423,6 +2588,19 @@ sealed class ThrowAfterSaveInterceptor : SaveChangesInterceptor
         CancellationToken cancellationToken = default)
     {
         if (Interlocked.Exchange(ref _thrown, 1) == 0) throw new ForcedRollbackException();
+        return ValueTask.FromResult(result);
+    }
+}
+
+sealed class ConcurrentReassignInterceptor(Action onFirstSaving) : SaveChangesInterceptor
+{
+    private int _fired;
+    public override ValueTask<InterceptionResult<int>> SavingChangesAsync(
+        DbContextEventData eventData,
+        InterceptionResult<int> result,
+        CancellationToken cancellationToken = default)
+    {
+        if (Interlocked.Exchange(ref _fired, 1) == 0) onFirstSaving();
         return ValueTask.FromResult(result);
     }
 }

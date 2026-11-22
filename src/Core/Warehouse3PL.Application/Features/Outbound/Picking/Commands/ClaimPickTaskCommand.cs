@@ -55,6 +55,7 @@ public class ClaimPickTaskCommandHandler : IRequestHandler<ClaimPickTaskCommand,
                 t.Status,
                 t.AssignedUserId,
                 t.Version,
+                PickWaveIsDeleted = t.PickWave.IsDeleted,
                 PickWaveStatus = t.PickWave.Status
             })
             .FirstOrDefaultAsync(cancellationToken);
@@ -65,6 +66,13 @@ public class ClaimPickTaskCommandHandler : IRequestHandler<ClaimPickTaskCommand,
         }
 
         _outboundAuth.ValidateStaffMutationFacilityAccess(snapshot.FacilityId, nameof(ClaimPickTaskCommand));
+
+        if (snapshot.PickWaveIsDeleted ||
+            (snapshot.PickWaveStatus != PickWaveStatus.Released && snapshot.PickWaveStatus != PickWaveStatus.InProgress))
+        {
+            throw new InvalidDomainStateException(
+                $"Pick task '{command.PickTaskId}' belongs to wave with status '{snapshot.PickWaveStatus}' and is not released for claiming.");
+        }
 
         if (snapshot.AssignedUserId == callerUserId.Value &&
             (snapshot.Status == PickTaskStatus.Assigned || snapshot.Status == PickTaskStatus.InProgress))
@@ -83,12 +91,6 @@ public class ClaimPickTaskCommandHandler : IRequestHandler<ClaimPickTaskCommand,
                 $"Pick task '{command.PickTaskId}' cannot be claimed in status '{snapshot.Status}'.");
         }
 
-        if (snapshot.PickWaveStatus != PickWaveStatus.Released && snapshot.PickWaveStatus != PickWaveStatus.InProgress)
-        {
-            throw new InvalidDomainStateException(
-                $"Pick task '{command.PickTaskId}' belongs to wave with status '{snapshot.PickWaveStatus}' and is not released for claiming.");
-        }
-
         var isRelational = _context is DbContext dbCtx &&
                            !string.Equals(dbCtx.Database.ProviderName, "Microsoft.EntityFrameworkCore.InMemory", StringComparison.OrdinalIgnoreCase);
         if (isRelational)
@@ -103,7 +105,9 @@ public class ClaimPickTaskCommandHandler : IRequestHandler<ClaimPickTaskCommand,
                                 !t.IsDeleted &&
                                 t.Status == PickTaskStatus.Pending &&
                                 t.AssignedUserId == null &&
-                                t.Version == snapshot.Version)
+                                t.Version == snapshot.Version &&
+                                !t.PickWave.IsDeleted &&
+                                (t.PickWave.Status == PickWaveStatus.Released || t.PickWave.Status == PickWaveStatus.InProgress))
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(t => t.Status, PickTaskStatus.Assigned)
                         .SetProperty(t => t.AssignedUserId, callerUserId.Value)
@@ -116,8 +120,22 @@ public class ClaimPickTaskCommandHandler : IRequestHandler<ClaimPickTaskCommand,
                     var latest = await _context.PickTasks
                         .AsNoTracking()
                         .Where(t => t.Id == command.PickTaskId && !t.IsDeleted)
-                        .Select(t => new { t.Status, t.AssignedUserId })
+                        .Select(t => new
+                        {
+                            t.Status,
+                            t.AssignedUserId,
+                            PickWaveIsDeleted = t.PickWave.IsDeleted,
+                            PickWaveStatus = t.PickWave.Status
+                        })
                         .FirstOrDefaultAsync(cancellationToken);
+
+                    if (latest != null &&
+                        (latest.PickWaveIsDeleted ||
+                         (latest.PickWaveStatus != PickWaveStatus.Released && latest.PickWaveStatus != PickWaveStatus.InProgress)))
+                    {
+                        throw new InvalidDomainStateException(
+                            $"Pick task '{command.PickTaskId}' belongs to wave with status '{latest.PickWaveStatus}' and is not released for claiming.");
+                    }
 
                     if (latest != null &&
                         latest.AssignedUserId == callerUserId.Value &&
@@ -154,6 +172,14 @@ public class ClaimPickTaskCommandHandler : IRequestHandler<ClaimPickTaskCommand,
                 .Include(t => t.PickWave)
                 .FirstOrDefaultAsync(t => t.Id == command.PickTaskId && !t.IsDeleted, cancellationToken)
                 ?? throw new EntityNotFoundException(nameof(PickTask), command.PickTaskId);
+
+            if (tracked.PickWave == null ||
+                tracked.PickWave.IsDeleted ||
+                (tracked.PickWave.Status != PickWaveStatus.Released && tracked.PickWave.Status != PickWaveStatus.InProgress))
+            {
+                throw new InvalidDomainStateException(
+                    $"Pick task '{command.PickTaskId}' belongs to wave with status '{tracked.PickWave?.Status}' and is not released for claiming.");
+            }
 
             if (tracked.AssignedUserId == callerUserId.Value &&
                 (tracked.Status == PickTaskStatus.Assigned || tracked.Status == PickTaskStatus.InProgress))

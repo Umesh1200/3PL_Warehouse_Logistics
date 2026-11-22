@@ -54,12 +54,13 @@ public class GetNextPickTaskQueryHandler : IRequestHandler<GetNextPickTaskQuery,
             .AsNoTracking()
             .Where(t => !t.IsDeleted &&
                         t.FacilityId == facilityId &&
+                        !t.PickWave.IsDeleted &&
+                        (t.PickWave.Status == PickWaveStatus.Released || t.PickWave.Status == PickWaveStatus.InProgress) &&
                         ((hasCallerId &&
                           t.AssignedUserId == callerId &&
                           (t.Status == PickTaskStatus.Assigned || t.Status == PickTaskStatus.InProgress)) ||
                          (t.AssignedUserId == null &&
-                          t.Status == PickTaskStatus.Pending &&
-                          (t.PickWave.Status == PickWaveStatus.Released || t.PickWave.Status == PickWaveStatus.InProgress))))
+                          t.Status == PickTaskStatus.Pending)))
             .OrderByDescending(t => hasCallerId && t.AssignedUserId == callerId)
             .ThenByDescending(t => t.PickWave.Priority)
             .ThenBy(t => t.PickSequence)

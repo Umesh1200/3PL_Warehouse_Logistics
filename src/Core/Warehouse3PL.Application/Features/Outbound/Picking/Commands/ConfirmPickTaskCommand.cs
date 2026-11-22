@@ -71,9 +71,6 @@ public class ConfirmPickTaskCommandHandler : IRequestHandler<ConfirmPickTaskComm
             }
         }
 
-        var usedOverride = isSupervisorOverride &&
-                           (!task.AssignedUserId.HasValue || task.AssignedUserId.Value != callerUserId);
-
         var result = await _executionService.ConfirmPickAsync(new ConfirmPickRequest
         {
             PickTaskId = command.PickTaskId,
@@ -83,22 +80,13 @@ public class ConfirmPickTaskCommandHandler : IRequestHandler<ConfirmPickTaskComm
             ScannedToteLpn = command.ScannedToteLpn,
             Quantity = command.Quantity,
             UserId = callerUserId ?? Guid.Empty,
-            IdempotencyKey = command.IdempotencyKey
+            IdempotencyKey = command.IdempotencyKey,
+            RequireAssignedOwnership = true,
+            AllowSupervisorOverride = isSupervisorOverride,
+            OverrideReason = isSupervisorOverride
+                ? $"Task-management override pick confirmation by supervisor '{callerUserId}'"
+                : null
         }, cancellationToken);
-
-        if (usedOverride)
-        {
-            _context.PickTaskStatusHistories.Add(new PickTaskStatusHistory
-            {
-                PickTaskId = task.Id,
-                FromStatus = task.Status,
-                ToStatus = result.TaskStatus,
-                Reason = $"Task-management override pick confirmation by supervisor '{callerUserId}' (prior assignee: '{task.AssignedUserId?.ToString() ?? "unassigned"}').",
-                ChangedByUserId = callerUserId ?? Guid.Empty,
-                ChangedAtUtc = DateTime.UtcNow
-            });
-            await _context.SaveChangesAsync(cancellationToken);
-        }
 
         return result;
     }

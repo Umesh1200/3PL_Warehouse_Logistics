@@ -53,6 +53,15 @@ public class PickExecutionService : IPickExecutionService
                 throw new EntityNotFoundException(nameof(PickTask), request.PickTaskId);
             }
 
+            var originalStatus = task.Status;
+            var originalAssignedUserId = task.AssignedUserId;
+            var requiresOverrideAudit = ValidateExecutionOwnership(
+                task,
+                request.RequireAssignedOwnership,
+                request.AllowSupervisorOverride,
+                request.UserId,
+                "execute pick confirmation");
+
             // 2. Idempotency & Terminal State Safeguard
             if (task.Status == PickTaskStatus.Completed || task.Status == PickTaskStatus.ShortPicked)
             {
@@ -87,6 +96,8 @@ public class PickExecutionService : IPickExecutionService
             {
                 throw new InvalidDomainStateException($"Cannot confirm pick for cancelled task '{task.Id}'.");
             }
+
+            ValidateReleasedWaveForExecution(task);
 
             // 3. Scan Validation — Location
             if (string.IsNullOrWhiteSpace(request.ScannedLocationBarcode))
@@ -255,6 +266,18 @@ public class PickExecutionService : IPickExecutionService
             // 9. Update Allocation and Task
             allocation.RecordPick(request.Quantity, destStock.Id, tote.Id, tote.LpnCode);
             task.ConfirmPick(request.Quantity, tote.LpnCode, tote.Id, request.UserId);
+            task.Version = unchecked(task.Version + 1u);
+
+            if (requiresOverrideAudit)
+            {
+                AddSupervisorOverrideAudit(
+                    task,
+                    originalStatus,
+                    originalAssignedUserId,
+                    request.UserId,
+                    request.OverrideReason,
+                    "pick confirmation");
+            }
 
             // 10. Record Immutable Inventory Transaction Ledger
             var tx = new InventoryTransaction
@@ -339,6 +362,15 @@ public class PickExecutionService : IPickExecutionService
                 throw new EntityNotFoundException(nameof(PickTask), request.PickTaskId);
             }
 
+            var originalStatus = task.Status;
+            var originalAssignedUserId = task.AssignedUserId;
+            var requiresOverrideAudit = ValidateExecutionOwnership(
+                task,
+                request.RequireAssignedOwnership,
+                request.AllowSupervisorOverride,
+                request.UserId,
+                "report a short-pick");
+
             if (task.Status == PickTaskStatus.Completed || task.Status == PickTaskStatus.ShortPicked)
             {
                 throw new InvalidDomainStateException(
@@ -349,6 +381,8 @@ public class PickExecutionService : IPickExecutionService
             {
                 throw new InvalidDomainStateException($"Cannot report short-pick for cancelled task '{task.Id}'.");
             }
+
+            ValidateReleasedWaveForExecution(task);
 
             var pickedQty = request.QuantityPicked;
             if (pickedQty < 0)
@@ -381,7 +415,9 @@ public class PickExecutionService : IPickExecutionService
                     ScannedToteLpn = request.ScannedToteLpn,
                     Quantity = pickedQty,
                     UserId = request.UserId,
-                    IdempotencyKey = request.IdempotencyKey
+                    IdempotencyKey = request.IdempotencyKey,
+                    RequireAssignedOwnership = false,
+                    AllowSupervisorOverride = false
                 }, cancellationToken);
             }
 
@@ -474,6 +510,18 @@ public class PickExecutionService : IPickExecutionService
 
             // 6. Update Task Status
             task.ReportShortPick(pickedQty, request.Reason, request.Notes, request.UserId);
+            task.Version = unchecked(task.Version + 1u);
+
+            if (requiresOverrideAudit)
+            {
+                AddSupervisorOverrideAudit(
+                    task,
+                    originalStatus,
+                    originalAssignedUserId,
+                    request.UserId,
+                    request.OverrideReason,
+                    "short-pick");
+            }
 
             // 7. Check Wave Completion
             var wave = task.PickWave;
@@ -505,6 +553,72 @@ public class PickExecutionService : IPickExecutionService
                 Message = $"Short-pick recorded ({request.Reason}). Discrepancy of {discrepancyQty} units reported."
             };
         }, cancellationToken);
+    }
+
+    private static bool ValidateExecutionOwnership(
+        PickTask task,
+        bool requireAssignedOwnership,
+        bool allowSupervisorOverride,
+        Guid userId,
+        string operationLabel)
+    {
+        if (!requireAssignedOwnership)
+        {
+            return false;
+        }
+
+        if (userId == Guid.Empty)
+        {
+            throw new ForbiddenException($"Authenticated staff operator identity is required to {operationLabel}.");
+        }
+
+        if (task.AssignedUserId.HasValue && task.AssignedUserId.Value == userId)
+        {
+            return false;
+        }
+
+        if (!allowSupervisorOverride)
+        {
+            throw new ForbiddenException(task.AssignedUserId.HasValue
+                ? "This pick task is assigned to another operator."
+                : $"Pick task must be explicitly claimed by the operator before {operationLabel}.");
+        }
+
+        return true;
+    }
+
+    private static void ValidateReleasedWaveForExecution(PickTask task)
+    {
+        if (task.PickWave == null ||
+            task.PickWave.IsDeleted ||
+            (task.PickWave.Status != PickWaveStatus.Released && task.PickWave.Status != PickWaveStatus.InProgress))
+        {
+            throw new InvalidDomainStateException(
+                $"Pick task '{task.Id}' belongs to wave with status '{task.PickWave?.Status}' and cannot be executed until the wave is Released or InProgress.");
+        }
+    }
+
+    private void AddSupervisorOverrideAudit(
+        PickTask task,
+        PickTaskStatus fromStatus,
+        Guid? priorAssignedUserId,
+        Guid supervisorUserId,
+        string? overrideReason,
+        string operationLabel)
+    {
+        var baseReason = string.IsNullOrWhiteSpace(overrideReason)
+            ? $"Task-management override {operationLabel} by supervisor '{supervisorUserId}'"
+            : overrideReason.Trim();
+
+        _context.PickTaskStatusHistories.Add(new PickTaskStatusHistory
+        {
+            PickTaskId = task.Id,
+            FromStatus = fromStatus,
+            ToStatus = task.Status,
+            Reason = $"{baseReason} (prior assignee: '{priorAssignedUserId?.ToString() ?? "unassigned"}').",
+            ChangedByUserId = supervisorUserId,
+            ChangedAtUtc = DateTime.UtcNow
+        });
     }
 }
 

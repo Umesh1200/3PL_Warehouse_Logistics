@@ -12,6 +12,9 @@ public class ConfirmPickRequest
     public decimal Quantity { get; set; }
     public Guid UserId { get; set; }
     public string? IdempotencyKey { get; set; }
+    public bool RequireAssignedOwnership { get; set; } = false;
+    public bool AllowSupervisorOverride { get; set; } = false;
+    public string? OverrideReason { get; set; }
 }
 
 public class PickConfirmationResult
@@ -41,6 +44,9 @@ public class ReportShortPickRequest
     public string? ScannedToteLpn { get; set; }
     public Guid UserId { get; set; }
     public string? IdempotencyKey { get; set; }
+    public bool RequireAssignedOwnership { get; set; } = false;
+    public bool AllowSupervisorOverride { get; set; } = false;
+    public string? OverrideReason { get; set; }
 }
 
 public class ShortPickExecutionResult

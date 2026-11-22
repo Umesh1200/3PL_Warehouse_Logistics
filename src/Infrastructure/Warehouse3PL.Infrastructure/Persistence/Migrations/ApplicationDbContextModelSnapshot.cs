@@ -15948,6 +15948,10 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("user_id");
 
+                    b.Property<Guid?>("AssignedFacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("assigned_facility_id");
+
                     b.Property<Guid?>("ClientId")
                         .HasColumnType("uuid")
                         .HasColumnName("client_id");
@@ -16034,6 +16038,9 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id")
                         .HasName("pk_users");
+
+                    b.HasIndex("AssignedFacilityId")
+                        .HasDatabaseName("ix_users_assigned_facility_id");
 
                     b.HasIndex("ClientId")
                         .HasDatabaseName("ix_users_client_id");
@@ -19558,11 +19565,19 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.User", b =>
                 {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "AssignedFacility")
+                        .WithMany()
+                        .HasForeignKey("AssignedFacilityId")
+                        .OnDelete(DeleteBehavior.SetNull)
+                        .HasConstraintName("fk_users_facilities_assigned_facility_id");
+
                     b.HasOne("Warehouse3PL.Domain.Entities.Security.Client", "Client")
                         .WithMany("Users")
                         .HasForeignKey("ClientId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .HasConstraintName("fk_users_clients_client_id");
+
+                    b.Navigation("AssignedFacility");
 
                     b.Navigation("Client");
                 });

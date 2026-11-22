@@ -51,6 +51,9 @@ public sealed class Phase740BReadQueuesAndRfClaimHttpTests : IAsyncLifetime
     private static readonly Guid SupervisorId = Guid.Parse("740b0003-0000-0000-0000-000000000003");
     private static readonly Guid ViewOnlyUserId = Guid.Parse("740b0003-0000-0000-0000-000000000004");
     private static readonly Guid ClientUserId = Guid.Parse("740b0003-0000-0000-0000-000000000005");
+    private static readonly Guid ForeignStaffId = Guid.Parse("740b0003-0000-0000-0000-000000000006");
+    private static readonly Guid UnassignedFacilityStaffId = Guid.Parse("740b0003-0000-0000-0000-000000000007");
+    private static readonly Guid InactiveStaffId = Guid.Parse("740b0003-0000-0000-0000-000000000008");
 
     private static readonly Guid ItemA = Guid.Parse("740b0004-0000-0000-0000-000000000001");
     private static readonly Guid BinA = Guid.Parse("740b0005-0000-0000-0000-000000000001");
@@ -90,6 +93,7 @@ public sealed class Phase740BReadQueuesAndRfClaimHttpTests : IAsyncLifetime
 
     private WebApplication _app = null!;
     private HttpClient _http = null!;
+    private readonly ExecutionRaceGate _raceGate = new();
 
     public async Task InitializeAsync()
     {
@@ -125,7 +129,12 @@ public sealed class Phase740BReadQueuesAndRfClaimHttpTests : IAsyncLifetime
         builder.Services.AddScoped<IPickRouteOptimizer, SerpentineRouteOptimizer>();
         builder.Services.AddScoped<IPickTaskGenerator, PickTaskGenerator>();
         builder.Services.AddScoped<IPickWaveGenerator, PickWaveGenerator>();
-        builder.Services.AddScoped<IPickExecutionService, PickExecutionService>();
+        builder.Services.AddSingleton(_raceGate);
+        builder.Services.AddScoped<PickExecutionService>();
+        builder.Services.AddScoped<IPickExecutionService>(sp =>
+            new InterceptingPickExecutionService(
+                sp.GetRequiredService<PickExecutionService>(),
+                sp.GetRequiredService<ExecutionRaceGate>()));
         builder.Services.AddScoped<ICartonizationService, CartonizationService>();
         builder.Services.AddScoped<IPackingExecutionService, PackingExecutionService>();
         builder.Services.AddScoped<IShippingCarrierService, SimulatedCarrierService>();
@@ -170,9 +179,12 @@ public sealed class Phase740BReadQueuesAndRfClaimHttpTests : IAsyncLifetime
             new ClientFacilityAccess { ClientId = ClientB, FacilityId = FacilityA, Status = FacilityAccessStatus.Active });
 
         db.Users.AddRange(
-            new User { Id = OpAId, Email = "opa@740b.test", FirstName = "Op", LastName = "Alpha", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
-            new User { Id = OpBId, Email = "opb@740b.test", FirstName = "Op", LastName = "Beta", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
-            new User { Id = SupervisorId, Email = "sup@740b.test", FirstName = "Sup", LastName = "Lead", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
+            new User { Id = OpAId, AssignedFacilityId = FacilityA, Email = "opa@740b.test", FirstName = "Op", LastName = "Alpha", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
+            new User { Id = OpBId, AssignedFacilityId = FacilityA, Email = "opb@740b.test", FirstName = "Op", LastName = "Beta", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
+            new User { Id = SupervisorId, AssignedFacilityId = FacilityA, Email = "sup@740b.test", FirstName = "Sup", LastName = "Lead", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
+            new User { Id = ForeignStaffId, AssignedFacilityId = FacilityB, Email = "foreign@740b.test", FirstName = "For", LastName = "Staff", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
+            new User { Id = UnassignedFacilityStaffId, AssignedFacilityId = null, Email = "nofac@740b.test", FirstName = "No", LastName = "Facility", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" },
+            new User { Id = InactiveStaffId, AssignedFacilityId = FacilityA, Email = "inactive@740b.test", FirstName = "In", LastName = "Active", UserType = UserType.Staff, Status = UserStatus.Inactive, PasswordHash = "x" },
             new User { Id = ClientUserId, ClientId = ClientA, Email = "client@740b.test", FirstName = "Cli", LastName = "Ent", UserType = UserType.Client, Status = UserStatus.Active, PasswordHash = "x" });
 
         db.Items.Add(new Item { Id = ItemA, ClientId = ClientA, Sku = "SKU-740B-01", Description = "Servo Unit" });
@@ -598,6 +610,207 @@ public sealed class Phase740BReadQueuesAndRfClaimHttpTests : IAsyncLifetime
         Assert.Equal(SupervisorId, overrideHistories[0].ChangedByUserId);
     }
 
+    [Fact]
+    public async Task AssignTask_ValidatesOperatorFacilityAuthorizationAndStatus()
+    {
+        // Positive: same-facility active Staff (FacilityA)
+        using (var rOk = JsonRequest(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{TaskPendingA}/assign", "manage-only", new { operatorUserId = OpBId }))
+        using (var respOk = await _http.SendAsync(rOk))
+            Assert.Equal(HttpStatusCode.OK, respOk.StatusCode);
+
+        // Negative: active Staff assigned to foreign FacilityB -> 403 Forbidden
+        using (var rForeign = JsonRequest(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{TaskPendingA}/assign", "manage-only", new { operatorUserId = ForeignStaffId }))
+        using (var respForeign = await _http.SendAsync(rForeign))
+            Assert.Equal(HttpStatusCode.Forbidden, respForeign.StatusCode);
+
+        // Negative: active Staff lacking AssignedFacilityId -> 403 Forbidden
+        using (var rNoFac = JsonRequest(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{TaskPendingA}/assign", "manage-only", new { operatorUserId = UnassignedFacilityStaffId }))
+        using (var respNoFac = await _http.SendAsync(rNoFac))
+            Assert.Equal(HttpStatusCode.Forbidden, respNoFac.StatusCode);
+
+        // Negative: Inactive same-facility Staff -> 400 BadRequest
+        using (var rInactive = JsonRequest(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{TaskPendingA}/assign", "manage-only", new { operatorUserId = InactiveStaffId }))
+        using (var respInactive = await _http.SendAsync(rInactive))
+            Assert.Equal(HttpStatusCode.BadRequest, respInactive.StatusCode);
+
+        // Verify TaskPendingA remains assigned to OpBId
+        using var scope = _app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var persisted = await db.PickTasks.IgnoreQueryFilters().AsNoTracking().SingleAsync(t => t.Id == TaskPendingA);
+        Assert.Equal(OpBId, persisted.AssignedUserId);
+    }
+
+    [Fact]
+    public async Task ReleasedWaveEnforcement_BlocksPlanningCancelledAndCompletedWaves_ZeroInventoryMutation()
+    {
+        var allocPlan = Guid.NewGuid();
+        var allocCanc = Guid.NewGuid();
+        var allocComp = Guid.NewGuid();
+        var wavePlan = Guid.NewGuid();
+        var waveCanc = Guid.NewGuid();
+        var waveComp = Guid.NewGuid();
+        var taskPlanAssigned = Guid.NewGuid();
+        var taskPlanPending = Guid.NewGuid();
+        var taskCancAssigned = Guid.NewGuid();
+        var taskCancPending = Guid.NewGuid();
+        var taskCompAssigned = Guid.NewGuid();
+
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+
+            // Move released tasks in FacilityA out of OpA's queue so /next only sees our newly seeded test tasks
+            foreach (var t in await db.PickTasks.IgnoreQueryFilters().Where(x => x.FacilityId == FacilityA).ToListAsync())
+            {
+                t.IsDeleted = true;
+            }
+
+            db.InventoryAllocations.AddRange(
+                new InventoryAllocation { Id = allocPlan, ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = OrderA1, OutboundOrderLineId = OrderLineA1, StockOnHandId = StockBinAId, ItemId = ItemA, LocationId = BinA, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+                new InventoryAllocation { Id = allocCanc, ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = OrderA1, OutboundOrderLineId = OrderLineA1, StockOnHandId = StockBinAId, ItemId = ItemA, LocationId = BinA, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated },
+                new InventoryAllocation { Id = allocComp, ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = OrderA1, OutboundOrderLineId = OrderLineA1, StockOnHandId = StockBinAId, ItemId = ItemA, LocationId = BinA, QuantityRequested = 5m, QuantityAllocated = 5m, Status = AllocationStatus.Allocated });
+
+            db.PickWaves.AddRange(
+                new PickWave { Id = wavePlan, ClientId = ClientA, FacilityId = FacilityA, WaveNumber = "WV-PLAN", Priority = 10, Status = PickWaveStatus.Planning },
+                new PickWave { Id = waveCanc, ClientId = ClientA, FacilityId = FacilityA, WaveNumber = "WV-CANC", Priority = 10, Status = PickWaveStatus.Cancelled },
+                new PickWave { Id = waveComp, ClientId = ClientA, FacilityId = FacilityA, WaveNumber = "WV-COMP", Priority = 10, Status = PickWaveStatus.Completed });
+
+            db.PickTasks.AddRange(
+                new PickTask { Id = taskPlanAssigned, ClientId = ClientA, FacilityId = FacilityA, PickWaveId = wavePlan, OutboundOrderId = OrderA1, OutboundOrderLineId = OrderLineA1, InventoryAllocationId = allocPlan, StockOnHandId = StockBinAId, ItemId = ItemA, SourceLocationId = BinA, QuantityToPick = 5m, PickSequence = 1, Status = PickTaskStatus.Assigned, AssignedUserId = OpAId, Version = 1 },
+                new PickTask { Id = taskPlanPending, ClientId = ClientA, FacilityId = FacilityA, PickWaveId = wavePlan, OutboundOrderId = OrderA1, OutboundOrderLineId = OrderLineA1, InventoryAllocationId = allocPlan, StockOnHandId = StockBinAId, ItemId = ItemA, SourceLocationId = BinA, QuantityToPick = 5m, PickSequence = 2, Status = PickTaskStatus.Pending, Version = 1 },
+                new PickTask { Id = taskCancAssigned, ClientId = ClientA, FacilityId = FacilityA, PickWaveId = waveCanc, OutboundOrderId = OrderA1, OutboundOrderLineId = OrderLineA1, InventoryAllocationId = allocCanc, StockOnHandId = StockBinAId, ItemId = ItemA, SourceLocationId = BinA, QuantityToPick = 5m, PickSequence = 3, Status = PickTaskStatus.Assigned, AssignedUserId = OpAId, Version = 1 },
+                new PickTask { Id = taskCancPending, ClientId = ClientA, FacilityId = FacilityA, PickWaveId = waveCanc, OutboundOrderId = OrderA1, OutboundOrderLineId = OrderLineA1, InventoryAllocationId = allocCanc, StockOnHandId = StockBinAId, ItemId = ItemA, SourceLocationId = BinA, QuantityToPick = 5m, PickSequence = 4, Status = PickTaskStatus.Pending, Version = 1 },
+                new PickTask { Id = taskCompAssigned, ClientId = ClientA, FacilityId = FacilityA, PickWaveId = waveComp, OutboundOrderId = OrderA1, OutboundOrderLineId = OrderLineA1, InventoryAllocationId = allocComp, StockOnHandId = StockBinAId, ItemId = ItemA, SourceLocationId = BinA, QuantityToPick = 5m, PickSequence = 5, Status = PickTaskStatus.Assigned, AssignedUserId = OpAId, Version = 1 });
+
+            await db.SaveChangesAsync();
+        }
+
+        // /next must return 204 NoContent — even previously assigned tasks in Planning, Cancelled, or Completed waves are excluded!
+        using (var rNext = Request(HttpMethod.Get, $"/api/v1/outbound/pick-tasks/next?facilityId={FacilityA}", "exec-only-a"))
+        using (var respNext = await _http.SendAsync(rNext))
+            Assert.Equal(HttpStatusCode.NoContent, respNext.StatusCode);
+
+        foreach (var blockedTaskId in new[] { taskPlanAssigned, taskPlanPending, taskCancAssigned, taskCancPending, taskCompAssigned })
+        {
+            using (var rAssign = JsonRequest(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{blockedTaskId}/assign", "manage-only", new { operatorUserId = OpBId }))
+            using (var respAssign = await _http.SendAsync(rAssign))
+                Assert.Equal(HttpStatusCode.UnprocessableEntity, respAssign.StatusCode);
+
+            using (var rClaim = JsonRequest(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{blockedTaskId}/claim", "exec-only-a", new { }))
+            using (var respClaim = await _http.SendAsync(rClaim))
+                Assert.Equal(HttpStatusCode.UnprocessableEntity, respClaim.StatusCode);
+        }
+
+        foreach (var assignedNonReleasedId in new[] { taskPlanAssigned, taskCancAssigned, taskCompAssigned })
+        {
+            using (var rConfirm = JsonRequest(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{assignedNonReleasedId}/confirm", "exec-only-a",
+                new { scannedLocationBarcode = "BIN-740B-A1", scannedItemBarcode = "SKU-740B-01", scannedToteLpn = "TOTE-740B-01", quantity = 5m }))
+            using (var respConfirm = await _http.SendAsync(rConfirm))
+                Assert.Equal(HttpStatusCode.UnprocessableEntity, respConfirm.StatusCode);
+
+            using (var rShort = JsonRequest(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{assignedNonReleasedId}/short-pick", "exec-only-a",
+                new { quantityPicked = 0m, reason = 1, notes = "blocked wave" }))
+            using (var respShort = await _http.SendAsync(rShort))
+                Assert.Equal(HttpStatusCode.UnprocessableEntity, respShort.StatusCode);
+        }
+
+        using var verifyScope = _app.Services.CreateScope();
+        var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var stock = await verifyDb.StockOnHand.IgnoreQueryFilters().SingleAsync(s => s.Id == StockBinAId);
+        Assert.Equal(20m, stock.QtyAvailable);
+        Assert.Equal(10m, stock.QtyAllocated);
+        Assert.Empty(await verifyDb.InventoryTransactions.IgnoreQueryFilters().ToListAsync());
+    }
+
+    [Fact]
+    public async Task MidFlightReassignment_BetweenPreCheckAndTransaction_RejectsFormerOperatorWithZeroStockMutation()
+    {
+        var entered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var release = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+        _raceGate.Arm(
+            taskId =>
+            {
+                if (taskId == TaskAssignedOpA)
+                {
+                    entered.TrySetResult();
+                    return release.Task;
+                }
+
+                return Task.CompletedTask;
+            });
+
+        try
+        {
+            // OpA initiates /confirm while assigned -> passes initial command handler read check, then pauses at tx boundary
+            var confirmTask = _http.SendAsync(JsonRequest(
+                HttpMethod.Post,
+                $"/api/v1/outbound/pick-tasks/{TaskAssignedOpA}/confirm",
+                "exec-only-a",
+                new { scannedLocationBarcode = "BIN-740B-A1", scannedItemBarcode = "SKU-740B-01", scannedToteLpn = "TOTE-740B-01", quantity = 5m }));
+
+            await entered.Task;
+
+            // Supervisor reassigns TaskAssignedOpA from OpA to OpB before OpA's execution transaction runs
+            using (var rReassign = JsonRequest(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{TaskAssignedOpA}/assign", "manage-only", new { operatorUserId = OpBId }))
+            using (var respReassign = await _http.SendAsync(rReassign))
+                Assert.Equal(HttpStatusCode.OK, respReassign.StatusCode);
+
+            release.TrySetResult();
+
+            using var confirmResp = await confirmTask;
+            Assert.Equal(HttpStatusCode.Forbidden, confirmResp.StatusCode);
+
+            // Repeat mid-flight reassignment on /short-pick (assign back to OpA, enter short-pick, reassign to OpB mid-flight)
+            using (var rBack = JsonRequest(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{TaskAssignedOpA}/assign", "manage-only", new { operatorUserId = OpAId }))
+            using (var respBack = await _http.SendAsync(rBack))
+                Assert.Equal(HttpStatusCode.OK, respBack.StatusCode);
+
+            var shortEntered = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var shortRelease = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            _raceGate.Arm(
+                taskId =>
+                {
+                    if (taskId == TaskAssignedOpA)
+                    {
+                        shortEntered.TrySetResult();
+                        return shortRelease.Task;
+                    }
+
+                    return Task.CompletedTask;
+                });
+
+            var shortTask = _http.SendAsync(JsonRequest(
+                HttpMethod.Post,
+                $"/api/v1/outbound/pick-tasks/{TaskAssignedOpA}/short-pick",
+                "exec-only-a",
+                new { quantityPicked = 0m, reason = 1, notes = "race check" }));
+
+            await shortEntered.Task;
+
+            using (var rReassign2 = JsonRequest(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{TaskAssignedOpA}/assign", "manage-only", new { operatorUserId = OpBId }))
+            using (var respReassign2 = await _http.SendAsync(rReassign2))
+                Assert.Equal(HttpStatusCode.OK, respReassign2.StatusCode);
+
+            shortRelease.TrySetResult();
+
+            using var shortResp = await shortTask;
+            Assert.Equal(HttpStatusCode.Forbidden, shortResp.StatusCode);
+        }
+        finally
+        {
+            _raceGate.Clear();
+        }
+
+        using var scope = _app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var srcStock = await db.StockOnHand.IgnoreQueryFilters().SingleAsync(s => s.Id == StockBinAId);
+        Assert.Equal(20m, srcStock.QtyAvailable);
+        Assert.Equal(10m, srcStock.QtyAllocated);
+        Assert.Empty(await db.InventoryTransactions.IgnoreQueryFilters().ToListAsync());
+        Assert.Empty(await db.PickExceptions.ToListAsync());
+    }
+
     // ─────────────────────────────────────────────────────────────────────────────
     // 3. Shipments, Eligible Packages, and Packing Workbench Read Contracts
     // ─────────────────────────────────────────────────────────────────────────────
@@ -824,6 +1037,41 @@ public sealed class Phase740BReadQueuesAndRfClaimHttpTests : IAsyncLifetime
             var identity = new ClaimsIdentity(claims, Scheme.Name);
             return Task.FromResult(AuthenticateResult.Success(
                 new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name)));
+        }
+    }
+
+    private sealed class ExecutionRaceGate
+    {
+        private volatile Func<Guid, Task>? _hook;
+
+        public void Arm(Func<Guid, Task> hook) => _hook = hook;
+        public void Clear() => _hook = null;
+
+        public Task WaitIfArmedAsync(Guid pickTaskId)
+        {
+            var hook = _hook;
+            return hook != null ? hook(pickTaskId) : Task.CompletedTask;
+        }
+    }
+
+    private sealed class InterceptingPickExecutionService(
+        PickExecutionService inner,
+        ExecutionRaceGate gate) : IPickExecutionService
+    {
+        public async Task<PickConfirmationResult> ConfirmPickAsync(
+            ConfirmPickRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            await gate.WaitIfArmedAsync(request.PickTaskId);
+            return await inner.ConfirmPickAsync(request, cancellationToken);
+        }
+
+        public async Task<ShortPickExecutionResult> ReportShortPickAsync(
+            ReportShortPickRequest request,
+            CancellationToken cancellationToken = default)
+        {
+            await gate.WaitIfArmedAsync(request.PickTaskId);
+            return await inner.ReportShortPickAsync(request, cancellationToken);
         }
     }
 }

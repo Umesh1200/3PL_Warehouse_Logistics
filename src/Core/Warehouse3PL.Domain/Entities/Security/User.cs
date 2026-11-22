@@ -1,4 +1,5 @@
 using Warehouse3PL.Domain.Common;
+using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Domain.Entities.Security;
@@ -10,6 +11,7 @@ namespace Warehouse3PL.Domain.Entities.Security;
 public class User : AuditableEntity<Guid>, ISoftDeletable
 {
     public Guid? ClientId { get; set; }
+    public Guid? AssignedFacilityId { get; set; }
     public string Email { get; set; } = string.Empty;
     public string PasswordHash { get; set; } = string.Empty;
     public string FirstName { get; set; } = string.Empty;
@@ -29,6 +31,7 @@ public class User : AuditableEntity<Guid>, ISoftDeletable
 
     // Navigations
     public Client? Client { get; set; }
+    public Facility? AssignedFacility { get; set; }
     public ICollection<UserRole> UserRoles { get; set; } = [];
 
     public User()

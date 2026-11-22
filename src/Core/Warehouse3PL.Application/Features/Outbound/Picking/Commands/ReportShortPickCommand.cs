@@ -73,9 +73,6 @@ public class ReportShortPickCommandHandler : IRequestHandler<ReportShortPickComm
             }
         }
 
-        var usedOverride = isSupervisorOverride &&
-                           (!task.AssignedUserId.HasValue || task.AssignedUserId.Value != callerUserId);
-
         var result = await _executionService.ReportShortPickAsync(new ReportShortPickRequest
         {
             PickTaskId = command.PickTaskId,
@@ -86,22 +83,13 @@ public class ReportShortPickCommandHandler : IRequestHandler<ReportShortPickComm
             ScannedItemBarcode = command.ScannedItemBarcode,
             ScannedToteLpn = command.ScannedToteLpn,
             UserId = callerUserId ?? Guid.Empty,
-            IdempotencyKey = command.IdempotencyKey
+            IdempotencyKey = command.IdempotencyKey,
+            RequireAssignedOwnership = true,
+            AllowSupervisorOverride = isSupervisorOverride,
+            OverrideReason = isSupervisorOverride
+                ? $"Task-management override short-pick by supervisor '{callerUserId}'"
+                : null
         }, cancellationToken);
-
-        if (usedOverride)
-        {
-            _context.PickTaskStatusHistories.Add(new PickTaskStatusHistory
-            {
-                PickTaskId = task.Id,
-                FromStatus = task.Status,
-                ToStatus = result.TaskStatus,
-                Reason = $"Task-management override short-pick by supervisor '{callerUserId}' (prior assignee: '{task.AssignedUserId?.ToString() ?? "unassigned"}').",
-                ChangedByUserId = callerUserId ?? Guid.Empty,
-                ChangedAtUtc = DateTime.UtcNow
-            });
-            await _context.SaveChangesAsync(cancellationToken);
-        }
 
         return result;
     }
