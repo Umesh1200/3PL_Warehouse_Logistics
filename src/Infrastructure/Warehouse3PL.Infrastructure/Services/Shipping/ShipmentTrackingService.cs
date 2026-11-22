@@ -65,6 +65,13 @@ public class ShipmentTrackingService : IShipmentTrackingService
             throw new EntityNotFoundException(nameof(Package), normalizedTracking);
         }
 
+        if (!string.IsNullOrWhiteSpace(package.CarrierCode) &&
+            !string.Equals(package.CarrierCode.Trim(), normalizedCarrier, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ForbiddenException(
+                $"Carrier '{request.CarrierCode}' does not match package assigned carrier '{package.CarrierCode}' for tracking number '{normalizedTracking}'.");
+        }
+
         // Cross-Tenant Validation Guard
         if (request.TenantIdOverride.HasValue && request.TenantIdOverride.Value != package.ClientId)
         {

@@ -2,6 +2,7 @@ using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Enums;
@@ -562,6 +563,7 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
                 TotalPackagesDispatched = shipment.TotalPackagesCount,
                 TotalWeightKg = shipment.TotalWeightKg,
                 DriverName = request.DriverName,
+                AssignedDriverUserId = shipment.AssignedDriverUserId,
                 BillOfLadingNumber = shipment.BillOfLadingNumber,
                 Message = "Shipment already dispatched (Idempotent)."
             };
@@ -582,6 +584,34 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
             var unLoadedNums = string.Join(", ", unLoadedPackages.Select(p => $"'{p.PackageNumber}' ({p.Status})"));
             throw new InvalidDomainStateException(
                 $"Cannot dispatch shipment '{shipment.ShipmentNumber}'. All packages must be confirmed Loaded onto trailer before custody transfer. Unloaded: {unLoadedNums}.");
+        }
+
+        // Authoritative Driver Identity Binding
+        Guid? effectiveAssignedDriverUserId = request.AssignedDriverUserId ?? shipment.AssignedDriverUserId;
+        if (request.AssignedDriverUserId.HasValue)
+        {
+            if (shipment.AssignedDriverUserId.HasValue &&
+                shipment.AssignedDriverUserId.Value != request.AssignedDriverUserId.Value)
+            {
+                throw new InvalidDomainStateException(
+                    $"Shipment '{shipment.ShipmentNumber}' is already assigned to driver '{shipment.AssignedDriverUserId.Value}'. Reassign via dispatch management before confirming custody transfer for a different driver.");
+            }
+
+            await OutboundOperationalAuthorization.ValidateAssignableDriverAsync(
+                _context,
+                request.AssignedDriverUserId.Value,
+                shipment.ClientId,
+                shipment.FacilityId,
+                cancellationToken);
+        }
+        else if (effectiveAssignedDriverUserId.HasValue)
+        {
+            await OutboundOperationalAuthorization.ValidateAssignableDriverAsync(
+                _context,
+                effectiveAssignedDriverUserId.Value,
+                shipment.ClientId,
+                shipment.FacilityId,
+                cancellationToken);
         }
 
         // Driver details validation
@@ -611,6 +641,7 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
             TotalPackagesConfirmed = shipment.TotalPackagesCount,
             TotalWeightKg = shipment.TotalWeightKg,
             AuthorizedByUserId = request.AuthorizedUserId,
+            AssignedDriverUserId = effectiveAssignedDriverUserId,
             TransferredAtUtc = DateTime.UtcNow,
             Notes = request.Notes
         };
@@ -618,9 +649,11 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
 
         // 5. Update Shipment to Dispatched (Zero physical inventory quantity modification)
         shipment.Status = ShipmentStatus.Dispatched;
+        shipment.AssignedDriverUserId = effectiveAssignedDriverUserId;
         shipment.TrailerNumber = custody.TrailerNumber;
         shipment.SealNumber = custody.SealNumber;
         shipment.DispatchedAtUtc = custody.TransferredAtUtc;
+        shipment.Version++;
 
         _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
         {
@@ -628,7 +661,7 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
             FacilityId = shipment.FacilityId,
             ShipmentId = shipment.Id,
             Action = "CustodyTransferredAndDispatched",
-            Details = $"Handed over to driver '{request.DriverName}' (Carrier: {shipment.CarrierCode}, Trailer: {custody.TrailerNumber}, Seal: {custody.SealNumber})",
+            Details = $"Handed over to driver '{request.DriverName}' (DriverUserId: {effectiveAssignedDriverUserId?.ToString() ?? "External"}, Carrier: {shipment.CarrierCode}, Trailer: {custody.TrailerNumber}, Seal: {custody.SealNumber})",
             UserId = request.AuthorizedUserId,
             TimestampUtc = custody.TransferredAtUtc
         });
@@ -679,6 +712,7 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
             TotalPackagesDispatched = shipment.TotalPackagesCount,
             TotalWeightKg = shipment.TotalWeightKg,
             DriverName = custody.DriverName,
+            AssignedDriverUserId = custody.AssignedDriverUserId,
             BillOfLadingNumber = custody.BillOfLadingNumber,
             CompletedOrderIds = completedOrders,
             Message = "Custody transfer confirmed and shipment dispatched successfully."

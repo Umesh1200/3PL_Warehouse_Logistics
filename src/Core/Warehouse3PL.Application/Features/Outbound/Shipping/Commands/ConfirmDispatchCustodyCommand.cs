@@ -15,7 +15,8 @@ public record ConfirmDispatchCustodyCommand(
     string? TrailerNumber = null,
     string? SealNumber = null,
     string? Notes = null,
-    string? IdempotencyKey = null) : IRequest<ConfirmDispatchCustodyResult>;
+    string? IdempotencyKey = null,
+    Guid? AssignedDriverUserId = null) : IRequest<ConfirmDispatchCustodyResult>;
 
 public class ConfirmDispatchCustodyCommandHandler : IRequestHandler<ConfirmDispatchCustodyCommand, ConfirmDispatchCustodyResult>
 {
@@ -59,6 +60,7 @@ public class ConfirmDispatchCustodyCommandHandler : IRequestHandler<ConfirmDispa
             TrailerNumber = command.TrailerNumber,
             SealNumber = command.SealNumber,
             AuthorizedUserId = _currentUser.UserId ?? Guid.Empty,
+            AssignedDriverUserId = command.AssignedDriverUserId,
             Notes = command.Notes,
             IdempotencyKey = command.IdempotencyKey
         }, cancellationToken);

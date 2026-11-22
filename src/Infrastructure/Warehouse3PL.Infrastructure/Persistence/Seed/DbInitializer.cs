@@ -205,6 +205,7 @@ public class DbInitializer
 
         // 5. Driver Role
         var driverRole = await _context.Roles
+            .Include(r => r.RolePermissions)
             .FirstOrDefaultAsync(r => r.RoleName == SystemRoles.Driver);
 
         if (driverRole == null)
@@ -216,6 +217,44 @@ public class DbInitializer
                 IsSystemRole = true
             };
             _context.Roles.Add(driverRole);
+        }
+
+        var disallowedDriverPermissions = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            Permissions.Outbound.Pick,
+            Permissions.Outbound.Pack,
+            Permissions.Outbound.Ship,
+            Permissions.Outbound.TasksView,
+            Permissions.Outbound.TasksManage,
+            Permissions.Outbound.WavesManage,
+            Permissions.Outbound.OrdersView,
+            Permissions.Outbound.OrdersCreate,
+            Permissions.Outbound.OrdersImport,
+            Permissions.Outbound.OrdersCancel,
+            Permissions.Outbound.OrdersAllocate,
+            Permissions.Dispatch.ManageRuns
+        };
+
+        if (driverRole.IsSystemRole && driverRole.RolePermissions.Count > 0)
+        {
+            var disallowedDriverGrants = driverRole.RolePermissions
+                .Where(rp => disallowedDriverPermissions.Contains(rp.PermissionKey))
+                .ToList();
+            if (disallowedDriverGrants.Count > 0)
+            {
+                _context.RolePermissions.RemoveRange(disallowedDriverGrants);
+            }
+        }
+
+        if (!driverRole.RolePermissions.Any(rp =>
+            string.Equals(rp.PermissionKey, Permissions.Dispatch.ExecuteDelivery, StringComparison.OrdinalIgnoreCase)))
+        {
+            driverRole.RolePermissions.Add(new RolePermission
+            {
+                Role = driverRole,
+                PermissionKey = Permissions.Dispatch.ExecuteDelivery,
+                AccessLevel = AccessLevel.Execute
+            });
         }
 
         await _context.SaveChangesAsync();

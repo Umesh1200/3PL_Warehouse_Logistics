@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Inbound;
+using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -238,6 +239,169 @@ public class WarehouseOperationalAuthorization
                 throw new ForbiddenException("Client users cannot access unassigned blind receiving sessions.");
             }
         }
+    }
+
+    /// <summary>
+    /// Enforces authoritative courier delivery execution access for a package:
+    /// - Always rejects UserType.Client (including ClientAdmin) with 403 Forbidden.
+    /// - Enforces Permissions.Dispatch.ExecuteDelivery for Staff and Driver.
+    /// - Confines non-SuperAdmin Staff to their single assigned facility (never honoring analytics:multi-facility:view).
+    /// - Confines UserType.Driver strictly to Dispatched shipments where Shipment.AssignedDriverUserId == caller
+    ///   and the active immutable ShipmentCustodyTransfer is bound to the caller's user identity.
+    /// </summary>
+    public async Task ValidateCourierPackageAccessAsync(Package package, CancellationToken ct = default)
+    {
+        ArgumentNullException.ThrowIfNull(package);
+
+        if (!_currentUser.IsAuthenticated)
+        {
+            throw new UnauthorizedException("Authentication is required for courier delivery operations.");
+        }
+
+        if (_currentUser.UserType == UserType.Client)
+        {
+            throw new ForbiddenException("Client accounts cannot execute courier delivery or custody operations.");
+        }
+
+        if (IsVerifiedPlatformSuperAdmin)
+        {
+            return;
+        }
+
+        if (!_currentUser.HasPermission(Permissions.Dispatch.ExecuteDelivery))
+        {
+            throw new ForbiddenException("Missing 'dispatch:execute-delivery' permission for courier delivery execution.");
+        }
+
+        if (_currentUser.UserType == UserType.Staff)
+        {
+            if (package.FacilityId == Guid.Empty)
+            {
+                throw new ForbiddenException("A valid facility scope is required for courier delivery operations.");
+            }
+
+            if (!_currentUser.FacilityId.HasValue || _currentUser.FacilityId.Value == Guid.Empty)
+            {
+                throw new ForbiddenException("Staff member has no assigned facility for courier delivery execution.");
+            }
+
+            if (_currentUser.FacilityId.Value != package.FacilityId)
+            {
+                throw new ForbiddenException($"Staff member is not authorized for package facility '{package.FacilityId}'.");
+            }
+
+            if (_currentUser.RequestedFacilityId.HasValue &&
+                _currentUser.RequestedFacilityId.Value != _currentUser.FacilityId.Value)
+            {
+                throw new ForbiddenException(
+                    $"Requested facility header '{_currentUser.RequestedFacilityId.Value}' does not match assigned facility.");
+            }
+
+            return;
+        }
+
+        if (_currentUser.UserType == UserType.Driver)
+        {
+            if (!_currentUser.UserId.HasValue || _currentUser.UserId.Value == Guid.Empty)
+            {
+                throw new ForbiddenException("Authenticated driver user identity is required.");
+            }
+
+            if (!package.ShipmentId.HasValue || package.ShipmentId.Value == Guid.Empty)
+            {
+                throw new ForbiddenException($"Package '{package.PackageNumber}' is not assigned to a dispatched shipment.");
+            }
+
+            var driverUserId = _currentUser.UserId.Value;
+
+            var shipment = await _db.Shipments
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(s => s.Id == package.ShipmentId.Value && !s.IsDeleted)
+                .Select(s => new
+                {
+                    s.Id,
+                    s.ClientId,
+                    s.FacilityId,
+                    s.Status,
+                    s.AssignedDriverUserId
+                })
+                .FirstOrDefaultAsync(ct);
+
+            if (shipment == null ||
+                shipment.ClientId != package.ClientId ||
+                shipment.FacilityId != package.FacilityId)
+            {
+                throw new ForbiddenException($"Driver custody verification failed for package '{package.PackageNumber}'.");
+            }
+
+            if (shipment.Status != ShipmentStatus.Dispatched)
+            {
+                throw new ForbiddenException(
+                    $"Courier execution requires shipment status 'Dispatched' (current: '{shipment.Status}').");
+            }
+
+            if (!shipment.AssignedDriverUserId.HasValue || shipment.AssignedDriverUserId.Value != driverUserId)
+            {
+                throw new ForbiddenException(
+                    $"Driver '{driverUserId}' is not currently assigned to shipment '{shipment.Id}'.");
+            }
+
+            var latestCustodyTransfer = await _db.ShipmentCustodyTransfers
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(t => t.ShipmentId == shipment.Id &&
+                            t.ClientId == shipment.ClientId &&
+                            t.FacilityId == shipment.FacilityId)
+                .OrderByDescending(t => t.TransferredAtUtc)
+                .ThenByDescending(t => t.Id)
+                .Select(t => new { t.Id, t.AssignedDriverUserId })
+                .FirstOrDefaultAsync(ct);
+
+            if (latestCustodyTransfer == null ||
+                !latestCustodyTransfer.AssignedDriverUserId.HasValue ||
+                latestCustodyTransfer.AssignedDriverUserId.Value != driverUserId)
+            {
+                throw new ForbiddenException(
+                    $"Driver '{driverUserId}' does not hold verified active custody transfer for shipment '{shipment.Id}'.");
+            }
+
+            return;
+        }
+
+        throw new ForbiddenException("User identity type is not authorized for courier delivery operations.");
+    }
+
+    /// <summary>
+    /// Loads the target package (rejecting unauthenticated callers with 401 and Client identities with 403)
+    /// and executes <see cref="ValidateCourierPackageAccessAsync"/> before any downstream side effects.
+    /// </summary>
+    public async Task<Package> ValidateCourierPackageAccessByIdAsync(Guid packageId, CancellationToken ct = default)
+    {
+        if (!_currentUser.IsAuthenticated)
+        {
+            throw new UnauthorizedException("Authentication is required for courier delivery operations.");
+        }
+
+        if (_currentUser.UserType == UserType.Client)
+        {
+            throw new ForbiddenException("Client accounts cannot execute courier delivery or custody operations.");
+        }
+
+        if (packageId == Guid.Empty)
+        {
+            throw new Warehouse3PL.Domain.Exceptions.ValidationException(nameof(packageId), "Package ID is required.");
+        }
+
+        var package = await _db.Packages
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Include(p => p.Shipment)
+            .FirstOrDefaultAsync(p => p.Id == packageId && !p.IsDeleted, ct)
+            ?? throw new EntityNotFoundException(nameof(Package), packageId);
+
+        await ValidateCourierPackageAccessAsync(package, ct);
+        return package;
     }
 }
 

@@ -605,7 +605,15 @@ public class DeliveryExceptionIngestionTests
         Assert.Equal(DeliveryExceptionType.PackageDamagedInTransit, carrierCmdResult.ExceptionType);
         Assert.Equal(DeliveryExceptionSeverity.Critical, carrierCmdResult.Severity);
 
-        var driverHandler = new ReportDriverDeliveryExceptionCommandHandler(service);
+        var handlerUserContext = new TestCurrentUserContext
+        {
+            UserId = fix.DriverUserId,
+            UserType = UserType.Staff,
+            FacilityId = fix.FacilityId,
+            PermissionsList = [Warehouse3PL.Domain.Constants.Permissions.Dispatch.ExecuteDelivery]
+        };
+        var warehouseAuth = new Warehouse3PL.Application.Common.Security.WarehouseOperationalAuthorization(context, handlerUserContext);
+        var driverHandler = new ReportDriverDeliveryExceptionCommandHandler(service, warehouseAuth, new TestTenantProvider { BypassTenantFilter = true }, handlerUserContext);
         var driverCmdResult = await driverHandler.Handle(new ReportDriverDeliveryExceptionCommand(new ReportDriverExceptionRequest
         {
             PackageId = pkg.Id,

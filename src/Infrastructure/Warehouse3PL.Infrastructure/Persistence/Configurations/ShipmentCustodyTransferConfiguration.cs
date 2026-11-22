@@ -71,6 +71,9 @@ public class ShipmentCustodyTransferConfiguration : IEntityTypeConfiguration<Shi
             .HasColumnName("authorized_by_user_id")
             .IsRequired();
 
+        builder.Property(c => c.AssignedDriverUserId)
+            .HasColumnName("assigned_driver_user_id");
+
         builder.Property(c => c.TransferredAtUtc)
             .HasColumnName("transferred_at_utc")
             .IsRequired();
@@ -80,7 +83,13 @@ public class ShipmentCustodyTransferConfiguration : IEntityTypeConfiguration<Shi
             .HasForeignKey(c => c.ShipmentId)
             .OnDelete(DeleteBehavior.Restrict);
 
+        builder.HasOne(c => c.AssignedDriverUser)
+            .WithMany()
+            .HasForeignKey(c => c.AssignedDriverUserId)
+            .OnDelete(DeleteBehavior.SetNull);
+
         builder.HasIndex(c => c.ShipmentId);
+        builder.HasIndex(c => c.AssignedDriverUserId);
         builder.HasIndex(c => new { c.FacilityId, c.TransferredAtUtc });
     }
 }

@@ -27,6 +27,7 @@ public class ShipmentCustodyTransfer : BaseEntity<Guid>, ITenantEntity
     public decimal TotalWeightKg { get; set; }
 
     public Guid AuthorizedByUserId { get; set; }
+    public Guid? AssignedDriverUserId { get; set; }
     public DateTime TransferredAtUtc { get; set; } = DateTime.UtcNow;
     public string? Notes { get; set; }
 
@@ -35,6 +36,7 @@ public class ShipmentCustodyTransfer : BaseEntity<Guid>, ITenantEntity
     public Facility Facility { get; set; } = null!;
     public Shipment Shipment { get; set; } = null!;
     public User AuthorizedByUser { get; set; } = null!;
+    public User? AssignedDriverUser { get; set; }
 
     public ShipmentCustodyTransfer()
     {

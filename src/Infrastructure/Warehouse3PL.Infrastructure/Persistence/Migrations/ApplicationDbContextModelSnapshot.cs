@@ -14774,6 +14774,10 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("shipment_id");
 
+                    b.Property<Guid?>("AssignedDriverUserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("assigned_driver_user_id");
+
                     b.Property<string>("BillOfLadingNumber")
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)")
@@ -14903,6 +14907,9 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.HasKey("Id")
                         .HasName("pk_shipments");
 
+                    b.HasIndex("AssignedDriverUserId")
+                        .HasDatabaseName("ix_shipments_assigned_driver_user_id");
+
                     b.HasIndex("CarrierCode")
                         .HasDatabaseName("ix_shipments_carrier_code");
 
@@ -14987,6 +14994,10 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("transfer_id");
 
+                    b.Property<Guid?>("AssignedDriverUserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("assigned_driver_user_id");
+
                     b.Property<Guid>("AuthorizedByUserId")
                         .HasColumnType("uuid")
                         .HasColumnName("authorized_by_user_id");
@@ -15060,6 +15071,9 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
                     b.HasKey("Id")
                         .HasName("pk_shipment_custody_transfers");
+
+                    b.HasIndex("AssignedDriverUserId")
+                        .HasDatabaseName("ix_shipment_custody_transfers_assigned_driver_user_id");
 
                     b.HasIndex("AuthorizedByUserId")
                         .HasDatabaseName("ix_shipment_custody_transfers_authorized_by_user_id");
@@ -19337,6 +19351,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Outbound.Shipment", b =>
                 {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Security.User", "AssignedDriverUser")
+                        .WithMany()
+                        .HasForeignKey("AssignedDriverUserId")
+                        .OnDelete(DeleteBehavior.SetNull)
+                        .HasConstraintName("fk_shipments_users_assigned_driver_user_id");
+
                     b.HasOne("Warehouse3PL.Domain.Entities.Security.Client", "Client")
                         .WithMany()
                         .HasForeignKey("ClientId")
@@ -19356,6 +19376,8 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasForeignKey("StagingLocationId")
                         .OnDelete(DeleteBehavior.SetNull)
                         .HasConstraintName("fk_shipments_locations_staging_location_id");
+
+                    b.Navigation("AssignedDriverUser");
 
                     b.Navigation("Client");
 
@@ -19403,6 +19425,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Outbound.ShipmentCustodyTransfer", b =>
                 {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Security.User", "AssignedDriverUser")
+                        .WithMany()
+                        .HasForeignKey("AssignedDriverUserId")
+                        .OnDelete(DeleteBehavior.SetNull)
+                        .HasConstraintName("fk_shipment_custody_transfers_users_assigned_driver_user_id");
+
                     b.HasOne("Warehouse3PL.Domain.Entities.Security.User", "AuthorizedByUser")
                         .WithMany()
                         .HasForeignKey("AuthorizedByUserId")
@@ -19430,6 +19458,8 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_shipment_custody_transfers_shipments_shipment_id");
+
+                    b.Navigation("AssignedDriverUser");
 
                     b.Navigation("AuthorizedByUser");
 

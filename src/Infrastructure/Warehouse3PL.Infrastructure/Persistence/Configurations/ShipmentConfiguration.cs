@@ -79,6 +79,9 @@ public class ShipmentConfiguration : IEntityTypeConfiguration<Shipment>
         builder.Property(s => s.StagingLocationId)
             .HasColumnName("staging_location_id");
 
+        builder.Property(s => s.AssignedDriverUserId)
+            .HasColumnName("assigned_driver_user_id");
+
         builder.Property(s => s.TrailerNumber)
             .HasColumnName("trailer_number")
             .HasMaxLength(100);
@@ -115,6 +118,7 @@ public class ShipmentConfiguration : IEntityTypeConfiguration<Shipment>
         builder.HasIndex(s => s.ClientId);
         builder.HasIndex(s => s.Status);
         builder.HasIndex(s => s.StagingLocationId);
+        builder.HasIndex(s => s.AssignedDriverUserId);
         builder.HasIndex(s => s.CarrierCode);
 
         // Relationships
@@ -131,6 +135,11 @@ public class ShipmentConfiguration : IEntityTypeConfiguration<Shipment>
         builder.HasOne(s => s.StagingLocation)
             .WithMany()
             .HasForeignKey(s => s.StagingLocationId)
+            .OnDelete(DeleteBehavior.SetNull);
+
+        builder.HasOne(s => s.AssignedDriverUser)
+            .WithMany()
+            .HasForeignKey(s => s.AssignedDriverUserId)
             .OnDelete(DeleteBehavior.SetNull);
 
         builder.HasMany(s => s.Packages)

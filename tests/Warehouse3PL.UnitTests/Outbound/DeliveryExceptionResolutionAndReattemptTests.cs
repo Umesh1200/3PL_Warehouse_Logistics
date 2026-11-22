@@ -996,7 +996,8 @@ public class DeliveryExceptionResolutionAndReattemptTests
             ResolutionNotes = "Verified by dispatcher"
         };
         var command = new ResolveDeliveryExceptionCommand(request);
-        var handler = new ResolveDeliveryExceptionCommandHandler(service);
+        var outAuth = new Warehouse3PL.Application.Common.Security.OutboundOperationalAuthorization(context, userContext, tenantProvider);
+        var handler = new ResolveDeliveryExceptionCommandHandler(service, userContext, outAuth);
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -1023,7 +1024,8 @@ public class DeliveryExceptionResolutionAndReattemptTests
             Notes = "Reattempt via CQRS"
         };
         var command = new ScheduleDeliveryReattemptCommand(request);
-        var handler = new ScheduleDeliveryReattemptCommandHandler(service);
+        var outAuth = new Warehouse3PL.Application.Common.Security.OutboundOperationalAuthorization(context, userContext, tenantProvider);
+        var handler = new ScheduleDeliveryReattemptCommandHandler(service, userContext, outAuth);
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -1052,7 +1054,8 @@ public class DeliveryExceptionResolutionAndReattemptTests
             ResolutionAction = "Update unit number on carrier portal"
         };
         var command = new RecordCustomerContactCommand(request);
-        var handler = new RecordCustomerContactCommandHandler(service);
+        var outAuth = new Warehouse3PL.Application.Common.Security.OutboundOperationalAuthorization(context, userContext, tenantProvider);
+        var handler = new RecordCustomerContactCommandHandler(service, userContext, outAuth);
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -1081,7 +1084,8 @@ public class DeliveryExceptionResolutionAndReattemptTests
             Notes = "Updated via CQRS command"
         };
         var command = new UpdateDeliveryAddressCommand(request);
-        var handler = new UpdateDeliveryAddressCommandHandler(service);
+        var outAuth = new Warehouse3PL.Application.Common.Security.OutboundOperationalAuthorization(context, userContext, tenantProvider);
+        var handler = new UpdateDeliveryAddressCommandHandler(service, userContext, outAuth);
 
         var result = await handler.Handle(command, CancellationToken.None);
 
@@ -1108,7 +1112,8 @@ public class DeliveryExceptionResolutionAndReattemptTests
             Notes = "Redirected via CQRS command"
         };
         var command = new RedirectToCarrierDepotCommand(request);
-        var handler = new RedirectToCarrierDepotCommandHandler(service);
+        var outAuth = new Warehouse3PL.Application.Common.Security.OutboundOperationalAuthorization(context, userContext, tenantProvider);
+        var handler = new RedirectToCarrierDepotCommandHandler(service, userContext, outAuth);
 
         var result = await handler.Handle(command, CancellationToken.None);
 

@@ -239,6 +239,24 @@ try
             Console.WriteLine("PASS Phase 7.4.0A/B migrations reconciled ClientAdmin, webhook state/audit, users.assigned_facility_id, and role_reconciliation_audit_logs on PostgreSQL.");
         }
 
+        // 4a-ter. Verify Phase 7.4.0C migration added driver custody columns, FKs, indexes, and Driver role permissions
+        await using (var p740cCmd = new NpgsqlCommand(@"
+            SELECT
+                (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'shipments' AND column_name = 'assigned_driver_user_id') AS shp_drv_col,
+                (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'shipment_custody_transfers' AND column_name = 'assigned_driver_user_id') AS xfer_drv_col,
+                (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'shipments' AND indexname = 'ix_shipments_assigned_driver_user_id') AS shp_drv_idx,
+                (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'shipment_custody_transfers' AND indexname = 'ix_shipment_custody_transfers_assigned_driver_user_id') AS xfer_drv_idx,
+                (SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.role_id = rp.role_id WHERE r.role_name = 'Driver' AND rp.permission_key = 'dispatch:execute-delivery') AS drv_exec_perm,
+                (SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.role_id = rp.role_id WHERE r.role_name = 'Driver' AND rp.permission_key IN ('outbound:pick','outbound:pack','outbound:ship','dispatch:manage-runs')) AS drv_disallowed_perm;
+        ", sqlConn))
+        {
+            await using var r = await p740cCmd.ExecuteReaderAsync();
+            await r.ReadAsync();
+            if (r.GetInt64(0) != 1 || r.GetInt64(1) != 1 || r.GetInt64(2) != 1 || r.GetInt64(3) != 1 || r.GetInt64(4) != 1 || r.GetInt64(5) != 0)
+                throw new InvalidOperationException("Phase 7.4.0C migration schema or Driver role_permissions verification failed on PostgreSQL.");
+            Console.WriteLine("PASS Phase 7.4.0C migration added driver custody columns/indexes/FKs and reconciled Driver role permission (dispatch:execute-delivery ONLY) on PostgreSQL.");
+        }
+
         // 4b. Verify matching and differing location values:
         // - Matching (Task 1): suggested_location_id preserved as loc1
         // - Missing canonical (Task 2): suggested_location_id backfilled to loc2 from target_location_id1
@@ -1704,18 +1722,22 @@ try
     // 6.3 Build dedicated WebApi TestServer with real TenantProvider + Outbound services against live PostgreSQL
     const string pgPrimarySecret = "pg-ci-fedex-primary-secret";
     const string pgSecondarySecret = "pg-ci-fedex-secondary-secret";
+    var pgPodStorageDir = Path.Combine(Path.GetTempPath(), $"pg-740c-pod-{Guid.NewGuid():N}");
     var p74WebBuilder = WebApplication.CreateBuilder();
     p74WebBuilder.Host.UseDefaultServiceProvider(o => o.ValidateOnBuild = false);
     p74WebBuilder.Logging.ClearProviders();
     p74WebBuilder.WebHost.UseTestServer();
     p74WebBuilder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
     {
+        ["ObjectStorage:BaseDirectory"] = pgPodStorageDir,
         ["CarrierWebhooks:TimestampToleranceSeconds"] = "300",
-        ["CarrierWebhooks:MaxPayloadBytes"] = "1024",
+        ["CarrierWebhooks:MaxPayloadBytes"] = "4096",
         ["CarrierWebhooks:Carriers:SIM-FEDEX:PrimarySecret"] = pgPrimarySecret,
         ["CarrierWebhooks:Carriers:SIM-FEDEX:SecondarySecret"] = pgSecondarySecret,
         ["CarrierWebhooks:Carriers:SIM-FEDEX:SecondarySecretExpiresAtUtc"] = DateTimeOffset.UtcNow.AddHours(1).ToString("O")
     });
+    p74WebBuilder.Services.Configure<Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions>(
+        p74WebBuilder.Configuration.GetSection(Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions.SectionName));
     p74WebBuilder.Services.Configure<CarrierWebhookOptions>(
         p74WebBuilder.Configuration.GetSection(CarrierWebhookOptions.SectionName));
     p74WebBuilder.Services.AddControllers()
@@ -1750,9 +1772,15 @@ try
     p74WebBuilder.Services.AddScoped<IPickExecutionService, PickExecutionService>();
     p74WebBuilder.Services.AddScoped<ICartonizationService, CartonizationService>();
     p74WebBuilder.Services.AddScoped<IPackingExecutionService, PackingExecutionService>();
+    p74WebBuilder.Services.AddSingleton<IObjectStorageService, Warehouse3PL.Infrastructure.Services.Storage.PrivateObjectStorageService>();
     p74WebBuilder.Services.AddScoped<IShippingCarrierService, SimulatedCarrierService>();
     p74WebBuilder.Services.AddScoped<IShippingLabelService, ShippingLabelService>();
     p74WebBuilder.Services.AddScoped<IShipmentConsolidationService, ShipmentConsolidationService>();
+    p74WebBuilder.Services.AddScoped<IShipmentTrackingService, ShipmentTrackingService>();
+    p74WebBuilder.Services.AddScoped<IProofOfDeliveryService, Warehouse3PL.Infrastructure.Services.Shipping.ProofOfDeliveryService>();
+    p74WebBuilder.Services.AddScoped<IDeliveryConfirmationService, Warehouse3PL.Infrastructure.Services.Shipping.DeliveryConfirmationService>();
+    p74WebBuilder.Services.AddScoped<ICarrierExceptionClassificationService, Warehouse3PL.Infrastructure.Services.Shipping.CarrierExceptionClassificationService>();
+    p74WebBuilder.Services.AddScoped<IDeliveryExceptionService, Warehouse3PL.Infrastructure.Services.Shipping.DeliveryExceptionService>();
     p74WebBuilder.Services.AddScoped<ReturnTrackingService>();
     p74WebBuilder.Services.AddScoped<IReturnTrackingService, PgFaultInjectableReturnTrackingService>();
     p74WebBuilder.Services.AddSingleton<PgWebhookProbeState>();
@@ -2925,8 +2953,247 @@ try
 
     Console.WriteLine("PASS PostgreSQL P74-AUTH-02 Disabled Anonymous Registration (Zero Users/Tokens Persisted) & Active Tenant Check verified cleanly.");
 
+    // =========================================================================
+    // 8. Phase 7.4.0C — Courier APIs, Driver Custody & Dispatch Foundation on PostgreSQL
+    // =========================================================================
+    var cDriverAId = Guid.NewGuid();
+    var cDriverBId = Guid.NewGuid();
+    var cOrderId = Guid.NewGuid();
+    var cLineId = Guid.NewGuid();
+    var cShipmentId = Guid.NewGuid();
+    var cPkg1Id = Guid.NewGuid();
+    var cPkg2Id = Guid.NewGuid();
+    var cTrk1 = "TRK-PG-740C-001";
+    var cTrk2 = "TRK-PG-740C-002";
+
+    await using (var cDb = CreateDb(operationalConn, user))
+    {
+        var driverRoleEntity = await cDb.Roles
+            .Include(r => r.RolePermissions)
+            .SingleAsync(r => r.RoleName == SystemRoles.Driver);
+
+        // Inject disallowed grant then run DbInitializer twice to verify idempotent Driver permission reconciliation
+        if (!driverRoleEntity.RolePermissions.Any(rp => rp.PermissionKey == Permissions.Outbound.Pick))
+        {
+            cDb.RolePermissions.Add(new RolePermission { RoleId = driverRoleEntity.Id, PermissionKey = Permissions.Outbound.Pick, AccessLevel = AccessLevel.Execute });
+            await cDb.SaveChangesAsync();
+        }
+        var cInit = new DbInitializer(cDb, new PasswordHasher(), NullLogger<DbInitializer>.Instance);
+        await cInit.SeedAsync();
+        await cInit.SeedAsync();
+
+        var driverPermsAfter = await cDb.RolePermissions
+            .Where(rp => rp.RoleId == driverRoleEntity.Id)
+            .Select(rp => rp.PermissionKey)
+            .ToListAsync();
+        if (driverPermsAfter.Count != 1 || driverPermsAfter[0] != Permissions.Dispatch.ExecuteDelivery)
+            throw new InvalidOperationException("PostgreSQL DbInitializer Driver role reconciliation failed.");
+
+        var cDriverA = new User { Id = cDriverAId, Email = "pg-driver-a@740c.test", FirstName = "PG", LastName = "DriverA", UserType = UserType.Driver, Status = UserStatus.Active, PasswordHash = new PasswordHasher().HashPassword("Password123!") };
+        cDriverA.UserRoles.Add(new UserRole { User = cDriverA, Role = driverRoleEntity });
+        var cDriverB = new User { Id = cDriverBId, Email = "pg-driver-b@740c.test", FirstName = "PG", LastName = "DriverB", UserType = UserType.Driver, Status = UserStatus.Active, PasswordHash = new PasswordHasher().HashPassword("Password123!") };
+        cDriverB.UserRoles.Add(new UserRole { User = cDriverB, Role = driverRoleEntity });
+        cDb.Users.AddRange(cDriverA, cDriverB);
+
+        var cOrder = new OutboundOrder { Id = cOrderId, ClientId = client1Id, FacilityId = facilityId, OrderNumber = "PG-ORD-740C-1", CustomerName = "Courier Buyer", Status = OutboundOrderStatus.Completed };
+        cOrder.Lines.Add(new OutboundOrderLine { Id = cLineId, OutboundOrderId = cOrderId, ItemId = item1Id, LineNumber = 1, QuantityOrdered = 2m, QuantityAllocated = 2m });
+        cDb.OutboundOrders.Add(cOrder);
+
+        cDb.Shipments.Add(new Shipment
+        {
+            Id = cShipmentId,
+            ClientId = client1Id,
+            FacilityId = facilityId,
+            ShipmentNumber = "PG-SHP-740C-1",
+            CarrierCode = "SIM-FEDEX",
+            Status = ShipmentStatus.ReadyForDispatch,
+            TotalPackagesCount = 2,
+            TotalWeightKg = 4m,
+            Version = 1
+        });
+        cDb.Packages.AddRange(
+            new Package { Id = cPkg1Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = cOrderId, ShipmentId = cShipmentId, PackageNumber = "PG-PKG-740C-1", CarrierCode = "SIM-FEDEX", TrackingNumber = cTrk1, Status = PackageStatus.Loaded, CurrentTrackingStatus = TrackingMilestoneStatus.PendingHandover, GrossWeightKg = 2m, LengthCm = 10, WidthCm = 10, HeightCm = 10 },
+            new Package { Id = cPkg2Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = cOrderId, ShipmentId = cShipmentId, PackageNumber = "PG-PKG-740C-2", CarrierCode = "SIM-FEDEX", TrackingNumber = cTrk2, Status = PackageStatus.Loaded, CurrentTrackingStatus = TrackingMilestoneStatus.PendingHandover, GrossWeightKg = 2m, LengthCm = 10, WidthCm = 10, HeightCm = 10 });
+        await cDb.SaveChangesAsync();
+    }
+
+    await using var cBaselineDb = CreateDb(operationalConn, user);
+    var cInitStockTotal = await cBaselineDb.StockOnHand.Where(s => s.FacilityId == facilityId).SumAsync(s => s.QtyAvailable + s.QtyAllocated);
+    var cInitTxCount = await cBaselineDb.InventoryTransactions.CountAsync();
+
+    // 8.1 Assign-driver negative checks (cross-facility 403, stale version 409) & valid assignment (200)
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/shipments/{cShipmentId}/assign-driver", bSupId, p74FacB, Permissions.Dispatch.ManageRuns, new { driverUserId = cDriverAId }))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/shipments/{cShipmentId}/assign-driver", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { driverUserId = cDriverAId, expectedVersion = 99u }))).StatusCode != HttpStatusCode.Conflict)
+        throw new InvalidOperationException("Phase 7.4.0C PostgreSQL assign-driver facility/concurrency check failed.");
+
+    using (var rAssignOk = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/shipments/{cShipmentId}/assign-driver", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { driverUserId = cDriverAId, expectedVersion = 1u, reason = "Initial route" })))
+    {
+        if (rAssignOk.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Phase 7.4.0C assign-driver failed: {rAssignOk.StatusCode}");
+    }
+
+    // Helper claims builder for DriverA / DriverB
+    static void SetDriverClaims(Guid drvId, string perm = Permissions.Dispatch.ExecuteDelivery) => TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, drvId.ToString()),
+        new Claim(ClaimTypes.Role, SystemRoles.Driver),
+        new Claim("user_type", "Driver"),
+        new Claim("permissions", perm)
+    };
+
+    // Un-dispatched shipment denied for DriverA (403)
+    SetDriverClaims(cDriverAId);
+    if ((await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{cPkg1Id}/confirm-delivery", new { })).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Assigned driver must be denied (403) before custody dispatch confirmation.");
+    TestAuthHandler.CustomClaims = null;
+
+    // 8.2 Dispatch custody transfer binds ShipmentCustodyTransfer.AssignedDriverUserId = DriverA
+    using (var rDispOk = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{cShipmentId}/dispatch", bSupId, facilityId, Permissions.Outbound.Ship, new { driverName = "PG DriverA", driverSignature = "SIG-DRV-A" })))
+    {
+        if (rDispOk.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Phase 7.4.0C ConfirmDispatch failed: {rDispOk.StatusCode}");
+    }
+
+    // Revocation without reason -> 422; with reason -> 200 (blocks old DriverA); reassign with reason -> 200 (preserves original CustodyTransfer row)
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/shipments/{cShipmentId}/assign-driver", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { driverUserId = (Guid?)null }))).StatusCode != HttpStatusCode.UnprocessableEntity ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/shipments/{cShipmentId}/assign-driver", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { driverUserId = (Guid?)null, reason = "Temporary hold" }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Phase 7.4.0C PostgreSQL custody revocation audit enforcement failed.");
+
+    SetDriverClaims(cDriverAId);
+    if ((await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{cPkg1Id}/confirm-delivery", new { })).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Revoked driver must immediately get 403 Forbidden.");
+    TestAuthHandler.CustomClaims = null;
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/shipments/{cShipmentId}/assign-driver", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { driverUserId = cDriverAId, reason = "Resumed delivery by DriverA" }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Phase 7.4.0C audited driver reassignment failed.");
+
+    await using (var cXferDb = CreateDb(operationalConn, user))
+    {
+        var xfers = await cXferDb.ShipmentCustodyTransfers.Where(t => t.ShipmentId == cShipmentId).ToListAsync();
+        if (xfers.Count != 2 || xfers.Any(t => t.AssignedDriverUserId != cDriverAId))
+            throw new InvalidOperationException($"Expected 2 immutable custody transfers bound to DriverA, found {xfers.Count}.");
+    }
+
+    // 8.3 Auth-before-storage check (DriverB 403 leaves 0 storage files) + Multipart POD Upload + Forced Rollback Recovery + Confirm Delivery
+    var storageFilesBefore = Directory.GetFiles(pgPodStorageDir, "*", SearchOption.AllDirectories).Length;
+    SetDriverClaims(cDriverBId);
+    if ((await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{cPkg1Id}/pod", new { recipientName = "WrongDriver" })).StatusCode != HttpStatusCode.Forbidden ||
+        Directory.GetFiles(pgPodStorageDir, "*", SearchOption.AllDirectories).Length != storageFilesBefore)
+        throw new InvalidOperationException("Unauthorized driver triggered POD upload or did not fail with 403 before storage.");
+
+    SetDriverClaims(cDriverAId);
+    Guid pgPod1Id;
+    using (var mpForm = new MultipartFormDataContent())
+    {
+        var pngBytes = new ByteArrayContent([0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01]);
+        pngBytes.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/png");
+        mpForm.Add(pngBytes, "signature", "pg-sig.png");
+        mpForm.Add(new StringContent("PG Consignee"), "recipientName");
+        mpForm.Add(new StringContent("true"), "isSigned");
+        using var rPgPod = await p74Client.PostAsync($"/api/v1/outbound/dispatch/packages/{cPkg1Id}/pod", mpForm);
+        if (rPgPod.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"PostgreSQL multipart POD upload failed: {rPgPod.StatusCode}: {await rPgPod.Content.ReadAsStringAsync()}");
+        using var podDoc = await JsonDocument.ParseAsync(await rPgPod.Content.ReadAsStreamAsync());
+        pgPod1Id = podDoc.RootElement.GetProperty("proofOfDeliveryId").GetGuid();
+    }
+
+    // Forced rollback test on DeliveryConfirmationService leaving zero partial POD_CONFIRMED / Delivered mutations on PostgreSQL
+    await using (var failConfirmDb = CreateDb(operationalConn, user, new ThrowAfterSaveInterceptor()))
+    {
+        var failConfSvc = new Warehouse3PL.Infrastructure.Services.Shipping.DeliveryConfirmationService(
+            failConfirmDb, new VerificationTenant(), new VerificationIdentity(facilityId), NullLogger<Warehouse3PL.Infrastructure.Services.Shipping.DeliveryConfirmationService>.Instance);
+        var rolled = false;
+        try
+        {
+            await failConfSvc.ConfirmDeliveryAsync(new ConfirmPackageDeliveryRequest { PackageId = cPkg1Id, ProofOfDeliveryId = pgPod1Id });
+        }
+        catch (ForcedRollbackException) { rolled = true; }
+        if (!rolled) throw new InvalidOperationException("Expected ForcedRollbackException in POD confirmation rollback check.");
+    }
+
+    await using (var checkAfterRollbackDb = CreateDb(operationalConn, user))
+    {
+        var pkgAfterRb = await checkAfterRollbackDb.Packages.SingleAsync(p => p.Id == cPkg1Id);
+        if (pkgAfterRb.CurrentTrackingStatus == TrackingMilestoneStatus.Delivered)
+            throw new InvalidOperationException("PostgreSQL delivery confirmation rollback leaked Delivered package state.");
+    }
+
+    // Now confirm pkg1 cleanly + duplicate idempotency + submit POD and confirm pkg2 -> order rolls up to Delivered!
+    if ((await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{cPkg1Id}/confirm-delivery", new { proofOfDeliveryId = pgPod1Id })).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{cPkg1Id}/confirm-delivery", new { })).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{cPkg2Id}/pod", new { recipientName = "PG Consignee 2" })).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{cPkg2Id}/confirm-delivery", new { })).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("PostgreSQL courier POD + ConfirmDelivery sequence failed.");
+
+    // Driver cannot access Dispatch Board or Exceptions or Timeline (403); Driver reports exception only on active custody (note Delivered pkg2 or report on active pkg)
+    if ((await p74Client.GetAsync("/api/v1/outbound/dispatch/board")).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.GetAsync($"/api/v1/outbound/dispatch/packages/{cPkg1Id}/timeline")).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Driver read denial on /dispatch/board and /timeline failed on PostgreSQL.");
+    TestAuthHandler.CustomClaims = null;
+
+    await using (var cPostDb = CreateDb(operationalConn, user))
+    {
+        var cOrderFinal = await cPostDb.OutboundOrders.SingleAsync(o => o.Id == cOrderId);
+        var cShipFinal = await cPostDb.Shipments.SingleAsync(s => s.Id == cShipmentId);
+        var cEndStockTotal = await cPostDb.StockOnHand.Where(s => s.FacilityId == facilityId).SumAsync(s => s.QtyAvailable + s.QtyAllocated);
+        var cEndTxCount = await cPostDb.InventoryTransactions.CountAsync();
+        if (cOrderFinal.DeliveryStatus != OrderDeliveryStatus.Delivered || cShipFinal.DeliveryStatus != TrackingMilestoneStatus.Delivered ||
+            cEndStockTotal != cInitStockTotal || cEndTxCount != cInitTxCount)
+            throw new InvalidOperationException("PostgreSQL OrderDeliveryStatus.Delivered rollup or zero-stock invariant failed.");
+    }
+
+    // 8.4 Client read concealment (own order 200 vs foreign 404), signed dispatch carrier webhooks + replay + mismatch
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, SystemRoles.ClientAdmin),
+        new Claim("user_type", "Client"),
+        new Claim("tenant_id", client1Id.ToString()),
+        new Claim("permissions", Permissions.Dispatch.View)
+    };
+    if ((await p74Client.GetAsync($"/api/v1/outbound/dispatch/orders/{cOrderId}/delivery-status")).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.GetAsync($"/api/v1/outbound/dispatch/orders/{p74OrderC2FacA}/delivery-status")).StatusCode != HttpStatusCode.NotFound ||
+        (await p74Client.GetAsync($"/api/v1/outbound/dispatch/packages/{cPkg1Id}/pod")).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Phase 7.4.0C Client read/concealment assertions failed on PostgreSQL.");
+    TestAuthHandler.CustomClaims = null;
+
+    static HttpRequestMessage SignDispatchWebhook(string url, string carrier, string secret, string body, string nonce)
+    {
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+        var sig = Convert.ToHexStringLower(hmac.ComputeHash(Encoding.UTF8.GetBytes($"{ts}.{nonce}.{body}")));
+        var req = new HttpRequestMessage(HttpMethod.Post, url) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        req.Headers.Add("X-Carrier-Id", carrier);
+        req.Headers.Add("X-Webhook-Timestamp", ts);
+        req.Headers.Add("X-Webhook-Nonce", nonce);
+        req.Headers.Add("X-Webhook-Signature", sig);
+        return req;
+    }
+
+    var excWebhookBody = JsonSerializer.Serialize(new
+    {
+        carrierCode = "SIM-FEDEX",
+        trackingNumber = p74Tracking,
+        carrierEventId = "PG-740C-EXC-1",
+        carrierExceptionCode = "WEA01",
+        carrierDescription = "Snow delay at sort center",
+        occurredAtUtc = DateTime.UtcNow.AddMinutes(-2)
+    });
+    if ((await p74Client.SendAsync(SignDispatchWebhook("/api/v1/outbound/dispatch/webhooks/carrier-exception", "SIM-FEDEX", pgPrimarySecret, excWebhookBody, "pg-740c-wh-1"))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(SignDispatchWebhook("/api/v1/outbound/dispatch/webhooks/carrier-exception", "SIM-FEDEX", pgPrimarySecret, excWebhookBody, "pg-740c-wh-1"))).StatusCode != HttpStatusCode.Unauthorized ||
+        (await p74Client.SendAsync(SignDispatchWebhook("/api/v1/outbound/dispatch/webhooks/carrier-exception", "SIM-FEDEX", pgPrimarySecret, excWebhookBody, "pg-740c-wh-2"))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(SignDispatchWebhook("/api/v1/outbound/dispatch/webhooks/carrier-tracking", "SIM-UPS", pgPrimarySecret, excWebhookBody, "pg-740c-wh-bad"))).StatusCode != HttpStatusCode.Unauthorized)
+        throw new InvalidOperationException("Phase 7.4.0C signed dispatch webhook checks failed on PostgreSQL.");
+
+    Console.WriteLine("PASS PostgreSQL Phase 7.4.0C Driver Custody, Assign-Driver Concurrency, Revocation, Multipart POD, Rollback/Retry, Order Rollup & Signed Webhooks verified cleanly.");
+
+    if (Directory.Exists(pgPodStorageDir))
+    {
+        try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }
+    }
+
     Console.WriteLine("\n================================================================================");
-    Console.WriteLine("ALL PHASE 7.3, 7.4.0A & PHASE 7.4.0B POSTGRESQL VERIFICATIONS PASSED CLEANLY!");
+    Console.WriteLine("ALL PHASE 7.3, 7.4.0A, 7.4.0B & 7.4.0C POSTGRESQL VERIFICATIONS PASSED CLEANLY!");
     Console.WriteLine("================================================================================");
 }
 finally

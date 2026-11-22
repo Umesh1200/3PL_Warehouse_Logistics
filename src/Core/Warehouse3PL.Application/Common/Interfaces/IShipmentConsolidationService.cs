@@ -126,6 +126,7 @@ public class ConfirmDispatchCustodyRequest
     public string? TrailerNumber { get; set; }
     public string? SealNumber { get; set; }
     public Guid AuthorizedUserId { get; set; }
+    public Guid? AssignedDriverUserId { get; set; }
     public string? Notes { get; set; }
     public string? IdempotencyKey { get; set; }
 }
@@ -140,6 +141,7 @@ public class ConfirmDispatchCustodyResult
     public int TotalPackagesDispatched { get; set; }
     public decimal TotalWeightKg { get; set; }
     public string DriverName { get; set; } = string.Empty;
+    public Guid? AssignedDriverUserId { get; set; }
     public string? BillOfLadingNumber { get; set; }
     public List<Guid> CompletedOrderIds { get; set; } = [];
     public string Message { get; set; } = string.Empty;

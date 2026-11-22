@@ -2,8 +2,10 @@ using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Constants;
+using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
+using ValidationException = Warehouse3PL.Domain.Exceptions.ValidationException;
 
 namespace Warehouse3PL.Application.Common.Security;
 
@@ -313,5 +315,137 @@ public sealed class OutboundOperationalAuthorization
         }
 
         return facilities;
+    }
+
+    /// <summary>
+    /// Validates that the target user exists, is active, is UserType.Driver with the Driver role,
+    /// and is compatible with the shipment's tenant/facility when optionally scoped.
+    /// </summary>
+    public static async Task<User> ValidateAssignableDriverAsync(
+        IApplicationDbContext db,
+        Guid driverUserId,
+        Guid shipmentClientId,
+        Guid shipmentFacilityId,
+        CancellationToken ct = default)
+    {
+        if (driverUserId == Guid.Empty)
+        {
+            throw new ValidationException(nameof(driverUserId), "A valid driver user ID is required.");
+        }
+
+        var driverUser = await db.Users
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Include(u => u.UserRoles)
+                .ThenInclude(ur => ur.Role)
+            .FirstOrDefaultAsync(u => u.Id == driverUserId && !u.IsDeleted, ct);
+
+        if (driverUser == null)
+        {
+            throw new EntityNotFoundException(nameof(User), driverUserId);
+        }
+
+        if (driverUser.Status != UserStatus.Active)
+        {
+            throw new ValidationException(nameof(driverUserId),
+                $"Driver user '{driverUserId}' is not active (status: '{driverUser.Status}').");
+        }
+
+        if (driverUser.UserType != UserType.Driver)
+        {
+            throw new ValidationException(nameof(driverUserId),
+                $"User '{driverUserId}' is not a Driver account (UserType: '{driverUser.UserType}').");
+        }
+
+        var hasDriverRole = driverUser.UserRoles.Any(ur =>
+            ur.Role != null &&
+            string.Equals(ur.Role.RoleName, SystemRoles.Driver, StringComparison.OrdinalIgnoreCase));
+
+        if (!hasDriverRole)
+        {
+            throw new ValidationException(nameof(driverUserId),
+                $"Driver user '{driverUserId}' does not hold the required '{SystemRoles.Driver}' role.");
+        }
+
+        if (driverUser.ClientId.HasValue && driverUser.ClientId.Value != shipmentClientId)
+        {
+            throw new ForbiddenException(
+                $"Driver user '{driverUserId}' belongs to a different client tenant than shipment client '{shipmentClientId}'.");
+        }
+
+        if (driverUser.AssignedFacilityId.HasValue && driverUser.AssignedFacilityId.Value != shipmentFacilityId)
+        {
+            throw new ForbiddenException(
+                $"Driver user '{driverUserId}' is scoped to facility '{driverUser.AssignedFacilityId.Value}' and cannot be assigned to facility '{shipmentFacilityId}'.");
+        }
+
+        return driverUser;
+    }
+
+    /// <summary>
+    /// Validates trusted staff identity and single-facility mutation authority for a Shipment.
+    /// </summary>
+    public async Task<Guid> ValidateStaffShipmentMutationAsync(
+        Guid shipmentId,
+        string operationDescription,
+        CancellationToken ct = default)
+    {
+        EnsureStaffOperationalIdentity(operationDescription);
+
+        var shipment = await _db.Shipments
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(s => s.Id == shipmentId && !s.IsDeleted)
+            .Select(s => new { s.Id, s.ClientId, s.FacilityId })
+            .FirstOrDefaultAsync(ct)
+            ?? throw new EntityNotFoundException(nameof(Domain.Entities.Outbound.Shipment), shipmentId);
+
+        ValidateStaffMutationFacilityAccess(shipment.FacilityId, operationDescription);
+        return shipment.ClientId;
+    }
+
+    /// <summary>
+    /// Validates trusted staff identity and single-facility mutation authority for a DeliveryException.
+    /// </summary>
+    public async Task<Guid> ValidateStaffExceptionMutationAsync(
+        Guid exceptionId,
+        string operationDescription,
+        CancellationToken ct = default)
+    {
+        EnsureStaffOperationalIdentity(operationDescription);
+
+        var exc = await _db.ShipmentDeliveryExceptions
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(e => e.Id == exceptionId)
+            .Select(e => new { e.Id, e.ClientId, e.FacilityId })
+            .FirstOrDefaultAsync(ct)
+            ?? throw new EntityNotFoundException(nameof(Domain.Entities.Outbound.ShipmentDeliveryException), exceptionId);
+
+        ValidateStaffMutationFacilityAccess(exc.FacilityId, operationDescription);
+        return exc.ClientId;
+    }
+
+    /// <summary>
+    /// Scopes the request tenant filter to the authorized package's client after courier custody verification,
+    /// while rejecting any spoofed cross-tenant X-Tenant-Id header.
+    /// </summary>
+    public static void BindValidatedCourierTenant(
+        ITenantProvider tenantProvider,
+        ICurrentUserContext currentUser,
+        Guid packageClientId)
+    {
+        if (currentUser.UserType == UserType.Driver)
+        {
+            if (tenantProvider.TenantId.HasValue && tenantProvider.TenantId.Value != packageClientId)
+            {
+                throw new ForbiddenException("Driver request tenant header does not match authorized custody shipment tenant.");
+            }
+
+            if (!tenantProvider.TenantId.HasValue)
+            {
+                tenantProvider.SetTenantId(packageClientId);
+            }
+        }
     }
 }

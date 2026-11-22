@@ -32,6 +32,7 @@ public class Shipment : AuditableEntity<Guid>, ITenantEntity, ISoftDeletable
     public decimal TotalVolumeCm3 { get; set; }
 
     public Guid? StagingLocationId { get; set; }
+    public Guid? AssignedDriverUserId { get; set; }
 
     public string? TrailerNumber { get; set; }
     public string? SealNumber { get; set; }
@@ -49,6 +50,7 @@ public class Shipment : AuditableEntity<Guid>, ITenantEntity, ISoftDeletable
     public Client Client { get; set; } = null!;
     public Facility Facility { get; set; } = null!;
     public Location? StagingLocation { get; set; }
+    public User? AssignedDriverUser { get; set; }
 
     public ICollection<Package> Packages { get; set; } = [];
     public ICollection<ShipmentTrackingEvent> TrackingEvents { get; set; } = [];

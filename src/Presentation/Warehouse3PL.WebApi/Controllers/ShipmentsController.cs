@@ -204,7 +204,8 @@ public class ShipmentsController : BaseApiController
             request.TrailerNumber,
             request.SealNumber,
             request.Notes,
-            request.IdempotencyKey), ct);
+            request.IdempotencyKey,
+            request.AssignedDriverUserId), ct);
 
         return Ok(result);
     }
@@ -240,5 +241,6 @@ public record ConfirmDispatchCustodyApiRequest(
     string? TrailerNumber = null,
     string? SealNumber = null,
     string? Notes = null,
-    string? IdempotencyKey = null);
+    string? IdempotencyKey = null,
+    Guid? AssignedDriverUserId = null);
 
