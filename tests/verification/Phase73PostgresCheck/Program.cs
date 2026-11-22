@@ -2961,6 +2961,8 @@ try
     var cOrderId = Guid.NewGuid();
     var cLineId = Guid.NewGuid();
     var cShipmentId = Guid.NewGuid();
+    var cHu1Id = Guid.NewGuid();
+    var cHu2Id = Guid.NewGuid();
     var cPkg1Id = Guid.NewGuid();
     var cPkg2Id = Guid.NewGuid();
     var cTrk1 = "TRK-PG-740C-001";
@@ -3011,9 +3013,12 @@ try
             TotalWeightKg = 4m,
             Version = 1
         });
+        cDb.HandlingUnits.AddRange(
+            new HandlingUnit { Id = cHu1Id, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-CARTON-740C-1", UnitType = HandlingUnitType.ShippingCarton },
+            new HandlingUnit { Id = cHu2Id, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-CARTON-740C-2", UnitType = HandlingUnitType.ShippingCarton });
         cDb.Packages.AddRange(
-            new Package { Id = cPkg1Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = cOrderId, ShipmentId = cShipmentId, PackageNumber = "PG-PKG-740C-1", CarrierCode = "SIM-FEDEX", TrackingNumber = cTrk1, Status = PackageStatus.Loaded, CurrentTrackingStatus = TrackingMilestoneStatus.PendingHandover, GrossWeightKg = 2m, LengthCm = 10, WidthCm = 10, HeightCm = 10 },
-            new Package { Id = cPkg2Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = cOrderId, ShipmentId = cShipmentId, PackageNumber = "PG-PKG-740C-2", CarrierCode = "SIM-FEDEX", TrackingNumber = cTrk2, Status = PackageStatus.Loaded, CurrentTrackingStatus = TrackingMilestoneStatus.PendingHandover, GrossWeightKg = 2m, LengthCm = 10, WidthCm = 10, HeightCm = 10 });
+            new Package { Id = cPkg1Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = cOrderId, ShipmentId = cShipmentId, HandlingUnitId = cHu1Id, PackageNumber = "PG-PKG-740C-1", CarrierCode = "SIM-FEDEX", TrackingNumber = cTrk1, Status = PackageStatus.Loaded, CurrentTrackingStatus = TrackingMilestoneStatus.PendingHandover, GrossWeightKg = 2m, LengthCm = 10, WidthCm = 10, HeightCm = 10 },
+            new Package { Id = cPkg2Id, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = cOrderId, ShipmentId = cShipmentId, HandlingUnitId = cHu2Id, PackageNumber = "PG-PKG-740C-2", CarrierCode = "SIM-FEDEX", TrackingNumber = cTrk2, Status = PackageStatus.Loaded, CurrentTrackingStatus = TrackingMilestoneStatus.PendingHandover, GrossWeightKg = 2m, LengthCm = 10, WidthCm = 10, HeightCm = 10 });
         await cDb.SaveChangesAsync();
     }
 
