@@ -221,7 +221,8 @@ try
                 (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'carrier_webhook_nonces' AND indexname = 'ix_carrier_webhook_nonces_carrier_code_nonce') AS nonce_idx_exists,
                 (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'carrier_webhook_nonces' AND column_name IN ('status','attempt_count','processing_lease_expires_at_utc','processed_at_utc','claim_token')) AS nonce_state_cols,
                 (SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'carrier_webhook_audit_logs') AS audit_tbl_exists,
-                (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'assigned_facility_id') AS user_fac_col;
+                (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'users' AND column_name = 'assigned_facility_id') AS user_fac_col,
+                (SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'role_reconciliation_audit_logs') AS role_recon_tbl;
         ", sqlConn))
         {
             await using var r = await p74Cmd.ExecuteReaderAsync();
@@ -232,9 +233,10 @@ try
             var nonceStateCols = r.GetInt64(3);
             var auditTblExists = r.GetInt64(4);
             var userFacCol = r.GetInt64(5);
-            if (obsoleteCount != 0 || allowedOrderCount != 5 || nonceIdxExists != 1 || nonceStateCols != 5 || auditTblExists != 1 || userFacCol != 1)
-                throw new InvalidOperationException($"Phase 7.4.0A/B migration check failed: obsolete={obsoleteCount}, allowed={allowedOrderCount}, nonceIdx={nonceIdxExists}, nonceStateCols={nonceStateCols}, auditTbl={auditTblExists}, userFacCol={userFacCol}");
-            Console.WriteLine("PASS Phase 7.4.0A/B migrations reconciled ClientAdmin, webhook state/audit, and users.assigned_facility_id on PostgreSQL.");
+            var roleReconTbl = r.GetInt64(6);
+            if (obsoleteCount != 0 || allowedOrderCount != 5 || nonceIdxExists != 1 || nonceStateCols != 5 || auditTblExists != 1 || userFacCol != 1 || roleReconTbl != 1)
+                throw new InvalidOperationException($"Phase 7.4.0A/B migration check failed: obsolete={obsoleteCount}, allowed={allowedOrderCount}, nonceIdx={nonceIdxExists}, nonceStateCols={nonceStateCols}, auditTbl={auditTblExists}, userFacCol={userFacCol}, roleReconTbl={roleReconTbl}");
+            Console.WriteLine("PASS Phase 7.4.0A/B migrations reconciled ClientAdmin, webhook state/audit, users.assigned_facility_id, and role_reconciliation_audit_logs on PostgreSQL.");
         }
 
         // 4b. Verify matching and differing location values:
@@ -2780,6 +2782,98 @@ try
     }
 
     Console.WriteLine("PASS PostgreSQL P74-0B-04 (Staff Provisioning & JWT Claims) & P74-0B-05 (Atomic Positive Short-Pick, Forced Rollback, Retry, Concurrency Race) verified cleanly.");
+
+    // 7.5f P74-AUTH-01 Role Escalation Prevention & Privileged Client-Role Reconciliation on PostgreSQL
+    var pgCorruptClientUserId = Guid.NewGuid();
+    var pgClientAdminActorId = Guid.NewGuid();
+    await using (var authSeedDb = CreateDb(operationalConn, user))
+    {
+        var superRole = await authSeedDb.Roles.SingleAsync(r => r.RoleName == SystemRoles.SuperAdmin);
+        var whRole = await authSeedDb.Roles.SingleAsync(r => r.RoleName == SystemRoles.WarehouseOperator);
+        var cliAdminRole = await authSeedDb.Roles.SingleAsync(r => r.RoleName == SystemRoles.ClientAdmin);
+        var cliUserRole = await authSeedDb.Roles.SingleAsync(r => r.RoleName == SystemRoles.ClientUser);
+
+        var corruptUser = new User
+        {
+            Id = pgCorruptClientUserId,
+            ClientId = client1Id,
+            Email = "pg-corrupt-client@740b.test",
+            FirstName = "Corrupt",
+            LastName = "Client",
+            UserType = UserType.Client,
+            Status = UserStatus.Active,
+            PasswordHash = new PasswordHasher().HashPassword("Password123!"),
+            RefreshToken = "pre-reconciliation-stale-refresh-token",
+            RefreshTokenExpiryTime = DateTime.UtcNow.AddDays(5)
+        };
+        corruptUser.UserRoles.Add(new UserRole { User = corruptUser, Role = superRole });
+        corruptUser.UserRoles.Add(new UserRole { User = corruptUser, Role = whRole });
+        corruptUser.UserRoles.Add(new UserRole { User = corruptUser, Role = cliUserRole });
+
+        var pgCliAdmin = new User
+        {
+            Id = pgClientAdminActorId,
+            ClientId = client1Id,
+            Email = "pg-cliadmin-actor@740b.test",
+            FirstName = "Client",
+            LastName = "AdminActor",
+            UserType = UserType.Client,
+            Status = UserStatus.Active,
+            PasswordHash = new PasswordHasher().HashPassword("Password123!")
+        };
+        pgCliAdmin.UserRoles.Add(new UserRole { User = pgCliAdmin, Role = cliAdminRole });
+
+        authSeedDb.Users.AddRange(corruptUser, pgCliAdmin);
+        await authSeedDb.SaveChangesAsync();
+
+        var authRecon = new DbInitializer(authSeedDb, new PasswordHasher(), NullLogger<DbInitializer>.Instance);
+        await authRecon.SeedAsync();
+        await authRecon.SeedAsync(); // idempotency check
+    }
+
+    await using (var authCheckDb = CreateDb(operationalConn, user))
+    {
+        var cleanedUser = await authCheckDb.Users
+            .Include(u => u.UserRoles)
+                .ThenInclude(ur => ur.Role)
+            .SingleAsync(u => u.Id == pgCorruptClientUserId);
+        var remainingRoles = cleanedUser.UserRoles.Select(ur => ur.Role.RoleName).ToList();
+        if (remainingRoles.Contains(SystemRoles.SuperAdmin) || remainingRoles.Contains(SystemRoles.WarehouseOperator) ||
+            !remainingRoles.Contains(SystemRoles.ClientUser) || cleanedUser.RefreshToken != null)
+            throw new InvalidOperationException("P74-AUTH-01 PostgreSQL reconciliation failed to remove privileged roles or revoke refresh token.");
+
+        var auditRows = await authCheckDb.RoleReconciliationAuditLogs.Where(a => a.UserId == pgCorruptClientUserId).ToListAsync();
+        if (auditRows.Count != 2)
+            throw new InvalidOperationException($"P74-AUTH-01 PostgreSQL expected 2 RoleReconciliationAuditLog rows, found {auditRows.Count}.");
+    }
+
+    // ClientAdmin attempting SuperAdmin or WarehouseOperator grant via HTTP on PostgreSQL -> 403 Forbidden
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, pgClientAdminActorId.ToString()),
+        new Claim(ClaimTypes.Role, SystemRoles.ClientAdmin),
+        new Claim("user_type", "Client"),
+        new Claim("tenant_id", client1Id.ToString()),
+        new Claim("permissions", Permissions.Users.View),
+        new Claim("permissions", Permissions.Users.Create),
+        new Claim("permissions", Permissions.Users.AssignRoles)
+    };
+    if ((await p74Client.PostAsJsonAsync("/api/v1/users", new
+    {
+        email = "pg-esc@740b.test", password = "Password123!", firstName = "Esc", lastName = "User",
+        userType = UserType.Client, clientId = client1Id, roles = new[] { SystemRoles.SuperAdmin }
+    })).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.PostAsJsonAsync($"/api/v1/users/{pgCorruptClientUserId}/roles", new[] { SystemRoles.SuperAdmin })).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.PostAsJsonAsync($"/api/v1/users/{pgCorruptClientUserId}/roles", new[] { SystemRoles.WarehouseOperator })).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.PostAsJsonAsync("/api/v1/users", new
+        {
+            email = "pg-allowed-client@740b.test", password = "Password123!", firstName = "Ok", lastName = "Client",
+            userType = UserType.Client, clientId = client1Id, roles = new[] { SystemRoles.ClientUser }
+        })).StatusCode != HttpStatusCode.Created)
+        throw new InvalidOperationException("P74-AUTH-01 PostgreSQL ClientAdmin role-escalation prevention HTTP check failed.");
+    TestAuthHandler.CustomClaims = null;
+
+    Console.WriteLine("PASS PostgreSQL P74-AUTH-01 Role-Escalation Prevention, Client/Driver Privileged-Role Reconciliation & Audit Evidence verified cleanly.");
 
     Console.WriteLine("\n================================================================================");
     Console.WriteLine("ALL PHASE 7.3, 7.4.0A & PHASE 7.4.0B POSTGRESQL VERIFICATIONS PASSED CLEANLY!");

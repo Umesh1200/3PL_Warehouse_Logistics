@@ -3,13 +3,18 @@ using Microsoft.AspNetCore.Authentication.JwtBearer;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.DependencyInjection;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Infrastructure.Authentication;
 
 /// <summary>
-/// Authoritative JWT validation check ensuring active user state and strict alignment between
-/// the signed JWT facility_id claim and database Users.AssignedFacilityId for warehouse Staff.
+/// Authoritative JWT validation check verifying:
+/// - Active, non-deleted user state
+/// - Strict parity between signed JWT user_type and DB UserType
+/// - Incompatible privileged role rejection & immediate rejection of revoked DB roles
+/// - Client tenant_id parity
+/// - Staff facility_id parity with active DB Users.AssignedFacilityId
 /// </summary>
 public static class JwtStaffFacilityValidator
 {
@@ -34,7 +39,9 @@ public static class JwtStaffFacilityValidator
                 u.IsDeleted,
                 u.Status,
                 u.UserType,
-                u.AssignedFacilityId
+                u.ClientId,
+                u.AssignedFacilityId,
+                RoleNames = u.UserRoles.Select(ur => ur.Role.RoleName).ToList()
             })
             .FirstOrDefaultAsync(context.HttpContext.RequestAborted);
 
@@ -44,12 +51,64 @@ public static class JwtStaffFacilityValidator
             return;
         }
 
+        // Enforce strict signed user_type parity against authoritative DB UserType
+        var tokenUserTypeClaim = context.Principal?.FindFirst("user_type")?.Value
+            ?? context.Principal?.FindFirst("UserType")?.Value;
+
+        if (!Enum.TryParse<UserType>(tokenUserTypeClaim, ignoreCase: true, out var tokenUserType) ||
+            tokenUserType != user.UserType)
+        {
+            context.Fail("Token user_type does not match authoritative database account type.");
+            return;
+        }
+
+        // Extract all signed role claims across ClaimTypes.Role / roles / role
+        var tokenRoles = context.Principal!
+            .FindAll(ClaimTypes.Role)
+            .Concat(context.Principal.FindAll("roles"))
+            .Concat(context.Principal.FindAll("role"))
+            .Select(c => c.Value.Trim())
+            .Where(v => v.Length > 0)
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        // Reject incompatible privileged/platform role claims for account type and reject revoked DB roles immediately
+        var dbRolesSet = user.RoleNames.ToHashSet(StringComparer.OrdinalIgnoreCase);
+        foreach (var tokenRole in tokenRoles)
+        {
+            if (!RoleAssignmentPolicy.IsAllowedRoleForUserType(user.UserType, tokenRole))
+            {
+                context.Fail($"Token contains incompatible role '{tokenRole}' for account type '{user.UserType}'.");
+                return;
+            }
+
+            if (!dbRolesSet.Contains(tokenRole))
+            {
+                context.Fail($"Token role '{tokenRole}' has been revoked or is not currently assigned.");
+                return;
+            }
+        }
+
+        if (user.UserType == UserType.Client)
+        {
+            var tenantClaim = context.Principal.FindFirst("tenant_id")?.Value
+                ?? context.Principal.FindFirst("client_id")?.Value;
+            if (!Guid.TryParse(tenantClaim, out var tokenTenantId) ||
+                !user.ClientId.HasValue ||
+                tokenTenantId != user.ClientId.Value)
+            {
+                context.Fail("Client token tenant scope does not match authoritative database tenant.");
+                return;
+            }
+            return;
+        }
+
         if (user.UserType != UserType.Staff)
         {
             return;
         }
 
-        var facilityClaim = context.Principal?.FindFirst("facility_id")?.Value;
+        var facilityClaim = context.Principal.FindFirst("facility_id")?.Value;
         Guid? tokenFacilityId = null;
         if (!string.IsNullOrWhiteSpace(facilityClaim))
         {

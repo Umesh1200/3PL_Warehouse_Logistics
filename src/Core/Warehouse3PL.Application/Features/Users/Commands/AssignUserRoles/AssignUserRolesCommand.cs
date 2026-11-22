@@ -1,6 +1,7 @@
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -32,6 +33,7 @@ public class AssignUserRolesCommandHandler : IRequestHandler<AssignUserRolesComm
     {
         var user = await _context.Users
             .Include(u => u.UserRoles)
+                .ThenInclude(ur => ur.Role)
             .FirstOrDefaultAsync(u => u.Id == request.UserId && !u.IsDeleted, cancellationToken);
 
         if (user == null)
@@ -39,14 +41,15 @@ public class AssignUserRolesCommandHandler : IRequestHandler<AssignUserRolesComm
             throw new EntityNotFoundException(nameof(User), request.UserId);
         }
 
-        if (!_currentUser.IsStaff && user.ClientId != _currentUser.TenantId)
-        {
-            throw new ForbiddenException("Cannot manage roles for users of another client tenant.");
-        }
-
-        var matchingRoles = await _context.Roles
-            .Where(r => request.Roles.Contains(r.RoleName))
-            .ToListAsync(cancellationToken);
+        var existingRoleNames = user.UserRoles.Select(ur => ur.Role.RoleName).ToList();
+        var matchingRoles = await RoleAssignmentPolicy.ValidateAndResolveRolesAsync(
+            _context,
+            _currentUser,
+            user.UserType,
+            user.ClientId,
+            request.Roles,
+            existingRoleNames,
+            cancellationToken);
 
         // Remove old roles not in the new list
         var existingRoleIds = matchingRoles.Select(r => r.Id).ToHashSet();
@@ -58,8 +61,10 @@ public class AssignUserRolesCommandHandler : IRequestHandler<AssignUserRolesComm
 
         // Add newly assigned roles
         var currentRoleIds = user.UserRoles.Select(ur => ur.RoleId).ToHashSet();
+        var addedAny = false;
         foreach (var role in matchingRoles.Where(r => !currentRoleIds.Contains(r.Id)))
         {
+            addedAny = true;
             user.UserRoles.Add(new UserRole
             {
                 User = user,
@@ -67,6 +72,13 @@ public class AssignUserRolesCommandHandler : IRequestHandler<AssignUserRolesComm
                 AssignedAt = _dateTimeProvider.UtcNow,
                 AssignedBy = _currentUser.UserId
             });
+        }
+
+        // Revoke refresh tokens whenever a user's roles change so stale privileges cannot be refreshed
+        if (rolesToRemove.Count > 0 || addedAny)
+        {
+            user.RefreshToken = null;
+            user.RefreshTokenExpiryTime = null;
         }
 
         await _context.SaveChangesAsync(cancellationToken);

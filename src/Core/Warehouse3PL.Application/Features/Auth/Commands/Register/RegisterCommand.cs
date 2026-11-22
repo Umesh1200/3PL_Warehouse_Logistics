@@ -72,6 +72,11 @@ public class RegisterCommandHandler : IRequestHandler<RegisterCommand, AuthRespo
 
     public async Task<AuthResponseDto> Handle(RegisterCommand request, CancellationToken cancellationToken)
     {
+        if (request.UserType == UserType.Staff)
+        {
+            throw new ForbiddenException("Self-registration cannot create warehouse Staff or SuperAdmin accounts.");
+        }
+
         var emailNormalized = request.Email.Trim().ToLower();
 
         var existingUser = await _context.Users

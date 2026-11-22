@@ -15942,6 +15942,60 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.ToTable("role_permissions", (string)null);
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.RoleReconciliationAuditLog", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("audit_id");
+
+                    b.Property<string>("Action")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)")
+                        .HasColumnName("action");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("reason");
+
+                    b.Property<DateTime>("ReconciledAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("reconciled_at_utc");
+
+                    b.Property<int>("RoleId")
+                        .HasColumnType("integer")
+                        .HasColumnName("role_id");
+
+                    b.Property<string>("RoleName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("role_name");
+
+                    b.Property<Guid>("UserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("user_id");
+
+                    b.Property<string>("UserType")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("user_type");
+
+                    b.HasKey("Id")
+                        .HasName("pk_role_reconciliation_audit_logs");
+
+                    b.HasIndex("ReconciledAtUtc")
+                        .HasDatabaseName("ix_role_reconciliation_audit_logs_reconciled_at_utc");
+
+                    b.HasIndex("UserId")
+                        .HasDatabaseName("ix_role_reconciliation_audit_logs_user_id");
+
+                    b.ToTable("role_reconciliation_audit_logs", (string)null);
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.User", b =>
                 {
                     b.Property<Guid>("Id")

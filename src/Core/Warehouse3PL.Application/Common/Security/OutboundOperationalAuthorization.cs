@@ -32,6 +32,9 @@ public sealed class OutboundOperationalAuthorization
         _tenantProvider = tenantProvider;
     }
 
+    private bool IsVerifiedPlatformSuperAdmin =>
+        _currentUser.IsSuperAdmin && _currentUser.UserType == UserType.Staff;
+
     public void EnsureAuthenticated()
     {
         if (!_currentUser.IsAuthenticated)
@@ -47,7 +50,7 @@ public sealed class OutboundOperationalAuthorization
     {
         EnsureAuthenticated();
 
-        if (_currentUser.IsSuperAdmin || _currentUser.UserType == UserType.Staff)
+        if (IsVerifiedPlatformSuperAdmin || _currentUser.UserType == UserType.Staff)
         {
             return;
         }
@@ -69,7 +72,7 @@ public sealed class OutboundOperationalAuthorization
     {
         EnsureAuthenticated();
 
-        if (_currentUser.IsSuperAdmin)
+        if (IsVerifiedPlatformSuperAdmin)
         {
             return;
         }
@@ -89,7 +92,7 @@ public sealed class OutboundOperationalAuthorization
     {
         EnsureStaffOperationalIdentity(operationDescription);
 
-        if (_currentUser.IsSuperAdmin)
+        if (IsVerifiedPlatformSuperAdmin)
         {
             return;
         }
@@ -126,7 +129,7 @@ public sealed class OutboundOperationalAuthorization
     {
         EnsureStaffOperationalIdentity(operationDescription);
 
-        if (_currentUser.IsSuperAdmin || _currentUser.HasPermission(Permissions.Analytics.MultiFacilityView))
+        if (IsVerifiedPlatformSuperAdmin || _currentUser.HasPermission(Permissions.Analytics.MultiFacilityView))
         {
             return;
         }
@@ -156,7 +159,7 @@ public sealed class OutboundOperationalAuthorization
 
         var targetFacility = requestedFacilityId ?? _currentUser.RequestedFacilityId;
 
-        if (_currentUser.IsSuperAdmin)
+        if (IsVerifiedPlatformSuperAdmin)
         {
             return new OperationalQueryScope(requestedClientId, targetFacility, null);
         }

@@ -46,6 +46,7 @@ public sealed class Phase740BRealJwtFacilityProvisioningHttpTests : IAsyncLifeti
     private const string TestAudience = "nexus3pl-test-api";
 
     private static readonly Guid ClientA = Guid.Parse("740c0001-0000-0000-0000-000000000001");
+    private static readonly Guid ClientB = Guid.Parse("740c0001-0000-0000-0000-000000000002");
     private static readonly Guid FacilityA = Guid.Parse("740c0002-0000-0000-0000-000000000001");
     private static readonly Guid FacilityB = Guid.Parse("740c0002-0000-0000-0000-000000000002");
     private static readonly Guid FacilityInactive = Guid.Parse("740c0002-0000-0000-0000-000000000003");
@@ -54,6 +55,8 @@ public sealed class Phase740BRealJwtFacilityProvisioningHttpTests : IAsyncLifeti
     private static readonly Guid PreExistingUnassignedStaffId = Guid.Parse("740c0003-0000-0000-0000-000000000002");
     private static readonly Guid ClientAdminId = Guid.Parse("740c0003-0000-0000-0000-000000000003");
     private static readonly Guid InactiveStaffId = Guid.Parse("740c0003-0000-0000-0000-000000000004");
+    private static readonly Guid ForeignClientUserId = Guid.Parse("740c0003-0000-0000-0000-000000000005");
+    private static readonly Guid StaffNonSuperAdminId = Guid.Parse("740c0003-0000-0000-0000-000000000006");
 
     private static readonly Guid ItemA = Guid.Parse("740c0004-0000-0000-0000-000000000001");
     private static readonly Guid BinA = Guid.Parse("740c0005-0000-0000-0000-000000000001");
@@ -166,7 +169,9 @@ public sealed class Phase740BRealJwtFacilityProvisioningHttpTests : IAsyncLifeti
 
     private static void SeedData(ApplicationDbContext db, IPasswordHasher hasher)
     {
-        db.Clients.Add(new Client { Id = ClientA, CompanyName = "RealJwt Client", AccountCode = "JWT-A" });
+        db.Clients.AddRange(
+            new Client { Id = ClientA, CompanyName = "RealJwt Client", AccountCode = "JWT-A" },
+            new Client { Id = ClientB, CompanyName = "Foreign Client B", AccountCode = "JWT-B" });
 
         db.Facilities.AddRange(
             new Facility { Id = FacilityA, FacilityCode = "JWT-FAC-A", Name = "Facility A", AddressLine1 = "1 Main", City = "Chicago", CountryCode = "US", IsActive = true },
@@ -188,8 +193,17 @@ public sealed class Phase740BRealJwtFacilityProvisioningHttpTests : IAsyncLifeti
         roleClientAdmin.RolePermissions.Add(new RolePermission { PermissionKey = Permissions.Users.View });
         roleClientAdmin.RolePermissions.Add(new RolePermission { PermissionKey = Permissions.Users.Create });
         roleClientAdmin.RolePermissions.Add(new RolePermission { PermissionKey = Permissions.Users.Edit });
+        roleClientAdmin.RolePermissions.Add(new RolePermission { PermissionKey = Permissions.Users.AssignRoles });
 
-        db.Roles.AddRange(roleSuper, roleWhOps, roleSupervisor, roleClientAdmin);
+        var roleClientUser = new Role { RoleName = SystemRoles.ClientUser };
+        var roleDriver = new Role { RoleName = SystemRoles.Driver };
+        var roleStaffUserMgr = new Role { RoleName = SystemRoles.OperationsManager };
+        roleStaffUserMgr.RolePermissions.Add(new RolePermission { PermissionKey = Permissions.Users.View });
+        roleStaffUserMgr.RolePermissions.Add(new RolePermission { PermissionKey = Permissions.Users.Create });
+        roleStaffUserMgr.RolePermissions.Add(new RolePermission { PermissionKey = Permissions.Users.Edit });
+        roleStaffUserMgr.RolePermissions.Add(new RolePermission { PermissionKey = Permissions.Users.AssignRoles });
+
+        db.Roles.AddRange(roleSuper, roleWhOps, roleSupervisor, roleClientAdmin, roleClientUser, roleDriver, roleStaffUserMgr);
 
         var passHash = hasher.HashPassword("Password123!");
         var superAdmin = new User
@@ -244,7 +258,33 @@ public sealed class Phase740BRealJwtFacilityProvisioningHttpTests : IAsyncLifeti
         };
         inactiveStaff.UserRoles.Add(new UserRole { User = inactiveStaff, Role = roleWhOps });
 
-        db.Users.AddRange(superAdmin, preUnassigned, clientAdmin, inactiveStaff);
+        var foreignClientUser = new User
+        {
+            Id = ForeignClientUserId,
+            ClientId = ClientB,
+            Email = "foreign-client@jwt.test",
+            PasswordHash = passHash,
+            FirstName = "Foreign",
+            LastName = "User",
+            UserType = UserType.Client,
+            Status = UserStatus.Active
+        };
+        foreignClientUser.UserRoles.Add(new UserRole { User = foreignClientUser, Role = roleClientUser });
+
+        var staffNonSuperAdmin = new User
+        {
+            Id = StaffNonSuperAdminId,
+            Email = "ops-mgr@jwt.test",
+            PasswordHash = passHash,
+            FirstName = "Ops",
+            LastName = "Manager",
+            UserType = UserType.Staff,
+            Status = UserStatus.Active,
+            AssignedFacilityId = FacilityA
+        };
+        staffNonSuperAdmin.UserRoles.Add(new UserRole { User = staffNonSuperAdmin, Role = roleStaffUserMgr });
+
+        db.Users.AddRange(superAdmin, preUnassigned, clientAdmin, inactiveStaff, foreignClientUser, staffNonSuperAdmin);
 
         db.Items.Add(new Item { Id = ItemA, ClientId = ClientA, Sku = "SKU-JWT-01", Description = "JWT Test Item" });
         db.Locations.AddRange(
@@ -495,6 +535,174 @@ public sealed class Phase740BRealJwtFacilityProvisioningHttpTests : IAsyncLifeti
             using var rAfterRevokeNext = await _http.SendAsync(BearerRequest(HttpMethod.Get, $"/api/v1/outbound/pick-tasks/next?facilityId={FacilityB}", token3));
             Assert.Equal(HttpStatusCode.Forbidden, rAfterRevokeNext.StatusCode);
         }
+    }
+
+    [Fact]
+    public async Task RealJwtPipeline_RoleEscalationPrevention_RevokedPrivileges_AndUserTypeParity()
+    {
+        var (adminToken, _, _) = await LoginAsync("superadmin@jwt.test", "Password123!");
+        var (clientAdminToken, _, _) = await LoginAsync("client-admin@jwt.test", "Password123!");
+        var (opsMgrToken, _, _) = await LoginAsync("ops-mgr@jwt.test", "Password123!");
+
+        // 1. ClientAdmin attempts to create Client user with SuperAdmin / WarehouseOperator / Driver -> 403 Forbidden (none created!)
+        foreach (var forbiddenRole in new[] { SystemRoles.SuperAdmin, SystemRoles.WarehouseOperator, SystemRoles.OperationsManager, SystemRoles.Driver, "PickSupervisor" })
+        {
+            using var rEsc = await _http.SendAsync(BearerRequest(HttpMethod.Post, "/api/v1/users", clientAdminToken, new
+            {
+                email = $"esc-{forbiddenRole.ToLowerInvariant()}@jwt.test",
+                password = "Password123!",
+                firstName = "Esc",
+                lastName = "Attempt",
+                userType = UserType.Client,
+                clientId = ClientA,
+                roles = new[] { forbiddenRole }
+            }));
+            Assert.Equal(HttpStatusCode.Forbidden, rEsc.StatusCode);
+        }
+
+        // ClientAdmin cannot create foreign-tenant user -> 403 Forbidden
+        using (var rForeignCreate = await _http.SendAsync(BearerRequest(HttpMethod.Post, "/api/v1/users", clientAdminToken, new
+        {
+            email = "foreign-create@jwt.test",
+            password = "Password123!",
+            firstName = "For",
+            lastName = "Create",
+            userType = UserType.Client,
+            clientId = ClientB,
+            roles = new[] { SystemRoles.ClientUser }
+        })))
+            Assert.Equal(HttpStatusCode.Forbidden, rForeignCreate.StatusCode);
+
+        // 2. ClientAdmin CAN create permitted own-tenant ClientUser and update own-tenant client role to ClientAdmin
+        Guid ownClientUserId;
+        using (var rValidClientCreate = await _http.SendAsync(BearerRequest(HttpMethod.Post, "/api/v1/users", clientAdminToken, new
+        {
+            email = "own-client-user@jwt.test",
+            password = "Password123!",
+            firstName = "Own",
+            lastName = "Client",
+            userType = UserType.Client,
+            clientId = ClientA,
+            roles = new[] { SystemRoles.ClientUser }
+        })))
+        {
+            Assert.Equal(HttpStatusCode.Created, rValidClientCreate.StatusCode);
+            using var doc = JsonDocument.Parse(await rValidClientCreate.Content.ReadAsStringAsync());
+            ownClientUserId = doc.RootElement.GetProperty("id").GetGuid();
+        }
+
+        using (var rPromotePermitted = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/users/{ownClientUserId}/roles", clientAdminToken, new[] { SystemRoles.ClientAdmin })))
+            Assert.Equal(HttpStatusCode.OK, rPromotePermitted.StatusCode);
+
+        // 3. ClientAdmin attempts to grant SuperAdmin / warehouse-only / unknown roles to existing own-tenant user -> 403 Forbidden
+        foreach (var escalatedRole in new[] { SystemRoles.SuperAdmin, SystemRoles.WarehouseOperator, SystemRoles.OperationsManager, SystemRoles.Driver, "UnknownFakeRole" })
+        {
+            using var rGrantEsc = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/users/{ownClientUserId}/roles", clientAdminToken, new[] { escalatedRole }));
+            Assert.Equal(HttpStatusCode.Forbidden, rGrantEsc.StatusCode);
+        }
+
+        // ClientAdmin cannot manage foreign-tenant user or staff user roles -> 403 Forbidden
+        using (var rForeignRoles = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/users/{ForeignClientUserId}/roles", clientAdminToken, new[] { SystemRoles.ClientUser })))
+            Assert.Equal(HttpStatusCode.Forbidden, rForeignRoles.StatusCode);
+
+        using (var rStaffRoles = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/users/{StaffNonSuperAdminId}/roles", clientAdminToken, new[] { SystemRoles.ClientUser })))
+            Assert.Equal(HttpStatusCode.Forbidden, rStaffRoles.StatusCode);
+
+        // 4. Non-SuperAdmin staff cannot grant SuperAdmin (403) and unknown role fails closed (400)
+        using (var rNonSuperGrant = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/users/{PreExistingUnassignedStaffId}/roles", opsMgrToken, new[] { SystemRoles.SuperAdmin })))
+            Assert.Equal(HttpStatusCode.Forbidden, rNonSuperGrant.StatusCode);
+
+        using (var rUnknownRole = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/users/{PreExistingUnassignedStaffId}/roles", opsMgrToken, new[] { "NonExistentRole" })))
+            Assert.Equal(HttpStatusCode.BadRequest, rUnknownRole.StatusCode);
+
+        // Even SuperAdmin cannot assign SuperAdmin/platform roles to Client user (403 Forbidden)
+        using (var rSuperAssignToClient = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/users/{ownClientUserId}/roles", adminToken, new[] { SystemRoles.SuperAdmin })))
+            Assert.Equal(HttpStatusCode.Forbidden, rSuperAssignToClient.StatusCode);
+
+        // 5. Legitimate SuperAdmin provisioning + immediate invalidation of JWT and refresh token when SuperAdmin is revoked
+        Guid tempSuperStaffId;
+        using (var rCreateSuperStaff = await _http.SendAsync(BearerRequest(HttpMethod.Post, "/api/v1/users", adminToken, new
+        {
+            email = "temp-super@jwt.test",
+            password = "Password123!",
+            firstName = "Temp",
+            lastName = "Super",
+            userType = UserType.Staff,
+            assignedFacilityId = FacilityA,
+            roles = new[] { SystemRoles.SuperAdmin }
+        })))
+        {
+            Assert.Equal(HttpStatusCode.Created, rCreateSuperStaff.StatusCode);
+            using var doc = JsonDocument.Parse(await rCreateSuperStaff.Content.ReadAsStringAsync());
+            tempSuperStaffId = doc.RootElement.GetProperty("id").GetGuid();
+        }
+
+        var (tempSuperToken, tempSuperRefresh, _) = await LoginAsync("temp-super@jwt.test", "Password123!");
+        using (var rSuperMe = await _http.SendAsync(BearerRequest(HttpMethod.Get, "/api/v1/auth/me", tempSuperToken)))
+            Assert.Equal(HttpStatusCode.OK, rSuperMe.StatusCode);
+
+        // Non-SuperAdmin staff cannot revoke SuperAdmin from tempSuperStaffId -> 403 Forbidden
+        using (var rOpsRevokeSuper = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/users/{tempSuperStaffId}/roles", opsMgrToken, new[] { SystemRoles.WarehouseOperator })))
+            Assert.Equal(HttpStatusCode.Forbidden, rOpsRevokeSuper.StatusCode);
+
+        // Platform SuperAdmin revokes SuperAdmin -> replaced with WarehouseOperator
+        using (var rRevokeSuper = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/users/{tempSuperStaffId}/roles", adminToken, new[] { SystemRoles.WarehouseOperator })))
+            Assert.Equal(HttpStatusCode.OK, rRevokeSuper.StatusCode);
+
+        // Old SuperAdmin JWT immediately rejected (401 Unauthorized) AND old refresh token invalidated (401 Unauthorized)
+        using (var rStaleSuperUse = await _http.SendAsync(BearerRequest(HttpMethod.Get, $"/api/v1/outbound/pick-tasks?facilityId={FacilityB}", tempSuperToken)))
+            Assert.Equal(HttpStatusCode.Unauthorized, rStaleSuperUse.StatusCode);
+
+        using (var rStaleRefreshUse = await _http.PostAsJsonAsync("/api/v1/auth/refresh-token", new { accessToken = tempSuperToken, refreshToken = tempSuperRefresh }))
+            Assert.Equal(HttpStatusCode.Unauthorized, rStaleRefreshUse.StatusCode);
+
+        // 6. Forged/stale JWT where signed user_type ("Staff") + role ("SuperAdmin") mismatch DB (UserType.Client) -> 401 Unauthorized
+        var forgedCreds = new SigningCredentials(
+            new SymmetricSecurityKey(Encoding.UTF8.GetBytes(TestJwtSecret)),
+            SecurityAlgorithms.HmacSha256);
+        var forgedJwt = new JwtSecurityToken(
+            issuer: TestIssuer,
+            audience: TestAudience,
+            claims: new[]
+            {
+                new System.Security.Claims.Claim(JwtRegisteredClaimNames.Sub, ownClientUserId.ToString()),
+                new System.Security.Claims.Claim("user_type", "Staff"),
+                new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Role, SystemRoles.SuperAdmin),
+                new System.Security.Claims.Claim("facility_id", FacilityA.ToString())
+            },
+            notBefore: DateTime.UtcNow.AddMinutes(-1),
+            expires: DateTime.UtcNow.AddMinutes(30),
+            signingCredentials: forgedCreds);
+        var forgedTokenString = new JwtSecurityTokenHandler().WriteToken(forgedJwt);
+
+        using (var rForgedUse = await _http.SendAsync(BearerRequest(HttpMethod.Get, $"/api/v1/outbound/pick-tasks?facilityId={FacilityA}", forgedTokenString)))
+            Assert.Equal(HttpStatusCode.Unauthorized, rForgedUse.StatusCode);
+
+        // 7. Regression: Client user holding a privileged SuperAdmin role cannot bypass CurrentUserContext or OutboundOperationalAuthorization
+        var spoofedClientPrincipal = new System.Security.Claims.ClaimsPrincipal(new System.Security.Claims.ClaimsIdentity(new[]
+        {
+            new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.NameIdentifier, ownClientUserId.ToString()),
+            new System.Security.Claims.Claim("user_type", "Client"),
+            new System.Security.Claims.Claim("tenant_id", ClientA.ToString()),
+            new System.Security.Claims.Claim(System.Security.Claims.ClaimTypes.Role, SystemRoles.SuperAdmin),
+            new System.Security.Claims.Claim("permissions", Permissions.Outbound.Pick)
+        }, "Test"));
+        var httpContext = new Microsoft.AspNetCore.Http.DefaultHttpContext { User = spoofedClientPrincipal };
+        var ctxAccessor = new Microsoft.AspNetCore.Http.HttpContextAccessor { HttpContext = httpContext };
+        var curUser = new CurrentUserContext(ctxAccessor);
+        Assert.False(curUser.IsSuperAdmin);
+        Assert.False(curUser.IsStaff);
+
+        using var scope = _app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<IApplicationDbContext>();
+        var tenantProv = new TenantProvider(ctxAccessor);
+        tenantProv.SetTenantId(ClientA);
+        var outAuth = new Warehouse3PL.Application.Common.Security.OutboundOperationalAuthorization(db, curUser, tenantProv);
+
+        Assert.Throws<Warehouse3PL.Domain.Exceptions.ForbiddenException>(() => outAuth.EnsureStaffOperationalIdentity("ClientSpoofedSuperAdmin"));
+        Assert.Throws<Warehouse3PL.Domain.Exceptions.ForbiddenException>(() => outAuth.ValidateStaffMutationFacilityAccess(FacilityA, "ClientSpoofedSuperAdmin"));
+        await Assert.ThrowsAsync<Warehouse3PL.Domain.Exceptions.ForbiddenException>(async () =>
+            await outAuth.ResolveOutboundQueryScopeAsync(null, FacilityA, allowCrossFacilityRead: true, allowClient: false));
     }
 
     public async Task DisposeAsync()

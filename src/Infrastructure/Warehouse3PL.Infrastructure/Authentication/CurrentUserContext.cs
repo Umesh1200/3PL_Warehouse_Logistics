@@ -86,9 +86,9 @@ public class CurrentUserContext : ICurrentUserContext
 
     public bool IsAuthenticated => User?.Identity?.IsAuthenticated ?? false;
 
-    public bool IsStaff => UserType == Domain.Enums.UserType.Staff || IsInRole(SystemRoles.SuperAdmin);
+    public bool IsStaff => UserType == Domain.Enums.UserType.Staff;
 
-    public bool IsSuperAdmin => IsInRole(SystemRoles.SuperAdmin);
+    public bool IsSuperAdmin => UserType == Domain.Enums.UserType.Staff && IsInRole(SystemRoles.SuperAdmin);
 
     public bool HasPermission(string permission)
     {

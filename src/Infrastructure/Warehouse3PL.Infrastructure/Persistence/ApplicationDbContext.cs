@@ -55,6 +55,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<Role> Roles => Set<Role>();
     public DbSet<RolePermission> RolePermissions => Set<RolePermission>();
     public DbSet<UserRole> UserRoles => Set<UserRole>();
+    public DbSet<RoleReconciliationAuditLog> RoleReconciliationAuditLogs => Set<RoleReconciliationAuditLog>();
     public DbSet<ClientFacilityAccess> ClientFacilityAccesses => Set<ClientFacilityAccess>();
     public DbSet<Facility> Facilities => Set<Facility>();
     public DbSet<WarehouseZone> WarehouseZones => Set<WarehouseZone>();

@@ -4,6 +4,7 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
@@ -78,9 +79,9 @@ public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserD
     {
         // Enforce tenant boundary: non-staff can only create Client users in their own tenant
         var targetClientId = request.ClientId;
-        if (!_currentUser.IsStaff)
+        if (!_currentUser.IsStaff || _currentUser.UserType != UserType.Staff)
         {
-            if (!_currentUser.TenantId.HasValue)
+            if (!_currentUser.TenantId.HasValue || _currentUser.TenantId.Value == Guid.Empty)
             {
                 throw new ForbiddenException("Cannot create users without a tenant context.");
             }
@@ -88,8 +89,23 @@ public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserD
             {
                 throw new ForbiddenException("Only authorized warehouse staff administrators can create Staff/Driver accounts or assign facilities.");
             }
+            if (request.ClientId.HasValue && request.ClientId.Value != _currentUser.TenantId.Value)
+            {
+                throw new ForbiddenException("Cannot create users belonging to another client tenant.");
+            }
             targetClientId = _currentUser.TenantId.Value;
         }
+
+        // Enforce server-side role assignment policy prior to persisting user or roles
+        var effectiveClientId = request.UserType == UserType.Staff ? (Guid?)null : targetClientId;
+        var resolvedRoles = await RoleAssignmentPolicy.ValidateAndResolveRolesAsync(
+            _context,
+            _currentUser,
+            request.UserType,
+            effectiveClientId,
+            request.Roles,
+            existingTargetRoleNames: null,
+            cancellationToken);
 
         Guid? validatedFacilityId = null;
         if (request.AssignedFacilityId.HasValue)
@@ -147,23 +163,16 @@ public class CreateUserCommandHandler : IRequestHandler<CreateUserCommand, UserD
             AssignedFacilityId = request.UserType == UserType.Staff ? validatedFacilityId : null
         };
 
-        // Assign roles
-        if (request.Roles.Count != 0)
+        // Assign validated roles
+        foreach (var role in resolvedRoles)
         {
-            var requestedRoles = await _context.Roles
-                .Where(r => request.Roles.Contains(r.RoleName))
-                .ToListAsync(cancellationToken);
-
-            foreach (var role in requestedRoles)
+            user.UserRoles.Add(new UserRole
             {
-                user.UserRoles.Add(new UserRole
-                {
-                    User = user,
-                    Role = role,
-                    AssignedAt = _dateTimeProvider.UtcNow,
-                    AssignedBy = _currentUser.UserId
-                });
-            }
+                User = user,
+                Role = role,
+                AssignedAt = _dateTimeProvider.UtcNow,
+                AssignedBy = _currentUser.UserId
+            });
         }
 
         _context.Users.Add(user);

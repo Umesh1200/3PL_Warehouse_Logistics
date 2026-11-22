@@ -23,6 +23,9 @@ public class WarehouseOperationalAuthorization
         _currentUser = currentUser;
     }
 
+    private bool IsVerifiedPlatformSuperAdmin =>
+        _currentUser.IsSuperAdmin && _currentUser.UserType == UserType.Staff;
+
     /// <summary>
     /// Validates and resolves the operational tenant and facility scope for inventory and task queries.
     /// </summary>
@@ -39,7 +42,7 @@ public class WarehouseOperationalAuthorization
         var targetFacility = requestedFacilityId ?? _currentUser.RequestedFacilityId;
 
         // 1. SuperAdmin: can access any client and any facility
-        if (_currentUser.IsSuperAdmin)
+        if (IsVerifiedPlatformSuperAdmin)
         {
             return new OperationalQueryScope(requestedClientId, targetFacility, null);
         }
@@ -133,7 +136,8 @@ public class WarehouseOperationalAuthorization
             throw new UnauthorizedException("Authentication is required.");
         }
 
-        if (_currentUser.IsSuperAdmin)
+        // 1. SuperAdmin: can access any client and any facility
+        if (IsVerifiedPlatformSuperAdmin)
         {
             return;
         }

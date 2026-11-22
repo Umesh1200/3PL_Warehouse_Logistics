@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Catalog;
 using Warehouse3PL.Domain.Entities.CrossDock;
@@ -218,6 +219,51 @@ public class DbInitializer
         }
 
         await _context.SaveChangesAsync();
+        await ReconcileNonStaffPlatformRolesAsync();
+    }
+
+    private async Task ReconcileNonStaffPlatformRolesAsync()
+    {
+        var invalidAssignments = await _context.UserRoles
+            .Include(ur => ur.User)
+            .Include(ur => ur.Role)
+            .Where(ur => !ur.User.IsDeleted &&
+                         (ur.User.UserType == UserType.Client || ur.User.UserType == UserType.Driver))
+            .ToListAsync();
+
+        var disallowed = invalidAssignments
+            .Where(ur => !RoleAssignmentPolicy.IsAllowedRoleForUserType(ur.User.UserType, ur.Role.RoleName))
+            .ToList();
+
+        if (disallowed.Count == 0)
+        {
+            return;
+        }
+
+        var now = DateTime.UtcNow;
+        foreach (var ur in disallowed)
+        {
+            _context.RoleReconciliationAuditLogs.Add(new RoleReconciliationAuditLog
+            {
+                UserId = ur.UserId,
+                UserType = ur.User.UserType,
+                RoleId = ur.RoleId,
+                RoleName = ur.Role.RoleName,
+                Action = "RemovedPlatformRoleFromNonStaff",
+                Reason = $"Idempotent startup reconciliation removed disallowed role '{ur.Role.RoleName}' from {ur.User.UserType} user '{ur.User.Email}'.",
+                ReconciledAtUtc = now
+            });
+
+            ur.User.RefreshToken = null;
+            ur.User.RefreshTokenExpiryTime = null;
+        }
+
+        _context.UserRoles.RemoveRange(disallowed);
+        await _context.SaveChangesAsync();
+
+        _logger.LogWarning(
+            "Reconciled {Count} disallowed privileged/platform role assignment(s) from non-staff accounts and revoked their refresh tokens.",
+            disallowed.Count);
     }
 
     private async Task<Facility> SeedFacilitiesAsync()
@@ -341,6 +387,7 @@ public class DbInitializer
         }
 
         await _context.SaveChangesAsync();
+        await ReconcileNonStaffPlatformRolesAsync();
     }
 
     private async Task SeedClientFacilityAccessAsync(Client client, Facility facility)

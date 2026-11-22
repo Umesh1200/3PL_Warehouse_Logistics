@@ -20,6 +20,7 @@ public interface IApplicationDbContext
     DbSet<Role> Roles { get; }
     DbSet<RolePermission> RolePermissions { get; }
     DbSet<UserRole> UserRoles { get; }
+    DbSet<RoleReconciliationAuditLog> RoleReconciliationAuditLogs { get; }
     DbSet<ClientFacilityAccess> ClientFacilityAccesses { get; }
     DbSet<Facility> Facilities { get; }
     DbSet<WarehouseZone> WarehouseZones { get; }
