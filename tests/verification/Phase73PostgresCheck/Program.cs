@@ -3075,10 +3075,12 @@ try
     }
 
     // 8.3 Auth-before-storage check (DriverB 403 leaves 0 storage files) + Multipart POD Upload + Forced Rollback Recovery + Confirm Delivery
-    var storageFilesBefore = Directory.GetFiles(pgPodStorageDir, "*", SearchOption.AllDirectories).Length;
+    var storageFilesBefore = Directory.Exists(pgPodStorageDir)
+        ? Directory.GetFiles(pgPodStorageDir, "*", SearchOption.AllDirectories).Length
+        : 0;
     SetDriverClaims(cDriverBId);
     if ((await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{cPkg1Id}/pod", new { recipientName = "WrongDriver" })).StatusCode != HttpStatusCode.Forbidden ||
-        Directory.GetFiles(pgPodStorageDir, "*", SearchOption.AllDirectories).Length != storageFilesBefore)
+        (Directory.Exists(pgPodStorageDir) ? Directory.GetFiles(pgPodStorageDir, "*", SearchOption.AllDirectories).Length : 0) != storageFilesBefore)
         throw new InvalidOperationException("Unauthorized driver triggered POD upload or did not fail with 403 before storage.");
 
     SetDriverClaims(cDriverAId);
