@@ -35,6 +35,9 @@ public class CarrierWebhookNonceConfiguration : IEntityTypeConfiguration<Carrier
             .HasDefaultValue(CarrierWebhookNonceStatus.Processing)
             .IsRequired();
 
+        builder.Property(x => x.ClaimToken)
+            .HasColumnName("claim_token");
+
         builder.Property(x => x.AttemptCount)
             .HasColumnName("attempt_count")
             .HasDefaultValue(1)

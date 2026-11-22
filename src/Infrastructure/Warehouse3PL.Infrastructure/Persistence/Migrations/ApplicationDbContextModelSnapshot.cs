@@ -11451,6 +11451,10 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(50)")
                         .HasColumnName("carrier_code");
 
+                    b.Property<Guid?>("ClaimToken")
+                        .HasColumnType("uuid")
+                        .HasColumnName("claim_token");
+
                     b.Property<DateTime>("LastAttemptAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("last_attempt_at_utc");

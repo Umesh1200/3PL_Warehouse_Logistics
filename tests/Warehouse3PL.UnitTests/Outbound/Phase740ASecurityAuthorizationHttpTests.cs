@@ -120,7 +120,9 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
         builder.Services.AddHttpContextAccessor();
         builder.Services.AddScoped<ICurrentUserContext, CurrentUserContext>();
         builder.Services.AddScoped<ITenantProvider, TenantProvider>();
-        builder.Services.AddScoped<IDateTimeProvider, DateTimeProvider>();
+        var testClock = new ControllableClock();
+        builder.Services.AddSingleton(testClock);
+        builder.Services.AddSingleton<IDateTimeProvider>(testClock);
         builder.Services.AddScoped<AuditableEntityInterceptor>();
 
         // Outbound infrastructure services exercised by controllers/handlers
@@ -807,6 +809,114 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
     }
 
     [Fact]
+    public async Task CarrierWebhook_ExpiredLeaseFencing_BlocksStaleCompletionInBothOrders()
+    {
+        var clock = _app.Services.GetRequiredService<ControllableClock>();
+        var probeState = _app.Services.GetRequiredService<WebhookProbeState>();
+
+        // Case 1: Worker A stalls -> lease expires -> Worker B reclaims and SUCCEEDS FIRST -> stale Worker A FAILS afterward
+        const string nonceForwardFail = "nonce-fence-fwd-fail";
+        var payload1 = JsonSerializer.Serialize(new
+        {
+            carrierCode = "SIM-FEDEX",
+            trackingNumber = ReturnTrackingNumber,
+            carrierEventId = "EVT-FENCE-1",
+            carrierEventCode = "IN_TRANSIT",
+            carrierDescription = "Fencing forward-fail test",
+            occurredAtUtc = DateTime.UtcNow
+        });
+
+        var ctrlA1 = new WebhookAttemptControl { FailOnProceed = true };
+        var ctrlB1 = new WebhookAttemptControl { FailOnProceed = false };
+        probeState.Enqueue(nonceForwardFail, ctrlA1);
+        probeState.Enqueue(nonceForwardFail, ctrlB1);
+
+        var ts1 = new DateTimeOffset(clock.UtcNow).ToUnixTimeSeconds().ToString();
+        var workerA1Task = _http.SendAsync(CreateSignedWebhookRequest("SIM-FEDEX", PrimarySecretActiveCarrier, payload1, ts1, nonceForwardFail));
+        await ctrlA1.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Expire Worker A's 60s lease while A remains stalled
+        clock.UtcNow = clock.UtcNow.AddSeconds(70);
+        var tsB1 = new DateTimeOffset(clock.UtcNow).ToUnixTimeSeconds().ToString();
+        var workerB1Task = _http.SendAsync(CreateSignedWebhookRequest("SIM-FEDEX", PrimarySecretActiveCarrier, payload1, tsB1, nonceForwardFail));
+        await ctrlB1.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+        ctrlB1.Proceed.TrySetResult(true);
+        using var respB1 = await workerB1Task;
+        Assert.Equal(HttpStatusCode.OK, respB1.StatusCode);
+
+        // Release stale Worker A to fail afterward -> must NOT overwrite Succeeded
+        ctrlA1.Proceed.TrySetResult(true);
+        using var respA1 = await workerA1Task;
+        Assert.Equal(HttpStatusCode.InternalServerError, respA1.StatusCode);
+
+        // Case 2: Reverse order — Worker A stalls -> lease expires -> Worker B reclaims -> stale Worker A COMPLETES FIRST -> Worker B completes SECOND
+        const string nonceReverseOk = "nonce-fence-rev-ok";
+        var payload2 = JsonSerializer.Serialize(new
+        {
+            carrierCode = "SIM-FEDEX",
+            trackingNumber = ReturnTrackingNumber,
+            carrierEventId = "EVT-FENCE-2",
+            carrierEventCode = "OUT_FOR_DELIVERY",
+            carrierDescription = "Fencing reverse-order test",
+            occurredAtUtc = DateTime.UtcNow
+        });
+
+        var ctrlA2 = new WebhookAttemptControl { FailOnProceed = false };
+        var ctrlB2 = new WebhookAttemptControl { FailOnProceed = false };
+        probeState.Enqueue(nonceReverseOk, ctrlA2);
+        probeState.Enqueue(nonceReverseOk, ctrlB2);
+
+        var tsA2 = new DateTimeOffset(clock.UtcNow).ToUnixTimeSeconds().ToString();
+        var workerA2Task = _http.SendAsync(CreateSignedWebhookRequest("SIM-FEDEX", PrimarySecretActiveCarrier, payload2, tsA2, nonceReverseOk));
+        await ctrlA2.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        clock.UtcNow = clock.UtcNow.AddSeconds(70);
+        var tsB2 = new DateTimeOffset(clock.UtcNow).ToUnixTimeSeconds().ToString();
+        var workerB2Task = _http.SendAsync(CreateSignedWebhookRequest("SIM-FEDEX", PrimarySecretActiveCarrier, payload2, tsB2, nonceReverseOk));
+        await ctrlB2.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        // Unblock stale Worker A FIRST while Worker B holds active ownership
+        ctrlA2.Proceed.TrySetResult(true);
+        using var respA2 = await workerA2Task;
+        Assert.Equal(HttpStatusCode.OK, respA2.StatusCode);
+
+        using (var midScope = _app.Services.CreateScope())
+        {
+            var midDb = midScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var midNonce = await midDb.CarrierWebhookNonces.SingleAsync(x => x.Nonce == nonceReverseOk);
+            Assert.Equal(CarrierWebhookNonceStatus.Processing, midNonce.Status);
+            Assert.NotNull(midNonce.ClaimToken);
+            Assert.Equal(2, midNonce.AttemptCount);
+        }
+
+        // Unblock legitimate Worker B SECOND -> transitions nonce cleanly to Succeeded with 1 total business event
+        ctrlB2.Proceed.TrySetResult(true);
+        using var respB2 = await workerB2Task;
+        Assert.Equal(HttpStatusCode.OK, respB2.StatusCode);
+
+        using (var verifyScope = _app.Services.CreateScope())
+        {
+            var db = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            Assert.Equal(2, await db.ReturnTrackingEvents.IgnoreQueryFilters().CountAsync());
+
+            foreach (var n in new[] { nonceForwardFail, nonceReverseOk })
+            {
+                var row = await db.CarrierWebhookNonces.SingleAsync(x => x.Nonce == n);
+                Assert.Equal(CarrierWebhookNonceStatus.Succeeded, row.Status);
+                Assert.Null(row.ClaimToken);
+                Assert.Equal(2, row.AttemptCount);
+                Assert.Equal(200, row.LastHttpStatusCode);
+
+                var audits = await db.CarrierWebhookAuditLogs.Where(a => a.Nonce == n).ToListAsync();
+                Assert.Equal(2, audits.Count(a => a.Outcome == "Received"));
+                Assert.Single(audits, a => a.Outcome == "StaleAttemptIgnored");
+                Assert.Single(audits, a => a.Outcome == "Processed" && a.HttpStatusCode == 200);
+                Assert.DoesNotContain(audits, a => a.Outcome == "Failed");
+            }
+        }
+    }
+
+    [Fact]
     public async Task CarrierWebhook_InvalidExtremeMalformedTimestamps_FailClosedWithUnauthorizedAndAudit()
     {
         var payload = JsonSerializer.Serialize(new
@@ -1161,9 +1271,35 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
     }
 }
 
+public sealed class ControllableClock : IDateTimeProvider
+{
+    public DateTime UtcNow { get; set; } = DateTime.UtcNow;
+}
+
+public sealed class WebhookAttemptControl
+{
+    public TaskCompletionSource<bool> Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource<bool> Proceed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public bool FailOnProceed { get; init; }
+}
+
 public sealed class WebhookProbeState
 {
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentQueue<WebhookAttemptControl>> _controls = new(StringComparer.Ordinal);
     public string? FailNextNonce { get; set; }
+
+    public void Enqueue(string nonce, WebhookAttemptControl control)
+    {
+        var q = _controls.GetOrAdd(nonce, _ => new System.Collections.Concurrent.ConcurrentQueue<WebhookAttemptControl>());
+        q.Enqueue(control);
+    }
+
+    public bool TryDequeue(string? nonce, out WebhookAttemptControl? control)
+    {
+        control = null;
+        if (string.IsNullOrEmpty(nonce)) return false;
+        return _controls.TryGetValue(nonce, out var q) && q.TryDequeue(out control);
+    }
 }
 
 public sealed class FaultInjectableReturnTrackingService(
@@ -1171,19 +1307,28 @@ public sealed class FaultInjectableReturnTrackingService(
     WebhookProbeState probeState,
     Microsoft.AspNetCore.Http.IHttpContextAccessor httpContextAccessor) : IReturnTrackingService
 {
-    public Task<IngestReturnTrackingResult> IngestReturnTrackingEventAsync(
+    public async Task<IngestReturnTrackingResult> IngestReturnTrackingEventAsync(
         IngestReturnTrackingRequest request,
         CancellationToken cancellationToken = default)
     {
         var nonce = httpContextAccessor.HttpContext?.Request.Headers["X-Webhook-Nonce"].FirstOrDefault();
-        if (!string.IsNullOrEmpty(probeState.FailNextNonce) &&
-            string.Equals(probeState.FailNextNonce, nonce, StringComparison.Ordinal))
+        if (probeState.TryDequeue(nonce, out var control) && control != null)
+        {
+            control.Entered.TrySetResult(true);
+            await control.Proceed.Task;
+            if (control.FailOnProceed)
+            {
+                throw new TimeoutException("Simulated delayed worker failure after lease expiry.");
+            }
+        }
+        else if (!string.IsNullOrEmpty(probeState.FailNextNonce) &&
+                 string.Equals(probeState.FailNextNonce, nonce, StringComparison.Ordinal))
         {
             probeState.FailNextNonce = null;
             throw new TimeoutException("Simulated transient carrier downstream timeout.");
         }
 
-        return inner.IngestReturnTrackingEventAsync(request, cancellationToken);
+        return await inner.IngestReturnTrackingEventAsync(request, cancellationToken);
     }
 
     public Task<ReturnInboundHandoffDto?> GetInboundHandoffByReturnShipmentIdAsync(

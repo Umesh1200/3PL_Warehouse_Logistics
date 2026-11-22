@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Npgsql;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Enums;
@@ -224,8 +225,39 @@ public class ReturnTrackingService : IReturnTrackingService
 
         _context.ReturnTrackingEvents.Add(trackingEvent);
 
-        // 9. Atomic Commit
-        await _context.SaveChangesAsync(cancellationToken);
+        // 9. Atomic Commit (concurrent duplicate fingerprint on PostgreSQL degrades cleanly to idempotent duplicate result)
+        try
+        {
+            await _context.SaveChangesAsync(cancellationToken);
+        }
+        catch (DbUpdateException ex) when (IsFingerprintUniqueViolation(ex))
+        {
+            _context.ClearChangeTracker();
+            var committedShipment = await _context.ReturnShipments
+                .Include(s => s.ReturnAuthorization)
+                .Include(s => s.InboundHandoff)
+                .AsNoTracking()
+                .FirstOrDefaultAsync(s => s.Id == shipment.Id, cancellationToken);
+
+            var handoffRef = committedShipment?.InboundHandoff?.HandoffReference ?? inboundHandoffReference;
+            var handoffId = committedShipment?.InboundHandoffId ?? inboundHandoffId;
+            return new IngestReturnTrackingResult
+            {
+                IsSuccess = true,
+                IsDuplicate = true,
+                ReturnShipmentId = shipment.Id,
+                ReturnAuthorizationId = auth.Id,
+                TrackingNumber = shipment.TrackingNumber,
+                CarrierCode = shipment.CarrierCode,
+                ShipmentStatus = committedShipment?.Status ?? shipment.Status,
+                AuthorizationStatus = committedShipment?.ReturnAuthorization?.Status ?? auth.Status,
+                CarrierHandoverAtUtc = committedShipment?.CarrierHandoverAtUtc ?? shipment.CarrierHandoverAtUtc,
+                DeliveredAtWarehouseUtc = committedShipment?.DeliveredAtWarehouseUtc ?? shipment.DeliveredAtWarehouseUtc,
+                InboundHandoffId = handoffId,
+                InboundHandoffReference = handoffRef,
+                Message = "Duplicate reverse tracking event ignored after concurrent commit (idempotent)."
+            };
+        }
 
         _logger.LogInformation(
             "Reverse tracking event '{Type}' ingested for ReturnShipment '{ShipmentId}' (Auth '{AuthNum}'). Status: '{Status}', HandoverAt: {Handover}",
@@ -467,6 +499,12 @@ public class ReturnTrackingService : IReturnTrackingService
             Notes = handoff.Notes
         };
     }
+
+    private static bool IsFingerprintUniqueViolation(DbUpdateException ex)
+        => ex.InnerException is PostgresException pgEx &&
+           pgEx.SqlState == PostgresErrorCodes.UniqueViolation &&
+           pgEx.ConstraintName != null &&
+           pgEx.ConstraintName.Contains("ix_return_tracking_events_fingerprint", StringComparison.OrdinalIgnoreCase);
 
     #endregion
 }

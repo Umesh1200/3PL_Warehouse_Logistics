@@ -19,6 +19,7 @@ public class CarrierWebhookNonce : BaseEntity<Guid>
     public string Nonce { get; set; } = string.Empty;
     public string PayloadSha256 { get; set; } = string.Empty;
     public CarrierWebhookNonceStatus Status { get; set; } = CarrierWebhookNonceStatus.Processing;
+    public Guid? ClaimToken { get; set; }
     public int AttemptCount { get; set; } = 1;
     public DateTime WebhookTimestampUtc { get; set; }
     public DateTime ReceivedAtUtc { get; set; } = DateTime.UtcNow;

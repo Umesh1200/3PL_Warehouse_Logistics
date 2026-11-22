@@ -216,7 +216,7 @@ try
                 (SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.role_id = rp.role_id WHERE r.role_name = 'ClientAdmin' AND rp.permission_key IN ('outbound:pick','outbound:ship','outbound:pack','outbound:tasks:manage','outbound:waves:manage','outbound:orders:allocate')) AS obsolete_count,
                 (SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.role_id = rp.role_id WHERE r.role_name = 'ClientAdmin' AND rp.permission_key IN ('outbound:orders:view','outbound:orders:create','outbound:orders:import','outbound:orders:cancel','dispatch:view')) AS allowed_order_count,
                 (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'carrier_webhook_nonces' AND indexname = 'ix_carrier_webhook_nonces_carrier_code_nonce') AS nonce_idx_exists,
-                (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'carrier_webhook_nonces' AND column_name IN ('status','attempt_count','processing_lease_expires_at_utc','processed_at_utc')) AS nonce_state_cols,
+                (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'carrier_webhook_nonces' AND column_name IN ('status','attempt_count','processing_lease_expires_at_utc','processed_at_utc','claim_token')) AS nonce_state_cols,
                 (SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'carrier_webhook_audit_logs') AS audit_tbl_exists;
         ", sqlConn))
         {
@@ -227,7 +227,7 @@ try
             var nonceIdxExists = r.GetInt64(2);
             var nonceStateCols = r.GetInt64(3);
             var auditTblExists = r.GetInt64(4);
-            if (obsoleteCount != 0 || allowedOrderCount != 5 || nonceIdxExists != 1 || nonceStateCols != 4 || auditTblExists != 1)
+            if (obsoleteCount != 0 || allowedOrderCount != 5 || nonceIdxExists != 1 || nonceStateCols != 5 || auditTblExists != 1)
                 throw new InvalidOperationException($"Phase 7.4.0A migration check failed: obsolete={obsoleteCount}, allowed={allowedOrderCount}, nonceIdx={nonceIdxExists}, nonceStateCols={nonceStateCols}, auditTbl={auditTblExists}");
             Console.WriteLine("PASS Phase 7.4.0A migrations reconciled ClientAdmin (including dispatch:view) and created carrier_webhook_nonces state machine/audit_logs on PostgreSQL.");
         }
@@ -1724,7 +1724,9 @@ try
     p74WebBuilder.Services.AddHttpContextAccessor();
     p74WebBuilder.Services.AddScoped<ICurrentUserContext, CurrentUserContext>();
     p74WebBuilder.Services.AddScoped<ITenantProvider, TenantProvider>();
-    p74WebBuilder.Services.AddScoped<IDateTimeProvider, VerificationClock>();
+    var p74Clock = new PgControllableClock();
+    p74WebBuilder.Services.AddSingleton(p74Clock);
+    p74WebBuilder.Services.AddSingleton<IDateTimeProvider>(p74Clock);
     p74WebBuilder.Services.AddScoped<AuditableEntityInterceptor>();
     p74WebBuilder.Services.AddScoped<IAllocationCandidateFilter, AllocationCandidateFilter>();
     p74WebBuilder.Services.AddScoped<IAllocationStrategy, FifoAllocationStrategy>();
@@ -2043,6 +2045,126 @@ try
     }
     Console.WriteLine("PASS PostgreSQL Carrier Webhook retry recovery, concurrent safety, fail-closed timestamps, 413 limits, and accurate audit statuses verified.");
 
+    // 6.8 P74-0A-05: Deterministic Two-Worker Lease Fencing on Live PostgreSQL (forward & reverse completion orders)
+    // A) Forward order (Worker B succeeds first, stale Worker A fails afterward)
+    const string pgFenceNonceFwd = "pg-fence-fwd-1";
+    var pgFenceBody1 = JsonSerializer.Serialize(new
+    {
+        carrierCode = "SIM-FEDEX",
+        trackingNumber = p74Tracking,
+        carrierEventId = "PG-EVT-FENCE-1",
+        carrierEventCode = "IN_TRANSIT",
+        carrierDescription = "Postgres lease fencing forward-fail",
+        occurredAtUtc = DateTime.UtcNow
+    });
+    var fCtrlA = new PgWebhookAttemptControl { FailOnProceed = true };
+    var fCtrlB = new PgWebhookAttemptControl { FailOnProceed = false };
+    pgProbeState.Enqueue(pgFenceNonceFwd, fCtrlA);
+    pgProbeState.Enqueue(pgFenceNonceFwd, fCtrlB);
+
+    var wA1Task = p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgFenceBody1, new DateTimeOffset(p74Clock.UtcNow).ToUnixTimeSeconds().ToString(), pgFenceNonceFwd));
+    await fCtrlA.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    p74Clock.UtcNow = p74Clock.UtcNow.AddSeconds(70);
+
+    var wB1Task = p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgFenceBody1, new DateTimeOffset(p74Clock.UtcNow).ToUnixTimeSeconds().ToString(), pgFenceNonceFwd));
+    await fCtrlB.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    fCtrlB.Proceed.TrySetResult(true);
+    if ((await wB1Task).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Worker B reclamation failed on PostgreSQL.");
+
+    fCtrlA.Proceed.TrySetResult(true);
+    if ((await wA1Task).StatusCode != HttpStatusCode.InternalServerError)
+        throw new InvalidOperationException("Expected stale Worker A injected failure to return 500.");
+
+    // B) Forward order (Worker B succeeds first, stale Worker A completes normally afterward)
+    const string pgFenceNonceFwdOk = "pg-fence-fwd-ok-2";
+    var pgFenceBody2 = JsonSerializer.Serialize(new
+    {
+        carrierCode = "SIM-FEDEX",
+        trackingNumber = p74Tracking,
+        carrierEventId = "PG-EVT-FENCE-2",
+        carrierEventCode = "IN_TRANSIT",
+        carrierDescription = "Postgres lease fencing forward-ok",
+        occurredAtUtc = DateTime.UtcNow
+    });
+    var fOkCtrlA = new PgWebhookAttemptControl { FailOnProceed = false };
+    var fOkCtrlB = new PgWebhookAttemptControl { FailOnProceed = false };
+    pgProbeState.Enqueue(pgFenceNonceFwdOk, fOkCtrlA);
+    pgProbeState.Enqueue(pgFenceNonceFwdOk, fOkCtrlB);
+
+    var wA2OkTask = p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgFenceBody2, new DateTimeOffset(p74Clock.UtcNow).ToUnixTimeSeconds().ToString(), pgFenceNonceFwdOk));
+    await fOkCtrlA.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    p74Clock.UtcNow = p74Clock.UtcNow.AddSeconds(70);
+
+    var wB2OkTask = p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgFenceBody2, new DateTimeOffset(p74Clock.UtcNow).ToUnixTimeSeconds().ToString(), pgFenceNonceFwdOk));
+    await fOkCtrlB.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    fOkCtrlB.Proceed.TrySetResult(true);
+    if ((await wB2OkTask).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Worker B2 failed on PostgreSQL.");
+    fOkCtrlA.Proceed.TrySetResult(true);
+    await wA2OkTask;
+
+    // C) Reverse completion order (Worker A completes FIRST while Worker B owns lease; Worker B finishes SECOND)
+    const string pgFenceNonceRev = "pg-fence-rev-3";
+    var pgFenceBody3 = JsonSerializer.Serialize(new
+    {
+        carrierCode = "SIM-FEDEX",
+        trackingNumber = p74Tracking,
+        carrierEventId = "PG-EVT-FENCE-3",
+        carrierEventCode = "OUT_FOR_DELIVERY",
+        carrierDescription = "Postgres lease fencing reverse order",
+        occurredAtUtc = DateTime.UtcNow
+    });
+    var rCtrlA = new PgWebhookAttemptControl { FailOnProceed = false };
+    var rCtrlB = new PgWebhookAttemptControl { FailOnProceed = false };
+    pgProbeState.Enqueue(pgFenceNonceRev, rCtrlA);
+    pgProbeState.Enqueue(pgFenceNonceRev, rCtrlB);
+
+    var wA3Task = p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgFenceBody3, new DateTimeOffset(p74Clock.UtcNow).ToUnixTimeSeconds().ToString(), pgFenceNonceRev));
+    await rCtrlA.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+    p74Clock.UtcNow = p74Clock.UtcNow.AddSeconds(70);
+
+    var wB3Task = p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgFenceBody3, new DateTimeOffset(p74Clock.UtcNow).ToUnixTimeSeconds().ToString(), pgFenceNonceRev));
+    await rCtrlB.Entered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    // Stale Worker A finishes FIRST -> must NOT clear Worker B's active Processing state
+    rCtrlA.Proceed.TrySetResult(true);
+    await wA3Task;
+
+    await using (var midPgDb = CreateDb(operationalConn, user))
+    {
+        var midRow = await midPgDb.CarrierWebhookNonces.SingleAsync(x => x.Nonce == pgFenceNonceRev);
+        if (midRow.Status != CarrierWebhookNonceStatus.Processing || !midRow.ClaimToken.HasValue || midRow.AttemptCount != 2)
+            throw new InvalidOperationException($"Reverse-order stale completion corrupted active Processing state: status={midRow.Status}, token={midRow.ClaimToken}, attempts={midRow.AttemptCount}");
+    }
+
+    // Legitimate Worker B completes SECOND (encounters fingerprint dedup or commits cleanly) -> Succeeded with 1 event
+    rCtrlB.Proceed.TrySetResult(true);
+    if ((await wB3Task).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Worker B3 failed during reverse-order completion on PostgreSQL.");
+
+    await using (var fenceVerifyDb = CreateDb(operationalConn, user))
+    {
+        var totalEventsAfterFence = await fenceVerifyDb.ReturnTrackingEvents.CountAsync(e => e.ReturnShipmentId == p74ReturnShipId);
+        if (totalEventsAfterFence != 7) // 4 previous + 3 distinct fenced events (1 per nonce)
+            throw new InvalidOperationException($"Expected exactly 7 total ReturnTrackingEvents after fencing tests (no duplicates), got {totalEventsAfterFence}");
+
+        foreach (var n in new[] { pgFenceNonceFwd, pgFenceNonceFwdOk, pgFenceNonceRev })
+        {
+            var row = await fenceVerifyDb.CarrierWebhookNonces.SingleAsync(x => x.Nonce == n);
+            if (row.Status != CarrierWebhookNonceStatus.Succeeded || row.ClaimToken.HasValue || row.AttemptCount != 2 || row.LastHttpStatusCode != 200)
+                throw new InvalidOperationException($"Fenced nonce '{n}' final state invalid: status={row.Status}, token={row.ClaimToken}, attempts={row.AttemptCount}, code={row.LastHttpStatusCode}");
+
+            var audits = await fenceVerifyDb.CarrierWebhookAuditLogs.Where(a => a.Nonce == n).ToListAsync();
+            if (audits.Count(a => a.Outcome == "Received") != 2 ||
+                audits.Count(a => a.Outcome == "StaleAttemptIgnored") != 1 ||
+                audits.Count(a => a.Outcome == "Processed" && a.HttpStatusCode == 200) != 1 ||
+                audits.Any(a => a.Outcome == "Failed"))
+                throw new InvalidOperationException($"Audit history inaccurate for fenced nonce '{n}'.");
+        }
+    }
+    Console.WriteLine("PASS PostgreSQL Two-Worker Lease Fencing (forward-fail, forward-ok, reverse completion) verified cleanly.");
+
     Console.WriteLine("\n================================================================================");
     Console.WriteLine("ALL PHASE 7.3 & PHASE 7.4.0A POSTGRESQL VERIFICATIONS PASSED CLEANLY!");
     Console.WriteLine("================================================================================");
@@ -2173,9 +2295,35 @@ sealed class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
     }
 }
 
+sealed class PgControllableClock : IDateTimeProvider
+{
+    public DateTime UtcNow { get; set; } = DateTime.UtcNow;
+}
+
+sealed class PgWebhookAttemptControl
+{
+    public TaskCompletionSource<bool> Entered { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public TaskCompletionSource<bool> Proceed { get; } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    public bool FailOnProceed { get; init; }
+}
+
 sealed class PgWebhookProbeState
 {
+    private readonly System.Collections.Concurrent.ConcurrentDictionary<string, System.Collections.Concurrent.ConcurrentQueue<PgWebhookAttemptControl>> _controls = new(StringComparer.Ordinal);
     public string? FailNextNonce { get; set; }
+
+    public void Enqueue(string nonce, PgWebhookAttemptControl control)
+    {
+        var q = _controls.GetOrAdd(nonce, _ => new System.Collections.Concurrent.ConcurrentQueue<PgWebhookAttemptControl>());
+        q.Enqueue(control);
+    }
+
+    public bool TryDequeue(string? nonce, out PgWebhookAttemptControl? control)
+    {
+        control = null;
+        if (string.IsNullOrEmpty(nonce)) return false;
+        return _controls.TryGetValue(nonce, out var q) && q.TryDequeue(out control);
+    }
 }
 
 sealed class PgFaultInjectableReturnTrackingService(
@@ -2183,19 +2331,28 @@ sealed class PgFaultInjectableReturnTrackingService(
     PgWebhookProbeState probeState,
     Microsoft.AspNetCore.Http.IHttpContextAccessor httpContextAccessor) : IReturnTrackingService
 {
-    public Task<IngestReturnTrackingResult> IngestReturnTrackingEventAsync(
+    public async Task<IngestReturnTrackingResult> IngestReturnTrackingEventAsync(
         IngestReturnTrackingRequest request,
         CancellationToken cancellationToken = default)
     {
         var nonce = httpContextAccessor.HttpContext?.Request.Headers["X-Webhook-Nonce"].FirstOrDefault();
-        if (!string.IsNullOrEmpty(probeState.FailNextNonce) &&
-            string.Equals(probeState.FailNextNonce, nonce, StringComparison.Ordinal))
+        if (probeState.TryDequeue(nonce, out var control) && control != null)
+        {
+            control.Entered.TrySetResult(true);
+            await control.Proceed.Task;
+            if (control.FailOnProceed)
+            {
+                throw new TimeoutException("Simulated PostgreSQL delayed worker failure after lease expiry.");
+            }
+        }
+        else if (!string.IsNullOrEmpty(probeState.FailNextNonce) &&
+                 string.Equals(probeState.FailNextNonce, nonce, StringComparison.Ordinal))
         {
             probeState.FailNextNonce = null;
             throw new TimeoutException("Simulated PostgreSQL transient downstream failure.");
         }
 
-        return inner.IngestReturnTrackingEventAsync(request, cancellationToken);
+        return await inner.IngestReturnTrackingEventAsync(request, cancellationToken);
     }
 
     public Task<ReturnInboundHandoffDto?> GetInboundHandoffByReturnShipmentIdAsync(

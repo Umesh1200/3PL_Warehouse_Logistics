@@ -253,6 +253,7 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
 
         await FinalizeNonceAndAuditAsync(
             claim.NonceId!.Value,
+            claim.ClaimToken!.Value,
             normalizedCarrier,
             payloadTracking,
             nonce,
@@ -260,7 +261,7 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
             httpContext);
     }
 
-    private async Task<(ClaimOutcome Outcome, Guid? NonceId, string? Reason)> AcquireOrReclaimNonceAsync(
+    private async Task<(ClaimOutcome Outcome, Guid? NonceId, Guid? ClaimToken, string? Reason)> AcquireOrReclaimNonceAsync(
         string normalizedCarrier,
         string nonce,
         string payloadSha256,
@@ -278,6 +279,7 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
         try
         {
             var leaseUntil = utcNow.AddSeconds(leaseSeconds);
+            var claimToken = Guid.NewGuid();
             var existing = await _db.CarrierWebhookNonces
                 .AsNoTracking()
                 .FirstOrDefaultAsync(x => x.CarrierCode == normalizedCarrier && x.Nonce == nonce, ct);
@@ -290,6 +292,7 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
                     Nonce = nonce,
                     PayloadSha256 = payloadSha256,
                     Status = CarrierWebhookNonceStatus.Processing,
+                    ClaimToken = claimToken,
                     AttemptCount = 1,
                     WebhookTimestampUtc = webhookTimestampUtc,
                     ReceivedAtUtc = utcNow,
@@ -301,7 +304,7 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
                 try
                 {
                     await _db.SaveChangesAsync(ct);
-                    return (ClaimOutcome.Acquired, created.Id, null);
+                    return (ClaimOutcome.Acquired, created.Id, claimToken, null);
                 }
                 catch (DbUpdateException ex) when (IsNonceUniqueViolation(ex))
                 {
@@ -312,7 +315,7 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
 
                     if (existing == null)
                     {
-                        return (ClaimOutcome.ConcurrentInFlight, null,
+                        return (ClaimOutcome.ConcurrentInFlight, null, null,
                             $"Concurrent claim conflict for carrier webhook nonce '{nonce}'.");
                     }
                 }
@@ -320,13 +323,13 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
 
             if (!string.Equals(existing.PayloadSha256, payloadSha256, StringComparison.OrdinalIgnoreCase))
             {
-                return (ClaimOutcome.ReplayRejected, null,
+                return (ClaimOutcome.ReplayRejected, null, null,
                     $"Carrier webhook nonce '{nonce}' was previously bound to a different payload.");
             }
 
             if (existing.Status == CarrierWebhookNonceStatus.Succeeded)
             {
-                return (ClaimOutcome.ReplayRejected, null,
+                return (ClaimOutcome.ReplayRejected, null, null,
                     $"Carrier webhook nonce '{nonce}' has already been processed successfully.");
             }
 
@@ -334,20 +337,23 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
                 existing.ProcessingLeaseExpiresAtUtc.HasValue &&
                 existing.ProcessingLeaseExpiresAtUtc.Value > utcNow)
             {
-                return (ClaimOutcome.ConcurrentInFlight, null,
+                return (ClaimOutcome.ConcurrentInFlight, null, null,
                     $"Carrier webhook nonce '{nonce}' is currently being processed by another worker.");
             }
 
-            // Failed attempt or expired Processing lease -> safe retry claim
+            // Failed attempt or expired Processing lease -> safe retry reclaim fenced with a new ClaimToken + AttemptCount check
             if (isRelational && _db is DbContext relCtx)
             {
                 var updated = await relCtx.Set<CarrierWebhookNonce>()
                     .Where(x => x.Id == existing.Id &&
+                                x.AttemptCount == existing.AttemptCount &&
+                                x.Status == existing.Status &&
                                 (x.Status == CarrierWebhookNonceStatus.Failed ||
                                  (x.Status == CarrierWebhookNonceStatus.Processing &&
                                   (!x.ProcessingLeaseExpiresAtUtc.HasValue || x.ProcessingLeaseExpiresAtUtc.Value <= utcNow))))
                     .ExecuteUpdateAsync(s => s
                         .SetProperty(x => x.Status, CarrierWebhookNonceStatus.Processing)
+                        .SetProperty(x => x.ClaimToken, claimToken)
                         .SetProperty(x => x.AttemptCount, x => x.AttemptCount + 1)
                         .SetProperty(x => x.LastAttemptAtUtc, utcNow)
                         .SetProperty(x => x.ProcessingLeaseExpiresAtUtc, leaseUntil)
@@ -362,26 +368,41 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
 
                     if (latest?.Status == CarrierWebhookNonceStatus.Succeeded)
                     {
-                        return (ClaimOutcome.ReplayRejected, null,
+                        return (ClaimOutcome.ReplayRejected, null, null,
                             $"Carrier webhook nonce '{nonce}' has already been processed successfully.");
                     }
 
-                    return (ClaimOutcome.ConcurrentInFlight, null,
+                    return (ClaimOutcome.ConcurrentInFlight, null, null,
                         $"Carrier webhook nonce '{nonce}' was claimed concurrently by another attempt.");
                 }
 
-                return (ClaimOutcome.Acquired, existing.Id, null);
+                return (ClaimOutcome.Acquired, existing.Id, claimToken, null);
             }
 
             var tracked = await _db.CarrierWebhookNonces.FirstAsync(x => x.Id == existing.Id, ct);
+            if (tracked.AttemptCount != existing.AttemptCount ||
+                tracked.Status == CarrierWebhookNonceStatus.Succeeded ||
+                (tracked.Status == CarrierWebhookNonceStatus.Processing &&
+                 tracked.ProcessingLeaseExpiresAtUtc.HasValue &&
+                 tracked.ProcessingLeaseExpiresAtUtc.Value > utcNow))
+            {
+                return (tracked.Status == CarrierWebhookNonceStatus.Succeeded
+                        ? ClaimOutcome.ReplayRejected
+                        : ClaimOutcome.ConcurrentInFlight,
+                    null,
+                    null,
+                    $"Carrier webhook nonce '{nonce}' state changed concurrently before reclamation.");
+            }
+
             tracked.Status = CarrierWebhookNonceStatus.Processing;
+            tracked.ClaimToken = claimToken;
             tracked.AttemptCount += 1;
             tracked.LastAttemptAtUtc = utcNow;
             tracked.ProcessingLeaseExpiresAtUtc = leaseUntil;
             tracked.WebhookTimestampUtc = webhookTimestampUtc;
             await _db.SaveChangesAsync(ct);
 
-            return (ClaimOutcome.Acquired, tracked.Id, null);
+            return (ClaimOutcome.Acquired, tracked.Id, claimToken, null);
         }
         finally
         {
@@ -394,6 +415,7 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
 
     private async Task FinalizeNonceAndAuditAsync(
         Guid nonceId,
+        Guid claimToken,
         string normalizedCarrier,
         string? trackingNumber,
         string nonce,
@@ -420,8 +442,9 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
                 : executed.Exception.Message;
 
             _db.ClearChangeTracker();
-            await UpdateNonceOutcomeAsync(
+            var updated = await UpdateNonceOutcomeAsync(
                 nonceId,
+                claimToken,
                 CarrierWebhookNonceStatus.Failed,
                 statusCode,
                 Truncate(reason, 500),
@@ -431,9 +454,11 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
                 normalizedCarrier,
                 trackingNumber,
                 nonce,
-                "Failed",
+                updated ? "Failed" : "StaleAttemptIgnored",
                 statusCode,
-                reason,
+                updated
+                    ? reason
+                    : $"Stale attempt ignored after lease reclamation (claim '{claimToken}'). Failure: {reason}",
                 httpContext,
                 CancellationToken.None);
             return;
@@ -444,8 +469,9 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
 
         if (actualStatusCode is >= 200 and < 300)
         {
-            await UpdateNonceOutcomeAsync(
+            var updated = await UpdateNonceOutcomeAsync(
                 nonceId,
+                claimToken,
                 CarrierWebhookNonceStatus.Succeeded,
                 actualStatusCode,
                 failureReason: null,
@@ -455,17 +481,20 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
                 normalizedCarrier,
                 trackingNumber,
                 nonce,
-                "Processed",
+                updated ? "Processed" : "StaleAttemptIgnored",
                 actualStatusCode,
-                null,
+                updated
+                    ? null
+                    : $"Stale attempt completed with HTTP {actualStatusCode} after lease reclamation (claim '{claimToken}'); newer nonce outcome preserved.",
                 httpContext,
                 CancellationToken.None);
         }
         else
         {
             var failureReason = $"Downstream endpoint returned non-success HTTP {actualStatusCode}.";
-            await UpdateNonceOutcomeAsync(
+            var updated = await UpdateNonceOutcomeAsync(
                 nonceId,
+                claimToken,
                 CarrierWebhookNonceStatus.Failed,
                 actualStatusCode,
                 failureReason,
@@ -475,16 +504,19 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
                 normalizedCarrier,
                 trackingNumber,
                 nonce,
-                "Failed",
+                updated ? "Failed" : "StaleAttemptIgnored",
                 actualStatusCode,
-                failureReason,
+                updated
+                    ? failureReason
+                    : $"Stale attempt returned HTTP {actualStatusCode} after lease reclamation (claim '{claimToken}'); newer nonce outcome preserved.",
                 httpContext,
                 CancellationToken.None);
         }
     }
 
-    private async Task UpdateNonceOutcomeAsync(
+    private async Task<bool> UpdateNonceOutcomeAsync(
         Guid nonceId,
+        Guid claimToken,
         CarrierWebhookNonceStatus status,
         int httpStatusCode,
         string? failureReason,
@@ -492,31 +524,41 @@ public sealed class CarrierWebhookAuthenticationFilter : IAsyncResourceFilter
     {
         if (_db is DbContext dbCtx && dbCtx.Database.IsRelational())
         {
-            await dbCtx.Set<CarrierWebhookNonce>()
-                .Where(x => x.Id == nonceId)
+            var affected = await dbCtx.Set<CarrierWebhookNonce>()
+                .Where(x => x.Id == nonceId &&
+                            x.Status == CarrierWebhookNonceStatus.Processing &&
+                            x.ClaimToken == claimToken)
                 .ExecuteUpdateAsync(s => s
                     .SetProperty(x => x.Status, status)
+                    .SetProperty(x => x.ClaimToken, (Guid?)null)
                     .SetProperty(x => x.LastHttpStatusCode, httpStatusCode)
                     .SetProperty(x => x.LastFailureReason, failureReason)
                     .SetProperty(x => x.ProcessedAtUtc, processedAtUtc)
                     .SetProperty(x => x.ProcessingLeaseExpiresAtUtc, (DateTime?)null),
                     CancellationToken.None);
-            return;
+            return affected == 1;
         }
 
         await NonRelationalClaimGate.WaitAsync(CancellationToken.None);
         try
         {
+            _db.ClearChangeTracker();
             var entity = await _db.CarrierWebhookNonces.FirstOrDefaultAsync(x => x.Id == nonceId, CancellationToken.None);
-            if (entity != null)
+            if (entity == null ||
+                entity.Status != CarrierWebhookNonceStatus.Processing ||
+                entity.ClaimToken != claimToken)
             {
-                entity.Status = status;
-                entity.LastHttpStatusCode = httpStatusCode;
-                entity.LastFailureReason = failureReason;
-                entity.ProcessedAtUtc = processedAtUtc;
-                entity.ProcessingLeaseExpiresAtUtc = null;
-                await _db.SaveChangesAsync(CancellationToken.None);
+                return false;
             }
+
+            entity.Status = status;
+            entity.ClaimToken = null;
+            entity.LastHttpStatusCode = httpStatusCode;
+            entity.LastFailureReason = failureReason;
+            entity.ProcessedAtUtc = processedAtUtc;
+            entity.ProcessingLeaseExpiresAtUtc = null;
+            await _db.SaveChangesAsync(CancellationToken.None);
+            return true;
         }
         finally
         {
