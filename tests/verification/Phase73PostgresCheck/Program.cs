@@ -1731,7 +1731,7 @@ try
     {
         ["ObjectStorage:BaseDirectory"] = pgPodStorageDir,
         ["CarrierWebhooks:TimestampToleranceSeconds"] = "300",
-        ["CarrierWebhooks:MaxPayloadBytes"] = "4096",
+        ["CarrierWebhooks:MaxPayloadBytes"] = "1024",
         ["CarrierWebhooks:Carriers:SIM-FEDEX:PrimarySecret"] = pgPrimarySecret,
         ["CarrierWebhooks:Carriers:SIM-FEDEX:SecondarySecret"] = pgSecondarySecret,
         ["CarrierWebhooks:Carriers:SIM-FEDEX:SecondarySecretExpiresAtUtc"] = DateTimeOffset.UtcNow.AddHours(1).ToString("O")
