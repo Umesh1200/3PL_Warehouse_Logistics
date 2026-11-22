@@ -91,9 +91,10 @@ public class ShippingController : BaseApiController
 
     /// <summary>
     /// Retrieves carrier milestone tracking events for an outbound package.
+    /// Authorized for warehouse staff with outbound:ship and owning clients with dispatch:view.
     /// </summary>
     [HttpGet("packages/{packageId:guid}/track")]
-    [HasPermission(Permissions.Outbound.Ship)]
+    [HasAnyPermission(Permissions.Outbound.Ship, Permissions.Dispatch.View)]
     [ProducesResponseType(typeof(CarrierTrackingResponse), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
     public async Task<IActionResult> TrackPackage([FromRoute] Guid packageId, CancellationToken ct)
@@ -104,17 +105,20 @@ public class ShippingController : BaseApiController
 
     /// <summary>
     /// Ingests carrier webhook tracking events for Return-To-Sender (RTS) shipments.
-    /// Authenticated via carrier-specific HMAC-SHA256 signature, 5-minute timestamp window, and DB-backed nonce replay prevention.
+    /// Authenticated via carrier-specific HMAC-SHA256 signature, 5-minute timestamp window, durable nonce state machine, and bounded request body size.
     /// Operates idempotently and monotonically. Automatically creates inbound receiving handoff upon carrier dock delivery.
     /// </summary>
     [HttpPost("returns/tracking/webhook")]
     [AllowAnonymous]
+    [RequestSizeLimit(262_144)]
     [CarrierWebhookHmacAuth]
     [ProducesResponseType(typeof(IngestReturnTrackingResult), StatusCodes.Status200OK)]
     [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status409Conflict)]
+    [ProducesResponseType(StatusCodes.Status413PayloadTooLarge)]
     public async Task<IActionResult> IngestReturnTrackingWebhook(
         [FromBody] IngestReturnTrackingRequest request,
         CancellationToken ct)

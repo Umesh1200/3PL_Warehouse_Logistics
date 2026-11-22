@@ -19,7 +19,7 @@ public class PermissionAuthorizationHandler : AuthorizationHandler<PermissionReq
             return Task.CompletedTask;
         }
 
-        if (_currentUser.IsSuperAdmin || _currentUser.HasPermission(requirement.Permission))
+        if (_currentUser.IsSuperAdmin || requirement.Permissions.Any(_currentUser.HasPermission))
         {
             context.Succeed(requirement);
         }
@@ -27,4 +27,3 @@ public class PermissionAuthorizationHandler : AuthorizationHandler<PermissionReq
         return Task.CompletedTask;
     }
 }
-

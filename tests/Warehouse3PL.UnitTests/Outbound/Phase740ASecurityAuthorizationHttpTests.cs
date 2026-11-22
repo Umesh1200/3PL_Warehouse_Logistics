@@ -96,6 +96,7 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["CarrierWebhooks:TimestampToleranceSeconds"] = "300",
+            ["CarrierWebhooks:MaxPayloadBytes"] = "1024",
             ["CarrierWebhooks:Carriers:SIM-FEDEX:PrimarySecret"] = PrimarySecretActiveCarrier,
             ["CarrierWebhooks:Carriers:SIM-FEDEX:SecondarySecret"] = SecondarySecretActiveCarrier,
             ["CarrierWebhooks:Carriers:SIM-FEDEX:SecondarySecretExpiresAtUtc"] = DateTime.UtcNow.AddHours(2).ToString("O"),
@@ -107,7 +108,9 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
         builder.Services.Configure<CarrierWebhookOptions>(
             builder.Configuration.GetSection(CarrierWebhookOptions.SectionName));
 
-        builder.Services.AddControllers().AddApplicationPart(typeof(OutboundOrdersController).Assembly);
+        builder.Services.AddControllers()
+            .AddApplicationPart(typeof(OutboundOrdersController).Assembly)
+            .AddApplicationPart(typeof(Phase740ASecurityAuthorizationHttpTests).Assembly);
         builder.Services.AddApplicationServices();
         builder.Services.AddAuthentication("WarehouseTest")
             .AddScheme<AuthenticationSchemeOptions, OutboundTestAuthentication>("WarehouseTest", _ => { });
@@ -137,7 +140,9 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
         builder.Services.AddScoped<IShippingCarrierService, SimulatedCarrierService>();
         builder.Services.AddScoped<IShippingLabelService, ShippingLabelService>();
         builder.Services.AddScoped<IShipmentConsolidationService, ShipmentConsolidationService>();
-        builder.Services.AddScoped<IReturnTrackingService, ReturnTrackingService>();
+        builder.Services.AddScoped<ReturnTrackingService>();
+        builder.Services.AddScoped<IReturnTrackingService, FaultInjectableReturnTrackingService>();
+        builder.Services.AddSingleton<WebhookProbeState>();
 
         var databaseName = Guid.NewGuid().ToString();
         builder.Services.AddDbContext<ApplicationDbContext>((sp, options) => options
@@ -355,6 +360,59 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
         using (var suspendedResp = await _http.SendAsync(suspendedReq))
         {
             Assert.Equal(HttpStatusCode.Forbidden, suspendedResp.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task PostReconciliationClientAdmin_TracksOwnPackageViaDispatchView_AndIsDeniedShippingMutations()
+    {
+        // Reconciled ClientAdmin holds dispatch:view + outbound:orders:* WITHOUT outbound:ship
+        using (var ownReq = Request(HttpMethod.Get, $"/api/v1/outbound/shipping/packages/{PackageClientAFacA}/track", "client-admin-reconciled"))
+        using (var ownResp = await _http.SendAsync(ownReq))
+        {
+            Assert.Equal(HttpStatusCode.OK, ownResp.StatusCode);
+        }
+
+        // Foreign tenant package -> 404 NotFound concealment
+        using (var foreignReq = Request(HttpMethod.Get, $"/api/v1/outbound/shipping/packages/{PackageClientBFacA}/track", "client-admin-reconciled"))
+        using (var foreignResp = await _http.SendAsync(foreignReq))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, foreignResp.StatusCode);
+        }
+
+        // Revoked facility package -> 403 Forbidden
+        using (var revokedReq = Request(HttpMethod.Get, $"/api/v1/outbound/shipping/packages/{PackageClientAFacB}/track", "client-admin-reconciled"))
+        using (var revokedResp = await _http.SendAsync(revokedReq))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, revokedResp.StatusCode);
+        }
+
+        // dispatch:view MUST NOT grant shipping mutations, rates, labels, or shipments
+        var deniedShippingRequests = new[]
+        {
+            JsonRequest(HttpMethod.Post, "/api/v1/outbound/shipping/rates", "client-admin-reconciled", new { packageId = PackageClientAFacA }),
+            JsonRequest(HttpMethod.Post, "/api/v1/outbound/shipping/labels/generate", "client-admin-reconciled", new { packageId = PackageClientAFacA, carrierCode = "SIM-FEDEX", serviceLevel = 1 }),
+            JsonRequest(HttpMethod.Post, $"/api/v1/outbound/shipping/labels/{LabelFacA}/void", "client-admin-reconciled", new { reason = "test" }),
+            Request(HttpMethod.Get, $"/api/v1/outbound/shipping/labels/{LabelFacA}", "client-admin-reconciled"),
+            JsonRequest(HttpMethod.Post, "/api/v1/outbound/shipments", "client-admin-reconciled", new { clientId = ClientA, facilityId = FacilityA, carrierCode = "SIM-FEDEX", serviceLevel = 1 }),
+            Request(HttpMethod.Get, $"/api/v1/outbound/shipments/{ShipmentFacA}", "client-admin-reconciled"),
+            Request(HttpMethod.Get, $"/api/v1/outbound/shipments/bol/{BolFacA}", "client-admin-reconciled")
+        };
+
+        foreach (var req in deniedShippingRequests)
+        {
+            using (req)
+            using (var resp = await _http.SendAsync(req))
+            {
+                Assert.Equal(HttpStatusCode.Forbidden, resp.StatusCode);
+            }
+        }
+
+        // Staff with outbound:ship retains tracking capability in assigned facility
+        using (var staffTrackReq = Request(HttpMethod.Get, $"/api/v1/outbound/shipping/packages/{PackageClientAFacA}/track", "staff-supervisor-facA"))
+        using (var staffTrackResp = await _http.SendAsync(staffTrackReq))
+        {
+            Assert.Equal(HttpStatusCode.OK, staffTrackResp.StatusCode);
         }
     }
 
@@ -647,7 +705,7 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
             Assert.Equal(HttpStatusCode.Forbidden, crossResp.StatusCode);
         }
 
-        // Assert exact DB state: 2 ReturnTrackingEvents, 3 nonces (including crossTenant after auth), audit logs for successes & failures
+        // Assert exact DB state: 2 ReturnTrackingEvents, 3 nonces (including crossTenant after auth), accurate Received/Processed/Failed/ReplayRejected audits
         using (var verifyScope = _app.Services.CreateScope())
         {
             var db = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
@@ -657,10 +715,192 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
             Assert.Contains(audits, a => a.Outcome == "MissingHeader" && a.HttpStatusCode == 401);
             Assert.Contains(audits, a => a.Outcome == "InvalidSignature" && a.HttpStatusCode == 401);
             Assert.Contains(audits, a => a.Outcome == "ExpiredTimestamp" && a.HttpStatusCode == 401);
-            Assert.Contains(audits, a => a.Outcome == "ReplayedNonce" && a.HttpStatusCode == 401);
-            Assert.Contains(audits, a => a.Outcome == "CrossTenantOrScopeRejected" && a.HttpStatusCode == 403);
-            Assert.Equal(2, audits.Count(a => a.Outcome == "Success" && a.HttpStatusCode == 200));
+            Assert.Contains(audits, a => a.Outcome == "ReplayRejected" && a.HttpStatusCode == 401);
+            Assert.Contains(audits, a => a.Outcome == "Failed" && a.HttpStatusCode == 403 && a.FailureReason != null && a.FailureReason.Contains("CrossTenantOrScopeRejected"));
+            Assert.Equal(3, audits.Count(a => a.Outcome == "Received"));
+            Assert.Equal(2, audits.Count(a => a.Outcome == "Processed" && a.HttpStatusCode == 200));
         }
+    }
+
+    [Fact]
+    public async Task CarrierWebhook_RetryRecoveryAndConcurrentSafety_PreservesIdempotency()
+    {
+        var probeState = _app.Services.GetRequiredService<WebhookProbeState>();
+        var retryPayload = JsonSerializer.Serialize(new
+        {
+            carrierCode = "SIM-FEDEX",
+            trackingNumber = ReturnTrackingNumber,
+            carrierEventId = "EVT-RETRY-1",
+            carrierEventCode = "IN_TRANSIT",
+            carrierDescription = "Retry recovery event",
+            occurredAtUtc = DateTime.UtcNow
+        });
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+        const string retryNonce = "nonce-retry-recoverable-1";
+
+        // 1. Simulate transient downstream failure (500) on attempt 1
+        probeState.FailNextNonce = retryNonce;
+        using (var failReq = CreateSignedWebhookRequest("SIM-FEDEX", PrimarySecretActiveCarrier, retryPayload, ts, retryNonce))
+        using (var failResp = await _http.SendAsync(failReq))
+        {
+            Assert.Equal(HttpStatusCode.InternalServerError, failResp.StatusCode);
+        }
+
+        // Verify zero ReturnTrackingEvent created, nonce recorded as Failed
+        using (var checkScope1 = _app.Services.CreateScope())
+        {
+            var db = checkScope1.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            Assert.Empty(await db.ReturnTrackingEvents.IgnoreQueryFilters().ToListAsync());
+            var nonceEntity = await db.CarrierWebhookNonces.SingleAsync(x => x.Nonce == retryNonce);
+            Assert.Equal(CarrierWebhookNonceStatus.Failed, nonceEntity.Status);
+            Assert.Equal(500, nonceEntity.LastHttpStatusCode);
+        }
+
+        // 2. Identical signed retry attempt 2 recovers cleanly and processes once -> 200 OK
+        using (var retryReq = CreateSignedWebhookRequest("SIM-FEDEX", PrimarySecretActiveCarrier, retryPayload, ts, retryNonce))
+        using (var retryResp = await _http.SendAsync(retryReq))
+        {
+            Assert.Equal(HttpStatusCode.OK, retryResp.StatusCode);
+        }
+
+        // 3. Subsequent identical replay after Succeeded MUST still be rejected -> 401 ReplayRejected
+        using (var replayReq = CreateSignedWebhookRequest("SIM-FEDEX", PrimarySecretActiveCarrier, retryPayload, ts, retryNonce))
+        using (var replayResp = await _http.SendAsync(replayReq))
+        {
+            Assert.Equal(HttpStatusCode.Unauthorized, replayResp.StatusCode);
+        }
+
+        // 4. Concurrent duplicate race with unseen nonce must never duplicate business events
+        var concurrentPayload = JsonSerializer.Serialize(new
+        {
+            carrierCode = "SIM-FEDEX",
+            trackingNumber = ReturnTrackingNumber,
+            carrierEventId = "EVT-CONCURRENT-1",
+            carrierEventCode = "OUT_FOR_DELIVERY",
+            carrierDescription = "Concurrent test event",
+            occurredAtUtc = DateTime.UtcNow
+        });
+        var cTs = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+        const string cNonce = "nonce-concurrent-1";
+
+        var t1 = _http.SendAsync(CreateSignedWebhookRequest("SIM-FEDEX", PrimarySecretActiveCarrier, concurrentPayload, cTs, cNonce));
+        var t2 = _http.SendAsync(CreateSignedWebhookRequest("SIM-FEDEX", PrimarySecretActiveCarrier, concurrentPayload, cTs, cNonce));
+        var responses = await Task.WhenAll(t1, t2);
+        Assert.Equal(1, responses.Count(r => r.StatusCode == HttpStatusCode.OK));
+        Assert.Equal(1, responses.Count(r => r.StatusCode == HttpStatusCode.Unauthorized || r.StatusCode == HttpStatusCode.Conflict));
+        foreach (var r in responses) r.Dispose();
+
+        using (var finalScope = _app.Services.CreateScope())
+        {
+            var db = finalScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            Assert.Equal(2, await db.ReturnTrackingEvents.IgnoreQueryFilters().CountAsync());
+            var finalRetryNonce = await db.CarrierWebhookNonces.SingleAsync(x => x.Nonce == retryNonce);
+            Assert.Equal(CarrierWebhookNonceStatus.Succeeded, finalRetryNonce.Status);
+            Assert.Equal(2, finalRetryNonce.AttemptCount);
+
+            var retryAudits = await db.CarrierWebhookAuditLogs.Where(a => a.Nonce == retryNonce).ToListAsync();
+            Assert.Equal(2, retryAudits.Count(a => a.Outcome == "Received"));
+            Assert.Single(retryAudits, a => a.Outcome == "Failed" && a.HttpStatusCode == 500);
+            Assert.Single(retryAudits, a => a.Outcome == "Processed" && a.HttpStatusCode == 200);
+            Assert.Single(retryAudits, a => a.Outcome == "ReplayRejected" && a.HttpStatusCode == 401);
+        }
+    }
+
+    [Fact]
+    public async Task CarrierWebhook_InvalidExtremeMalformedTimestamps_FailClosedWithUnauthorizedAndAudit()
+    {
+        var payload = JsonSerializer.Serialize(new
+        {
+            carrierCode = "SIM-FEDEX",
+            trackingNumber = ReturnTrackingNumber,
+            carrierEventId = "EVT-TS-BAD",
+            carrierEventCode = "IN_TRANSIT",
+            carrierDescription = "Timestamp fail-closed test",
+            occurredAtUtc = DateTime.UtcNow
+        });
+
+        var invalidTimestamps = new[]
+        {
+            long.MaxValue.ToString(),
+            long.MinValue.ToString(),
+            "253402300800",
+            "-62135596801",
+            "not-a-timestamp",
+            "2026-99-99T00:00:00Z",
+            "9999-12-31T23:59:59Z",
+            "0001-01-01T00:00:00Z"
+        };
+
+        for (var i = 0; i < invalidTimestamps.Length; i++)
+        {
+            var ts = invalidTimestamps[i];
+            using var req = CreateSignedWebhookRequest("SIM-FEDEX", PrimarySecretActiveCarrier, payload, ts, $"nonce-bad-ts-{i}");
+            using var resp = await _http.SendAsync(req);
+            Assert.Equal(HttpStatusCode.Unauthorized, resp.StatusCode);
+        }
+
+        using var scope = _app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.Empty(await db.ReturnTrackingEvents.IgnoreQueryFilters().ToListAsync());
+        var audits = await db.CarrierWebhookAuditLogs.ToListAsync();
+        Assert.Equal(invalidTimestamps.Length, audits.Count(a =>
+            (a.Outcome == "InvalidTimestamp" || a.Outcome == "ExpiredTimestamp") && a.HttpStatusCode == 401));
+    }
+
+    [Fact]
+    public async Task CarrierWebhook_OversizedPayloadReturns413_AndAuditRecordsActualDownstreamStatuses()
+    {
+        // 1. Oversized request with explicit Content-Length (> 1024 bytes) -> 413 Payload Too Large before auth
+        var oversizedBody = new string('A', 2048);
+        using (var largeReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/outbound/shipping/returns/tracking/webhook")
+        {
+            Content = new StringContent(oversizedBody, Encoding.UTF8, "application/json")
+        })
+        using (var largeResp = await _http.SendAsync(largeReq))
+        {
+            Assert.Equal(HttpStatusCode.RequestEntityTooLarge, largeResp.StatusCode);
+        }
+
+        // 2. Oversized chunked/unknown-length stream without Content-Length header -> 413 Payload Too Large
+        using (var chunkedReq = new HttpRequestMessage(HttpMethod.Post, "/api/v1/outbound/shipping/returns/tracking/webhook")
+        {
+            Content = new ChunkedNoLengthContent(Encoding.UTF8.GetBytes(new string('B', 2048)))
+        })
+        using (var chunkedResp = await _http.SendAsync(chunkedReq))
+        {
+            Assert.Equal(HttpStatusCode.RequestEntityTooLarge, chunkedResp.StatusCode);
+        }
+
+        // 3. Downstream returning non-200 IActionResult statuses (202 Accepted, 503 ServiceUnavailable) accurately audited
+        var probeBody = JsonSerializer.Serialize(new { carrierCode = "SIM-FEDEX", trackingNumber = ReturnTrackingNumber });
+        var ts = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+
+        using (var accReq = CreateSignedWebhookRequestToPath("/api/v1/test/webhook-probe/status/202", "SIM-FEDEX", PrimarySecretActiveCarrier, probeBody, ts, "nonce-probe-202"))
+        using (var accResp = await _http.SendAsync(accReq))
+        {
+            Assert.Equal(HttpStatusCode.Accepted, accResp.StatusCode);
+        }
+
+        // 503 non-exceptional result -> Failed (503) + nonce Marked Failed -> safe retry allowed with 200 OK
+        using (var unavailReq = CreateSignedWebhookRequestToPath("/api/v1/test/webhook-probe/status/503", "SIM-FEDEX", PrimarySecretActiveCarrier, probeBody, ts, "nonce-probe-503"))
+        using (var unavailResp = await _http.SendAsync(unavailReq))
+        {
+            Assert.Equal(HttpStatusCode.ServiceUnavailable, unavailResp.StatusCode);
+        }
+
+        using (var retryProbeReq = CreateSignedWebhookRequestToPath("/api/v1/test/webhook-probe/status/200", "SIM-FEDEX", PrimarySecretActiveCarrier, probeBody, ts, "nonce-probe-503"))
+        using (var retryProbeResp = await _http.SendAsync(retryProbeReq))
+        {
+            Assert.Equal(HttpStatusCode.OK, retryProbeResp.StatusCode);
+        }
+
+        using var scope = _app.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var audits = await db.CarrierWebhookAuditLogs.ToListAsync();
+        Assert.Equal(2, audits.Count(a => a.Outcome == "PayloadTooLarge" && a.HttpStatusCode == 413));
+        Assert.Contains(audits, a => a.Nonce == "nonce-probe-202" && a.Outcome == "Processed" && a.HttpStatusCode == 202);
+        Assert.Contains(audits, a => a.Nonce == "nonce-probe-503" && a.Outcome == "Failed" && a.HttpStatusCode == 503);
+        Assert.Contains(audits, a => a.Nonce == "nonce-probe-503" && a.Outcome == "Processed" && a.HttpStatusCode == 200);
     }
 
     // ─────────────────────────────────────────────────────────────────────────────
@@ -712,10 +952,20 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
         Assert.Contains(Permissions.Outbound.OrdersCreate, perms);
         Assert.Contains(Permissions.Outbound.OrdersImport, perms);
         Assert.Contains(Permissions.Outbound.OrdersCancel, perms);
+        Assert.Contains(Permissions.Dispatch.View, perms);
         Assert.Equal(perms.Distinct(StringComparer.OrdinalIgnoreCase).Count(), perms.Count);
     }
 
     private static HttpRequestMessage CreateSignedWebhookRequest(
+        string carrierId,
+        string secret,
+        string bodyJson,
+        string timestamp,
+        string nonce)
+        => CreateSignedWebhookRequestToPath("/api/v1/outbound/shipping/returns/tracking/webhook", carrierId, secret, bodyJson, timestamp, nonce);
+
+    private static HttpRequestMessage CreateSignedWebhookRequestToPath(
+        string path,
         string carrierId,
         string secret,
         string bodyJson,
@@ -726,7 +976,7 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
         using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
         var signature = Convert.ToHexStringLower(hmac.ComputeHash(Encoding.UTF8.GetBytes(canonical)));
 
-        var request = new HttpRequestMessage(HttpMethod.Post, "/api/v1/outbound/shipping/returns/tracking/webhook")
+        var request = new HttpRequestMessage(HttpMethod.Post, path)
         {
             Content = new StringContent(bodyJson, Encoding.UTF8, "application/json")
         };
@@ -802,6 +1052,26 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
                     }
                     break;
 
+                case "client-admin-reconciled":
+                    claims.Add(new(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()));
+                    claims.Add(new("user_type", "Client"));
+                    claims.Add(new("tenant_id", ClientA.ToString()));
+                    claims.Add(new(ClaimTypes.Role, SystemRoles.ClientAdmin));
+                    foreach (var p in new[]
+                    {
+                        Permissions.Outbound.View,
+                        Permissions.Outbound.Create,
+                        Permissions.Outbound.OrdersView,
+                        Permissions.Outbound.OrdersCreate,
+                        Permissions.Outbound.OrdersImport,
+                        Permissions.Outbound.OrdersCancel,
+                        Permissions.Dispatch.View
+                    })
+                    {
+                        claims.Add(new("permissions", p));
+                    }
+                    break;
+
                 case "driver-legacy":
                     claims.Add(new(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()));
                     claims.Add(new("user_type", "Driver"));
@@ -812,7 +1082,8 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
                         Permissions.Outbound.OrdersView,
                         Permissions.Outbound.TasksView,
                         Permissions.Outbound.Pick,
-                        Permissions.Outbound.Ship
+                        Permissions.Outbound.Ship,
+                        Permissions.Dispatch.View
                     })
                     {
                         claims.Add(new("permissions", p));
@@ -887,5 +1158,70 @@ public sealed class Phase740ASecurityAuthorizationHttpTests : IAsyncLifetime
             return Task.FromResult(AuthenticateResult.Success(
                 new AuthenticationTicket(new ClaimsPrincipal(identity), Scheme.Name)));
         }
+    }
+}
+
+public sealed class WebhookProbeState
+{
+    public string? FailNextNonce { get; set; }
+}
+
+public sealed class FaultInjectableReturnTrackingService(
+    ReturnTrackingService inner,
+    WebhookProbeState probeState,
+    Microsoft.AspNetCore.Http.IHttpContextAccessor httpContextAccessor) : IReturnTrackingService
+{
+    public Task<IngestReturnTrackingResult> IngestReturnTrackingEventAsync(
+        IngestReturnTrackingRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var nonce = httpContextAccessor.HttpContext?.Request.Headers["X-Webhook-Nonce"].FirstOrDefault();
+        if (!string.IsNullOrEmpty(probeState.FailNextNonce) &&
+            string.Equals(probeState.FailNextNonce, nonce, StringComparison.Ordinal))
+        {
+            probeState.FailNextNonce = null;
+            throw new TimeoutException("Simulated transient carrier downstream timeout.");
+        }
+
+        return inner.IngestReturnTrackingEventAsync(request, cancellationToken);
+    }
+
+    public Task<ReturnInboundHandoffDto?> GetInboundHandoffByReturnShipmentIdAsync(
+        Guid returnShipmentId,
+        CancellationToken cancellationToken = default)
+        => inner.GetInboundHandoffByReturnShipmentIdAsync(returnShipmentId, cancellationToken);
+
+    public Task<ReturnInboundHandoffDto?> GetInboundHandoffByAuthorizationIdAsync(
+        Guid returnAuthorizationId,
+        CancellationToken cancellationToken = default)
+        => inner.GetInboundHandoffByAuthorizationIdAsync(returnAuthorizationId, cancellationToken);
+
+    public Task<IReadOnlyList<ReturnTrackingTimelineEventDto>> GetReturnTrackingHistoryAsync(
+        Guid returnShipmentId,
+        CancellationToken cancellationToken = default)
+        => inner.GetReturnTrackingHistoryAsync(returnShipmentId, cancellationToken);
+}
+
+[Microsoft.AspNetCore.Mvc.ApiController]
+[Microsoft.AspNetCore.Mvc.Route("api/v1/test/webhook-probe")]
+public sealed class WebhookProbeTestController : Microsoft.AspNetCore.Mvc.ControllerBase
+{
+    [Microsoft.AspNetCore.Mvc.HttpPost("status/{code:int}")]
+    [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+    [Microsoft.AspNetCore.Mvc.RequestSizeLimit(262_144)]
+    [Warehouse3PL.WebApi.Security.CarrierWebhookHmacAuth]
+    public Microsoft.AspNetCore.Mvc.IActionResult ReturnExplicitStatus([Microsoft.AspNetCore.Mvc.FromRoute] int code)
+        => StatusCode(code, new { status = code });
+}
+
+internal sealed class ChunkedNoLengthContent(byte[] payload) : HttpContent
+{
+    protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        => stream.WriteAsync(payload, 0, payload.Length);
+
+    protected override bool TryComputeLength(out long length)
+    {
+        length = 0;
+        return false;
     }
 }

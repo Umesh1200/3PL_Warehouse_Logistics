@@ -11439,11 +11439,30 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("nonce_id");
 
+                    b.Property<int>("AttemptCount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("attempt_count");
+
                     b.Property<string>("CarrierCode")
                         .IsRequired()
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
                         .HasColumnName("carrier_code");
+
+                    b.Property<DateTime>("LastAttemptAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("last_attempt_at_utc");
+
+                    b.Property<string>("LastFailureReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("last_failure_reason");
+
+                    b.Property<int?>("LastHttpStatusCode")
+                        .HasColumnType("integer")
+                        .HasColumnName("last_http_status_code");
 
                     b.Property<string>("Nonce")
                         .IsRequired()
@@ -11457,9 +11476,25 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(64)")
                         .HasColumnName("payload_sha256");
 
+                    b.Property<DateTime?>("ProcessedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("processed_at_utc");
+
+                    b.Property<DateTime?>("ProcessingLeaseExpiresAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("processing_lease_expires_at_utc");
+
                     b.Property<DateTime>("ReceivedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("received_at_utc");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("Processing")
+                        .HasColumnName("status");
 
                     b.Property<DateTime>("WebhookTimestampUtc")
                         .HasColumnType("timestamp with time zone")

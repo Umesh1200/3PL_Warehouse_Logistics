@@ -210,12 +210,13 @@ try
                 throw new InvalidOperationException("Partial unique index ix_putaway_tasks_lpn_id was not created on putaway_tasks.");
         }
 
-        // 4a-bis. Verify Phase 7.4.0A migration removed obsolete ClientAdmin permissions, added order permissions, and created webhook tables/indexes
+        // 4a-bis. Verify Phase 7.4.0A migrations removed obsolete ClientAdmin permissions, added dispatch:view + order permissions, and created webhook state/audit tables
         await using (var p74Cmd = new NpgsqlCommand(@"
             SELECT
                 (SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.role_id = rp.role_id WHERE r.role_name = 'ClientAdmin' AND rp.permission_key IN ('outbound:pick','outbound:ship','outbound:pack','outbound:tasks:manage','outbound:waves:manage','outbound:orders:allocate')) AS obsolete_count,
-                (SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.role_id = rp.role_id WHERE r.role_name = 'ClientAdmin' AND rp.permission_key IN ('outbound:orders:view','outbound:orders:create','outbound:orders:import','outbound:orders:cancel')) AS allowed_order_count,
+                (SELECT COUNT(*) FROM role_permissions rp JOIN roles r ON r.role_id = rp.role_id WHERE r.role_name = 'ClientAdmin' AND rp.permission_key IN ('outbound:orders:view','outbound:orders:create','outbound:orders:import','outbound:orders:cancel','dispatch:view')) AS allowed_order_count,
                 (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'carrier_webhook_nonces' AND indexname = 'ix_carrier_webhook_nonces_carrier_code_nonce') AS nonce_idx_exists,
+                (SELECT COUNT(*) FROM information_schema.columns WHERE table_name = 'carrier_webhook_nonces' AND column_name IN ('status','attempt_count','processing_lease_expires_at_utc','processed_at_utc')) AS nonce_state_cols,
                 (SELECT COUNT(*) FROM information_schema.tables WHERE table_name = 'carrier_webhook_audit_logs') AS audit_tbl_exists;
         ", sqlConn))
         {
@@ -224,10 +225,11 @@ try
             var obsoleteCount = r.GetInt64(0);
             var allowedOrderCount = r.GetInt64(1);
             var nonceIdxExists = r.GetInt64(2);
-            var auditTblExists = r.GetInt64(3);
-            if (obsoleteCount != 0 || allowedOrderCount != 4 || nonceIdxExists != 1 || auditTblExists != 1)
-                throw new InvalidOperationException($"Phase 7.4.0A migration check failed: obsolete={obsoleteCount}, allowedOrders={allowedOrderCount}, nonceIdx={nonceIdxExists}, auditTbl={auditTblExists}");
-            Console.WriteLine("PASS Phase 7.4.0A migration reconciled ClientAdmin permissions and created carrier_webhook_nonces/audit_logs on PostgreSQL.");
+            var nonceStateCols = r.GetInt64(3);
+            var auditTblExists = r.GetInt64(4);
+            if (obsoleteCount != 0 || allowedOrderCount != 5 || nonceIdxExists != 1 || nonceStateCols != 4 || auditTblExists != 1)
+                throw new InvalidOperationException($"Phase 7.4.0A migration check failed: obsolete={obsoleteCount}, allowed={allowedOrderCount}, nonceIdx={nonceIdxExists}, nonceStateCols={nonceStateCols}, auditTbl={auditTblExists}");
+            Console.WriteLine("PASS Phase 7.4.0A migrations reconciled ClientAdmin (including dispatch:view) and created carrier_webhook_nonces state machine/audit_logs on PostgreSQL.");
         }
 
         // 4b. Verify matching and differing location values:
@@ -1511,7 +1513,8 @@ try
             permSet.Contains(Permissions.Outbound.Ship) ||
             permSet.Contains(Permissions.Outbound.Pack) ||
             !permSet.Contains(Permissions.Outbound.OrdersView) ||
-            !permSet.Contains(Permissions.Outbound.OrdersCreate))
+            !permSet.Contains(Permissions.Outbound.OrdersCreate) ||
+            !permSet.Contains(Permissions.Dispatch.View))
         {
             throw new InvalidOperationException("DbInitializer idempotent ClientAdmin reconciliation check failed on PostgreSQL.");
         }
@@ -1701,6 +1704,7 @@ try
     p74WebBuilder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
     {
         ["CarrierWebhooks:TimestampToleranceSeconds"] = "300",
+        ["CarrierWebhooks:MaxPayloadBytes"] = "1024",
         ["CarrierWebhooks:Carriers:SIM-FEDEX:PrimarySecret"] = pgPrimarySecret,
         ["CarrierWebhooks:Carriers:SIM-FEDEX:SecondarySecret"] = pgSecondarySecret,
         ["CarrierWebhooks:Carriers:SIM-FEDEX:SecondarySecretExpiresAtUtc"] = DateTimeOffset.UtcNow.AddHours(1).ToString("O")
@@ -1709,6 +1713,7 @@ try
         p74WebBuilder.Configuration.GetSection(CarrierWebhookOptions.SectionName));
     p74WebBuilder.Services.AddControllers()
         .AddApplicationPart(typeof(OutboundOrdersController).Assembly)
+        .AddApplicationPart(typeof(PgWebhookProbeController).Assembly)
         .AddJsonOptions(options => options.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
     p74WebBuilder.Services.AddApplicationServices();
     p74WebBuilder.Services.AddAuthentication("TestAuth")
@@ -1737,7 +1742,9 @@ try
     p74WebBuilder.Services.AddScoped<IShippingCarrierService, SimulatedCarrierService>();
     p74WebBuilder.Services.AddScoped<IShippingLabelService, ShippingLabelService>();
     p74WebBuilder.Services.AddScoped<IShipmentConsolidationService, ShipmentConsolidationService>();
-    p74WebBuilder.Services.AddScoped<IReturnTrackingService, ReturnTrackingService>();
+    p74WebBuilder.Services.AddScoped<ReturnTrackingService>();
+    p74WebBuilder.Services.AddScoped<IReturnTrackingService, PgFaultInjectableReturnTrackingService>();
+    p74WebBuilder.Services.AddSingleton<PgWebhookProbeState>();
     p74WebBuilder.Services.AddDbContext<ApplicationDbContext>((sp, opts) =>
         opts.UseNpgsql(operationalConn).UseSnakeCaseNamingConvention()
             .AddInterceptors(sp.GetRequiredService<AuditableEntityInterceptor>()));
@@ -1783,7 +1790,28 @@ try
         throw new InvalidOperationException("Expected 404 NotFound for foreign tenant package tracking.");
     Console.WriteLine("PASS PostgreSQL ClientAdmin legacy claim rejection (403), own track transition (200), and foreign concealment (404).");
 
-    // 6.5 Driver & unassigned staff rejections (403) + MultiFacilityView read-only vs write separation
+    // 6.4b Post-reconciliation ClientAdmin (dispatch:view + outbound:orders:* WITHOUT outbound:ship) tracks own package (200), conceals foreign (404), denied rates/labels/shipments (403)
+    TestAuthHandler.CustomClaims = new List<Claim>
+    {
+        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.Role, SystemRoles.ClientAdmin),
+        new Claim("user_type", "Client"),
+        new Claim("tenant_id", client1Id.ToString()),
+        new Claim("permissions", Permissions.Outbound.OrdersView),
+        new Claim("permissions", Permissions.Outbound.OrdersCreate),
+        new Claim("permissions", Permissions.Dispatch.View)
+    };
+    if ((await p74Client.GetAsync($"/api/v1/outbound/shipping/packages/{p74PkgC1FacA}/track")).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Expected 200 OK for reconciled ClientAdmin (dispatch:view) own-tenant tracking.");
+    if ((await p74Client.GetAsync($"/api/v1/outbound/shipping/packages/{p74PkgC2FacA}/track")).StatusCode != HttpStatusCode.NotFound)
+        throw new InvalidOperationException("Expected 404 NotFound for reconciled ClientAdmin foreign tracking.");
+    if ((await p74Client.PostAsJsonAsync("/api/v1/outbound/shipping/rates", new { packageId = p74PkgC1FacA })).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.PostAsJsonAsync("/api/v1/outbound/shipping/labels/generate", new { packageId = p74PkgC1FacA, carrierCode = "SIM-FEDEX", serviceLevel = 1 })).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.GetAsync($"/api/v1/outbound/shipments/{p74ShipFacB}")).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Reconciled ClientAdmin with dispatch:view must be denied (403) on shipping mutations/shipments.");
+    Console.WriteLine("PASS PostgreSQL Post-Reconciliation ClientAdmin (dispatch:view): own track (200), foreign concealment (404), shipping mutations denied (403).");
+
+    // 6.5 Driver (with dispatch:view + outbound:ship) & unassigned staff rejections (403) + MultiFacilityView read-only vs write separation
     TestAuthHandler.CustomClaims = new List<Claim>
     {
         new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
@@ -1791,7 +1819,8 @@ try
         new Claim("user_type", "Driver"),
         new Claim("facility_id", facilityId.ToString()),
         new Claim("permissions", Permissions.Outbound.OrdersView),
-        new Claim("permissions", Permissions.Outbound.Ship)
+        new Claim("permissions", Permissions.Outbound.Ship),
+        new Claim("permissions", Permissions.Dispatch.View)
     };
     if ((await p74Client.GetAsync($"/api/v1/outbound/orders/{p74OrderC1FacA}")).StatusCode != HttpStatusCode.Forbidden ||
         (await p74Client.GetAsync($"/api/v1/outbound/shipping/packages/{p74PkgC1FacA}/track")).StatusCode != HttpStatusCode.Forbidden)
@@ -1900,8 +1929,10 @@ try
             CarrierCode = "SIM-FEDEX",
             Nonce = "pg-nonce-1",
             PayloadSha256 = new string('0', 64),
+            Status = CarrierWebhookNonceStatus.Succeeded,
             WebhookTimestampUtc = DateTime.UtcNow,
-            ReceivedAtUtc = DateTime.UtcNow
+            ReceivedAtUtc = DateTime.UtcNow,
+            LastAttemptAtUtc = DateTime.UtcNow
         });
         var dupNonceCaught = false;
         try
@@ -1915,7 +1946,102 @@ try
         if (!dupNonceCaught)
             throw new InvalidOperationException("PostgreSQL unique constraint ix_carrier_webhook_nonces_carrier_code_nonce did not raise 23505.");
     }
-    Console.WriteLine("PASS PostgreSQL Carrier Webhook HMAC-SHA256, replay 23505 protection, secret rotation, cross-tenant 403, and audit logging verified.");
+
+    // 6.7 P74-0A-02/03/04 on Live PostgreSQL: safe retry recovery, concurrent duplicate safety, fail-closed extreme timestamps, 413 payload limit & accurate status audit
+    var pgProbeState = p74App.Services.GetRequiredService<PgWebhookProbeState>();
+    var pgTs = DateTimeOffset.UtcNow.ToUnixTimeSeconds().ToString();
+    var pgRetryBody = JsonSerializer.Serialize(new
+    {
+        carrierCode = "SIM-FEDEX",
+        trackingNumber = p74Tracking,
+        carrierEventId = "PG-EVT-RETRY-1",
+        carrierEventCode = "EXCEPTION",
+        carrierDescription = "Transient outage retry test",
+        occurredAtUtc = DateTime.UtcNow
+    });
+
+    pgProbeState.FailNextNonce = "pg-retry-nonce-1";
+    if ((await p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgRetryBody, pgTs, "pg-retry-nonce-1"))).StatusCode != HttpStatusCode.InternalServerError)
+        throw new InvalidOperationException("Expected 500 InternalServerError on injected transient failure.");
+    if ((await p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgRetryBody, pgTs, "pg-retry-nonce-1"))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Identical signed retry after transient failure should succeed (200 OK).");
+    if ((await p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgRetryBody, pgTs, "pg-retry-nonce-1"))).StatusCode != HttpStatusCode.Unauthorized)
+        throw new InvalidOperationException("Replay after succeeded retry must return 401 Unauthorized.");
+
+    // Concurrent duplicate signed requests with unseen nonce -> exactly 1 business mutation
+    var pgConcurrentBody = JsonSerializer.Serialize(new
+    {
+        carrierCode = "SIM-FEDEX",
+        trackingNumber = p74Tracking,
+        carrierEventId = "PG-EVT-CONC-1",
+        carrierEventCode = "DELIVERED",
+        carrierDescription = "Concurrent Postgres test",
+        occurredAtUtc = DateTime.UtcNow
+    });
+    var concResponses = await Task.WhenAll(
+        p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgConcurrentBody, pgTs, "pg-conc-nonce-1")),
+        p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgConcurrentBody, pgTs, "pg-conc-nonce-1")));
+    if (concResponses.Count(r => r.StatusCode == HttpStatusCode.OK) != 1 ||
+        concResponses.Count(r => r.StatusCode == HttpStatusCode.Conflict || r.StatusCode == HttpStatusCode.Unauthorized) != 1)
+        throw new InvalidOperationException($"Concurrent webhook race failed: statuses={string.Join(",", concResponses.Select(r => r.StatusCode))}");
+
+    // Fail-closed invalid/extreme timestamps -> 401 (no 500)
+    foreach (var badTs in new[] { long.MaxValue.ToString(), "253402300800", "not-a-timestamp", "9999-12-31T23:59:59Z" })
+    {
+        if ((await p74Client.SendAsync(SignWebhook("SIM-FEDEX", pgPrimarySecret, pgRetryBody, badTs, $"pg-badts-{badTs[..4]}"))).StatusCode != HttpStatusCode.Unauthorized)
+            throw new InvalidOperationException($"Extreme/malformed timestamp '{badTs}' must return 401 Unauthorized.");
+    }
+
+    // 413 payload limit + accurate non-200 status auditing (202, 503 -> retry 200)
+    if ((await p74Client.PostAsync("/api/v1/outbound/shipping/returns/tracking/webhook",
+            new StringContent(new string('X', 2048), Encoding.UTF8, "application/json"))).StatusCode != HttpStatusCode.RequestEntityTooLarge)
+        throw new InvalidOperationException("Oversized webhook payload (>1024 bytes) must return 413 PayloadTooLarge.");
+    if ((await p74Client.PostAsync("/api/v1/outbound/shipping/returns/tracking/webhook",
+            new PgChunkedContent(Encoding.UTF8.GetBytes(new string('Y', 2048))))).StatusCode != HttpStatusCode.RequestEntityTooLarge)
+        throw new InvalidOperationException("Oversized chunked webhook payload must return 413 PayloadTooLarge.");
+
+    static HttpRequestMessage SignProbe(string path, string secret, string body, string ts, string nonce)
+    {
+        var canonical = $"{ts}.{nonce}.{body}";
+        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(secret));
+        var sig = Convert.ToHexStringLower(hmac.ComputeHash(Encoding.UTF8.GetBytes(canonical)));
+        var req = new HttpRequestMessage(HttpMethod.Post, path) { Content = new StringContent(body, Encoding.UTF8, "application/json") };
+        req.Headers.Add("X-Carrier-Id", "SIM-FEDEX");
+        req.Headers.Add("X-Webhook-Timestamp", ts);
+        req.Headers.Add("X-Webhook-Nonce", nonce);
+        req.Headers.Add("X-Webhook-Signature", sig);
+        return req;
+    }
+
+    var probePayload = JsonSerializer.Serialize(new { carrierCode = "SIM-FEDEX", trackingNumber = p74Tracking });
+    if ((await p74Client.SendAsync(SignProbe("/api/v1/pg-probe/status/202", pgPrimarySecret, probePayload, pgTs, "pg-probe-202"))).StatusCode != HttpStatusCode.Accepted)
+        throw new InvalidOperationException("Expected 202 Accepted from probe.");
+    if ((await p74Client.SendAsync(SignProbe("/api/v1/pg-probe/status/503", pgPrimarySecret, probePayload, pgTs, "pg-probe-503"))).StatusCode != HttpStatusCode.ServiceUnavailable)
+        throw new InvalidOperationException("Expected 503 ServiceUnavailable from probe.");
+    if ((await p74Client.SendAsync(SignProbe("/api/v1/pg-probe/status/200", pgPrimarySecret, probePayload, pgTs, "pg-probe-503"))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Expected retry recovery (200 OK) after 503 ServiceUnavailable.");
+
+    await using (var p74VerifyDb2 = CreateDb(operationalConn, user))
+    {
+        var finalEvents = await p74VerifyDb2.ReturnTrackingEvents.CountAsync(e => e.ReturnShipmentId == p74ReturnShipId);
+        if (finalEvents != 4)
+            throw new InvalidOperationException($"Expected exactly 4 ReturnTrackingEvents (2 initial + 1 retry + 1 concurrent), got {finalEvents}");
+
+        var retryNonceRow = await p74VerifyDb2.CarrierWebhookNonces.SingleAsync(x => x.Nonce == "pg-retry-nonce-1");
+        if (retryNonceRow.Status != CarrierWebhookNonceStatus.Succeeded || retryNonceRow.AttemptCount != 2)
+            throw new InvalidOperationException($"Retry nonce state mismatch: status={retryNonceRow.Status}, attempts={retryNonceRow.AttemptCount}");
+
+        var allAudits = await p74VerifyDb2.CarrierWebhookAuditLogs.ToListAsync();
+        if (!allAudits.Any(a => a.Outcome == "Received") ||
+            !allAudits.Any(a => a.Nonce == "pg-retry-nonce-1" && a.Outcome == "Failed" && a.HttpStatusCode == 500) ||
+            !allAudits.Any(a => a.Nonce == "pg-retry-nonce-1" && a.Outcome == "Processed" && a.HttpStatusCode == 200) ||
+            !allAudits.Any(a => a.Nonce == "pg-retry-nonce-1" && a.Outcome == "ReplayRejected" && a.HttpStatusCode == 401) ||
+            allAudits.Count(a => a.Outcome == "PayloadTooLarge" && a.HttpStatusCode == 413) < 2 ||
+            !allAudits.Any(a => a.Nonce == "pg-probe-202" && a.Outcome == "Processed" && a.HttpStatusCode == 202) ||
+            !allAudits.Any(a => a.Nonce == "pg-probe-503" && a.Outcome == "Failed" && a.HttpStatusCode == 503))
+            throw new InvalidOperationException("PostgreSQL webhook audit logs missing expected Received/Processed/Failed/ReplayRejected/413/202/503 entries.");
+    }
+    Console.WriteLine("PASS PostgreSQL Carrier Webhook retry recovery, concurrent safety, fail-closed timestamps, 413 limits, and accurate audit statuses verified.");
 
     Console.WriteLine("\n================================================================================");
     Console.WriteLine("ALL PHASE 7.3 & PHASE 7.4.0A POSTGRESQL VERIFICATIONS PASSED CLEANLY!");
@@ -2044,5 +2170,70 @@ sealed class TestAuthHandler : AuthenticationHandler<AuthenticationSchemeOptions
         var identity = new ClaimsIdentity(claims, "TestAuth");
         var ticket = new AuthenticationTicket(new ClaimsPrincipal(identity), "TestAuth");
         return Task.FromResult(AuthenticateResult.Success(ticket));
+    }
+}
+
+sealed class PgWebhookProbeState
+{
+    public string? FailNextNonce { get; set; }
+}
+
+sealed class PgFaultInjectableReturnTrackingService(
+    ReturnTrackingService inner,
+    PgWebhookProbeState probeState,
+    Microsoft.AspNetCore.Http.IHttpContextAccessor httpContextAccessor) : IReturnTrackingService
+{
+    public Task<IngestReturnTrackingResult> IngestReturnTrackingEventAsync(
+        IngestReturnTrackingRequest request,
+        CancellationToken cancellationToken = default)
+    {
+        var nonce = httpContextAccessor.HttpContext?.Request.Headers["X-Webhook-Nonce"].FirstOrDefault();
+        if (!string.IsNullOrEmpty(probeState.FailNextNonce) &&
+            string.Equals(probeState.FailNextNonce, nonce, StringComparison.Ordinal))
+        {
+            probeState.FailNextNonce = null;
+            throw new TimeoutException("Simulated PostgreSQL transient downstream failure.");
+        }
+
+        return inner.IngestReturnTrackingEventAsync(request, cancellationToken);
+    }
+
+    public Task<ReturnInboundHandoffDto?> GetInboundHandoffByReturnShipmentIdAsync(
+        Guid returnShipmentId,
+        CancellationToken cancellationToken = default)
+        => inner.GetInboundHandoffByReturnShipmentIdAsync(returnShipmentId, cancellationToken);
+
+    public Task<ReturnInboundHandoffDto?> GetInboundHandoffByAuthorizationIdAsync(
+        Guid returnAuthorizationId,
+        CancellationToken cancellationToken = default)
+        => inner.GetInboundHandoffByAuthorizationIdAsync(returnAuthorizationId, cancellationToken);
+
+    public Task<IReadOnlyList<ReturnTrackingTimelineEventDto>> GetReturnTrackingHistoryAsync(
+        Guid returnShipmentId,
+        CancellationToken cancellationToken = default)
+        => inner.GetReturnTrackingHistoryAsync(returnShipmentId, cancellationToken);
+}
+
+[Microsoft.AspNetCore.Mvc.ApiController]
+[Microsoft.AspNetCore.Mvc.Route("api/v1/pg-probe")]
+public sealed class PgWebhookProbeController : Microsoft.AspNetCore.Mvc.ControllerBase
+{
+    [Microsoft.AspNetCore.Mvc.HttpPost("status/{code:int}")]
+    [Microsoft.AspNetCore.Authorization.AllowAnonymous]
+    [Microsoft.AspNetCore.Mvc.RequestSizeLimit(262_144)]
+    [Warehouse3PL.WebApi.Security.CarrierWebhookHmacAuth]
+    public Microsoft.AspNetCore.Mvc.IActionResult ReturnExplicitStatus([Microsoft.AspNetCore.Mvc.FromRoute] int code)
+        => StatusCode(code, new { status = code });
+}
+
+sealed class PgChunkedContent(byte[] payload) : HttpContent
+{
+    protected override Task SerializeToStreamAsync(Stream stream, TransportContext? context)
+        => stream.WriteAsync(payload, 0, payload.Length);
+
+    protected override bool TryComputeLength(out long length)
+    {
+        length = 0;
+        return false;
     }
 }
