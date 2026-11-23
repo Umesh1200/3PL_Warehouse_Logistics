@@ -25,6 +25,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private readonly AuditableEntityInterceptor _auditableEntityInterceptor;
     private IDbContextTransaction? _currentTransaction;
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryShipmentLocks = new();
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryPackageLocks = new();
 
     public ApplicationDbContext(
         DbContextOptions<ApplicationDbContext> options,
@@ -40,6 +41,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
 
     public Guid? CurrentTenantId => _tenantProvider.TenantId;
     public bool BypassTenantFilter => _tenantProvider.BypassTenantFilter || _currentUser.IsStaff;
+    public bool IsRelationalDatabase => Database.IsRelational();
     public bool AllowExplicitAuditTimestamps { get; set; } = false;
     internal bool IsPrivilegedAnalyticsMaintenance => _currentUser.IsAuthenticated && _currentUser.IsSuperAdmin;
     private void EnforceJournalImmutability()
@@ -299,29 +301,46 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         Guid? shipmentId,
         Func<Task<TResult>> action,
         CancellationToken cancellationToken = default)
+        => await ExecuteWithPackageLockAsync(packageId: null, shipmentId: shipmentId, action, cancellationToken);
+
+    public async Task<TResult> ExecuteWithPackageLockAsync<TResult>(
+        Guid? packageId,
+        Guid? shipmentId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default)
     {
         if (!Database.IsRelational())
         {
-            SemaphoreSlim? inMemoryGate = null;
-            if (shipmentId.HasValue && shipmentId.Value != Guid.Empty)
-            {
-                inMemoryGate = InMemoryShipmentLocks.GetOrAdd(shipmentId.Value, _ => new SemaphoreSlim(1, 1));
-                await inMemoryGate.WaitAsync(cancellationToken);
-            }
+            SemaphoreSlim? shipmentGate = null;
+            SemaphoreSlim? packageGate = null;
 
             try
             {
+                // Acquire in canonical Shipment -> Package order to prevent deadlocks across callers.
+                if (shipmentId.HasValue && shipmentId.Value != Guid.Empty)
+                {
+                    shipmentGate = InMemoryShipmentLocks.GetOrAdd(shipmentId.Value, _ => new SemaphoreSlim(1, 1));
+                    await shipmentGate.WaitAsync(cancellationToken);
+                }
+
+                if (packageId.HasValue && packageId.Value != Guid.Empty)
+                {
+                    packageGate = InMemoryPackageLocks.GetOrAdd(packageId.Value, _ => new SemaphoreSlim(1, 1));
+                    await packageGate.WaitAsync(cancellationToken);
+                }
+
                 return await action();
             }
             finally
             {
-                inMemoryGate?.Release();
+                packageGate?.Release();
+                shipmentGate?.Release();
             }
         }
 
-        // Reuse an active caller-owned transaction without invoking nested execution strategy retries.
-        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        async Task AcquireRelationalRowLocksAsync()
         {
+            // Canonical Shipment -> Package FOR UPDATE ordering prevents deadlocks across dispatch/POD/delivery paths.
             if (shipmentId.HasValue && shipmentId.Value != Guid.Empty)
             {
                 await Database.ExecuteSqlInterpolatedAsync(
@@ -329,6 +348,18 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
                     cancellationToken);
             }
 
+            if (packageId.HasValue && packageId.Value != Guid.Empty)
+            {
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM packages WHERE package_id = {packageId.Value} FOR UPDATE",
+                    cancellationToken);
+            }
+        }
+
+        // Reuse an active caller-owned transaction without invoking nested execution strategy retries.
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            await AcquireRelationalRowLocksAsync();
             return await action();
         }
 
@@ -337,13 +368,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             await BeginTransactionAsync(cancellationToken);
             try
             {
-                if (shipmentId.HasValue && shipmentId.Value != Guid.Empty)
-                {
-                    await Database.ExecuteSqlInterpolatedAsync(
-                        $"SELECT 1 FROM shipments WHERE shipment_id = {shipmentId.Value} FOR UPDATE",
-                        cancellationToken);
-                }
-
+                await AcquireRelationalRowLocksAsync();
                 var result = await action();
                 await CommitTransactionAsync(cancellationToken);
                 return result;

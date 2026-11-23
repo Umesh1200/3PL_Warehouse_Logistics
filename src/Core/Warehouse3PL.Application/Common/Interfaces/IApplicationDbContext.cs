@@ -189,6 +189,8 @@ public interface IApplicationDbContext
     Task RollbackTransactionAsync(CancellationToken cancellationToken = default);
     Task<TResult> ExecuteInTransactionAsync<TResult>(Func<Task<TResult>> action, CancellationToken cancellationToken = default);
     Task<TResult> ExecuteWithShipmentLockAsync<TResult>(Guid? shipmentId, Func<Task<TResult>> action, CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithPackageLockAsync<TResult>(Guid? packageId, Guid? shipmentId, Func<Task<TResult>> action, CancellationToken cancellationToken = default);
+    bool IsRelationalDatabase { get; }
     void ClearChangeTracker();
     bool AllowExplicitAuditTimestamps { get; set; }
 }

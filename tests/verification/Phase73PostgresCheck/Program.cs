@@ -1776,6 +1776,8 @@ try
     p74WebBuilder.Services.AddScoped<IPackingExecutionService, PackingExecutionService>();
     var pgRaceStorageState = new PgRaceStorageState();
     p74WebBuilder.Services.AddSingleton(pgRaceStorageState);
+    var pgSaveBarrier = new PgSaveBarrierInterceptor();
+    p74WebBuilder.Services.AddSingleton(pgSaveBarrier);
     p74WebBuilder.Services.AddSingleton<Warehouse3PL.Infrastructure.Services.Storage.PrivateObjectStorageService>();
     p74WebBuilder.Services.AddSingleton<IObjectStorageService, PgRaceObjectStorageService>();
     p74WebBuilder.Services.AddScoped<IShippingCarrierService, SimulatedCarrierService>();
@@ -1791,7 +1793,9 @@ try
     p74WebBuilder.Services.AddSingleton<PgWebhookProbeState>();
     p74WebBuilder.Services.AddDbContext<ApplicationDbContext>((sp, opts) =>
         opts.UseNpgsql(operationalConn).UseSnakeCaseNamingConvention()
-            .AddInterceptors(sp.GetRequiredService<AuditableEntityInterceptor>()));
+            .AddInterceptors(
+                sp.GetRequiredService<AuditableEntityInterceptor>(),
+                sp.GetRequiredService<PgSaveBarrierInterceptor>()));
     p74WebBuilder.Services.AddScoped<IApplicationDbContext>(sp => sp.GetRequiredService<ApplicationDbContext>());
 
     using var p74App = p74WebBuilder.Build();
@@ -3329,20 +3333,219 @@ try
             throw new InvalidOperationException("PostgreSQL Order 1 persisted POD or Delivered state after lost custody.");
     }
 
-    // Completion Order 2: Reassign + DriverA acknowledges -> ConfirmDelivery commits FIRST -> late revocation rejected 422
+    // Completion Order 2 (genuinely overlapping PostgreSQL FOR UPDATE contention via barrier):
+    // ConfirmDelivery holds PostgreSQL FOR UPDATE on shipments/packages WHILE concurrent revocation blocks on the lock, commits Delivered, then revocation rejects with 422.
     if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/shipments/{raceShipId}/assign-driver", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { driverUserId = cDriverAId, reason = "Re-enabled for Order 2" }))).StatusCode != HttpStatusCode.OK)
         throw new InvalidOperationException("PostgreSQL Order 2 reassign failed.");
     SetDriverClaims(cDriverAId);
     if ((await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/shipments/{raceShipId}/acknowledge-custody", new { driverSignature = "SIG-RACE-ACK" })).StatusCode != HttpStatusCode.OK ||
-        (await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{racePkg2Id}/pod", new { recipientName = "PG Order 2 Consignee" })).StatusCode != HttpStatusCode.OK ||
-        (await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{racePkg2Id}/confirm-delivery", new { })).StatusCode != HttpStatusCode.OK)
-        throw new InvalidOperationException("PostgreSQL Order 2 POD/ConfirmDelivery sequence failed.");
+        (await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{racePkg2Id}/pod", new { recipientName = "PG Order 2 Consignee" })).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("PostgreSQL Order 2 ack/POD sequence failed.");
 
-    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/shipments/{raceShipId}/assign-driver", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { driverUserId = (Guid?)null, reason = "Late revoke after delivery" }))).StatusCode != HttpStatusCode.UnprocessableEntity)
-        throw new InvalidOperationException("PostgreSQL Order 2 late revocation after delivery must be rejected with 422.");
+    var pgConfirmEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var pgConfirmRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    pgSaveBarrier.ArmOnPodConfirmedSave(pgConfirmEntered, pgConfirmRelease);
+
+    var pgConfirmTask = p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{racePkg2Id}/confirm-delivery", new { });
+    await pgConfirmEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    // ConfirmDelivery now holds PostgreSQL SELECT ... FOR UPDATE on raceShipId; launch competing revocation concurrently.
+    var pgConcurrentRevokeTask = p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/shipments/{raceShipId}/assign-driver", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { driverUserId = (Guid?)null, reason = "Competing PG revoke while ConfirmDelivery holds FOR UPDATE" }));
+    await Task.Delay(250);
+    if (pgConcurrentRevokeTask.IsCompleted)
+        throw new InvalidOperationException($"PostgreSQL competing revocation did NOT block on FOR UPDATE row lock (status: {pgConcurrentRevokeTask.Result.StatusCode}).");
+
+    pgConfirmRelease.TrySetResult(true);
+    using (var pgConfirmResp = await pgConfirmTask)
+    {
+        if (pgConfirmResp.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"PostgreSQL Order 2 ConfirmDelivery failed: {pgConfirmResp.StatusCode}");
+    }
+    using (var pgRevokeResp = await pgConcurrentRevokeTask)
+    {
+        if (pgRevokeResp.StatusCode != HttpStatusCode.UnprocessableEntity)
+            throw new InvalidOperationException($"PostgreSQL Order 2 competing revocation after ConfirmDelivery commit must return 422, got {pgRevokeResp.StatusCode}");
+    }
+    await using (var r2CheckDb = CreateDb(operationalConn, user))
+    {
+        var pgPkg2Final = await r2CheckDb.Packages.SingleAsync(p => p.Id == racePkg2Id);
+        var pgShipRaceFinal = await r2CheckDb.Shipments.SingleAsync(s => s.Id == raceShipId);
+        if (pgPkg2Final.CurrentTrackingStatus != TrackingMilestoneStatus.Delivered || pgShipRaceFinal.AssignedDriverUserId != cDriverAId || pgShipRaceFinal.CustodyStatus != ShipmentCustodyStatus.Confirmed)
+            throw new InvalidOperationException("PostgreSQL Order 2 overlapping race corrupted Delivered or custody state.");
+    }
     TestAuthHandler.CustomClaims = null;
 
-    Console.WriteLine("PASS PostgreSQL P74-0C-01/02/03 Evidence-Source Matrix, Handover Acknowledgment & Two-Order Custody-Revocation Concurrency verified cleanly.");
+    Console.WriteLine("PASS PostgreSQL P74-0C-01/02/03 Evidence-Source Matrix, Handover Acknowledgment & Two-Order Overlapping FOR UPDATE Custody-Revocation Concurrency verified cleanly.");
+
+    // 8.7 P74-0C-04 Atomic PostgreSQL POD Supersession, Transaction Rollback, Duplicate & Concurrent Race Tests
+    var supOrderId = Guid.NewGuid();
+    var supShipId = Guid.NewGuid();
+    var supHuId = Guid.NewGuid();
+    var supPkgId = Guid.NewGuid();
+    await using (var supSeedDb = CreateDb(operationalConn, user))
+    {
+        supSeedDb.OutboundOrders.Add(new OutboundOrder { Id = supOrderId, ClientId = client1Id, FacilityId = facilityId, OrderNumber = "PG-ORD-SUP-1", CustomerName = "Supersession Buyer", Status = OutboundOrderStatus.Completed });
+        supSeedDb.Shipments.Add(new Shipment { Id = supShipId, ClientId = client1Id, FacilityId = facilityId, ShipmentNumber = "PG-SHP-SUP-1", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, CustodyStatus = ShipmentCustodyStatus.Confirmed, AssignedDriverUserId = cDriverAId, DispatchedAtUtc = DateTime.UtcNow.AddMinutes(-8), Version = 1 });
+        supSeedDb.ShipmentCustodyTransfers.Add(new ShipmentCustodyTransfer { ClientId = client1Id, FacilityId = facilityId, ShipmentId = supShipId, CarrierCode = "SIM-FEDEX", DriverName = "PG DriverA", DriverSignatureAcknowledgment = "SIG-SUP-INIT", TotalPackagesConfirmed = 1, TotalWeightKg = 1m, AuthorizedByUserId = bSupId, AssignedDriverUserId = cDriverAId, CustodyStatus = ShipmentCustodyStatus.Confirmed, TransferredAtUtc = DateTime.UtcNow.AddMinutes(-8) });
+        supSeedDb.HandlingUnits.Add(new HandlingUnit { Id = supHuId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-SUP-CARTON-1", UnitType = HandlingUnitType.ShippingCarton });
+        supSeedDb.Packages.Add(new Package { Id = supPkgId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = supOrderId, ShipmentId = supShipId, HandlingUnitId = supHuId, PackageNumber = "PG-SUP-PKG-1", CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-PG-SUP-1", Status = PackageStatus.Loaded, GrossWeightKg = 1m, LengthCm = 10, WidthCm = 10, HeightCm = 10 });
+        await supSeedDb.SaveChangesAsync();
+    }
+
+    byte[] pgSupPng = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01];
+    string pgSupPngB64 = Convert.ToBase64String(pgSupPng);
+    Guid pgOrigPodId;
+    SetDriverClaims(cDriverAId);
+    using (var origMp = new MultipartFormDataContent())
+    {
+        var origPng = new ByteArrayContent(pgSupPng);
+        origPng.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("image/png");
+        origMp.Add(origPng, "signature", "pg-sup-orig.png");
+        origMp.Add(new StringContent("Original PG Consignee"), "recipientName");
+        origMp.Add(new StringContent("true"), "isSigned");
+        using var rOrigPod = await p74Client.PostAsync($"/api/v1/outbound/dispatch/packages/{supPkgId}/pod", origMp);
+        if (rOrigPod.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"PostgreSQL initial POD for supersession failed: {rOrigPod.StatusCode}: {await rOrigPod.Content.ReadAsStringAsync()}");
+        using var origDoc = await JsonDocument.ParseAsync(await rOrigPod.Content.ReadAsStreamAsync());
+        pgOrigPodId = origDoc.RootElement.GetProperty("proofOfDeliveryId").GetGuid();
+    }
+
+    // Auth / Facility / Evidence-Source rejections on /pod/{podId}/supersede
+    if ((await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/pod/{pgOrigPodId}/supersede", new { reason = "Driver disallowed", replacementSubmission = new { evidenceSource = PodEvidenceSource.DriverHandheld, recipientName = "X" } })).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Driver must receive 403 on POD supersession.");
+    TestAuthHandler.CustomClaims = null;
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pgOrigPodId}/supersede", bSupId, p74FacB, Permissions.Dispatch.ManageRuns, new { reason = "Wrong fac", replacementSubmission = new { evidenceSource = PodEvidenceSource.ManualVerification, verificationReason = "Wrong fac", recipientName = "X" } }))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pgOrigPodId}/supersede", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { reason = "Bad src", replacementSubmission = new { evidenceSource = PodEvidenceSource.CarrierApi, carrierConfirmationNumber = "FDX-BAD" } }))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pgOrigPodId}/supersede", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { reason = "Missing verify reason", replacementSubmission = new { evidenceSource = PodEvidenceSource.ManualVerification, recipientName = "X" } }))).StatusCode != HttpStatusCode.BadRequest)
+        throw new InvalidOperationException("PostgreSQL POD supersession authorization/evidence-source boundaries failed.");
+
+    // PostgreSQL Transaction Rollback Test AFTER both UPDATE oldPod (save #1) AND INSERT newPod (save #2)
+    await using (var rbSupDb = CreateDb(operationalConn, user, new PgThrowAfterNthSaveInterceptor(2)))
+    {
+        var rbStorage = p74App.Services.GetRequiredService<IObjectStorageService>();
+        var rbSvc = new Warehouse3PL.Infrastructure.Services.Shipping.ProofOfDeliveryService(
+            rbSupDb, rbStorage, new VerificationTenant(), new VerificationIdentity(facilityId), NullLogger<Warehouse3PL.Infrastructure.Services.Shipping.ProofOfDeliveryService>.Instance);
+        var rbRolled = false;
+        using var rbMs = new MemoryStream(pgSupPng);
+        try
+        {
+            await rbSvc.SupersedeProofOfDeliveryAsync(new SupersedeProofOfDeliveryRequest
+            {
+                ExistingPodId = pgOrigPodId,
+                Reason = "PostgreSQL rollback test",
+                ReplacementSubmission = new SubmitProofOfDeliveryRequest
+                {
+                    PackageId = supPkgId,
+                    EvidenceSource = PodEvidenceSource.ManualVerification,
+                    VerificationReason = "PG Rollback verification",
+                    RecipientName = "Should Rollback",
+                    IsSigned = true,
+                    SignatureStream = rbMs,
+                    SignatureContentType = "image/png"
+                }
+            });
+        }
+        catch (ForcedRollbackException)
+        {
+            rbRolled = true;
+        }
+        if (!rbRolled) throw new InvalidOperationException("Expected ForcedRollbackException in PostgreSQL POD supersession rollback test.");
+    }
+
+    if (Directory.Exists(pgPodStorageDir) && Directory.GetFiles(pgPodStorageDir, "temp_*", SearchOption.AllDirectories).Length != 0)
+        throw new InvalidOperationException("PostgreSQL POD supersession rollback leaked temp storage file.");
+    await using (var rbVerifyDb = CreateDb(operationalConn, user))
+    {
+        var rbPods = await rbVerifyDb.ProofOfDeliveries.Where(p => p.PackageId == supPkgId).ToListAsync();
+        if (rbPods.Count != 1 || rbPods[0].Id != pgOrigPodId || rbPods[0].IsSuperseded || rbPods[0].SupersededByPodId != null || rbPods[0].SupersededReason != null || rbPods[0].SupersededAtUtc != null)
+            throw new InvalidOperationException("PostgreSQL POD supersession rollback did not restore old POD cleanly.");
+    }
+
+    // Concurrent PostgreSQL HTTP supersessions -> exactly 1 wins (200), 1 rejected (422), partial unique index satisfied
+    var pgSupEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    var pgSupRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+    pgRaceStorageState.NextStageHook = (pgSupEntered, pgSupRelease);
+
+    var supReq1 = p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pgOrigPodId}/supersede", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new
+    {
+        reason = "PG concurrent supersession #1",
+        replacementSubmission = new
+        {
+            evidenceSource = PodEvidenceSource.ManualVerification,
+            verificationReason = "Supervisor audit #1",
+            recipientName = "PG Corrected Consignee #1",
+            isSigned = true,
+            signatureBase64 = pgSupPngB64,
+            signatureContentType = "image/png"
+        }
+    }));
+    await pgSupEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+    var supReq2 = p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pgOrigPodId}/supersede", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new
+    {
+        reason = "PG concurrent supersession #2",
+        replacementSubmission = new
+        {
+            evidenceSource = PodEvidenceSource.ManualVerification,
+            verificationReason = "Supervisor audit #2",
+            recipientName = "PG Competing Consignee #2",
+            isSigned = true,
+            signatureBase64 = pgSupPngB64,
+            signatureContentType = "image/png"
+        }
+    }));
+
+    pgSupRelease.TrySetResult(true);
+    var supResps = await Task.WhenAll(supReq1, supReq2);
+    if (supResps.Count(r => r.StatusCode == HttpStatusCode.OK) != 1 ||
+        supResps.Count(r => r.StatusCode == HttpStatusCode.UnprocessableEntity) != 1)
+        throw new InvalidOperationException($"PostgreSQL concurrent POD supersession race failed: statuses={string.Join(",", supResps.Select(r => r.StatusCode))}");
+
+    Guid pgWinningPodId;
+    var okSupResp = supResps.Single(r => r.StatusCode == HttpStatusCode.OK);
+    using (var winSupDoc = await JsonDocument.ParseAsync(await okSupResp.Content.ReadAsStreamAsync()))
+    {
+        pgWinningPodId = winSupDoc.RootElement.GetProperty("proofOfDeliveryId").GetGuid();
+        if (!winSupDoc.RootElement.GetProperty("isStorageFinalized").GetBoolean())
+            throw new InvalidOperationException("PostgreSQL winning supersession POD was not finalized.");
+    }
+    foreach (var r in supResps) r.Dispose();
+
+    // Duplicate sequential supersession rejected (422)
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pgOrigPodId}/supersede", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { reason = "Sequential dup", replacementSubmission = new { evidenceSource = PodEvidenceSource.ManualVerification, verificationReason = "Dup audit", recipientName = "Dup" } }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+        throw new InvalidOperationException("PostgreSQL duplicate sequential supersession must return 422.");
+
+    if (Directory.Exists(pgPodStorageDir) && Directory.GetFiles(pgPodStorageDir, "temp_*", SearchOption.AllDirectories).Length != 0)
+        throw new InvalidOperationException("PostgreSQL concurrent POD supersession leaked temp storage files.");
+
+    await using (var supVerifyDb = CreateDb(operationalConn, user))
+    {
+        var supPods = await supVerifyDb.ProofOfDeliveries.Where(p => p.PackageId == supPkgId).ToListAsync();
+        if (supPods.Count != 2)
+            throw new InvalidOperationException($"Expected exactly 2 POD rows after PostgreSQL supersession, found {supPods.Count}.");
+        var oldRow = supPods.Single(p => p.Id == pgOrigPodId);
+        var newRow = supPods.Single(p => p.Id == pgWinningPodId);
+        if (!oldRow.IsSuperseded || oldRow.SupersededByPodId != pgWinningPodId || string.IsNullOrWhiteSpace(oldRow.SupersededReason) || !oldRow.SupersededAtUtc.HasValue ||
+            newRow.IsSuperseded || !newRow.IsStorageFinalized)
+            throw new InvalidOperationException("PostgreSQL POD supersession metadata or active state invariant failed.");
+    }
+
+    // Delivery confirmation must reject superseded POD (422) and succeed only with replacement POD (200)
+    SetDriverClaims(cDriverAId);
+    if ((await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{supPkgId}/confirm-delivery", new { proofOfDeliveryId = pgOrigPodId })).StatusCode != HttpStatusCode.UnprocessableEntity)
+        throw new InvalidOperationException("PostgreSQL confirm-delivery must reject superseded POD with 422.");
+    using (var rConfirmNew = await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{supPkgId}/confirm-delivery", new { proofOfDeliveryId = pgWinningPodId }))
+    {
+        if (rConfirmNew.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"PostgreSQL confirm-delivery with replacement POD failed: {rConfirmNew.StatusCode}");
+        using var cNewDoc = await JsonDocument.ParseAsync(await rConfirmNew.Content.ReadAsStreamAsync());
+        if (cNewDoc.RootElement.GetProperty("proofOfDeliveryId").GetGuid() != pgWinningPodId)
+            throw new InvalidOperationException("PostgreSQL confirm-delivery did not record replacement POD ID.");
+    }
+    TestAuthHandler.CustomClaims = null;
+
+    Console.WriteLine("PASS PostgreSQL P74-0C-04 Atomic POD Supersession, Rollback, Concurrent Lock Fencing & ConfirmDelivery Enforcement verified cleanly.");
 
     if (Directory.Exists(pgPodStorageDir))
     {
@@ -3405,6 +3608,46 @@ sealed class ThrowAfterSaveInterceptor : SaveChangesInterceptor
     {
         if (Interlocked.Exchange(ref _thrown, 1) == 0) throw new ForcedRollbackException();
         return ValueTask.FromResult(result);
+    }
+}
+
+sealed class PgThrowAfterNthSaveInterceptor(int nthSave) : SaveChangesInterceptor
+{
+    private int _countdown = nthSave;
+    public override ValueTask<int> SavedChangesAsync(
+        SaveChangesCompletedEventData eventData,
+        int result,
+        CancellationToken cancellationToken = default)
+    {
+        if (Volatile.Read(ref _countdown) > 0 && Interlocked.Decrement(ref _countdown) == 0)
+            throw new ForcedRollbackException();
+        return ValueTask.FromResult(result);
+    }
+}
+
+sealed class PgSaveBarrierInterceptor : SaveChangesInterceptor
+{
+    private (TaskCompletionSource<bool> Entered, TaskCompletionSource<bool> Release)? _podConfirmPause;
+
+    public void ArmOnPodConfirmedSave(TaskCompletionSource<bool> entered, TaskCompletionSource<bool> release)
+        => _podConfirmPause = (entered, release);
+
+    public override async ValueTask<InterceptionResult<int>> SavingChangesAsync(
+        DbContextEventData eventData,
+        InterceptionResult<int> result,
+        CancellationToken cancellationToken = default)
+    {
+        var pause = _podConfirmPause;
+        if (pause.HasValue && eventData.Context != null &&
+            eventData.Context.ChangeTracker.Entries<ShipmentTrackingEvent>()
+                .Any(e => e.State == EntityState.Added && e.Entity.CarrierEventCode == "POD_CONFIRMED"))
+        {
+            _podConfirmPause = null;
+            pause.Value.Entered.TrySetResult(true);
+            await pause.Value.Release.Task;
+        }
+
+        return await base.SavingChangesAsync(eventData, result, cancellationToken);
     }
 }
 

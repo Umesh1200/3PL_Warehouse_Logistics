@@ -87,6 +87,7 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
     private HttpClient _http = null!;
     private string _storageDir = null!;
     private RaceStorageState _raceStorageState = null!;
+    private RaceDbBarrierInterceptor _raceDbBarrier = null!;
     private static readonly JsonSerializerOptions JsonOptions = new(JsonSerializerDefaults.Web)
     {
         Converters = { new System.Text.Json.Serialization.JsonStringEnumConverter() }
@@ -127,6 +128,8 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
         builder.Services.AddSingleton<ITokenService, JwtTokenService>();
         _raceStorageState = new RaceStorageState();
         builder.Services.AddSingleton(_raceStorageState);
+        _raceDbBarrier = new RaceDbBarrierInterceptor();
+        builder.Services.AddSingleton(_raceDbBarrier);
         builder.Services.AddSingleton<PrivateObjectStorageService>();
         builder.Services.AddSingleton<IObjectStorageService, RaceControllableObjectStorageService>();
         builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
@@ -171,7 +174,9 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
         var dbName = Guid.NewGuid().ToString();
         builder.Services.AddDbContext<ApplicationDbContext>((sp, options) => options
             .UseInMemoryDatabase(dbName)
-            .AddInterceptors(sp.GetRequiredService<AuditableEntityInterceptor>()));
+            .AddInterceptors(
+                sp.GetRequiredService<AuditableEntityInterceptor>(),
+                sp.GetRequiredService<RaceDbBarrierInterceptor>()));
         builder.Services.AddScoped<IApplicationDbContext>(sp => sp.GetRequiredService<ApplicationDbContext>());
 
         _app = builder.Build();
@@ -917,7 +922,8 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
             Assert.Empty(await db.ProofOfDeliveries.IgnoreQueryFilters().Where(p => p.PackageId == Pkg1DispatchedId).ToListAsync());
         }
 
-        // Order 2: Re-assign DriverA -> DriverA acknowledges -> POD + ConfirmDelivery commits FIRST -> subsequent revocation rejected (422)
+        // Order 2 (overlapping reverse race via DB barrier): Re-assign DriverA -> DriverA acknowledges -> POD submitted
+        // ConfirmDelivery holds Shipment -> Package locks across barrier WHILE concurrent revocation waits on the lock -> ConfirmDelivery commits -> revocation rejected (422)
         using (var rReassign = await _http.SendAsync(BearerRequest(HttpMethod.Post,
             $"/api/v1/outbound/dispatch/shipments/{ShipmentDispatchedId}/assign-driver", supAToken,
             new { driverUserId = DriverAId, reason = "Re-dispatched after recall" })))
@@ -933,15 +939,26 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
             new { recipientName = "Committed Consignee", evidenceSource = PodEvidenceSource.DriverHandheld })))
             Assert.Equal(HttpStatusCode.OK, rPodCommit.StatusCode);
 
-        using (var rConfirmCommit = await _http.SendAsync(BearerRequest(HttpMethod.Post,
-            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/confirm-delivery", driverAToken, new { })))
+        var confirmEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var confirmRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _raceDbBarrier.ArmOnPodConfirmedSave(confirmEntered, confirmRelease);
+
+        var confirmTask = _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/confirm-delivery", driverAToken, new { }));
+        await confirmEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var concurrentRevokeTask = _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/shipments/{ShipmentDispatchedId}/assign-driver", supAToken,
+            new { driverUserId = (Guid?)null, reason = "Competing revoke while confirm holds lock" }));
+        await Task.Delay(150);
+        Assert.False(concurrentRevokeTask.IsCompleted);
+
+        confirmRelease.TrySetResult(true);
+        using (var rConfirmCommit = await confirmTask)
             Assert.Equal(HttpStatusCode.OK, rConfirmCommit.StatusCode);
 
-        // Revocation after delivery must fail cleanly (422) and preserve Delivered + POD state
-        using (var rLateRevoke = await _http.SendAsync(BearerRequest(HttpMethod.Post,
-            $"/api/v1/outbound/dispatch/shipments/{ShipmentDispatchedId}/assign-driver", supAToken,
-            new { driverUserId = (Guid?)null, reason = "Late revoke after delivery" })))
-            Assert.Equal(HttpStatusCode.UnprocessableEntity, rLateRevoke.StatusCode);
+        using (var rCompRevoke = await concurrentRevokeTask)
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rCompRevoke.StatusCode);
 
         using (var scope = _app.Services.CreateScope())
         {
@@ -949,6 +966,227 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
             var pkg1 = await db.Packages.IgnoreQueryFilters().SingleAsync(p => p.Id == Pkg1DispatchedId);
             Assert.Equal(TrackingMilestoneStatus.Delivered, pkg1.CurrentTrackingStatus);
             Assert.Single(await db.ProofOfDeliveries.IgnoreQueryFilters().Where(p => p.PackageId == Pkg1DispatchedId && !p.IsSuperseded).ToListAsync());
+        }
+    }
+
+    [Fact]
+    public async Task PodSupersession_AtomicUpdateOrdering_Concurrency_Auth_And_RollbackRecovery()
+    {
+        var supAToken = await LoginAsync("supa@740c.test");
+        var supBToken = await LoginAsync("supb@740c.test");
+        var driverAToken = await LoginAsync("drivera@740c.test");
+        var clientAdminToken = await LoginAsync("clienta@740c.test");
+
+        // 1. Driver creates initial finalized POD1 (with PNG signature)
+        Guid pod1Id;
+        using (var form = new MultipartFormDataContent())
+        {
+            var sig = new ByteArrayContent(CreateValidPngBytes());
+            sig.Headers.ContentType = new MediaTypeHeaderValue("image/png");
+            form.Add(sig, "signature", "orig-sig.png");
+            form.Add(new StringContent("Original Consignee"), "recipientName");
+            form.Add(new StringContent("true"), "isSigned");
+            var req = new HttpRequestMessage(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod") { Content = form };
+            req.Headers.Authorization = new AuthenticationHeaderValue("Bearer", driverAToken);
+            using var resp = await _http.SendAsync(req);
+            Assert.Equal(HttpStatusCode.OK, resp.StatusCode);
+            using var doc = await JsonDocument.ParseAsync(await resp.Content.ReadAsStreamAsync());
+            pod1Id = doc.RootElement.GetProperty("proofOfDeliveryId").GetGuid();
+        }
+
+        // 2. Authorization / facility / evidence-source negative checks on supersede endpoint
+        using (var rDrv = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pod1Id}/supersede", driverAToken,
+            new { reason = "Driver attempt", replacementSubmission = new { evidenceSource = PodEvidenceSource.DriverHandheld, recipientName = "X" } })))
+            Assert.Equal(HttpStatusCode.Forbidden, rDrv.StatusCode);
+
+        using (var rFacB = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pod1Id}/supersede", supBToken,
+            new { reason = "Wrong fac attempt", replacementSubmission = new { evidenceSource = PodEvidenceSource.ManualVerification, verificationReason = "Wrong fac", recipientName = "X" } })))
+            Assert.Equal(HttpStatusCode.Forbidden, rFacB.StatusCode);
+
+        using (var rClient = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pod1Id}/supersede", clientAdminToken,
+            new { reason = "Client attempt", replacementSubmission = new { evidenceSource = PodEvidenceSource.ConsigneePortal, consigneeAcknowledgmentText = "Portal" } })))
+            Assert.Equal(HttpStatusCode.Forbidden, rClient.StatusCode);
+
+        using (var rBadSrc = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pod1Id}/supersede", supAToken,
+            new { reason = "CarrierApi spoof", replacementSubmission = new { evidenceSource = PodEvidenceSource.CarrierApi, carrierConfirmationNumber = "FDX-SPOOF" } })))
+            Assert.Equal(HttpStatusCode.Forbidden, rBadSrc.StatusCode);
+
+        using (var rMissingVerify = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pod1Id}/supersede", supAToken,
+            new { reason = "Missing verify reason", replacementSubmission = new { evidenceSource = PodEvidenceSource.ManualVerification, recipientName = "Y" } })))
+            Assert.Equal(HttpStatusCode.BadRequest, rMissingVerify.StatusCode);
+
+        // 3. Failure recovery: failure on INSERT replacement (save #2 after old POD marked superseded on save #1) restores old POD + cleans temp storage
+        var pngB64 = Convert.ToBase64String(CreateValidPngBytes());
+        _raceDbBarrier.ThrowOnNthSave(2, new InvalidOperationException("Simulated replacement insert failure"));
+        using (var msFail = new MemoryStream(CreateValidPngBytes()))
+        {
+            using var scope = _app.Services.CreateScope();
+            var scopedTenant = scope.ServiceProvider.GetRequiredService<ITenantProvider>();
+            scopedTenant.SetTenantId(ClientA);
+            var scopedDb = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var scopedStorage = scope.ServiceProvider.GetRequiredService<IObjectStorageService>();
+            var staffCtx = new Warehouse3PL.UnitTests.Common.TestCurrentUserContext { UserId = SupervisorFacAId, UserType = UserType.Staff, FacilityId = FacilityA };
+            var svc = new ProofOfDeliveryService(scopedDb, scopedStorage, scopedTenant, staffCtx, Microsoft.Extensions.Logging.Abstractions.NullLogger<ProofOfDeliveryService>.Instance);
+            await Assert.ThrowsAsync<InvalidOperationException>(() => svc.SupersedeProofOfDeliveryAsync(new SupersedeProofOfDeliveryRequest
+            {
+                ExistingPodId = pod1Id,
+                Reason = "Rollback test",
+                ReplacementSubmission = new SubmitProofOfDeliveryRequest
+                {
+                    PackageId = Pkg1DispatchedId,
+                    EvidenceSource = PodEvidenceSource.ManualVerification,
+                    VerificationReason = "Rollback verification",
+                    RecipientName = "Should Not Persist",
+                    IsSigned = true,
+                    SignatureStream = msFail,
+                    SignatureContentType = "image/png"
+                }
+            }));
+        }
+
+        Assert.DoesNotContain(Directory.GetFiles(_storageDir, "*", SearchOption.AllDirectories), f => Path.GetFileName(f).StartsWith("temp_", StringComparison.OrdinalIgnoreCase));
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var pods = await db.ProofOfDeliveries.IgnoreQueryFilters().Where(p => p.PackageId == Pkg1DispatchedId).ToListAsync();
+            var oldRestored = Assert.Single(pods);
+            Assert.Equal(pod1Id, oldRestored.Id);
+            Assert.False(oldRestored.IsSuperseded);
+            Assert.Null(oldRestored.SupersededByPodId);
+        }
+
+        // 4. Concurrent overlapping supersessions: pause Worker 1 post-staging -> fire Worker 2 -> release -> exactly 1 succeeds (200), 1 rejected (422)
+        var sEntered = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        var sRelease = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+        _raceStorageState.NextStageHook = (sEntered, sRelease);
+
+        var t1 = _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pod1Id}/supersede", supAToken, new
+        {
+            reason = "Supervisor verified corrected POD #1",
+            replacementSubmission = new
+            {
+                evidenceSource = PodEvidenceSource.ManualVerification,
+                verificationReason = "Supervisor paper audit #1",
+                recipientName = "Corrected Consignee #1",
+                isSigned = true,
+                signatureBase64 = pngB64,
+                signatureContentType = "image/png"
+            }
+        }));
+        await sEntered.Task.WaitAsync(TimeSpan.FromSeconds(5));
+
+        var t2 = _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pod1Id}/supersede", supAToken, new
+        {
+            reason = "Competing supersession #2",
+            replacementSubmission = new
+            {
+                evidenceSource = PodEvidenceSource.ManualVerification,
+                verificationReason = "Competing audit #2",
+                recipientName = "Competing Consignee #2",
+                isSigned = true,
+                signatureBase64 = pngB64,
+                signatureContentType = "image/png"
+            }
+        }));
+
+        sRelease.TrySetResult(true);
+        var responses = await Task.WhenAll(t1, t2);
+        var okResp = Assert.Single(responses, r => r.StatusCode == HttpStatusCode.OK);
+        var rejectedResp = Assert.Single(responses, r => r.StatusCode == HttpStatusCode.UnprocessableEntity);
+        rejectedResp.Dispose();
+
+        Guid winningPodId;
+        using (var winDoc = await JsonDocument.ParseAsync(await okResp.Content.ReadAsStreamAsync()))
+        {
+            winningPodId = winDoc.RootElement.GetProperty("proofOfDeliveryId").GetGuid();
+            Assert.True(winDoc.RootElement.GetProperty("isStorageFinalized").GetBoolean());
+        }
+        okResp.Dispose();
+
+        // Duplicate sequential supersession rejected
+        using (var rDup = await _http.SendAsync(BearerRequest(HttpMethod.Post, $"/api/v1/outbound/dispatch/pod/{pod1Id}/supersede", supAToken, new
+        {
+            reason = "Sequential duplicate supersession",
+            replacementSubmission = new
+            {
+                evidenceSource = PodEvidenceSource.ManualVerification,
+                verificationReason = "Duplicate check",
+                recipientName = "Duplicate"
+            }
+        })))
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rDup.StatusCode);
+
+        // Verify exact DB state + zero orphaned temp storage files
+        Assert.DoesNotContain(Directory.GetFiles(_storageDir, "*", SearchOption.AllDirectories), f => Path.GetFileName(f).StartsWith("temp_", StringComparison.OrdinalIgnoreCase));
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var pods = await db.ProofOfDeliveries.IgnoreQueryFilters().Where(p => p.PackageId == Pkg1DispatchedId).ToListAsync();
+            Assert.Equal(2, pods.Count);
+            var oldRow = Assert.Single(pods, p => p.Id == pod1Id);
+            var newRow = Assert.Single(pods, p => p.Id == winningPodId);
+            Assert.True(oldRow.IsSuperseded);
+            Assert.Equal(winningPodId, oldRow.SupersededByPodId);
+            Assert.NotNull(oldRow.SupersededAtUtc);
+            Assert.False(string.IsNullOrWhiteSpace(oldRow.SupersededReason));
+            Assert.False(newRow.IsSuperseded);
+            Assert.True(newRow.IsStorageFinalized);
+        }
+
+        // Delivery confirmation rejects superseded POD (422) and accepts replacement POD (200)
+        using (var rOldConfirm = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/confirm-delivery", driverAToken,
+            new { proofOfDeliveryId = pod1Id })))
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rOldConfirm.StatusCode);
+
+        using (var rNewConfirm = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/confirm-delivery", driverAToken,
+            new { proofOfDeliveryId = winningPodId })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rNewConfirm.StatusCode);
+            using var cDoc = await JsonDocument.ParseAsync(await rNewConfirm.Content.ReadAsStreamAsync());
+            Assert.Equal(winningPodId, cDoc.RootElement.GetProperty("proofOfDeliveryId").GetGuid());
+        }
+    }
+
+    private sealed class RaceDbBarrierInterceptor : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
+    {
+        private (TaskCompletionSource<bool> Entered, TaskCompletionSource<bool> Release)? _podConfirmPause;
+        private int _throwCountdown;
+        private Exception? _throwException;
+
+        public void ArmOnPodConfirmedSave(TaskCompletionSource<bool> entered, TaskCompletionSource<bool> release)
+            => _podConfirmPause = (entered, release);
+
+        public void ThrowOnNthSave(int nthSave, Exception ex)
+        {
+            _throwException = ex;
+            Volatile.Write(ref _throwCountdown, nthSave);
+        }
+
+        public override async ValueTask<Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int>> SavingChangesAsync(
+            Microsoft.EntityFrameworkCore.Diagnostics.DbContextEventData eventData,
+            Microsoft.EntityFrameworkCore.Diagnostics.InterceptionResult<int> result,
+            CancellationToken cancellationToken = default)
+        {
+            var pause = _podConfirmPause;
+            if (pause.HasValue && eventData.Context != null &&
+                eventData.Context.ChangeTracker.Entries<ShipmentTrackingEvent>()
+                    .Any(e => e.State == EntityState.Added && e.Entity.CarrierEventCode == "POD_CONFIRMED"))
+            {
+                _podConfirmPause = null;
+                pause.Value.Entered.TrySetResult(true);
+                await pause.Value.Release.Task;
+            }
+
+            if (Volatile.Read(ref _throwCountdown) > 0 && Interlocked.Decrement(ref _throwCountdown) == 0 && _throwException != null)
+            {
+                var ex = _throwException;
+                _throwException = null;
+                throw ex;
+            }
+
+            return await base.SavingChangesAsync(eventData, result, cancellationToken);
         }
     }
 

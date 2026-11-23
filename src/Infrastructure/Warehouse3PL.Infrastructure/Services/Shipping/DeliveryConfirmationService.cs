@@ -59,7 +59,7 @@ public class DeliveryConfirmationService : IDeliveryConfirmationService
             .Select(p => p.ShipmentId)
             .FirstOrDefaultAsync(cancellationToken);
 
-        return await _context.ExecuteWithShipmentLockAsync(shipmentIdForLock, async () =>
+        return await _context.ExecuteWithPackageLockAsync(request.PackageId, shipmentIdForLock, async () =>
         {
             if (request.BeforeCommitCustodyValidationAsync != null)
             {

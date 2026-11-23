@@ -64,47 +64,64 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             throw new ValidationException(nameof(request.Reason), "Supersession reason must be provided.");
         }
 
-        var existingPod = await _context.ProofOfDeliveries
+        if (request.Reason.Trim().Length > 500)
+        {
+            throw new ValidationException(nameof(request.Reason), "Supersession reason cannot exceed 500 characters.");
+        }
+
+        if (request.ReplacementSubmission == null)
+        {
+            throw new ValidationException(nameof(request.ReplacementSubmission), "Replacement Proof of Delivery submission must be provided.");
+        }
+
+        WarehouseOperationalAuthorization.ValidatePodEvidenceSourceAuthorization(
+            _currentUserContext,
+            request.ReplacementSubmission.EvidenceSource,
+            request.ReplacementSubmission.VerificationReason,
+            request.ReplacementSubmission.IsInteractiveSubmission);
+
+        var existingPodSnapshot = await _context.ProofOfDeliveries
+            .AsNoTracking()
             .FirstOrDefaultAsync(p => p.Id == request.ExistingPodId, cancellationToken);
 
-        if (existingPod == null)
+        if (existingPodSnapshot == null)
         {
             throw new EntityNotFoundException(nameof(ProofOfDelivery), request.ExistingPodId);
         }
 
-        if (existingPod.IsSuperseded)
+        if (existingPodSnapshot.IsSuperseded)
         {
-            throw new InvalidDomainStateException($"Proof of Delivery '{existingPod.Id}' has already been superseded.");
+            throw new InvalidDomainStateException($"Proof of Delivery '{existingPodSnapshot.Id}' has already been superseded.");
         }
 
         // Validate that replacement belongs to the same package
         if (request.ReplacementSubmission.PackageId != Guid.Empty &&
-            request.ReplacementSubmission.PackageId != existingPod.PackageId)
+            request.ReplacementSubmission.PackageId != existingPodSnapshot.PackageId)
         {
             throw new ValidationException(nameof(request.ReplacementSubmission.PackageId),
                 "Replacement Proof of Delivery must belong to the same package as the superseded record.");
         }
 
-        request.ReplacementSubmission.PackageId = existingPod.PackageId;
+        request.ReplacementSubmission.PackageId = existingPodSnapshot.PackageId;
 
-        // Execute submission for replacement
-        var result = await ExecuteSubmissionInternalAsync(request.ReplacementSubmission, isSupersession: true, existingPod, cancellationToken);
-
-        // Mark existing POD as superseded
-        existingPod.Supersede(result.ProofOfDeliveryId, request.Reason, DateTime.UtcNow);
-        await _context.SaveChangesAsync(cancellationToken);
+        // Atomically supersede historical POD + insert replacement POD inside package/shipment lock & transaction
+        var result = await ExecuteSubmissionInternalAsync(
+            request.ReplacementSubmission,
+            isSupersession: true,
+            supersedeRequest: request,
+            cancellationToken);
 
         _logger.LogInformation("Superseded POD '{OldPodId}' with new POD '{NewPodId}' for Package '{Pkg}'. Reason: {Reason}",
-            existingPod.Id, result.ProofOfDeliveryId, existingPod.PackageId, request.Reason);
+            existingPodSnapshot.Id, result.ProofOfDeliveryId, existingPodSnapshot.PackageId, request.Reason);
 
-        result.Message = $"Proof of Delivery superseded successfully. Old POD: '{existingPod.Id}'.";
+        result.Message = $"Proof of Delivery superseded successfully. Old POD: '{existingPodSnapshot.Id}'.";
         return result;
     }
 
     private async Task<SubmitProofOfDeliveryResult> ExecuteSubmissionInternalAsync(
         SubmitProofOfDeliveryRequest request,
         bool isSupersession,
-        ProofOfDelivery? existingPodToSupersede,
+        SupersedeProofOfDeliveryRequest? supersedeRequest,
         CancellationToken cancellationToken)
     {
         // 1. Package & Evidence-Source Authorization (fail-closed before DB lookup or staged upload)
@@ -120,6 +137,7 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             request.IsInteractiveSubmission);
 
         var package = await _context.Packages
+            .AsNoTracking()
             .Include(p => p.Shipment)
             .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
 
@@ -261,18 +279,84 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             DeliveredAtUtc = request.DeliveredAtUtc
         };
 
-        pod.Validate();
-
         try
         {
-            await _context.ExecuteWithShipmentLockAsync(package.ShipmentId, async () =>
+            pod.Validate();
+
+            await _context.ExecuteWithPackageLockAsync(package.Id, package.ShipmentId, async () =>
             {
                 if (request.BeforeCommitCustodyValidationAsync != null)
                 {
                     await request.BeforeCommitCustodyValidationAsync(cancellationToken);
                 }
 
-                if (!isSupersession)
+                if (isSupersession)
+                {
+                    var lockedExistingPod = await _context.ProofOfDeliveries
+                        .FirstOrDefaultAsync(p => p.Id == supersedeRequest!.ExistingPodId, cancellationToken)
+                        ?? throw new EntityNotFoundException(nameof(ProofOfDelivery), supersedeRequest!.ExistingPodId);
+
+                    if (lockedExistingPod.PackageId != package.Id)
+                    {
+                        throw new ValidationException(nameof(request.PackageId),
+                            "Replacement Proof of Delivery must belong to the same package as the superseded record.");
+                    }
+
+                    if (lockedExistingPod.IsSuperseded)
+                    {
+                        throw new InvalidDomainStateException(
+                            $"Proof of Delivery '{lockedExistingPod.Id}' has already been superseded.");
+                    }
+
+                    var otherActivePod = await _context.ProofOfDeliveries
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(p => p.PackageId == package.Id && !p.IsSuperseded && p.Id != lockedExistingPod.Id, cancellationToken);
+                    if (otherActivePod != null)
+                    {
+                        throw new InvalidDomainStateException(
+                            $"Package '{package.PackageNumber}' already has an active Proof of Delivery ('{otherActivePod.Id}') different from '{lockedExistingPod.Id}'.");
+                    }
+
+                    var prevSuperseded = lockedExistingPod.IsSuperseded;
+                    var prevSupersededBy = lockedExistingPod.SupersededByPodId;
+                    var prevSupersededReason = lockedExistingPod.SupersededReason;
+                    var prevSupersededAt = lockedExistingPod.SupersededAtUtc;
+
+                    lockedExistingPod.Supersede(pod.Id, supersedeRequest!.Reason, DateTime.UtcNow);
+                    try
+                    {
+                        // Write ordering: UPDATE existing POD first inside the transaction so PostgreSQL partial unique index
+                        // ix_proof_of_deliveries_package_unique (WHERE is_superseded = false) allows the replacement INSERT.
+                        await _context.SaveChangesAsync(cancellationToken);
+
+                        _context.ProofOfDeliveries.Add(pod);
+                        await _context.SaveChangesAsync(cancellationToken);
+                    }
+                    catch
+                    {
+                        if (_context is DbContext efContext)
+                        {
+                            var podEntry = efContext.Entry(pod);
+                            if (podEntry.State != EntityState.Detached)
+                            {
+                                podEntry.State = EntityState.Detached;
+                            }
+                        }
+
+                        lockedExistingPod.IsSuperseded = prevSuperseded;
+                        lockedExistingPod.SupersededByPodId = prevSupersededBy;
+                        lockedExistingPod.SupersededReason = prevSupersededReason;
+                        lockedExistingPod.SupersededAtUtc = prevSupersededAt;
+
+                        if (!_context.IsRelationalDatabase)
+                        {
+                            await _context.SaveChangesAsync(CancellationToken.None);
+                        }
+
+                        throw;
+                    }
+                }
+                else
                 {
                     var racedActivePod = await _context.ProofOfDeliveries
                         .AsNoTracking()
@@ -283,19 +367,18 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
                         throw new ValidationException(nameof(request.PackageId),
                             $"Package '{package.PackageNumber}' already has an active authoritative Proof of Delivery ('{racedActivePod.Id}').");
                     }
+
+                    _context.ProofOfDeliveries.Add(pod);
+                    await _context.SaveChangesAsync(cancellationToken);
                 }
 
-                _context.ProofOfDeliveries.Add(pod);
-                await _context.SaveChangesAsync(cancellationToken);
                 return true;
             }, cancellationToken);
         }
         catch (Exception ex)
         {
             _logger.LogError(ex, "Failed to persist ProofOfDelivery metadata for package '{Pkg}'. Cleaning up staged objects.", package.PackageNumber);
-            // Clean up staged objects from storage so no orphaned files remain
-            if (tempSigKey != null) await _storageService.DeleteAsync(tempSigKey, cancellationToken);
-            if (tempPhotoKey != null) await _storageService.DeleteAsync(tempPhotoKey, cancellationToken);
+            await TryDeleteTempObjectsAsync(tempSigKey, tempPhotoKey);
             throw;
         }
 
@@ -409,6 +492,18 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
     }
 
     #region Helpers & Validations
+
+    private async Task TryDeleteTempObjectsAsync(string? tempSigKey, string? tempPhotoKey)
+    {
+        if (tempSigKey != null)
+        {
+            try { await _storageService.DeleteAsync(tempSigKey, CancellationToken.None); } catch { /* best-effort cleanup */ }
+        }
+        if (tempPhotoKey != null)
+        {
+            try { await _storageService.DeleteAsync(tempPhotoKey, CancellationToken.None); } catch { /* best-effort cleanup */ }
+        }
+    }
 
     private void ValidateSourceSpecificRules(SubmitProofOfDeliveryRequest request)
     {
