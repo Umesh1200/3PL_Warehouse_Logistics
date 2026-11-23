@@ -31,6 +31,7 @@ public static class Phase741OutboundLifecycleCheck
         var foreignItemId = Guid.NewGuid();
         var facBOnlyClientId = Guid.NewGuid();
         var facBOnlyId = Guid.NewGuid();
+        var authDestFacId = Guid.NewGuid();
         var facBOnlyItemId = Guid.NewGuid();
         var binId = Guid.NewGuid();
         var stockId = Guid.NewGuid();
@@ -71,14 +72,23 @@ public static class Phase741OutboundLifecycleCheck
                     StorageTempClass = StorageTempClass.Ambient
                 });
             }
-            seedDb.Facilities.Add(new Facility
-            {
-                Id = facBOnlyId,
-                FacilityCode = $"PG741B-{facBOnlyId.ToString("N")[..6]}",
-                Name = "PG 741 Isolated Facility B",
-                CountryCode = "USA",
-                IsActive = true
-            });
+            seedDb.Facilities.AddRange(
+                new Facility
+                {
+                    Id = facBOnlyId,
+                    FacilityCode = $"PG741B-{facBOnlyId.ToString("N")[..6]}",
+                    Name = "PG 741 Isolated Facility B",
+                    CountryCode = "USA",
+                    IsActive = true
+                },
+                new Facility
+                {
+                    Id = authDestFacId,
+                    FacilityCode = $"PG741D-{authDestFacId.ToString("N")[..6]}",
+                    Name = "PG 741 Authorized Dest Facility",
+                    CountryCode = "USA",
+                    IsActive = true
+                });
             seedDb.Clients.Add(new Warehouse3PL.Domain.Entities.Security.Client
             {
                 Id = facBOnlyClientId,
@@ -86,12 +96,19 @@ public static class Phase741OutboundLifecycleCheck
                 CompanyName = "Facility B Only Client",
                 Status = ClientStatus.Active
             });
-            seedDb.ClientFacilityAccesses.Add(new Warehouse3PL.Domain.Entities.Security.ClientFacilityAccess
-            {
-                ClientId = facBOnlyClientId,
-                FacilityId = facBOnlyId,
-                Status = FacilityAccessStatus.Active
-            });
+            seedDb.ClientFacilityAccesses.AddRange(
+                new Warehouse3PL.Domain.Entities.Security.ClientFacilityAccess
+                {
+                    ClientId = facBOnlyClientId,
+                    FacilityId = facBOnlyId,
+                    Status = FacilityAccessStatus.Active
+                },
+                new Warehouse3PL.Domain.Entities.Security.ClientFacilityAccess
+                {
+                    ClientId = clientId,
+                    FacilityId = authDestFacId,
+                    Status = FacilityAccessStatus.Active
+                });
             seedDb.Items.Add(new Item
             {
                 Id = facBOnlyItemId,
@@ -369,6 +386,135 @@ public static class Phase741OutboundLifecycleCheck
             var leakedBatches = await p74104VerifyDb.OrderImportBatches.CountAsync(b => b.ClientId == facBOnlyClientId);
             if (leakedOrders != 0 || leakedBatches != 0)
                 throw new InvalidOperationException($"Unauthorized Staff order/import persisted rows on PostgreSQL: orders={leakedOrders}, batches={leakedBatches}");
+        }
+
+        // Bulk stock-transfer destination authorization checks on live PostgreSQL
+        var validXferImportReq = staffReqFactory(
+            HttpMethod.Post,
+            "/api/v1/outbound/orders/bulk-import",
+            staffUserId,
+            facilityId,
+            Permissions.Outbound.OrdersImport,
+            new
+            {
+                facilityId,
+                sourceFileName = "pg-p741-04-valid-xfer.json",
+                orders = new[]
+                {
+                    new
+                    {
+                        facilityId,
+                        destinationFacilityId = authDestFacId,
+                        externalOrderReference = $"PG-XFER-OK-{Guid.NewGuid():N}",
+                        orderType = "StockTransferOrder",
+                        priority = 5,
+                        serviceLevel = "FreightLTL",
+                        shippingAddress = createPayload.shippingAddress,
+                        lines = new[] { new { itemId, quantityOrdered = 1m } }
+                    }
+                }
+            });
+        validXferImportReq.Headers.Add("X-Tenant-Id", clientId.ToString());
+        using (var validXferResp = await client.SendAsync(validXferImportReq))
+        {
+            if (validXferResp.StatusCode != HttpStatusCode.OK)
+                throw new InvalidOperationException($"Authorized Staff bulk stock-transfer import failed: {validXferResp.StatusCode}: {await validXferResp.Content.ReadAsStringAsync()}");
+        }
+
+        var unauthStaffXferReq = staffReqFactory(
+            HttpMethod.Post,
+            "/api/v1/outbound/orders/bulk-import",
+            staffUserId,
+            facilityId,
+            Permissions.Outbound.OrdersImport,
+            new
+            {
+                facilityId,
+                sourceFileName = "pg-p741-04-unauth-xfer.json",
+                orders = new[]
+                {
+                    new
+                    {
+                        facilityId,
+                        destinationFacilityId = facBOnlyId,
+                        externalOrderReference = "PG-SHOULD-NOT-PERSIST-XFER-STAFF",
+                        orderType = "StockTransferOrder",
+                        priority = 5,
+                        serviceLevel = "FreightLTL",
+                        shippingAddress = createPayload.shippingAddress,
+                        lines = new[] { new { itemId, quantityOrdered = 1m } }
+                    }
+                }
+            });
+        unauthStaffXferReq.Headers.Add("X-Tenant-Id", clientId.ToString());
+        using (var unauthXferResp = await client.SendAsync(unauthStaffXferReq))
+        {
+            if (unauthXferResp.StatusCode != HttpStatusCode.Forbidden)
+                throw new InvalidOperationException($"Expected 403 for unauthorized Staff bulk stock-transfer destination, got {unauthXferResp.StatusCode}");
+        }
+
+        setClientAdminClaims(clientId);
+        using (var validClientXferResp = await client.PostAsJsonAsync("/api/v1/outbound/orders/bulk-import", new
+        {
+            facilityId,
+            sourceFileName = "pg-p741-04-valid-client-xfer.json",
+            orders = new[]
+            {
+                new
+                {
+                    facilityId,
+                    destinationFacilityId = authDestFacId,
+                    externalOrderReference = $"PG-CLIENT-XFER-OK-{Guid.NewGuid():N}",
+                    orderType = "StockTransferOrder",
+                    priority = 5,
+                    serviceLevel = "FreightLTL",
+                    shippingAddress = createPayload.shippingAddress,
+                    lines = new[] { new { itemId, quantityOrdered = 1m } }
+                }
+            }
+        }))
+        {
+            if (validClientXferResp.StatusCode != HttpStatusCode.OK)
+                throw new InvalidOperationException($"Authorized ClientAdmin bulk stock-transfer failed: {validClientXferResp.StatusCode}: {await validClientXferResp.Content.ReadAsStringAsync()}");
+        }
+        using (var unauthClientXferResp = await client.PostAsJsonAsync("/api/v1/outbound/orders/bulk-import", new
+        {
+            facilityId,
+            sourceFileName = "pg-p741-04-unauth-client-xfer.json",
+            orders = new[]
+            {
+                new
+                {
+                    facilityId,
+                    destinationFacilityId = facBOnlyId,
+                    externalOrderReference = "PG-SHOULD-NOT-PERSIST-XFER-CLIENT",
+                    orderType = "StockTransferOrder",
+                    priority = 5,
+                    serviceLevel = "FreightLTL",
+                    shippingAddress = createPayload.shippingAddress,
+                    lines = new[] { new { itemId, quantityOrdered = 1m } }
+                }
+            }
+        }))
+        {
+            if (unauthClientXferResp.StatusCode != HttpStatusCode.Forbidden)
+                throw new InvalidOperationException($"Expected 403 for unauthorized ClientAdmin bulk stock-transfer destination, got {unauthClientXferResp.StatusCode}");
+        }
+        setClientAdminClaims(Guid.Empty);
+
+        await using (var xferVerifyDb = new ApplicationDbContext(
+            dbOptions, new VerificationTenant(), new VerificationIdentity(facilityId),
+            new AuditableEntityInterceptor(new VerificationIdentity(facilityId), new VerificationClock())))
+        {
+            var leakedXferOrders = await xferVerifyDb.OutboundOrders.CountAsync(o =>
+                o.DestinationFacilityId == facBOnlyId ||
+                o.ExternalOrderReference == "PG-SHOULD-NOT-PERSIST-XFER-STAFF" ||
+                o.ExternalOrderReference == "PG-SHOULD-NOT-PERSIST-XFER-CLIENT");
+            var leakedXferBatches = await xferVerifyDb.OrderImportBatches.CountAsync(b =>
+                b.SourceFileName == "pg-p741-04-unauth-xfer.json" ||
+                b.SourceFileName == "pg-p741-04-unauth-client-xfer.json");
+            if (leakedXferOrders != 0 || leakedXferBatches != 0)
+                throw new InvalidOperationException($"Unauthorized bulk stock-transfer persisted rows on PostgreSQL: orders={leakedXferOrders}, batches={leakedXferBatches}");
         }
 
         // 3. Allocate with Idempotency + duplicate replay check

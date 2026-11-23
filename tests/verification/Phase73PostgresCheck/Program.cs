@@ -3565,6 +3565,7 @@ try
                 new Claim("tenant_id", cId.ToString()),
                 new Claim("permissions", Permissions.Outbound.OrdersView),
                 new Claim("permissions", Permissions.Outbound.OrdersCreate),
+                new Claim("permissions", Permissions.Outbound.OrdersImport),
                 new Claim("permissions", Permissions.Outbound.WavesView)
             };
         },

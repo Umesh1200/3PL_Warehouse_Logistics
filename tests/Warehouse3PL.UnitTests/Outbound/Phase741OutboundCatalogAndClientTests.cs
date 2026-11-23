@@ -44,6 +44,7 @@ public sealed class Phase741OutboundCatalogAndClientTests : IAsyncLifetime
     private static readonly Guid ClientB = Guid.Parse("741a0001-0000-0000-0000-000000000002");
     private static readonly Guid FacilityA = Guid.Parse("741a0002-0000-0000-0000-000000000001");
     private static readonly Guid FacilityB = Guid.Parse("741a0002-0000-0000-0000-000000000002");
+    private static readonly Guid FacilityC = Guid.Parse("741a0002-0000-0000-0000-000000000003");
 
     private static readonly Guid ClientAdminAId = Guid.Parse("741a0003-0000-0000-0000-000000000001");
     private static readonly Guid StaffOrderCreatorAId = Guid.Parse("741a0003-0000-0000-0000-000000000002");
@@ -142,7 +143,8 @@ public sealed class Phase741OutboundCatalogAndClientTests : IAsyncLifetime
     {
         var facA = new Facility { Id = FacilityA, FacilityCode = "FAC-741-A", Name = "Chicago Hub", CountryCode = "USA", IsActive = true };
         var facB = new Facility { Id = FacilityB, FacilityCode = "FAC-741-B", Name = "Dallas Hub", CountryCode = "USA", IsActive = true };
-        db.Facilities.AddRange(facA, facB);
+        var facC = new Facility { Id = FacilityC, FacilityCode = "FAC-741-C", Name = "Newark Hub", CountryCode = "USA", IsActive = true };
+        db.Facilities.AddRange(facA, facB, facC);
 
         var clientA = new Client { Id = ClientA, AccountCode = "CL-A", CompanyName = "Alpha Logistics Co", Status = ClientStatus.Active };
         var clientB = new Client { Id = ClientB, AccountCode = "CL-B", CompanyName = "Beta Medical Supply", Status = ClientStatus.Active };
@@ -150,6 +152,7 @@ public sealed class Phase741OutboundCatalogAndClientTests : IAsyncLifetime
 
         db.ClientFacilityAccesses.AddRange(
             new ClientFacilityAccess { ClientId = ClientA, FacilityId = FacilityA, Status = FacilityAccessStatus.Active },
+            new ClientFacilityAccess { ClientId = ClientA, FacilityId = FacilityC, Status = FacilityAccessStatus.Active },
             new ClientFacilityAccess { ClientId = ClientB, FacilityId = FacilityB, Status = FacilityAccessStatus.Active });
 
         db.Items.AddRange(
@@ -628,5 +631,177 @@ public sealed class Phase741OutboundCatalogAndClientTests : IAsyncLifetime
         var db = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
         Assert.Equal(0, await db.OutboundOrders.IgnoreQueryFilters().CountAsync(o => o.ClientId == ClientB));
         Assert.Equal(0, await db.OrderImportBatches.IgnoreQueryFilters().CountAsync(b => b.ClientId == ClientB));
+    }
+
+    [Fact]
+    public async Task P741_04_BulkImportStockTransfer_EnforcesClientFacilityAccessForDestinationFacility()
+    {
+        var address = new
+        {
+            recipientName = "Transfer Receiving Dock",
+            companyName = "Alpha Logistics Co",
+            addressLine1 = "700 Transfer Pkwy",
+            city = "Newark",
+            stateOrProvince = "NJ",
+            postalCode = "07102",
+            countryCode = "USA"
+        };
+
+        // 1. Authorized Staff bulk stock-transfer import (ClientA: FacilityA -> FacilityC, both active for ClientA) succeeds
+        var validStaffXfer = new
+        {
+            facilityId = FacilityA,
+            sourceFileName = "staff-valid-xfer.json",
+            orders = new[]
+            {
+                new
+                {
+                    facilityId = FacilityA,
+                    destinationFacilityId = FacilityC,
+                    externalOrderReference = "XFER-STAFF-OK-1",
+                    orderType = "StockTransferOrder",
+                    priority = 6,
+                    serviceLevel = "FreightLTL",
+                    shippingAddress = address,
+                    lines = new[] { new { itemId = ItemClientAActiveId, quantityOrdered = 4m } }
+                }
+            }
+        };
+        using (var okStaffResp = await _http.SendAsync(AuthedReq(
+            HttpMethod.Post, "/api/v1/outbound/orders/bulk-import", StaffOrderCreatorAId, validStaffXfer, tenantHeader: ClientA)))
+        {
+            Assert.Equal(HttpStatusCode.OK, okStaffResp.StatusCode);
+            using var doc = await JsonDocument.ParseAsync(await okStaffResp.Content.ReadAsStreamAsync());
+            Assert.Equal(1, doc.RootElement.GetProperty("successfulRows").GetInt32());
+        }
+
+        // 2. Authorized ClientAdmin bulk stock-transfer import (ClientA: FacilityA -> FacilityC) succeeds
+        var validClientXfer = new
+        {
+            facilityId = FacilityA,
+            sourceFileName = "client-valid-xfer.json",
+            orders = new[]
+            {
+                new
+                {
+                    facilityId = FacilityA,
+                    destinationFacilityId = FacilityC,
+                    externalOrderReference = "XFER-CLIENT-OK-1",
+                    orderType = "StockTransferOrder",
+                    priority = 5,
+                    serviceLevel = "FreightLTL",
+                    shippingAddress = address,
+                    lines = new[] { new { itemId = ItemClientAActiveId, quantityOrdered = 2m } }
+                }
+            }
+        };
+        using (var okClientResp = await _http.SendAsync(AuthedReq(
+            HttpMethod.Post, "/api/v1/outbound/orders/bulk-import", ClientAdminAId, validClientXfer)))
+        {
+            Assert.Equal(HttpStatusCode.OK, okClientResp.StatusCode);
+            using var doc = await JsonDocument.ParseAsync(await okClientResp.Content.ReadAsStreamAsync());
+            Assert.Equal(1, doc.RootElement.GetProperty("successfulRows").GetInt32());
+        }
+
+        // 3. Unauthorized Staff bulk stock-transfer import (ClientA lacks access to FacilityB) returns 403 without persistence
+        var unauthStaffXfer = new
+        {
+            facilityId = FacilityA,
+            sourceFileName = "staff-unauth-xfer.json",
+            orders = new object[]
+            {
+                new
+                {
+                    facilityId = FacilityA,
+                    externalOrderReference = "XFER-MIX-SHOULD-ROLLBACK",
+                    orderType = "B2BSalesOrder",
+                    priority = 5,
+                    serviceLevel = "StandardGround",
+                    shippingAddress = address,
+                    lines = new[] { new { itemId = ItemClientAActiveId, quantityOrdered = 1m } }
+                },
+                new
+                {
+                    facilityId = FacilityA,
+                    destinationFacilityId = FacilityB,
+                    externalOrderReference = "XFER-STAFF-UNAUTH-B",
+                    orderType = "StockTransferOrder",
+                    priority = 5,
+                    serviceLevel = "FreightLTL",
+                    shippingAddress = address,
+                    lines = new[] { new { itemId = ItemClientAActiveId, quantityOrdered = 3m } }
+                }
+            }
+        };
+        using (var unauthStaffResp = await _http.SendAsync(AuthedReq(
+            HttpMethod.Post, "/api/v1/outbound/orders/bulk-import", StaffOrderCreatorAId, unauthStaffXfer, tenantHeader: ClientA)))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, unauthStaffResp.StatusCode);
+        }
+
+        // 4. Unauthorized ClientAdmin bulk stock-transfer import (FacilityB) returns 403 without persistence
+        var unauthClientXfer = new
+        {
+            facilityId = FacilityA,
+            sourceFileName = "client-unauth-xfer.json",
+            orders = new[]
+            {
+                new
+                {
+                    facilityId = FacilityA,
+                    destinationFacilityId = FacilityB,
+                    externalOrderReference = "XFER-CLIENT-UNAUTH-B",
+                    orderType = "StockTransferOrder",
+                    priority = 5,
+                    serviceLevel = "FreightLTL",
+                    shippingAddress = address,
+                    lines = new[] { new { itemId = ItemClientAActiveId, quantityOrdered = 3m } }
+                }
+            }
+        };
+        using (var unauthClientResp = await _http.SendAsync(AuthedReq(
+            HttpMethod.Post, "/api/v1/outbound/orders/bulk-import", ClientAdminAId, unauthClientXfer)))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, unauthClientResp.StatusCode);
+        }
+
+        // 5. Same-facility stock-transfer row is rejected as failed row with zero OutboundOrder persisted
+        var sameFacXfer = new
+        {
+            facilityId = FacilityA,
+            sourceFileName = "same-fac-xfer.json",
+            orders = new[]
+            {
+                new
+                {
+                    facilityId = FacilityA,
+                    destinationFacilityId = FacilityA,
+                    externalOrderReference = "XFER-SAME-FAC-FAIL",
+                    orderType = "StockTransferOrder",
+                    priority = 5,
+                    serviceLevel = "FreightLTL",
+                    shippingAddress = address,
+                    lines = new[] { new { itemId = ItemClientAActiveId, quantityOrdered = 2m } }
+                }
+            }
+        };
+        using (var sameFacResp = await _http.SendAsync(AuthedReq(
+            HttpMethod.Post, "/api/v1/outbound/orders/bulk-import", StaffOrderCreatorAId, sameFacXfer, tenantHeader: ClientA)))
+        {
+            Assert.Equal(HttpStatusCode.OK, sameFacResp.StatusCode);
+            using var doc = await JsonDocument.ParseAsync(await sameFacResp.Content.ReadAsStreamAsync());
+            Assert.Equal(0, doc.RootElement.GetProperty("successfulRows").GetInt32());
+            Assert.Equal(1, doc.RootElement.GetProperty("failedRows").GetInt32());
+        }
+
+        using var verifyScope = _app.Services.CreateScope();
+        var db = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.Equal(0, await db.OutboundOrders.IgnoreQueryFilters().CountAsync(o =>
+            o.DestinationFacilityId == FacilityB ||
+            o.ExternalOrderReference == "XFER-MIX-SHOULD-ROLLBACK" ||
+            o.ExternalOrderReference == "XFER-SAME-FAC-FAIL"));
+        Assert.Equal(0, await db.OrderImportBatches.IgnoreQueryFilters().CountAsync(b =>
+            b.SourceFileName == "staff-unauth-xfer.json" ||
+            b.SourceFileName == "client-unauth-xfer.json"));
     }
 }

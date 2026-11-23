@@ -88,6 +88,34 @@ public class ImportOutboundOrdersBulkCommandHandler : IRequestHandler<ImportOutb
             await _outboundAuth.EnsureClientHasActiveFacilityAccessAsync(clientId, request.FacilityId, cancellationToken);
         }
 
+        var distinctDestinationFacilityIds = request.Orders
+            .Where(o => o.DestinationFacilityId.HasValue && o.DestinationFacilityId.Value != Guid.Empty)
+            .Select(o => o.DestinationFacilityId!.Value)
+            .Distinct()
+            .ToList();
+
+        if (distinctDestinationFacilityIds.Count > 0)
+        {
+            var existingDestinationIds = await _context.Facilities
+                .AsNoTracking()
+                .Where(f => distinctDestinationFacilityIds.Contains(f.Id))
+                .Select(f => f.Id)
+                .ToHashSetAsync(cancellationToken);
+
+            foreach (var destFacilityId in distinctDestinationFacilityIds)
+            {
+                if (!existingDestinationIds.Contains(destFacilityId))
+                {
+                    throw new EntityNotFoundException(nameof(Domain.Entities.Facilities.Facility), destFacilityId);
+                }
+
+                if (!_currentUser.IsSuperAdmin)
+                {
+                    await _outboundAuth.EnsureClientHasActiveFacilityAccessAsync(clientId, destFacilityId, cancellationToken);
+                }
+            }
+        }
+
         var batchNumber = $"BATCH-{DateTime.UtcNow:yyyyMMddHHmmss}-{Guid.NewGuid().ToString("N")[..6].ToUpper()}";
         var batch = new OrderImportBatch
         {
@@ -173,6 +201,31 @@ public class ImportOutboundOrdersBulkCommandHandler : IRequestHandler<ImportOutb
                 continue;
             }
 
+            if (orderCmd.OrderType == OutboundOrderType.StockTransferOrder)
+            {
+                if (!orderCmd.DestinationFacilityId.HasValue || orderCmd.DestinationFacilityId.Value == Guid.Empty)
+                {
+                    rowLog.IsSuccess = false;
+                    rowLog.ErrorMessage = "Destination facility ID is required for stock transfer orders.";
+                    failedCount++;
+                    errorSummaries[$"row_{rowIndex}"] = rowLog.ErrorMessage;
+                    batch.Rows.Add(rowLog);
+                    rowIndex++;
+                    continue;
+                }
+
+                if (orderCmd.DestinationFacilityId.Value == request.FacilityId)
+                {
+                    rowLog.IsSuccess = false;
+                    rowLog.ErrorMessage = "Stock transfer source and destination facilities must be different.";
+                    failedCount++;
+                    errorSummaries[$"row_{rowIndex}"] = rowLog.ErrorMessage;
+                    batch.Rows.Add(rowLog);
+                    rowIndex++;
+                    continue;
+                }
+            }
+
             // Create Order
             try
             {
@@ -186,7 +239,9 @@ public class ImportOutboundOrdersBulkCommandHandler : IRequestHandler<ImportOutb
                 {
                     ClientId = clientId,
                     FacilityId = request.FacilityId,
-                    DestinationFacilityId = orderCmd.DestinationFacilityId,
+                    DestinationFacilityId = orderCmd.OrderType == OutboundOrderType.StockTransferOrder
+                        ? orderCmd.DestinationFacilityId
+                        : null,
                     CustomerId = orderCmd.CustomerId,
                     OrderNumber = orderNumber,
                     ExternalOrderReference = rowLog.ExternalOrderReference,
