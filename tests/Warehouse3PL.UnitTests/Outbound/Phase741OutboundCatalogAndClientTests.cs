@@ -803,5 +803,39 @@ public sealed class Phase741OutboundCatalogAndClientTests : IAsyncLifetime
         Assert.Equal(0, await db.OrderImportBatches.IgnoreQueryFilters().CountAsync(b =>
             b.SourceFileName == "staff-unauth-xfer.json" ||
             b.SourceFileName == "client-unauth-xfer.json"));
+
+        // 6. Ordinary sales orders with an irrelevant/unused DestinationFacilityId succeed and persist DestinationFacilityId = null
+        var salesWithUnusedDest = new
+        {
+            facilityId = FacilityA,
+            sourceFileName = "sales-unused-dest.json",
+            orders = new[]
+            {
+                new
+                {
+                    facilityId = FacilityA,
+                    destinationFacilityId = FacilityB,
+                    externalOrderReference = "SALES-UNUSED-DEST-1",
+                    orderType = "B2BSalesOrder",
+                    priority = 5,
+                    serviceLevel = "StandardGround",
+                    shippingAddress = address,
+                    lines = new[] { new { itemId = ItemClientAActiveId, quantityOrdered = 2m } }
+                }
+            }
+        };
+        using (var salesResp = await _http.SendAsync(AuthedReq(
+            HttpMethod.Post, "/api/v1/outbound/orders/bulk-import", StaffOrderCreatorAId, salesWithUnusedDest, tenantHeader: ClientA)))
+        {
+            Assert.Equal(HttpStatusCode.OK, salesResp.StatusCode);
+            using var doc = await JsonDocument.ParseAsync(await salesResp.Content.ReadAsStreamAsync());
+            Assert.Equal(1, doc.RootElement.GetProperty("successfulRows").GetInt32());
+        }
+
+        using var verifySalesScope = _app.Services.CreateScope();
+        var salesDb = verifySalesScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var importedSales = await salesDb.OutboundOrders.IgnoreQueryFilters()
+            .SingleAsync(o => o.ExternalOrderReference == "SALES-UNUSED-DEST-1");
+        Assert.Null(importedSales.DestinationFacilityId);
     }
 }

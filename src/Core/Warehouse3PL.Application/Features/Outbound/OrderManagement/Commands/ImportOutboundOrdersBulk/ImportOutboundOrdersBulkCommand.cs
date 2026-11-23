@@ -89,7 +89,9 @@ public class ImportOutboundOrdersBulkCommandHandler : IRequestHandler<ImportOutb
         }
 
         var distinctDestinationFacilityIds = request.Orders
-            .Where(o => o.DestinationFacilityId.HasValue && o.DestinationFacilityId.Value != Guid.Empty)
+            .Where(o => o.OrderType == OutboundOrderType.StockTransferOrder &&
+                        o.DestinationFacilityId.HasValue &&
+                        o.DestinationFacilityId.Value != Guid.Empty)
             .Select(o => o.DestinationFacilityId!.Value)
             .Distinct()
             .ToList();

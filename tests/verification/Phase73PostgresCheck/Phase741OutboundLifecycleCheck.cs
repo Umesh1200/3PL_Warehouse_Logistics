@@ -517,6 +517,48 @@ public static class Phase741OutboundLifecycleCheck
                 throw new InvalidOperationException($"Unauthorized bulk stock-transfer persisted rows on PostgreSQL: orders={leakedXferOrders}, batches={leakedXferBatches}");
         }
 
+        // Ordinary B2BSalesOrder carrying an unused destinationFacilityId succeeds and persists null DestinationFacilityId
+        var salesUnusedDestExtRef = $"PG-SALES-UNUSED-DEST-{Guid.NewGuid():N}";
+        var salesUnusedDestReq = staffReqFactory(
+            HttpMethod.Post,
+            "/api/v1/outbound/orders/bulk-import",
+            staffUserId,
+            facilityId,
+            Permissions.Outbound.OrdersImport,
+            new
+            {
+                facilityId,
+                sourceFileName = "pg-p741-04-sales-unused-dest.json",
+                orders = new[]
+                {
+                    new
+                    {
+                        facilityId,
+                        destinationFacilityId = facBOnlyId,
+                        externalOrderReference = salesUnusedDestExtRef,
+                        orderType = "B2BSalesOrder",
+                        priority = 5,
+                        serviceLevel = "StandardGround",
+                        shippingAddress = createPayload.shippingAddress,
+                        lines = new[] { new { itemId, quantityOrdered = 1m } }
+                    }
+                }
+            });
+        salesUnusedDestReq.Headers.Add("X-Tenant-Id", clientId.ToString());
+        using (var salesUnusedDestResp = await client.SendAsync(salesUnusedDestReq))
+        {
+            if (salesUnusedDestResp.StatusCode != HttpStatusCode.OK)
+                throw new InvalidOperationException($"Ordinary B2B import with unused destinationFacilityId failed: {salesUnusedDestResp.StatusCode}");
+        }
+        await using (var salesDestDb = new ApplicationDbContext(
+            dbOptions, new VerificationTenant(), new VerificationIdentity(facilityId),
+            new AuditableEntityInterceptor(new VerificationIdentity(facilityId), new VerificationClock())))
+        {
+            var salesRow = await salesDestDb.OutboundOrders.SingleAsync(o => o.ExternalOrderReference == salesUnusedDestExtRef);
+            if (salesRow.DestinationFacilityId.HasValue)
+                throw new InvalidOperationException("Ordinary B2BSalesOrder persisted non-null DestinationFacilityId.");
+        }
+
         // 3. Allocate with Idempotency + duplicate replay check
         var allocKey = $"pg-741-alloc-{Guid.NewGuid():N}";
         using (var allocResp = await client.SendAsync(staffReqFactory(
