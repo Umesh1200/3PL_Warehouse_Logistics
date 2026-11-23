@@ -41,6 +41,16 @@ export const LaunchpadGrid: React.FC = () => {
       badge: 'Wave Planner',
     },
     {
+      id: 'picking',
+      title: 'Directed Picking RF',
+      description: 'Claim released pick tasks, scan bins/SKUs/totes on mobile RF, and log short-pick exceptions.',
+      path: '/app/outbound/picking',
+      icon: 'Barcode',
+      permissions: ['outbound:tasks:view', 'outbound:tasks:manage', 'outbound:pick'],
+      allowedUserTypes: [UserType.Staff],
+      badge: 'RF Pick',
+    },
+    {
       id: 'putaway',
       title: 'Directed Putaway RF',
       description: 'Mobile-first barcode scanning, staging verification, and directed shelf confirmation.',

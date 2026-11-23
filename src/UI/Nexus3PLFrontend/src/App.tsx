@@ -16,6 +16,7 @@ import { PutawayPage } from './pages/inbound/PutawayPage';
 import { StockOnHandPage } from './pages/inventory/StockOnHandPage';
 import { OutboundOrdersPage } from './pages/outbound/OutboundOrdersPage';
 import { PickWavesPage } from './pages/outbound/PickWavesPage';
+import { PickingWorkstationPage } from './pages/outbound/PickingWorkstationPage';
 import './styles/base.css';
 
 const AppRoutes: React.FC = () => {
@@ -70,6 +71,10 @@ const AppRoutes: React.FC = () => {
       content = <PickWavesPage />;
       pageTitle = 'Pick Wave Planning & Release';
       breadcrumb = 'OPERATIONAL WORKFLOWS / PICK WAVES';
+    } else if (path === '/app/outbound/picking') {
+      content = <PickingWorkstationPage />;
+      pageTitle = 'Directed Picking & RF Execution';
+      breadcrumb = 'OPERATIONAL WORKFLOWS / DIRECTED PICKING';
     } else if (
       path === '/app/transportation' ||
       path === '/app/billing'

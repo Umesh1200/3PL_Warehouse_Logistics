@@ -92,6 +92,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => 
           icon: 'Layers',
         },
         {
+          label: 'Directed Picking',
+          path: '/app/outbound/picking',
+          permissions: ['outbound:tasks:view', 'outbound:tasks:manage', 'outbound:pick'],
+          allowedUserTypes: [UserType.Staff],
+          icon: 'Barcode',
+        },
+        {
           label: 'Transportation & Carriers',
           path: '/app/transportation',
           permissions: ['dispatch:view', 'analytics:transportation:view'],

@@ -7,6 +7,7 @@ import {
   PickTaskStatus,
   PickWaveStatus,
   PickWaveType,
+  ShortPickReason,
 } from '../../types/outbound';
 
 export function getOrderStatusBadgeClass(status: OutboundOrderStatus): string {
@@ -90,6 +91,25 @@ export function formatWaveTypeLabel(type: PickWaveType): string {
       return 'Bulk Pick';
     default:
       return String(type);
+  }
+}
+
+export function formatShortPickReasonLabel(reason: ShortPickReason): string {
+  switch (reason) {
+    case ShortPickReason.BinEmpty:
+      return 'Bin Empty (Zero Physical Stock)';
+    case ShortPickReason.DamagedStock:
+      return 'Damaged / Unusable Stock';
+    case ShortPickReason.BarcodeUnreadable:
+      return 'Barcode Unreadable';
+    case ShortPickReason.WrongItemInBin:
+      return 'Wrong Item in Bin';
+    case ShortPickReason.LotExpired:
+      return 'Lot Expired';
+    case ShortPickReason.BinInaccessible:
+      return 'Bin Inaccessible / Obstructed';
+    default:
+      return String(reason);
   }
 }
 

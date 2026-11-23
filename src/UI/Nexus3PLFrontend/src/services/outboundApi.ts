@@ -3,16 +3,23 @@ import { ClientDto, PagedResult } from '../types/auth';
 import {
   AllocationExecutionResultDto,
   AllocationStrategyType,
+  ConfirmPickTaskRequest,
   DeallocationExecutionResultDto,
+  EligiblePickOperatorDto,
   GetOutboundOrdersParams,
+  GetPickTasksParams,
   GetPickWavesParams,
   ImportOutboundOrdersBulkRequest,
   OrderImportBatchDto,
   OutboundItemOptionDto,
   OutboundOrderDto,
+  PickConfirmationResultDto,
+  PickTaskDto,
   PickWaveDto,
   PickWaveGenerationRequest,
   ReleaseAllocationResultDto,
+  ReportShortPickRequest,
+  ShortPickExecutionResultDto,
   StockAvailabilityAssessmentDto,
   WarehouseLocationNodeDto,
   CreateOutboundOrderRequest,
@@ -22,6 +29,7 @@ import {
   normalizeOrderStatus,
   normalizeOrderType,
   normalizeServiceLevel,
+  normalizeShortPickReason,
   normalizeShortageReason,
   normalizeStorageTempClass,
   normalizeTaskStatus,
@@ -75,6 +83,29 @@ function normalizeOrderDto(raw: unknown): OutboundOrderDto {
   };
 }
 
+export function normalizePickTaskDto(raw: unknown): PickTaskDto {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Received malformed or incomplete pick task response from server.');
+  }
+  const t = raw as PickTaskDto;
+  if (!t.id || !t.pickWaveId || !t.outboundOrderId || !t.itemId || !t.sku || !t.sourceLocationCode) {
+    throw new Error('Received incomplete pick task record missing required identifiers.');
+  }
+  return {
+    ...t,
+    status: normalizeTaskStatus(t.status),
+    shortPickReason:
+      t.shortPickReason !== undefined && t.shortPickReason !== null
+        ? normalizeShortPickReason(t.shortPickReason)
+        : null,
+    quantityToPick: Number(t.quantityToPick ?? 0),
+    quantityPicked: Number(t.quantityPicked ?? 0),
+    shortPickQuantity: Number(t.shortPickQuantity ?? 0),
+    pickSequence: Number(t.pickSequence ?? 0),
+    version: Number(t.version ?? 0),
+  };
+}
+
 function normalizePickWaveDto(raw: unknown): PickWaveDto {
   if (!raw || typeof raw !== 'object') {
     throw new Error('Received malformed or incomplete pick wave response from server.');
@@ -103,15 +134,7 @@ function normalizePickWaveDto(raw: unknown): PickWaveDto {
           orderStatus: normalizeOrderStatus(wo.orderStatus),
         }))
       : [],
-    tasks: Array.isArray(wave.tasks)
-      ? wave.tasks.map((t) => ({
-          ...t,
-          status: normalizeTaskStatus(t.status),
-          quantityToPick: Number(t.quantityToPick ?? 0),
-          quantityPicked: Number(t.quantityPicked ?? 0),
-          shortPickQuantity: Number(t.shortPickQuantity ?? 0),
-        }))
-      : [],
+    tasks: Array.isArray(wave.tasks) ? wave.tasks.map(normalizePickTaskDto) : [],
   };
 }
 
@@ -502,5 +525,149 @@ export const outboundApi = {
       throw new Error('Received malformed location tree response from server.');
     }
     return data as WarehouseLocationNodeDto[];
+  },
+
+  // =========================================================================
+  // 4. Directed Pick Execution & Task Queue (Phase 7.4.2)
+  // =========================================================================
+  getPickTasks: async (
+    params: GetPickTasksParams,
+    signal?: AbortSignal
+  ): Promise<PagedResult<PickTaskDto>> => {
+    const query = new URLSearchParams();
+    query.set('facilityId', params.facilityId);
+    if (params.clientId) query.set('clientId', params.clientId);
+    if (params.pickWaveId) query.set('pickWaveId', params.pickWaveId);
+    if (params.outboundOrderId) query.set('outboundOrderId', params.outboundOrderId);
+    if (params.assignedUserId) query.set('assignedUserId', params.assignedUserId);
+    if (params.statuses && params.statuses.length > 0) {
+      params.statuses.forEach((s) => query.append('statuses', s));
+    } else if (params.status) {
+      query.set('status', params.status);
+    }
+    if (params.searchTerm?.trim()) query.set('searchTerm', params.searchTerm.trim());
+    if (params.pageNumber) query.set('pageNumber', String(params.pageNumber));
+    if (params.pageSize) query.set('pageSize', String(params.pageSize));
+
+    const data = await apiClient<unknown>(`/api/v1/outbound/pick-tasks?${query.toString()}`, {
+      method: 'GET',
+      signal,
+    });
+    const paged = assertPagedResult<unknown>(data, 'pick tasks');
+    return {
+      ...paged,
+      items: paged.items.map(normalizePickTaskDto),
+    };
+  },
+
+  getPickTaskById: async (id: string, signal?: AbortSignal): Promise<PickTaskDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/pick-tasks/${id}`, {
+      method: 'GET',
+      signal,
+    });
+    return normalizePickTaskDto(data);
+  },
+
+  /**
+   * Strictly read-only execution endpoint deriving operator identity from server JWT.
+   * Returns null on 204 No Content.
+   */
+  getNextPickTask: async (facilityId: string, signal?: AbortSignal): Promise<PickTaskDto | null> => {
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/pick-tasks/next?facilityId=${encodeURIComponent(facilityId)}`,
+      {
+        method: 'GET',
+        signal,
+      }
+    );
+    if (data === null || data === undefined) {
+      return null;
+    }
+    return normalizePickTaskDto(data);
+  },
+
+  claimPickTask: async (id: string, signal?: AbortSignal): Promise<PickTaskDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/pick-tasks/${id}/claim`, {
+      method: 'POST',
+      signal,
+    });
+    return normalizePickTaskDto(data);
+  },
+
+  assignPickTask: async (
+    id: string,
+    operatorUserId: string,
+    signal?: AbortSignal
+  ): Promise<PickTaskDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/pick-tasks/${id}/assign`, {
+      method: 'POST',
+      body: JSON.stringify({ operatorUserId }),
+      signal,
+    });
+    return normalizePickTaskDto(data);
+  },
+
+  getEligiblePickOperators: async (
+    facilityId?: string,
+    signal?: AbortSignal
+  ): Promise<PagedResult<EligiblePickOperatorDto>> => {
+    const query = new URLSearchParams();
+    if (facilityId) query.set('facilityId', facilityId);
+    query.set('pageNumber', '1');
+    query.set('pageSize', '100');
+
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/pick-tasks/eligible-operators?${query.toString()}`,
+      {
+        method: 'GET',
+        signal,
+      }
+    );
+    return assertPagedResult<EligiblePickOperatorDto>(data, 'eligible pick operators');
+  },
+
+  confirmPickTask: async (
+    id: string,
+    payload: ConfirmPickTaskRequest,
+    signal?: AbortSignal
+  ): Promise<PickConfirmationResultDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/pick-tasks/${id}/confirm`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as PickConfirmationResultDto).pickTaskId) {
+      throw new Error('Received malformed or incomplete pick confirmation response from server.');
+    }
+    const res = data as PickConfirmationResultDto;
+    return {
+      ...res,
+      taskStatus: normalizeTaskStatus(res.taskStatus),
+      quantityPicked: Number(res.quantityPicked ?? 0),
+      shortPickQuantity: Number(res.shortPickQuantity ?? 0),
+      inventoryTransactionId: Number(res.inventoryTransactionId ?? 0),
+    };
+  },
+
+  reportShortPick: async (
+    id: string,
+    payload: ReportShortPickRequest,
+    signal?: AbortSignal
+  ): Promise<ShortPickExecutionResultDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/pick-tasks/${id}/short-pick`, {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as ShortPickExecutionResultDto).pickTaskId) {
+      throw new Error('Received malformed or incomplete short-pick response from server.');
+    }
+    const res = data as ShortPickExecutionResultDto;
+    return {
+      ...res,
+      taskStatus: normalizeTaskStatus(res.taskStatus),
+      quantityPicked: Number(res.quantityPicked ?? 0),
+      discrepancyQuantity: Number(res.discrepancyQuantity ?? 0),
+    };
   },
 };

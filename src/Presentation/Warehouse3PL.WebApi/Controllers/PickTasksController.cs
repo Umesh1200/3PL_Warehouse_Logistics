@@ -134,6 +134,22 @@ public class PickTasksController : BaseApiController
         var result = await Mediator.Send(new GetPickTaskByIdQuery(id), ct);
         return Ok(result);
     }
+
+    /// <summary>
+    /// Retrieves active facility-assigned warehouse staff operators eligible for pick task assignment.
+    /// Avoids requiring broad users:view directory permission for shift supervisors.
+    /// </summary>
+    [HttpGet("eligible-operators")]
+    [HasPermission(Permissions.Outbound.TasksManage)]
+    [ProducesResponseType(typeof(PagedResult<EligiblePickOperatorDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> GetEligibleOperators(
+        [FromQuery] GetEligiblePickOperatorsQuery query,
+        CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
+        return Ok(result);
+    }
 }
 
 public record AssignPickTaskRequest(Guid OperatorUserId);

@@ -2588,6 +2588,17 @@ try
     if ((await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/pick-tasks/next?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.Pick))).StatusCode != HttpStatusCode.NoContent)
         throw new InvalidOperationException("Expected 204 NoContent from /pick-tasks/next when no eligible tasks remain.");
 
+    // Phase 7.4.2 eligible-operators lookup (TasksManage allowed for own facility; cross-facility and Pick-only denied 403)
+    using (var eligibleOpsResp = await p74Client.SendAsync(StaffReq(
+        HttpMethod.Get, $"/api/v1/outbound/pick-tasks/eligible-operators?facilityId={facilityId}", bSupId, facilityId, Permissions.Outbound.TasksManage)))
+    {
+        if (eligibleOpsResp.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Expected 200 OK from /pick-tasks/eligible-operators, got {eligibleOpsResp.StatusCode}");
+    }
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/pick-tasks/eligible-operators?facilityId={p74FacB}", bSupId, facilityId, Permissions.Outbound.TasksManage))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/pick-tasks/eligible-operators?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.Pick))).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Phase 7.4.2 eligible-operators boundary failed on PostgreSQL.");
+
     Console.WriteLine("PASS PostgreSQL Phase 7.4.0B Read/Queue APIs, Two-Operator Claim Race (200/409), Read-Only /next, Ownership Enforcement, and Stock Conservation.");
 
     // 7.5 P74-0B-05 Atomic Positive-Quantity Short-Pick Execution + P74-0B-04 PostgreSQL Staff Facility Provisioning

@@ -87,6 +87,15 @@ export enum PickTaskStatus {
   Cancelled = 'Cancelled',
 }
 
+export enum ShortPickReason {
+  BinEmpty = 'BinEmpty',
+  DamagedStock = 'DamagedStock',
+  BarcodeUnreadable = 'BarcodeUnreadable',
+  WrongItemInBin = 'WrongItemInBin',
+  LotExpired = 'LotExpired',
+  BinInaccessible = 'BinInaccessible',
+}
+
 export enum StorageTempClass {
   Ambient = 'Ambient',
   TemperatureControlled = 'TemperatureControlled',
@@ -183,6 +192,15 @@ const TASK_STATUS_NUM: Record<number, PickTaskStatus> = {
   6: PickTaskStatus.Cancelled,
 };
 
+const SHORT_PICK_REASON_NUM: Record<number, ShortPickReason> = {
+  1: ShortPickReason.BinEmpty,
+  2: ShortPickReason.DamagedStock,
+  3: ShortPickReason.BarcodeUnreadable,
+  4: ShortPickReason.WrongItemInBin,
+  5: ShortPickReason.LotExpired,
+  6: ShortPickReason.BinInaccessible,
+};
+
 const ALLOC_STATUS_NUM: Record<number, AllocationStatus> = {
   1: AllocationStatus.Allocated,
   2: AllocationStatus.PartiallyPicked,
@@ -234,6 +252,9 @@ export const normalizeWaveType = (v: unknown) =>
 
 export const normalizeTaskStatus = (v: unknown) =>
   normalizeStringEnum(v, TASK_STATUS_NUM, Object.values(PickTaskStatus), 'PickTaskStatus');
+
+export const normalizeShortPickReason = (v: unknown) =>
+  normalizeStringEnum(v, SHORT_PICK_REASON_NUM, Object.values(ShortPickReason), 'ShortPickReason');
 
 export const normalizeAllocationStatus = (v: unknown) =>
   normalizeStringEnum(v, ALLOC_STATUS_NUM, Object.values(AllocationStatus), 'AllocationStatus');
@@ -531,11 +552,78 @@ export interface PickTaskDto {
   shortPickQuantity: number;
   pickSequence: number;
   status: PickTaskStatus;
-  shortPickReason?: string | null;
+  shortPickReason?: ShortPickReason | string | null;
   assignedUserId?: string | null;
   startedAtUtc?: string | null;
   completedAtUtc?: string | null;
   version: number;
+}
+
+export interface GetPickTasksParams {
+  facilityId: string;
+  clientId?: string;
+  pickWaveId?: string;
+  outboundOrderId?: string;
+  status?: PickTaskStatus;
+  statuses?: PickTaskStatus[];
+  assignedUserId?: string;
+  searchTerm?: string;
+  pageNumber?: number;
+  pageSize?: number;
+}
+
+export interface EligiblePickOperatorDto {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  assignedFacilityId?: string | null;
+}
+
+export interface ConfirmPickTaskRequest {
+  scannedLocationBarcode: string;
+  scannedItemBarcode: string;
+  scannedLotNumber?: string | null;
+  scannedToteLpn: string;
+  quantity: number;
+  idempotencyKey?: string;
+}
+
+export interface PickConfirmationResultDto {
+  isSuccess: boolean;
+  pickTaskId: string;
+  taskStatus: PickTaskStatus;
+  quantityPicked: number;
+  shortPickQuantity: number;
+  destinationStockId: string;
+  destinationHandlingUnitId: string;
+  destinationToteBarcode: string;
+  inventoryTransactionId: number;
+  waveCompleted: boolean;
+  orderCompleted: boolean;
+  message: string;
+}
+
+export interface ReportShortPickRequest {
+  quantityPicked: number;
+  reason: ShortPickReason;
+  notes?: string;
+  scannedLocationBarcode?: string;
+  scannedItemBarcode?: string;
+  scannedToteLpn?: string;
+  idempotencyKey?: string;
+}
+
+export interface ShortPickExecutionResultDto {
+  isSuccess: boolean;
+  pickTaskId: string;
+  taskStatus: PickTaskStatus;
+  quantityPicked: number;
+  discrepancyQuantity: number;
+  pickExceptionId: string;
+  generatedCycleCountId?: string | null;
+  locationLockApplied: boolean;
+  message: string;
 }
 
 export interface PickWaveDto {
