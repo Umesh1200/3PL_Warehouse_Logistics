@@ -3567,7 +3567,8 @@ try
                 new Claim("permissions", Permissions.Outbound.OrdersCreate),
                 new Claim("permissions", Permissions.Outbound.WavesView)
             };
-        });
+        },
+        client2Id);
 
     if (Directory.Exists(pgPodStorageDir))
     {

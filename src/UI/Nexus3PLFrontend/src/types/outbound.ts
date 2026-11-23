@@ -105,19 +105,23 @@ function normalizeStringEnum<T extends string>(
   raw: unknown,
   numMap: Record<number, T>,
   allowed: readonly T[],
-  fallback: T
+  enumName: string
 ): T {
-  if (typeof raw === 'number' && raw in numMap) return numMap[raw];
+  if (typeof raw === 'number' && Number.isInteger(raw) && raw in numMap) {
+    return numMap[raw];
+  }
   if (typeof raw === 'string') {
     const trimmed = raw.trim();
-    const numeric = Number(trimmed);
-    if (!Number.isNaN(numeric) && trimmed !== '' && numeric in numMap) {
-      return numMap[numeric];
+    if (trimmed !== '') {
+      const numeric = Number(trimmed);
+      if (Number.isInteger(numeric) && numeric in numMap) {
+        return numMap[numeric];
+      }
+      const found = allowed.find((v) => v.toLowerCase() === trimmed.toLowerCase());
+      if (found) return found;
     }
-    const found = allowed.find((v) => v.toLowerCase() === trimmed.toLowerCase());
-    if (found) return found;
   }
-  return fallback;
+  throw new Error(`Invalid or unrecognized ${enumName} value from server: ${String(raw)}`);
 }
 
 const ORDER_STATUS_NUM: Record<number, OutboundOrderStatus> = {
@@ -194,32 +198,54 @@ const IMPORT_STATUS_NUM: Record<number, ImportBatchStatus> = {
   4: ImportBatchStatus.Failed,
 };
 
+const SHORTAGE_REASON_NUM: Record<number, ShortageReason> = {
+  1: ShortageReason.InsufficientStock,
+  2: ShortageReason.NoValidLotsAvailable,
+  3: ShortageReason.ExpiredLotsOnly,
+  4: ShortageReason.LotRestrictionUnmet,
+  5: ShortageReason.LocationLocked,
+  6: ShortageReason.TempClassMismatch,
+};
+
+const STORAGE_TEMP_NUM: Record<number, StorageTempClass> = {
+  1: StorageTempClass.Ambient,
+  2: StorageTempClass.TemperatureControlled,
+  3: StorageTempClass.Refrigerated,
+  4: StorageTempClass.Frozen,
+};
+
 export const normalizeOrderStatus = (v: unknown) =>
-  normalizeStringEnum(v, ORDER_STATUS_NUM, Object.values(OutboundOrderStatus), OutboundOrderStatus.Released);
+  normalizeStringEnum(v, ORDER_STATUS_NUM, Object.values(OutboundOrderStatus), 'OutboundOrderStatus');
 
 export const normalizeOrderType = (v: unknown) =>
-  normalizeStringEnum(v, ORDER_TYPE_NUM, Object.values(OutboundOrderType), OutboundOrderType.B2BSalesOrder);
+  normalizeStringEnum(v, ORDER_TYPE_NUM, Object.values(OutboundOrderType), 'OutboundOrderType');
 
 export const normalizeLineStatus = (v: unknown) =>
-  normalizeStringEnum(v, LINE_STATUS_NUM, Object.values(OutboundOrderLineStatus), OutboundOrderLineStatus.Pending);
+  normalizeStringEnum(v, LINE_STATUS_NUM, Object.values(OutboundOrderLineStatus), 'OutboundOrderLineStatus');
 
 export const normalizeServiceLevel = (v: unknown) =>
-  normalizeStringEnum(v, SERVICE_LEVEL_NUM, Object.values(CarrierServiceLevel), CarrierServiceLevel.StandardGround);
+  normalizeStringEnum(v, SERVICE_LEVEL_NUM, Object.values(CarrierServiceLevel), 'CarrierServiceLevel');
 
 export const normalizeWaveStatus = (v: unknown) =>
-  normalizeStringEnum(v, WAVE_STATUS_NUM, Object.values(PickWaveStatus), PickWaveStatus.Planning);
+  normalizeStringEnum(v, WAVE_STATUS_NUM, Object.values(PickWaveStatus), 'PickWaveStatus');
 
 export const normalizeWaveType = (v: unknown) =>
-  normalizeStringEnum(v, WAVE_TYPE_NUM, Object.values(PickWaveType), PickWaveType.BatchPick);
+  normalizeStringEnum(v, WAVE_TYPE_NUM, Object.values(PickWaveType), 'PickWaveType');
 
 export const normalizeTaskStatus = (v: unknown) =>
-  normalizeStringEnum(v, TASK_STATUS_NUM, Object.values(PickTaskStatus), PickTaskStatus.Pending);
+  normalizeStringEnum(v, TASK_STATUS_NUM, Object.values(PickTaskStatus), 'PickTaskStatus');
 
 export const normalizeAllocationStatus = (v: unknown) =>
-  normalizeStringEnum(v, ALLOC_STATUS_NUM, Object.values(AllocationStatus), AllocationStatus.Allocated);
+  normalizeStringEnum(v, ALLOC_STATUS_NUM, Object.values(AllocationStatus), 'AllocationStatus');
 
 export const normalizeImportBatchStatus = (v: unknown) =>
-  normalizeStringEnum(v, IMPORT_STATUS_NUM, Object.values(ImportBatchStatus), ImportBatchStatus.Completed);
+  normalizeStringEnum(v, IMPORT_STATUS_NUM, Object.values(ImportBatchStatus), 'ImportBatchStatus');
+
+export const normalizeShortageReason = (v: unknown) =>
+  normalizeStringEnum(v, SHORTAGE_REASON_NUM, Object.values(ShortageReason), 'ShortageReason');
+
+export const normalizeStorageTempClass = (v: unknown) =>
+  normalizeStringEnum(v, STORAGE_TEMP_NUM, Object.values(StorageTempClass), 'StorageTempClass');
 
 export interface ShippingAddressDto {
   recipientName: string;

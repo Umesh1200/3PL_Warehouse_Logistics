@@ -24,9 +24,11 @@ public static class Phase741OutboundLifecycleCheck
         Guid facilityId,
         Guid staffUserId,
         Func<HttpMethod, string, Guid, Guid?, string, object?, HttpRequestMessage> staffReqFactory,
-        Action<Guid> setClientAdminClaims)
+        Action<Guid> setClientAdminClaims,
+        Guid? foreignClientId = null)
     {
         var itemId = Guid.NewGuid();
+        var foreignItemId = Guid.NewGuid();
         var binId = Guid.NewGuid();
         var stockId = Guid.NewGuid();
 
@@ -51,6 +53,21 @@ public static class Phase741OutboundLifecycleCheck
                 HeightCm = 10,
                 StorageTempClass = StorageTempClass.Ambient
             });
+            if (foreignClientId.HasValue)
+            {
+                seedDb.Items.Add(new Item
+                {
+                    Id = foreignItemId,
+                    ClientId = foreignClientId.Value,
+                    Sku = "PG-741-FOREIGN-SKU",
+                    Description = "Foreign Tenant SKU",
+                    WeightKg = 1m,
+                    LengthCm = 5,
+                    WidthCm = 5,
+                    HeightCm = 5,
+                    StorageTempClass = StorageTempClass.Ambient
+                });
+            }
             seedDb.Locations.Add(new Location
             {
                 Id = binId,
@@ -133,14 +150,62 @@ public static class Phase741OutboundLifecycleCheck
                 throw new InvalidOperationException("Phase 7.4.1 CheckStockAvailability unexpectedly reported unavailable.");
         }
 
-        // Negative boundary: ClientAdmin cannot allocate or generate waves (403)
+        // Negative & positive ClientAdmin P741-01 checks on PostgreSQL (no items:view, no waves:manage)
         setClientAdminClaims(clientId);
+        using (var catResp = await client.GetAsync($"/api/v1/outbound/orders/catalog-items?facilityId={facilityId}"))
+        {
+            if (catResp.StatusCode != HttpStatusCode.OK)
+                throw new InvalidOperationException($"ClientAdmin catalog-items lookup failed: {catResp.StatusCode}: {await catResp.Content.ReadAsStringAsync()}");
+            using var catDoc = await JsonDocument.ParseAsync(await catResp.Content.ReadAsStreamAsync());
+            var skus = catDoc.RootElement.GetProperty("items").EnumerateArray().Select(e => e.GetProperty("sku").GetString()).ToList();
+            if (!skus.Contains("PG-741-SKU") || skus.Contains("PG-741-FOREIGN-SKU"))
+                throw new InvalidOperationException("ClientAdmin catalog-items must return own active SKU and exclude foreign tenant SKUs.");
+        }
+        if (foreignClientId.HasValue &&
+            (await client.GetAsync($"/api/v1/outbound/orders/catalog-items?clientId={foreignClientId.Value}")).StatusCode != HttpStatusCode.Forbidden)
+        {
+            throw new InvalidOperationException("ClientAdmin must receive 403 on foreign-tenant catalog-items query.");
+        }
+        if ((await client.GetAsync("/api/v1/outbound/orders/reference-clients")).StatusCode != HttpStatusCode.Forbidden ||
+            (await client.GetAsync("/api/v1/outbound/pick-waves/eligible-clients")).StatusCode != HttpStatusCode.Forbidden)
+        {
+            throw new InvalidOperationException("ClientAdmin must receive 403 on staff-only outbound client reference endpoints.");
+        }
+        using (var caOrderResp = await client.PostAsJsonAsync("/api/v1/outbound/orders", new
+        {
+            facilityId,
+            orderType = "B2BSalesOrder",
+            priority = 4,
+            serviceLevel = "StandardGround",
+            shippingAddress = new
+            {
+                recipientName = "ClientAdmin Self Order",
+                addressLine1 = "101 Tenant Ave",
+                city = "Chicago",
+                stateOrProvince = "IL",
+                postalCode = "60601",
+                countryCode = "USA"
+            },
+            lines = new[] { new { itemId, quantityOrdered = 1m } }
+        }))
+        {
+            if (caOrderResp.StatusCode != HttpStatusCode.Created)
+                throw new InvalidOperationException($"ClientAdmin order creation with catalog SKU failed: {caOrderResp.StatusCode}: {await caOrderResp.Content.ReadAsStringAsync()}");
+        }
         if ((await client.PostAsJsonAsync($"/api/v1/outbound/orders/{orderId}/allocate", new { })).StatusCode != HttpStatusCode.Forbidden ||
             (await client.PostAsJsonAsync("/api/v1/outbound/pick-waves", new { request = new { clientId, facilityId, waveType = "BatchPick" } })).StatusCode != HttpStatusCode.Forbidden)
         {
             throw new InvalidOperationException("ClientAdmin must receive 403 on Order Allocation and Wave Generation.");
         }
         setClientAdminClaims(Guid.Empty);
+
+        // Staff permission-consistent client reference lookups (without broad clients:view)
+        using (var waveEligibleResp = await client.SendAsync(staffReqFactory(
+            HttpMethod.Get, $"/api/v1/outbound/pick-waves/eligible-clients?facilityId={facilityId}", staffUserId, facilityId, Permissions.Outbound.WavesManage, null)))
+        {
+            if (waveEligibleResp.StatusCode != HttpStatusCode.OK)
+                throw new InvalidOperationException($"Pick wave eligible-clients lookup failed: {waveEligibleResp.StatusCode}");
+        }
 
         // 3. Allocate with Idempotency + duplicate replay check
         var allocKey = $"pg-741-alloc-{Guid.NewGuid():N}";

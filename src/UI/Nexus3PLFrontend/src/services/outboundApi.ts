@@ -1,4 +1,3 @@
-import { adminApi } from './adminApi';
 import { apiClient } from './apiClient';
 import { ClientDto, PagedResult } from '../types/auth';
 import {
@@ -23,6 +22,8 @@ import {
   normalizeOrderStatus,
   normalizeOrderType,
   normalizeServiceLevel,
+  normalizeShortageReason,
+  normalizeStorageTempClass,
   normalizeTaskStatus,
   normalizeWaveStatus,
   normalizeWaveType,
@@ -86,6 +87,10 @@ function normalizePickWaveDto(raw: unknown): PickWaveDto {
     ...wave,
     waveType: normalizeWaveType(wave.waveType),
     status: normalizeWaveStatus(wave.status),
+    tempClass:
+      wave.tempClass !== undefined && wave.tempClass !== null
+        ? normalizeStorageTempClass(wave.tempClass)
+        : null,
     totalQuantityToPick: Number(wave.totalQuantityToPick ?? 0),
     totalQuantityPicked: Number(wave.totalQuantityPicked ?? 0),
     estimatedTravelMeters:
@@ -140,7 +145,13 @@ function normalizeAllocationResult(raw: unknown): AllocationExecutionResultDto {
             : [],
         }))
       : [],
-    shortages: Array.isArray(res.shortages) ? res.shortages : [],
+    shortages: Array.isArray(res.shortages)
+      ? res.shortages.map((s) => ({
+          ...s,
+          shortageQuantity: Number(s.shortageQuantity ?? 0),
+          reason: normalizeShortageReason(s.reason),
+        }))
+      : [],
   };
 }
 
@@ -407,25 +418,76 @@ export const outboundApi = {
   // =========================================================================
   // 3. Authorized Reference Data Lookups
   // =========================================================================
-  getAuthorizedClients: async (signal?: AbortSignal): Promise<PagedResult<ClientDto>> => {
-    return adminApi.getClients({ pageNumber: 1, pageSize: 100 }, signal);
+  getAuthorizedClients: async (
+    signal?: AbortSignal,
+    facilityId?: string
+  ): Promise<PagedResult<ClientDto>> => {
+    const query = new URLSearchParams();
+    if (facilityId) query.set('facilityId', facilityId);
+    query.set('pageNumber', '1');
+    query.set('pageSize', '100');
+
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/orders/reference-clients?${query.toString()}`,
+      {
+        method: 'GET',
+        signal,
+      }
+    );
+    return assertPagedResult<ClientDto>(data, 'outbound reference clients');
+  },
+
+  getEligibleWaveClients: async (
+    signal?: AbortSignal,
+    facilityId?: string
+  ): Promise<PagedResult<ClientDto>> => {
+    const query = new URLSearchParams();
+    if (facilityId) query.set('facilityId', facilityId);
+    query.set('pageNumber', '1');
+    query.set('pageSize', '100');
+
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/pick-waves/eligible-clients?${query.toString()}`,
+      {
+        method: 'GET',
+        signal,
+      }
+    );
+    return assertPagedResult<ClientDto>(data, 'eligible wave clients');
   },
 
   getAuthorizedItems: async (
-    params: { clientId?: string; searchTerm?: string; pageNumber?: number; pageSize?: number } = {},
+    params: {
+      clientId?: string;
+      facilityId?: string;
+      searchTerm?: string;
+      pageNumber?: number;
+      pageSize?: number;
+    } = {},
     signal?: AbortSignal
   ): Promise<PagedResult<OutboundItemOptionDto>> => {
     const query = new URLSearchParams();
     if (params.clientId) query.set('clientId', params.clientId);
+    if (params.facilityId) query.set('facilityId', params.facilityId);
     if (params.searchTerm?.trim()) query.set('searchTerm', params.searchTerm.trim());
     query.set('pageNumber', String(params.pageNumber ?? 1));
     query.set('pageSize', String(params.pageSize ?? 100));
 
-    const data = await apiClient<unknown>(`/api/v1/items?${query.toString()}`, {
+    const data = await apiClient<unknown>(`/api/v1/outbound/orders/catalog-items?${query.toString()}`, {
       method: 'GET',
       signal,
     });
-    return assertPagedResult<OutboundItemOptionDto>(data, 'items');
+    const paged = assertPagedResult<OutboundItemOptionDto>(data, 'outbound catalog items');
+    return {
+      ...paged,
+      items: paged.items.map((item) => ({
+        ...item,
+        storageTempClass:
+          item.storageTempClass !== undefined && item.storageTempClass !== null
+            ? normalizeStorageTempClass(item.storageTempClass)
+            : undefined,
+      })),
+    };
   },
 
   getLocationTree: async (

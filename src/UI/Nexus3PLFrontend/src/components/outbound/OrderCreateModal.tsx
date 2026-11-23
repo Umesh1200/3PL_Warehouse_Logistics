@@ -94,12 +94,14 @@ export const OrderCreateModal: React.FC<OrderCreateModalProps> = ({
     const loadReferenceData = async () => {
       if (isStaff && !canLookupClients) {
         setRefError(
-          'Client tenant directory permission (clients:view) is required for staff order entry so X-Tenant-Id can be resolved safely.'
+          'Outbound order creation or import permission (outbound:orders:create / outbound:orders:import) is required for staff client selection.'
         );
         return;
       }
       if (!canLookupItems) {
-        setRefError('Product SKU catalog permission (items:view) is required to select authorized order items.');
+        setRefError(
+          'Outbound order creation or import permission (outbound:orders:create / outbound:orders:import) is required to load tenant SKUs.'
+        );
         return;
       }
 
@@ -107,25 +109,29 @@ export const OrderCreateModal: React.FC<OrderCreateModalProps> = ({
       try {
         let targetClient = selectedClientId;
         if (isStaff) {
-          const clientRes = await outboundApi.getAuthorizedClients(ctrl.signal);
+          const clientRes = await outboundApi.getAuthorizedClients(ctrl.signal, activeFacility?.id);
           setClients(clientRes.items);
           if (!targetClient && clientRes.items.length > 0) {
             targetClient = clientRes.items[0].id;
             setSelectedClientId(targetClient);
           }
           if (clientRes.items.length === 0) {
-            setRefError('No authorized client tenants returned from the server.');
+            setRefError('No authorized client tenants returned from the server for this facility.');
             return;
           }
         }
 
         const itemRes = await outboundApi.getAuthorizedItems(
-          { clientId: isStaff ? targetClient : undefined, pageSize: 100 },
+          {
+            clientId: isStaff ? targetClient : undefined,
+            facilityId: activeFacility?.id,
+            pageSize: 100,
+          },
           ctrl.signal
         );
         setItems(itemRes.items);
         if (itemRes.items.length === 0) {
-          setRefError('No authorized SKU items exist for the selected tenant.');
+          setRefError('No active SKU items exist for the selected tenant.');
         }
       } catch (err: any) {
         if (err.name !== 'AbortError') {
@@ -138,14 +144,17 @@ export const OrderCreateModal: React.FC<OrderCreateModalProps> = ({
 
     loadReferenceData();
     return () => ctrl.abort();
-  }, [isOpen, isStaff, canLookupClients, canLookupItems]);
+  }, [isOpen, isStaff, activeFacility?.id, canLookupClients, canLookupItems]);
 
   useEffect(() => {
     if (!isOpen || !isStaff || !selectedClientId || !canLookupItems) return;
     const ctrl = new AbortController();
     setRefError(null);
     outboundApi
-      .getAuthorizedItems({ clientId: selectedClientId, pageSize: 100 }, ctrl.signal)
+      .getAuthorizedItems(
+        { clientId: selectedClientId, facilityId: activeFacility?.id, pageSize: 100 },
+        ctrl.signal
+      )
       .then((res) => {
         setItems(res.items);
         if (res.items.length === 0) {

@@ -26,7 +26,7 @@ export const PickWavesPage: React.FC = () => {
     isStaff && (isSuperAdmin || hasAnyPermission(['outbound:waves:view', 'outbound:waves:manage']));
   const canView = isStaff && hasPermission('outbound:waves:view');
   const canManage = isStaff && hasPermission('outbound:waves:manage');
-  const canLookupClients = isStaff && hasPermission('clients:view');
+  const canLookupClients = isStaff && hasPermission('outbound:waves:manage');
   const canLookupOrders = isStaff && hasPermission('outbound:orders:view');
   const canLookupLocations = isStaff && hasPermission('facilities:view');
 

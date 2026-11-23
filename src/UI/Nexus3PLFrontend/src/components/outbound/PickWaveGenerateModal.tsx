@@ -81,16 +81,16 @@ export const PickWaveGenerateModal: React.FC<PickWaveGenerateModalProps> = ({
 
     const loadRefs = async () => {
       if (!canLookupClients) {
-        setRefError('Client directory permission (clients:view) is required to select a client for wave planning.');
+        setRefError('Pick wave management permission (outbound:waves:manage) is required to select an eligible client.');
         return;
       }
       try {
-        const clientRes = await outboundApi.getAuthorizedClients(ctrl.signal);
+        const clientRes = await outboundApi.getEligibleWaveClients(ctrl.signal, activeFacility.id);
         setClients(clientRes.items);
         if (clientRes.items.length > 0) {
           setClientId((prev) => prev || clientRes.items[0].id);
         } else {
-          setRefError('No authorized clients found.');
+          setRefError('No authorized active clients found for this facility.');
         }
 
         if (canLookupLocations) {

@@ -264,6 +264,12 @@ export function parseJsonOrders(
   }
 }
 
+interface SubmittedImportRecord {
+  submittedRowNumber: number;
+  sourcePreviewRowIndex: number;
+  payload: CreateOutboundOrderRequest;
+}
+
 export const BulkOrderImportModal: React.FC<BulkOrderImportModalProps> = ({
   isOpen,
   onClose,
@@ -285,6 +291,7 @@ export const BulkOrderImportModal: React.FC<BulkOrderImportModalProps> = ({
 
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [batchResult, setBatchResult] = useState<OrderImportBatchDto | null>(null);
+  const [lastSubmittedRecords, setLastSubmittedRecords] = useState<SubmittedImportRecord[]>([]);
   const [isSubmitting, setIsSubmitting] = useState(false);
   const inFlightRef = useRef(false);
 
@@ -293,26 +300,29 @@ export const BulkOrderImportModal: React.FC<BulkOrderImportModalProps> = ({
     setParseError(null);
     setSubmitError(null);
     setBatchResult(null);
+    setLastSubmittedRecords([]);
     setConfirmReady(false);
     setPreviewRows([]);
     setRawContent('');
 
     if (!isStaff) return;
     if (!canLookupClients) {
-      setClientLookupError('Client directory permission (clients:view) is required for staff bulk imports.');
+      setClientLookupError(
+        'Outbound order import permission (outbound:orders:import / outbound:orders:create) is required for staff client selection.'
+      );
       return;
     }
 
     const ctrl = new AbortController();
     setClientLookupError(null);
     outboundApi
-      .getAuthorizedClients(ctrl.signal)
+      .getAuthorizedClients(ctrl.signal, activeFacility?.id)
       .then((res) => {
         setClients(res.items);
         if (res.items.length > 0) {
           setSelectedClientId((prev) => prev || res.items[0].id);
         } else {
-          setClientLookupError('No authorized client tenants available.');
+          setClientLookupError('No authorized client tenants available for this facility.');
         }
       })
       .catch((err: any) => {
@@ -321,7 +331,7 @@ export const BulkOrderImportModal: React.FC<BulkOrderImportModalProps> = ({
         }
       });
     return () => ctrl.abort();
-  }, [isOpen, isStaff, canLookupClients]);
+  }, [isOpen, isStaff, activeFacility?.id, canLookupClients]);
 
   useEffect(() => {
     if (isOpen && activeFacility && rawContent.trim() && parseError?.includes('Select an active facility')) {
@@ -331,6 +341,7 @@ export const BulkOrderImportModal: React.FC<BulkOrderImportModalProps> = ({
 
   const parseInput = (content: string, selectedFormat: 'json' | 'csv') => {
     setBatchResult(null);
+    setLastSubmittedRecords([]);
     setConfirmReady(false);
     setSubmitError(null);
     if (!content.trim()) {
@@ -361,20 +372,38 @@ export const BulkOrderImportModal: React.FC<BulkOrderImportModalProps> = ({
     parseInput(text, detectedFormat);
   };
 
-  const submitPayloads = async (ordersToSend: CreateOutboundOrderRequest[], fileName: string) => {
-    if (inFlightRef.current || isSubmitting || !activeFacility) return;
+  const submitRecords = async (recordsToSend: SubmittedImportRecord[], fileName: string) => {
+    if (inFlightRef.current || isSubmitting || !activeFacility || recordsToSend.length === 0) return;
     setSubmitError(null);
     inFlightRef.current = true;
     setIsSubmitting(true);
     try {
+      const normalizedBatchRecords = recordsToSend.map((record, index) => ({
+        ...record,
+        submittedRowNumber: index + 1,
+      }));
       const batch = await outboundApi.bulkImportOrders(
         {
           facilityId: activeFacility.id,
           sourceFileName: fileName,
-          orders: ordersToSend,
+          orders: normalizedBatchRecords.map((r) => r.payload),
         },
         isStaff ? selectedClientId : undefined
       );
+
+      for (const row of batch.rows) {
+        if (
+          !Number.isInteger(row.rowNumber) ||
+          row.rowNumber < 1 ||
+          row.rowNumber > normalizedBatchRecords.length
+        ) {
+          throw new Error(
+            `Bulk import summary returned invalid rowNumber ${row.rowNumber} for a batch of ${normalizedBatchRecords.length} submitted order(s).`
+          );
+        }
+      }
+
+      setLastSubmittedRecords(normalizedBatchRecords);
       setBatchResult(batch);
       setConfirmReady(false);
       onImported(batch);
@@ -389,12 +418,12 @@ export const BulkOrderImportModal: React.FC<BulkOrderImportModalProps> = ({
   const validRows = previewRows.filter((r) => r.valid && r.payload);
   const hasInvalidPreview = previewRows.some((r) => !r.valid);
 
-  // Exclude already succeeded AND duplicate rows when offering retry
-  const retryablePayloads = batchResult
+  // Resolve failed (non-success, non-duplicate) rows strictly 1:1 against the latest submitted batch array
+  const retryableRecords: SubmittedImportRecord[] = batchResult
     ? batchResult.rows
         .filter((r) => !r.isSuccess && !r.isDuplicate)
-        .map((r) => previewRows[r.rowNumber - 1]?.payload)
-        .filter((p): p is CreateOutboundOrderRequest => Boolean(p))
+        .map((r) => lastSubmittedRecords[r.rowNumber - 1])
+        .filter((rec): rec is SubmittedImportRecord => Boolean(rec))
     : [];
 
   return (
@@ -582,22 +611,28 @@ export const BulkOrderImportModal: React.FC<BulkOrderImportModalProps> = ({
                   </tr>
                 </thead>
                 <tbody>
-                  {batchResult.rows.map((r) => (
-                    <tr key={`${r.rowNumber}-${r.externalOrderReference || ''}`}>
-                      <td>{r.rowNumber}</td>
-                      <td>{r.externalOrderReference || '—'}</td>
-                      <td>
-                        {r.isSuccess ? (
-                          <span className="badge badge-success">Imported</span>
-                        ) : r.isDuplicate ? (
-                          <span className="badge badge-warning">Duplicate</span>
-                        ) : (
-                          <span className="badge badge-danger">Failed</span>
-                        )}
-                      </td>
-                      <td>{r.createdOutboundOrderId || r.errorMessage || '—'}</td>
-                    </tr>
-                  ))}
+                  {batchResult.rows.map((r) => {
+                    const sourceRecord = lastSubmittedRecords[r.rowNumber - 1];
+                    return (
+                      <tr key={`${r.rowNumber}-${r.externalOrderReference || ''}`}>
+                        <td>
+                          {r.rowNumber}
+                          {sourceRecord ? ` (File #${sourceRecord.sourcePreviewRowIndex})` : ''}
+                        </td>
+                        <td>{r.externalOrderReference || '—'}</td>
+                        <td>
+                          {r.isSuccess ? (
+                            <span className="badge badge-success">Imported</span>
+                          ) : r.isDuplicate ? (
+                            <span className="badge badge-warning">Duplicate</span>
+                          ) : (
+                            <span className="badge badge-danger">Failed</span>
+                          )}
+                        </td>
+                        <td>{r.createdOutboundOrderId || r.errorMessage || '—'}</td>
+                      </tr>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -608,14 +643,15 @@ export const BulkOrderImportModal: React.FC<BulkOrderImportModalProps> = ({
           <button type="button" className="btn btn-secondary" onClick={onClose} disabled={isSubmitting}>
             Close
           </button>
-          {batchResult && retryablePayloads.length > 0 && (
+          {batchResult && retryableRecords.length > 0 && (
             <button
               type="button"
               className="btn btn-outline"
               disabled={isSubmitting}
-              onClick={() => submitPayloads(retryablePayloads, `retry_${sourceFileName}`)}
+              onClick={() => submitRecords(retryableRecords, `retry_${sourceFileName}`)}
+              data-testid="retry-failed-import"
             >
-              Retry Failed Rows ({retryablePayloads.length})
+              Retry Failed Rows ({retryableRecords.length})
             </button>
           )}
           {!batchResult && (
@@ -631,8 +667,12 @@ export const BulkOrderImportModal: React.FC<BulkOrderImportModalProps> = ({
                 (isStaff && !selectedClientId)
               }
               onClick={() =>
-                submitPayloads(
-                  validRows.map((r) => r.payload!),
+                submitRecords(
+                  validRows.map((r, index) => ({
+                    submittedRowNumber: index + 1,
+                    sourcePreviewRowIndex: r.rowIndex,
+                    payload: r.payload!,
+                  })),
                   sourceFileName.trim() || 'bulk_import.json'
                 )
               }

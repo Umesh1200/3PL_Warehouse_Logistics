@@ -36,8 +36,10 @@ export const OutboundOrdersPage: React.FC = () => {
   const canAllocate = isStaff && hasPermission('outbound:orders:allocate');
   const canManage = isStaff && hasPermission('outbound:orders:manage');
   const canCancel = isAllowedIdentity && hasPermission('outbound:orders:cancel');
-  const canLookupClients = isStaff && hasPermission('clients:view');
-  const canLookupItems = hasPermission('items:view');
+  const canLookupClients =
+    isStaff && hasAnyPermission(['outbound:orders:create', 'outbound:orders:import']);
+  const canLookupItems =
+    isAllowedIdentity && hasAnyPermission(['outbound:orders:create', 'outbound:orders:import']);
 
   const [orders, setOrders] = useState<OutboundOrderDto[]>([]);
   const [totalCount, setTotalCount] = useState(0);

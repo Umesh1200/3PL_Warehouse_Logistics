@@ -193,19 +193,19 @@ describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves Frontend', () =>
       if (url.endsWith('/api/v1/facilities')) {
         return { ok: true, status: 200, json: async () => [FACILITY_A, FACILITY_B] } as Response;
       }
-      if (url.startsWith('/api/v1/clients')) {
+      if (url.startsWith('/api/v1/outbound/orders/reference-clients') || url.startsWith('/api/v1/outbound/pick-waves/eligible-clients')) {
         return {
           ok: true,
           status: 200,
           json: async () => ({
-            items: [{ id: 'client-a', companyName: 'Acme Corp', accountCode: 'ACME' }],
+            items: [{ id: 'client-a', companyName: 'Acme Corp', accountCode: 'ACME', status: 'Active' }],
             totalCount: 1,
             pageNumber: 1,
             pageSize: 100,
           }),
         } as Response;
       }
-      if (url.startsWith('/api/v1/items')) {
+      if (url.startsWith('/api/v1/outbound/orders/catalog-items')) {
         return {
           ok: true,
           status: 200,
@@ -216,6 +216,7 @@ describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves Frontend', () =>
                 clientId: 'client-a',
                 sku: 'SKU-OUT-01',
                 description: 'Outbound Servo Motor',
+                storageTempClass: 'Ambient',
                 isLotTracked: true,
                 requiresExpiryDate: false,
               },
@@ -808,6 +809,408 @@ describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves Frontend', () =>
     renderWithShell(<OutboundOrdersPage />);
     await waitFor(() => {
       expect(screen.getByTestId('orders-error-banner').textContent).toMatch(/malformed|incomplete/i);
+    });
+  });
+
+  it('allows seeded ClientAdmin without items:view to load tenant SKUs and submit an outbound order', async () => {
+    let createdBody: any = null;
+    const fetchSpy = mockBackend({
+      user: {
+        userId: 'client-admin-seeded',
+        email: 'clientadmin@acme.com',
+        userType: UserType.Client,
+        tenantId: 'client-a',
+        roles: ['ClientAdmin'],
+        // Exact DbInitializer.cs seeded ClientAdmin permissions (explicitly NO items:view)
+        permissions: [
+          'clients:view',
+          'users:view',
+          'users:create',
+          'users:edit',
+          'users:assign-roles',
+          'facilities:view',
+          'inventory:view',
+          'inventory:adjust',
+          'inventory:count',
+          'inbound:view',
+          'inbound:receive',
+          'outbound:view',
+          'outbound:create',
+          'outbound:orders:view',
+          'outbound:orders:create',
+          'outbound:orders:import',
+          'outbound:orders:cancel',
+          'billing:view',
+          'dispatch:view',
+        ],
+      },
+      onFetch: async (url, init) => {
+        if (url === '/api/v1/outbound/orders' && init?.method === 'POST') {
+          createdBody = JSON.parse(String(init.body));
+          return {
+            ok: true,
+            status: 201,
+            json: async () => ({
+              ...sampleOrderA,
+              id: 'ord-ca-1',
+              orderNumber: 'SO-2026-CA-01',
+            }),
+          } as Response;
+        }
+        return undefined;
+      },
+    });
+
+    renderWithShell(<OutboundOrdersPage />);
+    fireEvent.click(await screen.findByTestId('open-create-order-btn'));
+
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: /SKU-OUT-01/i })).toBeDefined();
+    });
+
+    const calledUrls = fetchSpy.mock.calls.map(([u]) => String(u));
+    expect(calledUrls.some((u) => u.startsWith('/api/v1/items'))).toBe(false);
+    expect(calledUrls.some((u) => u.startsWith('/api/v1/outbound/orders/reference-clients'))).toBe(false);
+    expect(calledUrls.some((u) => u.startsWith('/api/v1/outbound/orders/catalog-items'))).toBe(true);
+
+    fireEvent.change(document.getElementById('addr-recipient')!, { target: { value: 'Client Buyer' } });
+    fireEvent.change(document.getElementById('addr-line1')!, { target: { value: '200 Market St' } });
+    fireEvent.change(document.getElementById('addr-city')!, { target: { value: 'Chicago' } });
+    fireEvent.change(document.getElementById('addr-state')!, { target: { value: 'IL' } });
+    fireEvent.change(document.getElementById('addr-postal')!, { target: { value: '60602' } });
+    const skuSelect = document.querySelector('.order-line-row select') as HTMLSelectElement;
+    fireEvent.change(skuSelect, { target: { value: 'item-1' } });
+    fireEvent.click(screen.getByTestId('submit-create-order'));
+
+    await waitFor(() => {
+      expect(screen.getByText(/Created outbound order SO-2026-CA-01/i)).toBeDefined();
+    });
+    expect(createdBody?.lines?.[0]?.itemId).toBe('item-1');
+  });
+
+  it('allows Staff wave planner without clients:view to load eligible clients and generate a pick wave', async () => {
+    let generatedWaveBody: any = null;
+    const fetchSpy = mockBackend({
+      user: {
+        userId: 'wave-planner-1',
+        email: 'waves@nexus.local',
+        userType: UserType.Staff,
+        roles: ['WavePlanner'],
+        permissions: ['outbound:waves:view', 'outbound:waves:manage', 'outbound:orders:view'],
+      },
+      onFetch: async (url, init) => {
+        if (url === '/api/v1/outbound/pick-waves' && init?.method === 'POST') {
+          generatedWaveBody = JSON.parse(String(init.body));
+          return { ok: true, status: 201, json: async () => sampleWavePlanning } as Response;
+        }
+        return undefined;
+      },
+    });
+
+    renderWithShell(<PickWavesPage />, '/app/outbound/waves');
+    await screen.findByText('WAVE-20261123-001');
+    fireEvent.click(screen.getByTestId('open-generate-wave-btn'));
+
+    await waitFor(() => {
+      expect(screen.getByRole('option', { name: /Acme Corp/i })).toBeDefined();
+    });
+
+    const calledUrls = fetchSpy.mock.calls.map(([u]) => String(u));
+    expect(calledUrls.some((u) => u.startsWith('/api/v1/clients'))).toBe(false);
+    expect(calledUrls.some((u) => u.startsWith('/api/v1/outbound/pick-waves/eligible-clients'))).toBe(true);
+
+    fireEvent.click(screen.getByTestId('submit-generate-wave'));
+    await waitFor(() => {
+      expect(generatedWaveBody?.request?.clientId).toBe('client-a');
+    });
+  });
+
+  it('P741-02 maps bulk-import failed rows accurately across invalid preview rows and multiple consecutive retries', async () => {
+    const submittedBatches: Array<{ refs: string[] }> = [];
+    mockBackend({
+      user: {
+        userId: 'client-admin-retry',
+        email: 'client@acme.com',
+        userType: UserType.Client,
+        tenantId: 'client-a',
+        roles: ['ClientAdmin'],
+        permissions: ['outbound:orders:view', 'outbound:orders:import'],
+      },
+      onFetch: async (url, init) => {
+        if (url === '/api/v1/outbound/orders/bulk-import' && init?.method === 'POST') {
+          const parsed = JSON.parse(String(init.body));
+          const refs = parsed.orders.map((o: any) => o.externalOrderReference);
+          submittedBatches.push({ refs });
+
+          if (submittedBatches.length === 1) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                batchId: 'b-r1',
+                batchNumber: 'BATCH-R1',
+                sourceFileName: parsed.sourceFileName,
+                totalRows: 4,
+                successfulRows: 1,
+                duplicateRows: 1,
+                failedRows: 2,
+                status: 'CompletedWithErrors',
+                startedAtUtc: '2026-11-23T08:00:00Z',
+                rows: [
+                  { rowNumber: 1, externalOrderReference: 'REF-OK', isSuccess: true, isDuplicate: false, createdOutboundOrderId: 'ord-r1' },
+                  { rowNumber: 2, externalOrderReference: 'REF-DUP', isSuccess: false, isDuplicate: true, errorMessage: 'Duplicate' },
+                  { rowNumber: 3, externalOrderReference: 'REF-FAIL-1', isSuccess: false, isDuplicate: false, errorMessage: 'Timeout 1' },
+                  { rowNumber: 4, externalOrderReference: 'REF-FAIL-2', isSuccess: false, isDuplicate: false, errorMessage: 'Timeout 2' },
+                ],
+              }),
+            } as Response;
+          }
+
+          if (submittedBatches.length === 2) {
+            return {
+              ok: true,
+              status: 200,
+              json: async () => ({
+                batchId: 'b-r2',
+                batchNumber: 'BATCH-R2',
+                sourceFileName: parsed.sourceFileName,
+                totalRows: 2,
+                successfulRows: 1,
+                duplicateRows: 0,
+                failedRows: 1,
+                status: 'CompletedWithErrors',
+                startedAtUtc: '2026-11-23T08:01:00Z',
+                rows: [
+                  { rowNumber: 1, externalOrderReference: 'REF-FAIL-1', isSuccess: true, isDuplicate: false, createdOutboundOrderId: 'ord-r2' },
+                  { rowNumber: 2, externalOrderReference: 'REF-FAIL-2', isSuccess: false, isDuplicate: false, errorMessage: 'Still throttled' },
+                ],
+              }),
+            } as Response;
+          }
+
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              batchId: 'b-r3',
+              batchNumber: 'BATCH-R3',
+              sourceFileName: parsed.sourceFileName,
+              totalRows: 1,
+              successfulRows: 1,
+              duplicateRows: 0,
+              failedRows: 0,
+              status: 'Completed',
+              startedAtUtc: '2026-11-23T08:02:00Z',
+              rows: [
+                { rowNumber: 1, externalOrderReference: 'REF-FAIL-2', isSuccess: true, isDuplicate: false, createdOutboundOrderId: 'ord-r3' },
+              ],
+            }),
+          } as Response;
+        }
+        return undefined;
+      },
+    });
+
+    renderWithShell(<OutboundOrdersPage />);
+    await screen.findByText(/Chicago Central Hub \(FAC-A\)/i);
+    fireEvent.click(await screen.findByTestId('open-bulk-import-btn'));
+
+    // Invalid preview rows at index 1 (before valid) and index 3 (between valid rows)
+    const jsonPayload = JSON.stringify([
+      { externalOrderReference: 'BAD-BEFORE', shippingAddress: {}, lines: [] },
+      {
+        externalOrderReference: 'REF-OK',
+        shippingAddress: { recipientName: 'Alice', addressLine1: '1 Main', city: 'Chicago', stateOrProvince: 'IL', postalCode: '60601', countryCode: 'USA' },
+        lines: [{ itemId: 'item-1', quantityOrdered: 2 }],
+      },
+      { externalOrderReference: 'BAD-BETWEEN', shippingAddress: { recipientName: 'NoLines' }, lines: [] },
+      {
+        externalOrderReference: 'REF-DUP',
+        shippingAddress: { recipientName: 'Bob', addressLine1: '2 Main', city: 'Chicago', stateOrProvince: 'IL', postalCode: '60601', countryCode: 'USA' },
+        lines: [{ itemId: 'item-1', quantityOrdered: 3 }],
+      },
+      {
+        externalOrderReference: 'REF-FAIL-1',
+        shippingAddress: { recipientName: 'Cara', addressLine1: '3 Main', city: 'Chicago', stateOrProvince: 'IL', postalCode: '60601', countryCode: 'USA' },
+        lines: [{ itemId: 'item-1', quantityOrdered: 4 }],
+      },
+      {
+        externalOrderReference: 'REF-FAIL-2',
+        shippingAddress: { recipientName: 'Dan', addressLine1: '4 Main', city: 'Chicago', stateOrProvince: 'IL', postalCode: '60601', countryCode: 'USA' },
+        lines: [{ itemId: 'item-1', quantityOrdered: 5 }],
+      },
+    ]);
+
+    fireEvent.change(await screen.findByLabelText(/Paste JSON Payload/i), {
+      target: { value: jsonPayload },
+    });
+
+    fireEvent.click(screen.getByRole('checkbox'));
+    fireEvent.click(screen.getByTestId('submit-bulk-import'));
+
+    await waitFor(() =>
+      expect(screen.getByTestId('bulk-import-summary').textContent).toContain('BATCH-R1')
+    );
+    expect(submittedBatches[0].refs).toEqual(['REF-OK', 'REF-DUP', 'REF-FAIL-1', 'REF-FAIL-2']);
+
+    // Retry 1: must contain ONLY [REF-FAIL-1, REF-FAIL-2]
+    fireEvent.click(screen.getByTestId('retry-failed-import'));
+    await waitFor(() =>
+      expect(screen.getByTestId('bulk-import-summary').textContent).toContain('BATCH-R2')
+    );
+    expect(submittedBatches[1].refs).toEqual(['REF-FAIL-1', 'REF-FAIL-2']);
+
+    // Retry 2: must contain ONLY [REF-FAIL-2]
+    fireEvent.click(screen.getByTestId('retry-failed-import'));
+    await waitFor(() =>
+      expect(screen.getByTestId('bulk-import-summary').textContent).toContain('BATCH-R3')
+    );
+    expect(submittedBatches[2].refs).toEqual(['REF-FAIL-2']);
+    expect(screen.queryByTestId('retry-failed-import')).toBeNull();
+  });
+
+  it('P741-03 fails closed with explicit error banners on malformed operational enums across orders, allocations, imports, and waves', async () => {
+    let scenario: 'order' | 'allocation' | 'import' | 'wave' = 'order';
+    mockBackend({
+      user: {
+        userId: 'staff-enum-check',
+        email: 'ops@nexus.local',
+        userType: UserType.Staff,
+        roles: ['OperationsManager'],
+        permissions: [
+          'outbound:orders:view',
+          'outbound:orders:import',
+          'outbound:orders:allocate',
+          'outbound:waves:view',
+        ],
+      },
+      onFetch: async (url, init) => {
+        if (scenario === 'order' && url.startsWith('/api/v1/outbound/orders?')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              items: [{ ...sampleOrderA, status: 'CorruptedStatusEnum' }],
+              totalCount: 1,
+              pageNumber: 1,
+              pageSize: 15,
+            }),
+          } as Response;
+        }
+        if (scenario === 'import' && url === '/api/v1/outbound/orders/bulk-import' && init?.method === 'POST') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              batchId: 'b-bad',
+              batchNumber: 'BATCH-BAD',
+              sourceFileName: 'bad.json',
+              totalRows: 1,
+              successfulRows: 0,
+              duplicateRows: 0,
+              failedRows: 1,
+              status: 'MysteryBatchState',
+              startedAtUtc: '2026-11-23T08:00:00Z',
+              rows: [],
+            }),
+          } as Response;
+        }
+        if (scenario === 'allocation' && url === '/api/v1/outbound/orders/ord-1/allocate' && init?.method === 'POST') {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              outboundOrderId: 'ord-1',
+              orderNumber: 'SO-2026-1001',
+              status: 'Allocated',
+              totalQuantityOrdered: 10,
+              totalQuantityAllocated: 5,
+              totalShortageQuantity: 5,
+              isFullyAllocated: false,
+              isDuplicateRequest: false,
+              attemptCount: 1,
+              lineSummaries: [],
+              shortages: [
+                {
+                  shortageId: 'sh-1',
+                  lineId: 'line-1',
+                  itemId: 'item-1',
+                  shortageQuantity: 5,
+                  reason: 'UnknownShortageCode',
+                  notes: 'bad enum',
+                },
+              ],
+            }),
+          } as Response;
+        }
+        if (scenario === 'wave' && url.startsWith('/api/v1/outbound/pick-waves?')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              items: [{ ...sampleWavePlanning, waveType: 'TelekinesisPick' }],
+              totalCount: 1,
+              pageNumber: 1,
+              pageSize: 15,
+            }),
+          } as Response;
+        }
+        return undefined;
+      },
+    });
+
+    // 1. Order malformed enum
+    const { unmount: unmountOrders } = renderWithShell(<OutboundOrdersPage />);
+    await waitFor(() => {
+      expect(screen.getByTestId('orders-error-banner').textContent).toMatch(/OutboundOrderStatus/i);
+    });
+    unmountOrders();
+
+    // 2. Import malformed batch enum
+    scenario = 'import';
+    const { unmount: unmountImport } = renderWithShell(<OutboundOrdersPage />);
+    await screen.findByText(/Chicago Central Hub \(FAC-A\)/i);
+    fireEvent.click(await screen.findByTestId('open-bulk-import-btn'));
+    fireEvent.change(await screen.findByLabelText(/Paste JSON Payload/i), {
+      target: {
+        value: JSON.stringify([
+          {
+            externalOrderReference: 'REF-BAD-ENUM',
+            shippingAddress: {
+              recipientName: 'Enum Buyer',
+              addressLine1: '1 Main',
+              city: 'Chicago',
+              stateOrProvince: 'IL',
+              postalCode: '60601',
+              countryCode: 'USA',
+            },
+            lines: [{ itemId: 'item-1', quantityOrdered: 1 }],
+          },
+        ]),
+      },
+    });
+    fireEvent.click(screen.getByRole('checkbox'));
+    fireEvent.click(screen.getByTestId('submit-bulk-import'));
+    await waitFor(() => {
+      expect(screen.getByText(/ImportBatchStatus/i)).toBeDefined();
+    });
+    unmountImport();
+
+    // 3. Allocation shortage malformed enum
+    scenario = 'allocation';
+    const { unmount: unmountAlloc } = renderWithShell(<OutboundOrdersPage />);
+    fireEvent.click(await screen.findByTestId('inspect-order-ord-1'));
+    fireEvent.click(await screen.findByTestId('btn-allocate-order'));
+    await waitFor(() => {
+      expect(screen.getByText(/ShortageReason/i)).toBeDefined();
+    });
+    unmountAlloc();
+
+    // 4. Pick wave malformed enum
+    scenario = 'wave';
+    renderWithShell(<PickWavesPage />);
+    await waitFor(() => {
+      expect(screen.getByRole('alert').textContent).toMatch(/PickWaveType/i);
     });
   });
 });

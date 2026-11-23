@@ -8,7 +8,9 @@ using Warehouse3PL.Application.Features.Outbound.OrderManagement.Commands.Import
 using Warehouse3PL.Application.Features.Outbound.OrderManagement.Commands.ReleaseOutboundOrder;
 using Warehouse3PL.Application.Features.Outbound.OrderManagement.Queries.CheckOrderStockAvailability;
 using Warehouse3PL.Application.Features.Outbound.OrderManagement.Queries.GetOutboundOrderById;
+using Warehouse3PL.Application.Features.Outbound.OrderManagement.Queries.GetOutboundOrderCatalogItems;
 using Warehouse3PL.Application.Features.Outbound.OrderManagement.Queries.GetOutboundOrders;
+using Warehouse3PL.Application.Features.Outbound.OrderManagement.Queries.GetOutboundReferenceClients;
 using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Infrastructure.Authorization;
@@ -177,6 +179,38 @@ public class OutboundOrdersController : BaseApiController
     {
         var command = new ReleaseAllocationCommand(allocationId, request?.QuantityToRelease, request?.Reason ?? "Manual release");
         var result = await Mediator.Send(command, ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Tenant-scoped minimal catalog lookup for authorized outbound order creators and bulk importers.
+    /// Client users are strictly restricted to their authenticated TenantId without requiring broad items:view permission.
+    /// </summary>
+    [HttpGet("catalog-items")]
+    [HasAnyPermission(Permissions.Outbound.OrdersCreate, Permissions.Outbound.OrdersImport)]
+    [ProducesResponseType(typeof(PagedResult<OutboundCatalogItemDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> GetCatalogItems(
+        [FromQuery] GetOutboundOrderCatalogItemsQuery query,
+        CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Staff-only minimal client tenant lookup for authorized staff order creators and bulk importers.
+    /// Avoids requiring broad admin clients:view permission while strictly excluding Client and Driver users.
+    /// </summary>
+    [HttpGet("reference-clients")]
+    [HasAnyPermission(Permissions.Outbound.OrdersCreate, Permissions.Outbound.OrdersImport)]
+    [ProducesResponseType(typeof(PagedResult<OutboundReferenceClientDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> GetReferenceClients(
+        [FromQuery] GetOutboundReferenceClientsQuery query,
+        CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
         return Ok(result);
     }
 }

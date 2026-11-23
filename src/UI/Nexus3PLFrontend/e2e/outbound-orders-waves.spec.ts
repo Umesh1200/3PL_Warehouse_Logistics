@@ -19,13 +19,34 @@ const FACILITIES = [
   },
 ];
 
-const ARTIFACT_DIR =
-  'C:/Users/DELL/.gemini/antigravity/brain/3ef5018b-e9e3-4374-9eca-184b02ff2c4e';
+const CLIENT_PAGE = {
+  items: [{ id: 'cli-e2e-1', companyName: 'Apex Industrial Corp', accountCode: 'APEX', status: 'Active' }],
+  totalCount: 1,
+  pageNumber: 1,
+  pageSize: 100,
+};
+
+const CATALOG_ITEMS_PAGE = {
+  items: [
+    {
+      id: 'item-e2e-1',
+      clientId: 'cli-e2e-1',
+      sku: 'SKU-PUMP-741',
+      description: 'Hydraulic Valve Assembly',
+      storageTempClass: 'Ambient',
+      isLotTracked: false,
+      requiresExpiryDate: false,
+    },
+  ],
+  totalCount: 1,
+  pageNumber: 1,
+  pageSize: 100,
+};
 
 test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () => {
   test('exercises Create Order -> Stock Availability -> Allocate -> Generate Wave -> Release Wave and responsive viewports', async ({
     page,
-  }) => {
+  }, testInfo) => {
     const orders: any[] = [
       {
         id: 'ord-e2e-1',
@@ -122,8 +143,6 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
             'outbound:orders:cancel',
             'outbound:waves:view',
             'outbound:waves:manage',
-            'clients:view',
-            'items:view',
             'facilities:view',
           ],
         }),
@@ -311,6 +330,18 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
         });
       }
 
+      if (path === '/api/v1/outbound/orders/reference-clients' && method === 'GET') {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(CLIENT_PAGE) });
+      }
+
+      if (path === '/api/v1/outbound/orders/catalog-items' && method === 'GET') {
+        return route.fulfill({
+          status: 200,
+          contentType: 'application/json',
+          body: JSON.stringify(CATALOG_ITEMS_PAGE),
+        });
+      }
+
       if (path === '/api/v1/outbound/orders' && method === 'GET') {
         return route.fulfill({
           status: 200,
@@ -386,6 +417,10 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
           releasedAtUtc: '2026-11-23T09:10:00Z',
         };
         return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(waves[0]) });
+      }
+
+      if (path === '/api/v1/outbound/pick-waves/eligible-clients' && method === 'GET') {
+        return route.fulfill({ status: 200, contentType: 'application/json', body: JSON.stringify(CLIENT_PAGE) });
       }
 
       if (path === '/api/v1/outbound/pick-waves' && method === 'GET') {
@@ -476,14 +511,31 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
 
     await page.click('[data-testid="btn-allocate-order"]');
     await expect(page.getByTestId('allocation-result-panel')).toBeVisible();
+    await page.screenshot({
+      path: testInfo.outputPath('phase741-allocation-drawer-1440.png'),
+      fullPage: true,
+      animations: 'disabled',
+    });
 
     // Close drawer cleanly via Escape and capture Desktop Orders screenshot
     await page.keyboard.press('Escape');
     await expect(page.getByTestId('order-detail-drawer')).toBeHidden();
-    await page.screenshot({ path: `${ARTIFACT_DIR}/phase741-outbound-orders-1440.png`, fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath('phase741-outbound-orders-1440.png'),
+      fullPage: true,
+      animations: 'disabled',
+    });
 
     // Create New Order
     await page.click('[data-testid="open-create-order-btn"]');
+    await expect(page.locator('#addr-recipient')).toBeVisible();
+    await expect(page.locator('.order-line-row select option[value="item-e2e-1"]')).toHaveCount(1);
+    await page.waitForTimeout(250);
+    await page.screenshot({
+      path: testInfo.outputPath('phase741-create-order-modal-1440.png'),
+      fullPage: true,
+      animations: 'disabled',
+    });
     await page.fill('#addr-recipient', 'Taylor Reed');
     await page.fill('#addr-line1', '742 Harbor Ave');
     await page.fill('#addr-city', 'Chicago');
@@ -508,7 +560,11 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
     await page.click('[data-testid="release-wave-wave-e2e-1"]');
     await page.click('[data-testid="confirm-release-wave-btn"]');
     await expect(page.getByText(/released to floor/i)).toBeVisible();
-    await page.screenshot({ path: `${ARTIFACT_DIR}/phase741-pick-waves-1440.png`, fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath('phase741-pick-waves-1440.png'),
+      fullPage: true,
+      animations: 'disabled',
+    });
 
     // Responsive overflow checks across Tablet (768x1024) and Mobile (375x812, 320x568)
     for (const vp of [
@@ -518,6 +574,13 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
     ]) {
       await page.setViewportSize(vp);
       await page.waitForTimeout(100);
+      if (vp.width === 375) {
+        await page.screenshot({
+          path: testInfo.outputPath('phase741-pick-waves-375.png'),
+          fullPage: true,
+          animations: 'disabled',
+        });
+      }
       const overflowWaves = await page.evaluate(
         () => document.documentElement.scrollWidth > window.innerWidth + 1
       );
@@ -528,7 +591,11 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
     await page.locator('aside.app-sidebar a[href="/app/outbound/orders"]').click();
     await page.setViewportSize({ width: 375, height: 812 });
     await page.waitForTimeout(400);
-    await page.screenshot({ path: `${ARTIFACT_DIR}/phase741-outbound-orders-375.png`, fullPage: true });
+    await page.screenshot({
+      path: testInfo.outputPath('phase741-outbound-orders-375.png'),
+      fullPage: true,
+      animations: 'disabled',
+    });
 
     for (const vp of [
       { width: 768, height: 1024 },

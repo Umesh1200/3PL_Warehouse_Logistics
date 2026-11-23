@@ -1,5 +1,6 @@
 using Microsoft.AspNetCore.Mvc;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Features.Outbound.OrderManagement.Queries.GetOutboundReferenceClients;
 using Warehouse3PL.Application.Features.Outbound.Picking.Commands;
 using Warehouse3PL.Application.Features.Outbound.Picking.DTOs;
 using Warehouse3PL.Application.Features.Outbound.Picking.Queries;
@@ -62,6 +63,22 @@ public class PickWavesController : BaseApiController
     public async Task<IActionResult> ReleaseWave([FromRoute] Guid id, CancellationToken ct)
     {
         var result = await Mediator.Send(new ReleasePickWaveCommand(id), ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Retrieves active facility-eligible client tenants for authorized staff pick wave planners.
+    /// Avoids requiring broad admin clients:view permission.
+    /// </summary>
+    [HttpGet("eligible-clients")]
+    [HasPermission(Permissions.Outbound.WavesManage)]
+    [ProducesResponseType(typeof(PagedResult<OutboundReferenceClientDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> GetEligibleClients(
+        [FromQuery] GetEligibleWaveClientsQuery query,
+        CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
         return Ok(result);
     }
 }
