@@ -29,6 +29,9 @@ public static class Phase741OutboundLifecycleCheck
     {
         var itemId = Guid.NewGuid();
         var foreignItemId = Guid.NewGuid();
+        var facBOnlyClientId = Guid.NewGuid();
+        var facBOnlyId = Guid.NewGuid();
+        var facBOnlyItemId = Guid.NewGuid();
         var binId = Guid.NewGuid();
         var stockId = Guid.NewGuid();
 
@@ -68,6 +71,39 @@ public static class Phase741OutboundLifecycleCheck
                     StorageTempClass = StorageTempClass.Ambient
                 });
             }
+            seedDb.Facilities.Add(new Facility
+            {
+                Id = facBOnlyId,
+                FacilityCode = $"PG741B-{facBOnlyId.ToString("N")[..6]}",
+                Name = "PG 741 Isolated Facility B",
+                CountryCode = "USA",
+                IsActive = true
+            });
+            seedDb.Clients.Add(new Warehouse3PL.Domain.Entities.Security.Client
+            {
+                Id = facBOnlyClientId,
+                AccountCode = $"PG741C-{facBOnlyClientId.ToString("N")[..6]}",
+                CompanyName = "Facility B Only Client",
+                Status = ClientStatus.Active
+            });
+            seedDb.ClientFacilityAccesses.Add(new Warehouse3PL.Domain.Entities.Security.ClientFacilityAccess
+            {
+                ClientId = facBOnlyClientId,
+                FacilityId = facBOnlyId,
+                Status = FacilityAccessStatus.Active
+            });
+            seedDb.Items.Add(new Item
+            {
+                Id = facBOnlyItemId,
+                ClientId = facBOnlyClientId,
+                Sku = "PG-741-FACB-ONLY-SKU",
+                Description = "Unauthorized Facility A SKU",
+                WeightKg = 1m,
+                LengthCm = 5,
+                WidthCm = 5,
+                HeightCm = 5,
+                StorageTempClass = StorageTempClass.Ambient
+            });
             seedDb.Locations.Add(new Location
             {
                 Id = binId,
@@ -205,6 +241,134 @@ public static class Phase741OutboundLifecycleCheck
         {
             if (waveEligibleResp.StatusCode != HttpStatusCode.OK)
                 throw new InvalidOperationException($"Pick wave eligible-clients lookup failed: {waveEligibleResp.StatusCode}");
+        }
+
+        // P741-04 Live PostgreSQL checks: Staff facility/client relationship across catalog-items, order create, and bulk import
+        using (var staffValidCat = await client.SendAsync(staffReqFactory(
+            HttpMethod.Get, $"/api/v1/outbound/orders/catalog-items?clientId={clientId}&facilityId={facilityId}", staffUserId, facilityId, Permissions.Outbound.OrdersCreate, null)))
+        {
+            if (staffValidCat.StatusCode != HttpStatusCode.OK)
+                throw new InvalidOperationException($"Staff valid facility/client catalog lookup failed: {staffValidCat.StatusCode}");
+        }
+
+        using (var staffCrossClientWithFac = await client.SendAsync(staffReqFactory(
+            HttpMethod.Get, $"/api/v1/outbound/orders/catalog-items?clientId={facBOnlyClientId}&facilityId={facilityId}", staffUserId, facilityId, Permissions.Outbound.OrdersCreate, null)))
+        {
+            if (staffCrossClientWithFac.StatusCode != HttpStatusCode.Forbidden)
+                throw new InvalidOperationException($"Expected 403 for Staff at Facility A listing Facility-B-only Client SKUs, got {staffCrossClientWithFac.StatusCode}");
+        }
+
+        using (var staffOmitFac = await client.SendAsync(staffReqFactory(
+            HttpMethod.Get, $"/api/v1/outbound/orders/catalog-items?clientId={facBOnlyClientId}", staffUserId, facilityId, Permissions.Outbound.OrdersCreate, null)))
+        {
+            if (staffOmitFac.StatusCode != HttpStatusCode.Forbidden)
+                throw new InvalidOperationException($"Expected 403 when Staff omits facilityId for unauthorized client, got {staffOmitFac.StatusCode}");
+        }
+
+        var arbitraryTenantReq = staffReqFactory(
+            HttpMethod.Get, "/api/v1/outbound/orders/catalog-items", staffUserId, facilityId, Permissions.Outbound.OrdersCreate, null);
+        arbitraryTenantReq.Headers.Add("X-Tenant-Id", Guid.NewGuid().ToString());
+        using (var staffArbitraryTenant = await client.SendAsync(arbitraryTenantReq))
+        {
+            if (staffArbitraryTenant.StatusCode != HttpStatusCode.Forbidden)
+                throw new InvalidOperationException($"Expected 403 when Staff passes arbitrary X-Tenant-Id, got {staffArbitraryTenant.StatusCode}");
+        }
+
+        // Authorized Staff bulk import succeeds for valid client/facility pairing
+        var staffValidImportReq = staffReqFactory(
+            HttpMethod.Post,
+            "/api/v1/outbound/orders/bulk-import",
+            staffUserId,
+            facilityId,
+            Permissions.Outbound.OrdersImport,
+            new
+            {
+                facilityId,
+                sourceFileName = "pg-p741-04-valid.json",
+                orders = new[]
+                {
+                    new
+                    {
+                        facilityId,
+                        externalOrderReference = $"PG-IMP-OK-{Guid.NewGuid():N}",
+                        orderType = "B2BSalesOrder",
+                        priority = 5,
+                        serviceLevel = "StandardGround",
+                        shippingAddress = createPayload.shippingAddress,
+                        lines = new[] { new { itemId, quantityOrdered = 1m } }
+                    }
+                }
+            });
+        staffValidImportReq.Headers.Add("X-Tenant-Id", clientId.ToString());
+        using (var validImpResp = await client.SendAsync(staffValidImportReq))
+        {
+            if (validImpResp.StatusCode != HttpStatusCode.OK)
+                throw new InvalidOperationException($"Authorized Staff bulk import failed: {validImpResp.StatusCode}: {await validImpResp.Content.ReadAsStringAsync()}");
+        }
+
+        // Unauthorized Staff order create & bulk import for facBOnlyClientId at facilityId must return 403 without DB persistence
+        var unauthOrderReq = staffReqFactory(
+            HttpMethod.Post,
+            "/api/v1/outbound/orders",
+            staffUserId,
+            facilityId,
+            Permissions.Outbound.OrdersCreate,
+            new
+            {
+                facilityId,
+                externalOrderReference = "PG-SHOULD-NOT-PERSIST-ORD",
+                orderType = "B2BSalesOrder",
+                priority = 5,
+                serviceLevel = "StandardGround",
+                shippingAddress = createPayload.shippingAddress,
+                lines = new[] { new { itemId = facBOnlyItemId, quantityOrdered = 1m } }
+            });
+        unauthOrderReq.Headers.Add("X-Tenant-Id", facBOnlyClientId.ToString());
+        using (var unauthOrdResp = await client.SendAsync(unauthOrderReq))
+        {
+            if (unauthOrdResp.StatusCode != HttpStatusCode.Forbidden)
+                throw new InvalidOperationException($"Expected 403 for unauthorized Staff order create, got {unauthOrdResp.StatusCode}");
+        }
+
+        var unauthImportReq = staffReqFactory(
+            HttpMethod.Post,
+            "/api/v1/outbound/orders/bulk-import",
+            staffUserId,
+            facilityId,
+            Permissions.Outbound.OrdersImport,
+            new
+            {
+                facilityId,
+                sourceFileName = "pg-unauth-import.json",
+                orders = new[]
+                {
+                    new
+                    {
+                        facilityId,
+                        externalOrderReference = "PG-SHOULD-NOT-PERSIST-IMP",
+                        orderType = "B2BSalesOrder",
+                        priority = 5,
+                        serviceLevel = "StandardGround",
+                        shippingAddress = createPayload.shippingAddress,
+                        lines = new[] { new { itemId = facBOnlyItemId, quantityOrdered = 1m } }
+                    }
+                }
+            });
+        unauthImportReq.Headers.Add("X-Tenant-Id", facBOnlyClientId.ToString());
+        using (var unauthImpResp = await client.SendAsync(unauthImportReq))
+        {
+            if (unauthImpResp.StatusCode != HttpStatusCode.Forbidden)
+                throw new InvalidOperationException($"Expected 403 for unauthorized Staff bulk import, got {unauthImpResp.StatusCode}");
+        }
+
+        await using (var p74104VerifyDb = new ApplicationDbContext(
+            dbOptions, new VerificationTenant(), new VerificationIdentity(facilityId),
+            new AuditableEntityInterceptor(new VerificationIdentity(facilityId), new VerificationClock())))
+        {
+            var leakedOrders = await p74104VerifyDb.OutboundOrders.CountAsync(o => o.ClientId == facBOnlyClientId);
+            var leakedBatches = await p74104VerifyDb.OrderImportBatches.CountAsync(b => b.ClientId == facBOnlyClientId);
+            if (leakedOrders != 0 || leakedBatches != 0)
+                throw new InvalidOperationException($"Unauthorized Staff order/import persisted rows on PostgreSQL: orders={leakedOrders}, batches={leakedBatches}");
         }
 
         // 3. Allocate with Idempotency + duplicate replay check

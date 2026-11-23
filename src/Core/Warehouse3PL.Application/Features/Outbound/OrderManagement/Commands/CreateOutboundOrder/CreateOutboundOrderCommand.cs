@@ -150,7 +150,7 @@ public class CreateOutboundOrderCommandHandler : IRequestHandler<CreateOutboundO
             throw new EntityNotFoundException(nameof(Domain.Entities.Facilities.Facility), request.FacilityId);
         }
 
-        if (_currentUser.UserType == UserType.Client && !_currentUser.IsSuperAdmin)
+        if (!_currentUser.IsSuperAdmin)
         {
             await _outboundAuth.EnsureClientHasActiveFacilityAccessAsync(clientId, request.FacilityId, cancellationToken);
         }
@@ -170,7 +170,7 @@ public class CreateOutboundOrderCommandHandler : IRequestHandler<CreateOutboundO
                 throw new EntityNotFoundException(nameof(Domain.Entities.Facilities.Facility), request.DestinationFacilityId.Value);
             }
 
-            if (_currentUser.UserType == UserType.Client && !_currentUser.IsSuperAdmin)
+            if (!_currentUser.IsSuperAdmin)
             {
                 await _outboundAuth.EnsureClientHasActiveFacilityAccessAsync(clientId, request.DestinationFacilityId.Value, cancellationToken);
             }

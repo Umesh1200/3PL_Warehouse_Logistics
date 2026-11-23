@@ -78,11 +78,12 @@ public class GetOutboundOrderCatalogItemsQueryHandler
         else
         {
             _outboundAuth.EnsureStaffOperationalIdentity(nameof(GetOutboundOrderCatalogItemsQuery));
-            if (request.FacilityId.HasValue && request.FacilityId.Value != Guid.Empty)
+
+            if (request.ClientId.HasValue &&
+                _tenantProvider.TenantId.HasValue &&
+                request.ClientId.Value != _tenantProvider.TenantId.Value)
             {
-                _outboundAuth.ValidateStaffReadFacilityAccess(
-                    request.FacilityId.Value,
-                    nameof(GetOutboundOrderCatalogItemsQuery));
+                throw new ForbiddenException("Conflicting clientId query parameter and X-Tenant-Id header.");
             }
 
             var resolvedClientId = request.ClientId ?? _tenantProvider.TenantId ?? _currentUser.TenantId;
@@ -93,6 +94,26 @@ public class GetOutboundOrderCatalogItemsQueryHandler
                     "A valid clientId query parameter or X-Tenant-Id header is required for staff catalog lookup.");
             }
             targetClientId = resolvedClientId.Value;
+
+            var scope = await _outboundAuth.ResolveOutboundQueryScopeAsync(
+                requestedClientId: targetClientId,
+                requestedFacilityId: request.FacilityId == Guid.Empty ? null : request.FacilityId,
+                allowCrossFacilityRead: true,
+                allowClient: false,
+                ct: cancellationToken);
+
+            if (scope.FacilityId.HasValue)
+            {
+                await _outboundAuth.EnsureClientHasActiveFacilityAccessAsync(
+                    targetClientId,
+                    scope.FacilityId.Value,
+                    cancellationToken);
+            }
+            else if (!_currentUser.IsSuperAdmin)
+            {
+                // Cross-facility reader omitting facilityId must still target a client with active facility access.
+                await _outboundAuth.GetActiveClientFacilitiesAsync(targetClientId, cancellationToken);
+            }
         }
 
         var clientExists = await _context.Clients

@@ -49,6 +49,7 @@ public sealed class Phase741OutboundCatalogAndClientTests : IAsyncLifetime
     private static readonly Guid StaffOrderCreatorAId = Guid.Parse("741a0003-0000-0000-0000-000000000002");
     private static readonly Guid StaffWavePlannerAId = Guid.Parse("741a0003-0000-0000-0000-000000000003");
     private static readonly Guid DriverId = Guid.Parse("741a0003-0000-0000-0000-000000000004");
+    private static readonly Guid StaffMultiFacReaderFacAId = Guid.Parse("741a0003-0000-0000-0000-000000000005");
 
     private static readonly Guid ItemClientAActiveId = Guid.Parse("741a0004-0000-0000-0000-000000000001");
     private static readonly Guid ItemClientAInactiveId = Guid.Parse("741a0004-0000-0000-0000-000000000002");
@@ -206,6 +207,12 @@ public sealed class Phase741OutboundCatalogAndClientTests : IAsyncLifetime
 
         var orderCreatorRole = new Role { RoleName = "OrderCoordinator", Description = "Staff order creator", IsSystemRole = false };
         orderCreatorRole.RolePermissions.Add(new RolePermission { Role = orderCreatorRole, PermissionKey = Permissions.Outbound.OrdersCreate, AccessLevel = AccessLevel.Write });
+        orderCreatorRole.RolePermissions.Add(new RolePermission { Role = orderCreatorRole, PermissionKey = Permissions.Outbound.OrdersImport, AccessLevel = AccessLevel.Write });
+
+        var multiFacReaderRole = new Role { RoleName = "CrossFacilityOrderReader", Description = "Cross-facility reader with order create", IsSystemRole = false };
+        multiFacReaderRole.RolePermissions.Add(new RolePermission { Role = multiFacReaderRole, PermissionKey = Permissions.Outbound.OrdersCreate, AccessLevel = AccessLevel.Write });
+        multiFacReaderRole.RolePermissions.Add(new RolePermission { Role = multiFacReaderRole, PermissionKey = Permissions.Outbound.OrdersView, AccessLevel = AccessLevel.Read });
+        multiFacReaderRole.RolePermissions.Add(new RolePermission { Role = multiFacReaderRole, PermissionKey = Permissions.Analytics.MultiFacilityView, AccessLevel = AccessLevel.Read });
 
         var wavePlannerRole = new Role { RoleName = "WavePlanner", Description = "Staff wave planner", IsSystemRole = false };
         wavePlannerRole.RolePermissions.Add(new RolePermission { Role = wavePlannerRole, PermissionKey = Permissions.Outbound.WavesManage, AccessLevel = AccessLevel.Write });
@@ -213,7 +220,7 @@ public sealed class Phase741OutboundCatalogAndClientTests : IAsyncLifetime
         var driverRole = new Role { RoleName = SystemRoles.Driver, Description = "Driver", IsSystemRole = true };
         driverRole.RolePermissions.Add(new RolePermission { Role = driverRole, PermissionKey = Permissions.Dispatch.ExecuteDelivery, AccessLevel = AccessLevel.Execute });
 
-        db.Roles.AddRange(clientAdminRole, orderCreatorRole, wavePlannerRole, driverRole);
+        db.Roles.AddRange(clientAdminRole, orderCreatorRole, multiFacReaderRole, wavePlannerRole, driverRole);
 
         var pw = hasher.HashPassword("StrongPass#741");
         db.Users.AddRange(
@@ -252,6 +259,18 @@ public sealed class Phase741OutboundCatalogAndClientTests : IAsyncLifetime
                 AssignedFacilityId = FacilityA,
                 Status = UserStatus.Active,
                 UserRoles = { new UserRole { UserId = StaffWavePlannerAId, Role = wavePlannerRole } }
+            },
+            new User
+            {
+                Id = StaffMultiFacReaderFacAId,
+                Email = "multifac.a@test.local",
+                FirstName = "Multi",
+                LastName = "ReaderA",
+                PasswordHash = pw,
+                UserType = UserType.Staff,
+                AssignedFacilityId = FacilityA,
+                Status = UserStatus.Active,
+                UserRoles = { new UserRole { UserId = StaffMultiFacReaderFacAId, Role = multiFacReaderRole } }
             },
             new User
             {
@@ -425,5 +444,189 @@ public sealed class Phase741OutboundCatalogAndClientTests : IAsyncLifetime
             Assert.Equal(1, items.GetArrayLength());
             Assert.Equal(ClientA, items[0].GetProperty("id").GetGuid());
         }
+    }
+
+    [Fact]
+    public async Task P741_04_StaffCatalogLookup_EnforcesClientFacilityRelationship_AcrossExplicitOmittedAndHeaderCases()
+    {
+        // 1. Staff at Facility A can list Client A's authorized SKUs (with explicit or omitted facilityId)
+        using (var okExplicit = await _http.SendAsync(AuthedReq(
+            HttpMethod.Get, $"/api/v1/outbound/orders/catalog-items?clientId={ClientA}&facilityId={FacilityA}", StaffOrderCreatorAId)))
+        {
+            Assert.Equal(HttpStatusCode.OK, okExplicit.StatusCode);
+            using var doc = await JsonDocument.ParseAsync(await okExplicit.Content.ReadAsStreamAsync());
+            var items = doc.RootElement.GetProperty("items");
+            Assert.Equal(1, items.GetArrayLength());
+            Assert.Equal(ItemClientAActiveId, items[0].GetProperty("id").GetGuid());
+        }
+
+        using (var okOmittedFac = await _http.SendAsync(AuthedReq(
+            HttpMethod.Get, $"/api/v1/outbound/orders/catalog-items?clientId={ClientA}", StaffOrderCreatorAId)))
+        {
+            Assert.Equal(HttpStatusCode.OK, okOmittedFac.StatusCode);
+        }
+
+        // 2. Staff at Facility A cannot list Client B's SKUs (Client B is authorized only at Facility B)
+        using (var deniedExplicit = await _http.SendAsync(AuthedReq(
+            HttpMethod.Get, $"/api/v1/outbound/orders/catalog-items?clientId={ClientB}&facilityId={FacilityA}", StaffOrderCreatorAId)))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, deniedExplicit.StatusCode);
+        }
+
+        // 3. Staff cannot bypass facility/client check by omitting facilityId
+        using (var deniedOmittedFac = await _http.SendAsync(AuthedReq(
+            HttpMethod.Get, $"/api/v1/outbound/orders/catalog-items?clientId={ClientB}", StaffOrderCreatorAId)))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, deniedOmittedFac.StatusCode);
+        }
+
+        // 4. Staff cannot bypass using X-Tenant-Id header (ClientB or arbitrary GUID)
+        using (var deniedHeaderClientB = await _http.SendAsync(AuthedReq(
+            HttpMethod.Get, "/api/v1/outbound/orders/catalog-items", StaffOrderCreatorAId, tenantHeader: ClientB)))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, deniedHeaderClientB.StatusCode);
+        }
+
+        using (var deniedArbitraryHeader = await _http.SendAsync(AuthedReq(
+            HttpMethod.Get, $"/api/v1/outbound/orders/catalog-items?facilityId={FacilityA}", StaffOrderCreatorAId, tenantHeader: Guid.NewGuid())))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, deniedArbitraryHeader.StatusCode);
+        }
+
+        // Cross-facility read permission preserves authorized Facility B lookup while rejecting Facility A for ClientB
+        using (var crossReadAllowed = await _http.SendAsync(AuthedReq(
+            HttpMethod.Get, $"/api/v1/outbound/orders/catalog-items?clientId={ClientB}&facilityId={FacilityB}", StaffMultiFacReaderFacAId)))
+        {
+            Assert.Equal(HttpStatusCode.OK, crossReadAllowed.StatusCode);
+            using var doc = await JsonDocument.ParseAsync(await crossReadAllowed.Content.ReadAsStreamAsync());
+            Assert.Equal(ItemClientBActiveId, doc.RootElement.GetProperty("items")[0].GetProperty("id").GetGuid());
+        }
+
+        using (var crossReadBadPair = await _http.SendAsync(AuthedReq(
+            HttpMethod.Get, $"/api/v1/outbound/orders/catalog-items?clientId={ClientB}&facilityId={FacilityA}", StaffMultiFacReaderFacAId)))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, crossReadBadPair.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task P741_04_StaffOrderCreateAndBulkImport_EnforceClientFacilityAccess_WithoutUnauthorizedPersistence()
+    {
+        var address = new
+        {
+            recipientName = "Staff Recipient",
+            companyName = "Partner Dock",
+            addressLine1 = "500 Logistics Blvd",
+            city = "Chicago",
+            stateOrProvince = "IL",
+            postalCode = "60607",
+            countryCode = "USA"
+        };
+
+        // 5. Authorized Staff order creation & bulk import succeed for valid (ClientA, FacilityA)
+        var validOrderPayload = new
+        {
+            facilityId = FacilityA,
+            externalOrderReference = "STAFF-OK-ORD-1",
+            orderType = "B2BSalesOrder",
+            priority = 6,
+            serviceLevel = "StandardGround",
+            shippingAddress = address,
+            lines = new[] { new { itemId = ItemClientAActiveId, quantityOrdered = 3m } }
+        };
+        using (var okOrdResp = await _http.SendAsync(AuthedReq(
+            HttpMethod.Post, "/api/v1/outbound/orders", StaffOrderCreatorAId, validOrderPayload, tenantHeader: ClientA)))
+        {
+            Assert.Equal(HttpStatusCode.Created, okOrdResp.StatusCode);
+        }
+
+        var validImportPayload = new
+        {
+            facilityId = FacilityA,
+            sourceFileName = "staff-valid-import.json",
+            orders = new[]
+            {
+                new
+                {
+                    facilityId = FacilityA,
+                    externalOrderReference = "STAFF-OK-IMP-1",
+                    orderType = "B2BSalesOrder",
+                    priority = 5,
+                    serviceLevel = "StandardGround",
+                    shippingAddress = address,
+                    lines = new[] { new { itemId = ItemClientAActiveId, quantityOrdered = 2m } }
+                }
+            }
+        };
+        using (var okImpResp = await _http.SendAsync(AuthedReq(
+            HttpMethod.Post, "/api/v1/outbound/orders/bulk-import", StaffOrderCreatorAId, validImportPayload, tenantHeader: ClientA)))
+        {
+            Assert.Equal(HttpStatusCode.OK, okImpResp.StatusCode);
+            using var doc = await JsonDocument.ParseAsync(await okImpResp.Content.ReadAsStreamAsync());
+            Assert.Equal(1, doc.RootElement.GetProperty("successfulRows").GetInt32());
+        }
+
+        // 6. Unauthorized client/facility order creation and bulk import (ClientB at FacilityA) fail with 403 and zero persistence
+        var unauthOrderPayload = new
+        {
+            facilityId = FacilityA,
+            externalOrderReference = "STAFF-UNAUTH-ORD-B",
+            orderType = "B2BSalesOrder",
+            priority = 6,
+            serviceLevel = "StandardGround",
+            shippingAddress = address,
+            lines = new[] { new { itemId = ItemClientBActiveId, quantityOrdered = 3m } }
+        };
+        using (var unauthOrdResp = await _http.SendAsync(AuthedReq(
+            HttpMethod.Post, "/api/v1/outbound/orders", StaffOrderCreatorAId, unauthOrderPayload, tenantHeader: ClientB)))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, unauthOrdResp.StatusCode);
+        }
+
+        var unauthImportPayload = new
+        {
+            facilityId = FacilityA,
+            sourceFileName = "staff-unauth-import.json",
+            orders = new[]
+            {
+                new
+                {
+                    facilityId = FacilityA,
+                    externalOrderReference = "STAFF-UNAUTH-IMP-B",
+                    orderType = "B2BSalesOrder",
+                    priority = 5,
+                    serviceLevel = "StandardGround",
+                    shippingAddress = address,
+                    lines = new[] { new { itemId = ItemClientBActiveId, quantityOrdered = 2m } }
+                }
+            }
+        };
+        using (var unauthImpResp = await _http.SendAsync(AuthedReq(
+            HttpMethod.Post, "/api/v1/outbound/orders/bulk-import", StaffOrderCreatorAId, unauthImportPayload, tenantHeader: ClientB)))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, unauthImpResp.StatusCode);
+        }
+
+        // Cross-facility reader (Facility A assigned + Analytics.MultiFacilityView) still cannot mutate Facility B
+        var mutFacBPayload = new
+        {
+            facilityId = FacilityB,
+            externalOrderReference = "STAFF-MUTATE-FACB",
+            orderType = "B2BSalesOrder",
+            priority = 6,
+            serviceLevel = "StandardGround",
+            shippingAddress = address,
+            lines = new[] { new { itemId = ItemClientBActiveId, quantityOrdered = 1m } }
+        };
+        using (var mutFacBResp = await _http.SendAsync(AuthedReq(
+            HttpMethod.Post, "/api/v1/outbound/orders", StaffMultiFacReaderFacAId, mutFacBPayload, tenantHeader: ClientB)))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, mutFacBResp.StatusCode);
+        }
+
+        using var verifyScope = _app.Services.CreateScope();
+        var db = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        Assert.Equal(0, await db.OutboundOrders.IgnoreQueryFilters().CountAsync(o => o.ClientId == ClientB));
+        Assert.Equal(0, await db.OrderImportBatches.IgnoreQueryFilters().CountAsync(b => b.ClientId == ClientB));
     }
 }
