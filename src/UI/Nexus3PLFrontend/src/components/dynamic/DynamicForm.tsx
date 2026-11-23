@@ -107,12 +107,10 @@ export const DynamicForm: React.FC<DynamicFormProps> = ({
   };
 
   const auth = useContext(AuthContext);
-  const isSuperAdmin = auth?.user?.roles?.some((r) => r.toLowerCase() === 'superadmin') ?? false;
 
   const checkPermission = (perm?: string): boolean => {
     if (!perm) return true;
     if (!auth || !auth.user) return false;
-    if (isSuperAdmin) return true;
     return auth.hasPermission(perm);
   };
 

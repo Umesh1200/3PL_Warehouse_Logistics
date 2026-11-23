@@ -17,7 +17,7 @@ import {
 import { PutawayTaskDto, ReceivingSessionDto, PutawayTaskStatus, ReceivingStatus } from '../types/inbound';
 
 export const DashboardPage: React.FC = () => {
-  const { user, hasPermission, hasAnyPermission, hasRole } = useAuth();
+  const { user, hasPermission, hasAnyPermission, isSuperAdmin } = useAuth();
   const { activeFacility } = useFacility();
 
   // Metrics telemetry state
@@ -71,8 +71,7 @@ export const DashboardPage: React.FC = () => {
     currentFacilityRef.current = activeFacility?.id;
   }, [activeFacility?.id]);
 
-  // Backend RBAC permissions
-  const isSuperAdmin = hasRole('SuperAdmin');
+  // Backend RBAC permissions (verified Staff + SuperAdmin handled centrally in AuthContext)
   const canViewAnalytics = hasPermission('analytics:control-tower:view');
   // Listing queues requires inbound:view per backend controller authorization
   const canListPutawayQueue = hasPermission('inbound:view');

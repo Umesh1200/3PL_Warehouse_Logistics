@@ -1,6 +1,7 @@
 import React from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { Link } from '../../context/RouterContext';
+import { UserType, normalizeUserTypeStrict } from '../../types/auth';
 import { AppIcon, AppIconName } from '../common/AppIcon';
 
 interface LaunchpadItem {
@@ -11,14 +12,34 @@ interface LaunchpadItem {
   icon: AppIconName;
   permission?: string;
   permissions?: string[];
+  allowedUserTypes?: UserType[];
   badge?: string;
 }
 
 export const LaunchpadGrid: React.FC = () => {
-  const { hasPermission, hasAnyPermission, hasRole } = useAuth();
-  const isSuperAdmin = hasRole('SuperAdmin');
+  const { hasPermission, hasAnyPermission, isSuperAdmin, user } = useAuth();
 
   const items: LaunchpadItem[] = [
+    {
+      id: 'outbound-orders',
+      title: 'Outbound Orders & Allocation',
+      description: 'Order entry, bulk import, stock availability checks, and FIFO/FEFO inventory reservations.',
+      path: '/app/outbound/orders',
+      icon: 'Send',
+      permissions: ['outbound:orders:view', 'outbound:orders:create'],
+      allowedUserTypes: [UserType.Staff, UserType.Client],
+      badge: 'Fulfillment',
+    },
+    {
+      id: 'pick-waves',
+      title: 'Pick Wave Planning',
+      description: 'Group allocated orders into discrete, batch, zone, or bulk pick waves and release to floor.',
+      path: '/app/outbound/waves',
+      icon: 'Layers',
+      permissions: ['outbound:waves:view', 'outbound:waves:manage'],
+      allowedUserTypes: [UserType.Staff],
+      badge: 'Wave Planner',
+    },
     {
       id: 'putaway',
       title: 'Directed Putaway RF',
@@ -82,6 +103,12 @@ export const LaunchpadGrid: React.FC = () => {
   ];
 
   const authorizedItems = items.filter((item) => {
+    if (item.allowedUserTypes && item.allowedUserTypes.length > 0) {
+      const userType = user ? normalizeUserTypeStrict(user.userType) : null;
+      if (!userType || !item.allowedUserTypes.includes(userType)) {
+        return false;
+      }
+    }
     if (isSuperAdmin) return true;
     if (item.permission) return hasPermission(item.permission);
     if (item.permissions) return hasAnyPermission(item.permissions);

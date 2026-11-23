@@ -40,12 +40,10 @@ export const DynamicList: React.FC<DynamicListProps> = ({
   onAction,
 }) => {
   const auth = useContext(AuthContext);
-  const isSuperAdmin = auth?.user?.roles?.some((r) => r.toLowerCase() === 'superadmin') ?? false;
 
   const checkPermission = (perm?: string): boolean => {
     if (!perm) return true;
     if (!auth || !auth.user) return false; // Fail closed: no permissive actions without auth context
-    if (isSuperAdmin) return true;
     return auth.hasPermission(perm);
   };
 

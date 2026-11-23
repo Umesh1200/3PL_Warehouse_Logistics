@@ -3547,6 +3547,28 @@ try
 
     Console.WriteLine("PASS PostgreSQL P74-0C-04 Atomic POD Supersession, Rollback, Concurrent Lock Fencing & ConfirmDelivery Enforcement verified cleanly.");
 
+    await Phase741OutboundLifecycleCheck.RunAsync(
+        operationalConn,
+        p74Client,
+        client1Id,
+        facilityId,
+        bSupId,
+        StaffReq,
+        (cId) =>
+        {
+            if (cId == Guid.Empty) { TestAuthHandler.CustomClaims = null; return; }
+            TestAuthHandler.CustomClaims = new List<Claim>
+            {
+                new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+                new Claim(ClaimTypes.Role, SystemRoles.ClientAdmin),
+                new Claim("user_type", "Client"),
+                new Claim("tenant_id", cId.ToString()),
+                new Claim("permissions", Permissions.Outbound.OrdersView),
+                new Claim("permissions", Permissions.Outbound.OrdersCreate),
+                new Claim("permissions", Permissions.Outbound.WavesView)
+            };
+        });
+
     if (Directory.Exists(pgPodStorageDir))
     {
         try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }

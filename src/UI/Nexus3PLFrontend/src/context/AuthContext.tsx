@@ -2,12 +2,16 @@ import React, { createContext, useContext, useEffect, useState, useCallback } fr
 import { authApi } from '../services/authApi';
 import { tokenManager, requestManager } from '../services/apiClient';
 import { schemaService } from '../services/schemaService';
-import { CurrentUserDto, LoginRequest } from '../types/auth';
+import { CurrentUserDto, LoginRequest, UserType, normalizeUserTypeStrict } from '../types/auth';
 
 interface AuthContextType {
   user: CurrentUserDto | null;
   isAuthenticated: boolean;
   isLoading: boolean;
+  isStaff: boolean;
+  isClient: boolean;
+  isDriver: boolean;
+  isSuperAdmin: boolean;
   login: (request: LoginRequest) => Promise<void>;
   logout: () => void;
   hasPermission: (permission: string) => boolean;
@@ -87,19 +91,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const hasRole = (role: string): boolean => {
-    if (!user) return false;
+    if (!user || !Array.isArray(user.roles)) return false;
     return user.roles.some((r) => r.toLowerCase() === role.toLowerCase());
   };
 
+  const normalizedUserType = user ? normalizeUserTypeStrict(user.userType) : null;
+  const isStaff = normalizedUserType === UserType.Staff;
+  const isClient = normalizedUserType === UserType.Client;
+  const isDriver = normalizedUserType === UserType.Driver;
+  // Trusted Staff identity + SuperAdmin role required (matches backend CurrentUserContext.IsSuperAdmin)
+  const isSuperAdmin = Boolean(isStaff && hasRole('SuperAdmin'));
+
   const hasPermission = (permission: string): boolean => {
     if (!user) return false;
-    if (hasRole('SuperAdmin')) return true;
+    if (isSuperAdmin) return true;
+    if (!Array.isArray(user.permissions)) return false;
     return user.permissions.some((p) => p.toLowerCase() === permission.toLowerCase());
   };
 
   const hasAnyPermission = (permissions: string[]): boolean => {
     if (!user) return false;
-    if (hasRole('SuperAdmin')) return true;
+    if (isSuperAdmin) return true;
     return permissions.some((p) => hasPermission(p));
   };
 
@@ -109,6 +121,10 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         user,
         isAuthenticated: !!user,
         isLoading,
+        isStaff,
+        isClient,
+        isDriver,
+        isSuperAdmin,
         login,
         logout,
         hasPermission,

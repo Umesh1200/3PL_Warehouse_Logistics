@@ -1,14 +1,17 @@
 import React, { useEffect } from 'react';
 import { useAuth } from '../../context/AuthContext';
 import { useRouter, Link } from '../../context/RouterContext';
+import { UserType, normalizeUserTypeStrict } from '../../types/auth';
 import logoMark from '../../assets/logo-mark.svg';
 import { AppIcon, AppIconName } from '../common/AppIcon';
 
 interface NavItem {
   label: string;
   path: string;
+  activePaths?: string[];
   permission?: string;
   permissions?: string[];
+  allowedUserTypes?: UserType[];
   icon: AppIconName;
 }
 
@@ -23,7 +26,7 @@ export interface SidebarProps {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => {
-  const { hasPermission, hasAnyPermission, user } = useAuth();
+  const { hasPermission, hasAnyPermission, isSuperAdmin, user } = useAuth();
   const { path } = useRouter();
 
   // Escape key listener to close mobile sidebar drawer
@@ -74,10 +77,19 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => 
           icon: 'Boxes',
         },
         {
-          label: 'Outbound & Fulfillment',
-          path: '/app/outbound',
-          permissions: ['outbound:orders:view', 'outbound:ship'],
+          label: 'Outbound Orders',
+          path: '/app/outbound/orders',
+          activePaths: ['/app/outbound', '/app/outbound/orders'],
+          permissions: ['outbound:orders:view', 'outbound:orders:create'],
+          allowedUserTypes: [UserType.Staff, UserType.Client],
           icon: 'Send',
+        },
+        {
+          label: 'Pick Waves',
+          path: '/app/outbound/waves',
+          permissions: ['outbound:waves:view', 'outbound:waves:manage'],
+          allowedUserTypes: [UserType.Staff],
+          icon: 'Layers',
         },
         {
           label: 'Transportation & Carriers',
@@ -125,8 +137,14 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => 
   ];
 
   const isItemVisible = (item: NavItem): boolean => {
+    if (item.allowedUserTypes && item.allowedUserTypes.length > 0) {
+      const userType = user ? normalizeUserTypeStrict(user.userType) : null;
+      if (!userType || !item.allowedUserTypes.includes(userType)) {
+        return false;
+      }
+    }
     if (!item.permission && !item.permissions) return true;
-    if (user?.roles.some((r) => r.toLowerCase() === 'superadmin')) return true;
+    if (isSuperAdmin) return true;
     if (item.permission && hasPermission(item.permission)) return true;
     if (item.permissions && hasAnyPermission(item.permissions)) return true;
     return false;
@@ -180,7 +198,10 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => 
                 <div className="section-title">{section.title}</div>
                 <ul className="nav-list">
                   {visibleItems.map((item) => {
-                    const isActive = path === item.path || path.startsWith(`${item.path}/`);
+                    const isActive =
+                      path === item.path ||
+                      path.startsWith(`${item.path}/`) ||
+                      Boolean(item.activePaths?.includes(path));
                     return (
                       <li key={item.path} className="nav-item">
                         <Link

@@ -14,6 +14,8 @@ import { FacilitiesPage } from './pages/admin/FacilitiesPage';
 import { ReceivingPage } from './pages/inbound/ReceivingPage';
 import { PutawayPage } from './pages/inbound/PutawayPage';
 import { StockOnHandPage } from './pages/inventory/StockOnHandPage';
+import { OutboundOrdersPage } from './pages/outbound/OutboundOrdersPage';
+import { PickWavesPage } from './pages/outbound/PickWavesPage';
 import './styles/base.css';
 
 const AppRoutes: React.FC = () => {
@@ -60,8 +62,15 @@ const AppRoutes: React.FC = () => {
       content = <StockOnHandPage />;
       pageTitle = 'Stock on Hand & Inventory Ledger';
       breadcrumb = 'OPERATIONAL WORKFLOWS / INVENTORY BALANCES';
+    } else if (path === '/app/outbound' || path === '/app/outbound/orders') {
+      content = <OutboundOrdersPage />;
+      pageTitle = 'Outbound Orders & Allocation';
+      breadcrumb = 'OPERATIONAL WORKFLOWS / OUTBOUND ORDERS';
+    } else if (path === '/app/outbound/waves') {
+      content = <PickWavesPage />;
+      pageTitle = 'Pick Wave Planning & Release';
+      breadcrumb = 'OPERATIONAL WORKFLOWS / PICK WAVES';
     } else if (
-      path === '/app/outbound' ||
       path === '/app/transportation' ||
       path === '/app/billing'
     ) {

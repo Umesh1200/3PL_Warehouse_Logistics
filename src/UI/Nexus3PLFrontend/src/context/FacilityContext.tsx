@@ -15,12 +15,15 @@ interface FacilityContextType {
 const FacilityContext = createContext<FacilityContextType | null>(null);
 
 export const FacilityProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  const { isAuthenticated, user } = useAuth();
+  const { isAuthenticated, isLoading, user } = useAuth();
   const [facilities, setFacilities] = useState<FacilityDto[]>([]);
   const [activeFacility, setActiveFacilityState] = useState<FacilityDto | null>(null);
   const [isLoadingFacilities, setIsLoadingFacilities] = useState<boolean>(false);
 
   const refreshFacilities = useCallback(async () => {
+    if (isLoading) {
+      return;
+    }
     if (!isAuthenticated) {
       setFacilities([]);
       setActiveFacilityState(null);
@@ -52,7 +55,7 @@ export const FacilityProvider: React.FC<{ children: React.ReactNode }> = ({ chil
     } finally {
       setIsLoadingFacilities(false);
     }
-  }, [isAuthenticated]);
+  }, [isAuthenticated, isLoading]);
 
   useEffect(() => {
     refreshFacilities();

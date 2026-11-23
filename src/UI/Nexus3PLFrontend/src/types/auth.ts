@@ -25,6 +25,19 @@ export function normalizeUserType(val: any): UserType {
   return UserType.Staff;
 }
 
+/**
+ * Fail-closed UserType normalizer for authoritative RBAC checks.
+ * Missing or unrecognized values return null rather than defaulting to Staff.
+ */
+export function normalizeUserTypeStrict(val: any): UserType | null {
+  if (val === undefined || val === null || val === '') return null;
+  const str = String(val).trim().toLowerCase();
+  if (val === 1 || str === 'staff') return UserType.Staff;
+  if (val === 2 || str === 'client' || str === 'clientuser') return UserType.Client;
+  if (val === 3 || str === 'driver') return UserType.Driver;
+  return null;
+}
+
 export function normalizeUserStatus(val: any): UserStatus {
   if (!val) return UserStatus.Active;
   const str = String(val).trim().toLowerCase();
