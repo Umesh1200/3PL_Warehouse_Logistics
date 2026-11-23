@@ -95,6 +95,7 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
 
     const waves: any[] = [];
     let generatedWavePayload: any = null;
+    let createdWaveRecord: any = null;
 
     await page.route('**/api/v1/auth/login', async (route) => {
       return route.fulfill({
@@ -285,17 +286,21 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
       }
 
       if (path.endsWith('/allocate') && method === 'POST') {
-        orders[0] = {
-          ...orders[0],
+        const orderIdFromPath = path.split('/').slice(-2, -1)[0];
+        const idx = orders.findIndex((o) => o.id === orderIdFromPath);
+        const targetIdx = idx >= 0 ? idx : 0;
+        const target = orders[targetIdx];
+        orders[targetIdx] = {
+          ...target,
           status: 'Allocated',
-          lines: [{ ...orders[0].lines[0], quantityAllocated: 12, remainingDemand: 0, status: 'Allocated' }],
+          lines: [{ ...target.lines[0], quantityAllocated: 12, remainingDemand: 0, status: 'Allocated' }],
         };
         return route.fulfill({
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify({
-            outboundOrderId: orders[0].id,
-            orderNumber: orders[0].orderNumber,
+            outboundOrderId: orders[targetIdx].id,
+            orderNumber: orders[targetIdx].orderNumber,
             status: 'Allocated',
             totalQuantityOrdered: 12,
             totalQuantityAllocated: 12,
@@ -305,7 +310,7 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
             attemptCount: 1,
             lineSummaries: [
               {
-                lineId: orders[0].lines[0].id,
+                lineId: orders[targetIdx].lines[0].id,
                 lineNumber: 1,
                 itemId: 'item-e2e-1',
                 sku: 'SKU-PUMP-741',
@@ -343,12 +348,16 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
       }
 
       if (path === '/api/v1/outbound/orders' && method === 'GET') {
+        const statusParam = urlObj.searchParams.get('status');
+        const filteredOrders = statusParam
+          ? orders.filter((o) => o.status.toLowerCase() === statusParam.toLowerCase())
+          : orders;
         return route.fulfill({
           status: 200,
           contentType: 'application/json',
           body: JSON.stringify({
-            items: orders,
-            totalCount: orders.length,
+            items: filteredOrders,
+            totalCount: filteredOrders.length,
             pageNumber: 1,
             pageSize: 15,
           }),
@@ -433,6 +442,27 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
 
       if (path === '/api/v1/outbound/pick-waves' && method === 'POST') {
         generatedWavePayload = JSON.parse(route.request().postData() || '{}');
+        const eligibleOrders = orders.filter(
+          (o) => o.status === 'Allocated' || o.status === 'PartiallyAllocated'
+        );
+        const requestedIds: string[] = Array.isArray(generatedWavePayload.request.orderIds)
+          ? generatedWavePayload.request.orderIds
+          : [];
+        const targetOrder =
+          (requestedIds.length > 0
+            ? eligibleOrders.find((o) => requestedIds.includes(o.id))
+            : eligibleOrders[0]) ?? null;
+
+        if (!targetOrder) {
+          return route.fulfill({
+            status: 400,
+            contentType: 'application/json',
+            body: JSON.stringify({ detail: 'No allocated orders eligible for pick wave generation.' }),
+          });
+        }
+
+        const targetLine = targetOrder.lines[0];
+        const qtyAllocated = Number(targetLine.quantityAllocated || 0);
         const createdWave = {
           id: 'wave-e2e-1',
           clientId: generatedWavePayload.request.clientId,
@@ -440,39 +470,39 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
           waveNumber: 'WAVE-20261123-E2E',
           waveType: generatedWavePayload.request.waveType,
           status: 'Planning',
-          priority: 7,
+          priority: targetOrder.priority,
           ordersCount: 1,
           tasksCount: 1,
-          totalQuantityToPick: 12,
+          totalQuantityToPick: qtyAllocated,
           totalQuantityPicked: 0,
           estimatedTravelMeters: 84.5,
           createdAt: '2026-11-23T09:05:00Z',
           waveOrders: [
             {
               id: 'wo-e2e-1',
-              outboundOrderId: orders[0].id,
-              orderNumber: orders[0].orderNumber,
-              customerName: orders[0].customerName,
-              priority: 7,
+              outboundOrderId: targetOrder.id,
+              orderNumber: targetOrder.orderNumber,
+              customerName: targetOrder.customerName,
+              priority: targetOrder.priority,
               sequenceNumber: 1,
-              orderStatus: 'Allocated',
+              orderStatus: targetOrder.status,
             },
           ],
           tasks: [
             {
               id: 'pt-e2e-1',
               pickWaveId: 'wave-e2e-1',
-              outboundOrderId: orders[0].id,
-              orderNumber: orders[0].orderNumber,
-              outboundOrderLineId: 'line-e2e-1',
+              outboundOrderId: targetOrder.id,
+              orderNumber: targetOrder.orderNumber,
+              outboundOrderLineId: targetLine.id,
               inventoryAllocationId: 'alloc-e2e-1',
               stockOnHandId: 'stock-e2e-1',
-              itemId: 'item-e2e-1',
-              sku: 'SKU-PUMP-741',
-              itemDescription: 'Hydraulic Valve Assembly',
+              itemId: targetLine.itemId,
+              sku: targetLine.sku,
+              itemDescription: targetLine.itemDescription,
               sourceLocationId: 'loc-e2e-1',
               sourceLocationCode: 'A-01-BIN',
-              quantityToPick: 12,
+              quantityToPick: qtyAllocated,
               quantityPicked: 0,
               shortPickQuantity: 0,
               pickSequence: 1,
@@ -481,6 +511,7 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
             },
           ],
         };
+        createdWaveRecord = createdWave;
         waves.unshift(createdWave);
         return route.fulfill({ status: 201, contentType: 'application/json', body: JSON.stringify(createdWave) });
       }
@@ -550,11 +581,22 @@ test.describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves E2E', () =>
     // Navigate to Pick Waves (/app/outbound/waves)
     await page.locator('aside.app-sidebar a[href="/app/outbound/waves"]').click();
     await page.click('[data-testid="open-generate-wave-btn"]');
+    // Only Allocated order SO-2026-E2E-1 is eligible (unallocated SO-2026-E2E-NEW is excluded)
+    await expect(page.getByText('SO-2026-E2E-1')).toBeVisible();
+    await expect(page.getByText('SO-2026-E2E-NEW')).toHaveCount(0);
     await page.click('[data-testid="submit-generate-wave"]');
 
     expect(generatedWavePayload).toHaveProperty('request');
+    expect(createdWaveRecord).toBeTruthy();
+    expect(createdWaveRecord.waveOrders[0].outboundOrderId).toBe('ord-e2e-1');
+    expect(createdWaveRecord.waveOrders[0].orderNumber).toBe('SO-2026-E2E-1');
+    expect(createdWaveRecord.waveOrders[0].orderStatus).toBe('Allocated');
+    expect(createdWaveRecord.tasks[0].outboundOrderId).toBe('ord-e2e-1');
+    expect(createdWaveRecord.tasks[0].quantityToPick).toBe(12);
     await expect(page.getByRole('heading', { name: 'Wave WAVE-20261123-E2E' })).toBeVisible();
     await expect(page.getByTestId('wave-travel-estimate')).toContainText('84.5 m');
+    await expect(page.getByText('SO-2026-E2E-1').first()).toBeVisible();
+    await expect(page.getByText('SO-2026-E2E-NEW')).toHaveCount(0);
 
     // Release planning wave
     await page.click('[data-testid="release-wave-wave-e2e-1"]');
