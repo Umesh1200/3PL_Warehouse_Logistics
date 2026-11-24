@@ -96,6 +96,43 @@ export enum ShortPickReason {
   BinInaccessible = 'BinInaccessible',
 }
 
+export enum PackingSessionStatus {
+  Active = 'Active',
+  Completed = 'Completed',
+  Suspended = 'Suspended',
+  Aborted = 'Aborted',
+}
+
+export enum PackageStatus {
+  Open = 'Open',
+  Packed = 'Packed',
+  LabelPrinted = 'LabelPrinted',
+  Staged = 'Staged',
+  Loaded = 'Loaded',
+  Cancelled = 'Cancelled',
+}
+
+export enum ShippingLabelStatus {
+  Generated = 'Generated',
+  Printed = 'Printed',
+  Voided = 'Voided',
+}
+
+export enum PackagingMaterialType {
+  CorrugatedBox = 'CorrugatedBox',
+  PaddedEnvelope = 'PaddedEnvelope',
+  Pallet = 'Pallet',
+  CustomCrate = 'CustomCrate',
+}
+
+export enum HandlingUnitStatus {
+  Available = 'Available',
+  InUse = 'InUse',
+  InTransit = 'InTransit',
+  AtPackingStation = 'AtPackingStation',
+  Damaged = 'Damaged',
+}
+
 export enum StorageTempClass {
   Ambient = 'Ambient',
   TemperatureControlled = 'TemperatureControlled',
@@ -225,12 +262,84 @@ const SHORTAGE_REASON_NUM: Record<number, ShortageReason> = {
   6: ShortageReason.TempClassMismatch,
 };
 
+const PACKING_SESSION_STATUS_NUM: Record<number, PackingSessionStatus> = {
+  1: PackingSessionStatus.Active,
+  2: PackingSessionStatus.Completed,
+  3: PackingSessionStatus.Suspended,
+  4: PackingSessionStatus.Aborted,
+};
+
+const PACKAGE_STATUS_NUM: Record<number, PackageStatus> = {
+  1: PackageStatus.Open,
+  2: PackageStatus.Packed,
+  3: PackageStatus.LabelPrinted,
+  4: PackageStatus.Staged,
+  5: PackageStatus.Loaded,
+  6: PackageStatus.Cancelled,
+};
+
+const SHIPPING_LABEL_STATUS_NUM: Record<number, ShippingLabelStatus> = {
+  1: ShippingLabelStatus.Generated,
+  2: ShippingLabelStatus.Printed,
+  3: ShippingLabelStatus.Voided,
+};
+
+const PACKAGING_MATERIAL_TYPE_NUM: Record<number, PackagingMaterialType> = {
+  1: PackagingMaterialType.CorrugatedBox,
+  2: PackagingMaterialType.PaddedEnvelope,
+  3: PackagingMaterialType.Pallet,
+  4: PackagingMaterialType.CustomCrate,
+};
+
+const HANDLING_UNIT_STATUS_NUM: Record<number, HandlingUnitStatus> = {
+  1: HandlingUnitStatus.Available,
+  2: HandlingUnitStatus.InUse,
+  3: HandlingUnitStatus.InTransit,
+  4: HandlingUnitStatus.AtPackingStation,
+  5: HandlingUnitStatus.Damaged,
+};
+
 const STORAGE_TEMP_NUM: Record<number, StorageTempClass> = {
   1: StorageTempClass.Ambient,
   2: StorageTempClass.TemperatureControlled,
   3: StorageTempClass.Refrigerated,
   4: StorageTempClass.Frozen,
 };
+
+export const normalizePackingSessionStatus = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    PACKING_SESSION_STATUS_NUM,
+    Object.values(PackingSessionStatus),
+    'PackingSessionStatus'
+  );
+
+export const normalizePackageStatus = (v: unknown) =>
+  normalizeStringEnum(v, PACKAGE_STATUS_NUM, Object.values(PackageStatus), 'PackageStatus');
+
+export const normalizeShippingLabelStatus = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    SHIPPING_LABEL_STATUS_NUM,
+    Object.values(ShippingLabelStatus),
+    'ShippingLabelStatus'
+  );
+
+export const normalizePackagingMaterialType = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    PACKAGING_MATERIAL_TYPE_NUM,
+    Object.values(PackagingMaterialType),
+    'PackagingMaterialType'
+  );
+
+export const normalizeHandlingUnitStatus = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    HANDLING_UNIT_STATUS_NUM,
+    Object.values(HandlingUnitStatus),
+    'HandlingUnitStatus'
+  );
 
 export const normalizeOrderStatus = (v: unknown) =>
   normalizeStringEnum(v, ORDER_STATUS_NUM, Object.values(OutboundOrderStatus), 'OutboundOrderStatus');
@@ -690,6 +799,363 @@ export interface WarehouseLocationNodeDto {
   barcode: string;
   isActive: boolean;
   children?: WarehouseLocationNodeDto[];
+}
+
+export interface PackingStationLocationDto {
+  id: string;
+  locationCode: string;
+  barcode: string;
+  aisleCode: string;
+  isActive: boolean;
+}
+
+export interface PackagingMaterialDto {
+  id: string;
+  clientId?: string | null;
+  facilityId: string;
+  code: string;
+  name: string;
+  materialType: PackagingMaterialType;
+  lengthCm: number;
+  widthCm: number;
+  heightCm: number;
+  maxWeightKg: number;
+  tareWeightKg: number;
+  costPerUnit?: number | null;
+}
+
+export interface PackableOrderSummaryDto {
+  id: string;
+  clientId: string;
+  orderNumber: string;
+  customerName: string;
+  status: OutboundOrderStatus;
+  priority: number;
+  serviceLevel: CarrierServiceLevel;
+  totalAllocatedUnits: number;
+  totalPickedUnits: number;
+  totalPackedUnits: number;
+}
+
+export interface PackingSessionSummaryDto {
+  id: string;
+  clientId: string;
+  facilityId: string;
+  packingStationLocationId: string;
+  packingStationLocationCode: string;
+  outboundOrderId: string;
+  orderNumber: string;
+  operatorUserId: string;
+  operatorEmail: string;
+  status: PackingSessionStatus;
+  startedAtUtc: string;
+  completedAtUtc?: string | null;
+  activePackagesCount: number;
+  notes?: string | null;
+}
+
+export interface PackingSessionOrderLineDto {
+  orderLineId: string;
+  itemId: string;
+  sku: string;
+  description: string;
+  quantityOrdered: number;
+  quantityAllocated: number;
+  quantityPicked: number;
+  quantityPacked: number;
+  remainingToPack: number;
+  lineStatus: OutboundOrderLineStatus;
+}
+
+export interface PackingToteSummaryDto {
+  handlingUnitId: string;
+  lpnCode: string;
+  status: HandlingUnitStatus;
+  locationCode?: string | null;
+  totalQuantity: number;
+}
+
+export interface PackageSummaryDto {
+  id: string;
+  clientId: string;
+  facilityId: string;
+  outboundOrderId: string;
+  orderNumber: string;
+  shipmentId?: string | null;
+  handlingUnitId: string;
+  handlingUnitLpn: string;
+  packagingMaterialId?: string | null;
+  packageNumber: string;
+  cartonSequence: number;
+  grossWeightKg: number;
+  tareWeightKg: number;
+  netWeightKg: number;
+  lengthCm: number;
+  widthCm: number;
+  heightCm: number;
+  volumetricWeightKg: number;
+  carrierCode?: string | null;
+  trackingNumber?: string | null;
+  status: PackageStatus;
+  packedByUserId?: string | null;
+  packedAtUtc?: string | null;
+  hasActiveLabel: boolean;
+  latestLabelId?: string | null;
+}
+
+export interface PackingSessionDetailDto extends PackingSessionSummaryDto {
+  orderLines: PackingSessionOrderLineDto[];
+  packages: PackageSummaryDto[];
+  pickedTotes: PackingToteSummaryDto[];
+}
+
+export interface StartPackingSessionRequest {
+  facilityId: string;
+  packingStationLocationId: string;
+  outboundOrderId: string;
+}
+
+export interface PackingSessionResultDto {
+  isSuccess: boolean;
+  sessionId: string;
+  status: PackingSessionStatus;
+  outboundOrderId: string;
+  orderNumber: string;
+  packingStationLocationId: string;
+  stationLocationCode: string;
+  operatorUserId: string;
+  startedAtUtc: string;
+  activePackagesCount: number;
+  message: string;
+}
+
+export interface CartonizationRecommendRequest {
+  clientId: string;
+  facilityId: string;
+  outboundOrderId?: string;
+  preferredPackagingMaterialId?: string;
+  volumeUtilizationFactor?: number;
+}
+
+export interface CartonItemRecommendationDto {
+  itemId: string;
+  sku: string;
+  quantity: number;
+  totalWeightKg: number;
+  totalVolumeCm3: number;
+}
+
+export interface PackageRecommendationDto {
+  packageIndex: number;
+  packagingMaterialId: string;
+  packagingMaterialCode: string;
+  packagingMaterialName: string;
+  materialType: PackagingMaterialType;
+  boxLengthCm: number;
+  boxWidthCm: number;
+  boxHeightCm: number;
+  boxMaxWeightKg: number;
+  tareWeightKg: number;
+  estimatedNetWeightKg: number;
+  estimatedGrossWeightKg: number;
+  estimatedVolumeCm3: number;
+  boxCapacityVolumeCm3: number;
+  volumetricWeightKg: number;
+  volumeUtilizationPercentage: number;
+  items: CartonItemRecommendationDto[];
+}
+
+export interface CartonizationRecommendationDto {
+  isSuccess: boolean;
+  recommendedPackageCount: number;
+  recommendedPackages: PackageRecommendationDto[];
+  totalEstimatedGrossWeightKg: number;
+  totalEstimatedVolumeCm3: number;
+  message: string;
+  warnings: string[];
+}
+
+export interface CreatePackageRequest {
+  packingSessionId: string;
+  packagingMaterialId?: string | null;
+  overrideReason?: string;
+}
+
+export interface CreatePackageResultDto {
+  isSuccess: boolean;
+  packageId: string;
+  packageNumber: string;
+  handlingUnitId: string;
+  handlingUnitLpn: string;
+  status: PackageStatus;
+  packagingMaterialId?: string | null;
+  packagingMaterialCode?: string | null;
+  lengthCm: number;
+  widthCm: number;
+  heightCm: number;
+  tareWeightKg: number;
+  message: string;
+}
+
+export interface PackItemRequest {
+  packingSessionId: string;
+  packageId: string;
+  scannedToteLpn: string;
+  scannedItemBarcode: string;
+  scannedLotNumber?: string | null;
+  quantity: number;
+  idempotencyKey?: string;
+}
+
+export interface PackItemResultDto {
+  isSuccess: boolean;
+  packageId: string;
+  packageNumber: string;
+  packageLineId: string;
+  itemId: string;
+  sku: string;
+  lotNumber?: string | null;
+  quantityPacked: number;
+  remainingToteQuantity: number;
+  remainingOrderLineDemand: number;
+  sourceToteLpn: string;
+  cartonLpn: string;
+  inventoryTransactionId: number;
+  isOrderLineComplete: boolean;
+  isOrderFullyPacked: boolean;
+  message: string;
+}
+
+export interface ClosePackageResultDto {
+  isSuccess: boolean;
+  packageId: string;
+  packageNumber: string;
+  grossWeightKg: number;
+  tareWeightKg: number;
+  netWeightKg: number;
+  volumetricWeightKg: number;
+  status: PackageStatus;
+  message: string;
+}
+
+export interface ReleaseToteResultDto {
+  isSuccess: boolean;
+  handlingUnitId: string;
+  lpnCode: string;
+  status: HandlingUnitStatus;
+  message: string;
+}
+
+export interface CompletePackingSessionResultDto {
+  isSuccess: boolean;
+  sessionId: string;
+  status: PackingSessionStatus;
+  completedAtUtc?: string | null;
+  totalPackagesCount: number;
+  totalWeightKg: number;
+  message: string;
+}
+
+export interface CarrierRateQuoteDto {
+  carrierCode: string;
+  carrierName: string;
+  serviceLevel: CarrierServiceLevel;
+  serviceDescription: string;
+  totalAmount: number;
+  currency: string;
+  estimatedDeliveryDays: number;
+  isGuaranteed: boolean;
+}
+
+export interface GetPackageRatesRequest {
+  packageId: string;
+  preferredCarrierCode?: string;
+  preferredServiceLevel?: CarrierServiceLevel;
+}
+
+export interface GenerateShippingLabelRequest {
+  packageId: string;
+  carrierCode: string;
+  serviceLevel: CarrierServiceLevel;
+  labelFormat: string;
+  idempotencyKey?: string;
+  simulateFailure?: boolean;
+}
+
+export interface GenerateShippingLabelResultDto {
+  isSuccess: boolean;
+  packageId: string;
+  packageNumber: string;
+  labelId: string;
+  trackingNumber: string;
+  carrierCode: string;
+  serviceLevel: CarrierServiceLevel;
+  labelFormat: string;
+  labelData: string;
+  routingCode?: string | null;
+  rateCharged: number;
+  packageStatus: PackageStatus;
+  labelStatus: ShippingLabelStatus;
+  isSimulated: boolean;
+  message: string;
+  errorMessage?: string | null;
+}
+
+export interface VoidShippingLabelRequest {
+  reason: string;
+  idempotencyKey?: string;
+  simulateFailure?: boolean;
+}
+
+export interface VoidShippingLabelResultDto {
+  isSuccess: boolean;
+  labelId: string;
+  packageId: string;
+  trackingNumber: string;
+  labelStatus: ShippingLabelStatus;
+  packageStatus: PackageStatus;
+  voidConfirmationNumber: string;
+  message: string;
+  errorMessage?: string | null;
+}
+
+export interface ShippingLabelDto {
+  id: string;
+  packageId: string;
+  packageNumber: string;
+  trackingNumber: string;
+  carrierCode: string;
+  serviceLevel: CarrierServiceLevel;
+  labelFormat: string;
+  labelData: string;
+  routingCode?: string | null;
+  status: ShippingLabelStatus;
+  generatedAtUtc: string;
+  printedAtUtc?: string | null;
+  voidedAtUtc?: string | null;
+  voidReason?: string | null;
+}
+
+export interface GetPackingSessionsParams {
+  facilityId: string;
+  clientId?: string;
+  status?: PackingSessionStatus;
+  outboundOrderId?: string;
+  packingStationLocationId?: string;
+  searchTerm?: string;
+  pageNumber?: number;
+  pageSize?: number;
+}
+
+export interface GetPackingPackagesParams {
+  facilityId: string;
+  clientId?: string;
+  packingSessionId?: string;
+  outboundOrderId?: string;
+  status?: PackageStatus;
+  searchTerm?: string;
+  pageNumber?: number;
+  pageSize?: number;
 }
 
 export type OutboundPagedResult<T> = PagedResult<T>;

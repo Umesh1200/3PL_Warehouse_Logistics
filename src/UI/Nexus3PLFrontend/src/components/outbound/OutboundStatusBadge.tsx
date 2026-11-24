@@ -1,12 +1,17 @@
 import React from 'react';
 import {
+  CarrierServiceLevel,
   ImportBatchStatus,
   OutboundOrderDto,
   OutboundOrderStatus,
   OutboundOrderType,
+  PackagingMaterialType,
+  PackageStatus,
+  PackingSessionStatus,
   PickTaskStatus,
   PickWaveStatus,
   PickWaveType,
+  ShippingLabelStatus,
   ShortPickReason,
 } from '../../types/outbound';
 
@@ -141,4 +146,93 @@ export const WaveStatusBadge: React.FC<{ status: PickWaveStatus }> = ({ status }
 
 export const TaskStatusBadge: React.FC<{ status: PickTaskStatus }> = ({ status }) => (
   <span className={`badge ${getTaskStatusBadgeClass(status)}`}>{status}</span>
+);
+
+export function getPackingSessionStatusBadgeClass(status: PackingSessionStatus): string {
+  switch (status) {
+    case PackingSessionStatus.Completed:
+      return 'badge-success';
+    case PackingSessionStatus.Suspended:
+      return 'badge-warning';
+    case PackingSessionStatus.Aborted:
+      return 'badge-danger';
+    default:
+      return 'badge-info';
+  }
+}
+
+export function getPackageStatusBadgeClass(status: PackageStatus): string {
+  switch (status) {
+    case PackageStatus.Packed:
+    case PackageStatus.LabelPrinted:
+    case PackageStatus.Loaded:
+      return 'badge-success';
+    case PackageStatus.Open:
+    case PackageStatus.Staged:
+      return 'badge-warning';
+    case PackageStatus.Cancelled:
+      return 'badge-danger';
+    default:
+      return 'badge-info';
+  }
+}
+
+export function getShippingLabelStatusBadgeClass(status: ShippingLabelStatus): string {
+  switch (status) {
+    case ShippingLabelStatus.Printed:
+    case ShippingLabelStatus.Generated:
+      return 'badge-success';
+    case ShippingLabelStatus.Voided:
+      return 'badge-danger';
+    default:
+      return 'badge-info';
+  }
+}
+
+export function formatPackagingMaterialTypeLabel(type: PackagingMaterialType | string): string {
+  switch (type) {
+    case PackagingMaterialType.CorrugatedBox:
+      return 'Corrugated Box';
+    case PackagingMaterialType.PaddedEnvelope:
+      return 'Padded Envelope';
+    case PackagingMaterialType.Pallet:
+      return 'Pallet Base';
+    case PackagingMaterialType.CustomCrate:
+      return 'Custom Crate';
+    default:
+      return String(type);
+  }
+}
+
+export function formatServiceLevelLabel(level: CarrierServiceLevel | string): string {
+  switch (level) {
+    case CarrierServiceLevel.StandardGround:
+      return 'Standard Ground';
+    case CarrierServiceLevel.NextDayAir:
+      return 'Next Day Air';
+    case CarrierServiceLevel.SecondDayAir:
+      return 'Second Day Air';
+    case CarrierServiceLevel.PriorityOvernight:
+      return 'Priority Overnight';
+    case CarrierServiceLevel.FreightLTL:
+      return 'Freight LTL';
+    case CarrierServiceLevel.FreightFTL:
+      return 'Freight FTL';
+    case CarrierServiceLevel.CustomerPickup:
+      return 'Customer Pickup';
+    default:
+      return String(level);
+  }
+}
+
+export const PackingSessionStatusBadge: React.FC<{ status: PackingSessionStatus }> = ({ status }) => (
+  <span className={`badge ${getPackingSessionStatusBadgeClass(status)}`}>{status}</span>
+);
+
+export const PackageStatusBadge: React.FC<{ status: PackageStatus }> = ({ status }) => (
+  <span className={`badge ${getPackageStatusBadgeClass(status)}`}>{status}</span>
+);
+
+export const ShippingLabelStatusBadge: React.FC<{ status: ShippingLabelStatus }> = ({ status }) => (
+  <span className={`badge ${getShippingLabelStatusBadgeClass(status)}`}>{status}</span>
 );

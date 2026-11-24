@@ -14,6 +14,42 @@ namespace Warehouse3PL.WebApi.Controllers;
 public class PackingController : BaseApiController
 {
     /// <summary>
+    /// Retrieves active PackingStation locations for the operator's assigned facility.
+    /// </summary>
+    [HttpGet("stations")]
+    [HasPermission(Permissions.Outbound.Pack)]
+    [ProducesResponseType(typeof(IReadOnlyList<PackingStationLocationDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetPackingStations([FromQuery] Guid? facilityId, CancellationToken ct)
+    {
+        var result = await Mediator.Send(new GetPackingStationsQuery(facilityId), ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Retrieves active facility/client packaging materials for carton selection.
+    /// </summary>
+    [HttpGet("packaging-materials")]
+    [HasPermission(Permissions.Outbound.Pack)]
+    [ProducesResponseType(typeof(IReadOnlyList<PackagingMaterialDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetPackagingMaterials([FromQuery] Guid? facilityId, [FromQuery] Guid? clientId, CancellationToken ct)
+    {
+        var result = await Mediator.Send(new GetPackagingMaterialsQuery(facilityId, clientId), ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Retrieves packable outbound orders (Allocated / PartiallyAllocated / InProgress) in the facility.
+    /// </summary>
+    [HttpGet("packable-orders")]
+    [HasPermission(Permissions.Outbound.Pack)]
+    [ProducesResponseType(typeof(PagedResult<PackableOrderSummaryDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetPackableOrders([FromQuery] GetPackableOrdersQuery query, CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Retrieves paginated packing sessions for workbench resumption and supervisor oversight.
     /// </summary>
     [HttpGet("sessions")]

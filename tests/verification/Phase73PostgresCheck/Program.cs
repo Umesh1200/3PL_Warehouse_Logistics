@@ -3608,6 +3608,190 @@ try
         },
         client2Id);
 
+    // 7.11 Live PostgreSQL Phase 7.4.3 Packing, Cartonization, Idempotent Scan, Scale Close, Tote Release & Label Lifecycle
+    var p743StationId = Guid.NewGuid();
+    var p743BoxId = Guid.NewGuid();
+    var p743OrderId = Guid.NewGuid();
+    var p743LineId = Guid.NewGuid();
+    var p743ToteId = Guid.NewGuid();
+    var p743ToteStockId = Guid.NewGuid();
+    var p743BinId = Guid.NewGuid();
+    var p743WaveId = Guid.NewGuid();
+    var p743AllocId = Guid.NewGuid();
+
+    await using (var p743SeedDb = CreateDb(operationalConn, user))
+    {
+        p743SeedDb.Locations.AddRange(
+            new Location { Id = p743StationId, FacilityId = facilityId, LocationCode = "PG-PACK-STN-1", Barcode = "PG-PACK-STN-1", AisleCode = "PK", RackCode = "01", ShelfLevel = 1, LocationType = LocationType.PackingStation, IsActive = true },
+            new Location { Id = p743BinId, FacilityId = facilityId, LocationCode = "PG-743-BIN", Barcode = "PG-743-BIN", AisleCode = "01", RackCode = "02", ShelfLevel = 1, LocationType = LocationType.Bin, IsActive = true, IsPickable = true });
+
+        p743SeedDb.PackagingMaterials.Add(new PackagingMaterial
+        {
+            Id = p743BoxId,
+            FacilityId = facilityId,
+            ClientId = client1Id,
+            Code = "PG-BOX-MED",
+            Name = "PG Medium Box",
+            MaterialType = PackagingMaterialType.CorrugatedBox,
+            LengthCm = 40m,
+            WidthCm = 30m,
+            HeightCm = 25m,
+            MaxWeightKg = 25m,
+            TareWeightKg = 0.50m,
+            IsActive = true
+        });
+
+        var p743Order = new OutboundOrder
+        {
+            Id = p743OrderId,
+            ClientId = client1Id,
+            FacilityId = facilityId,
+            OrderNumber = "PG-SO-743-01",
+            CustomerName = "PG Packing Customer",
+            Status = OutboundOrderStatus.InProgress,
+            Priority = 7,
+            ServiceLevel = CarrierServiceLevel.StandardGround,
+            ShippingAddress = new ShippingAddress
+            {
+                RecipientName = "Bob Dock",
+                AddressLine1 = "743 Industrial Ave",
+                City = "Columbus",
+                StateOrProvince = "OH",
+                PostalCode = "43215",
+                CountryCode = "US"
+            }
+        };
+        p743Order.Lines.Add(new OutboundOrderLine { Id = p743LineId, OutboundOrderId = p743OrderId, ItemId = item1Id, LineNumber = 1, QuantityOrdered = 4m, QuantityAllocated = 4m, Status = OutboundOrderLineStatus.Allocated });
+        p743SeedDb.OutboundOrders.Add(p743Order);
+
+        p743SeedDb.HandlingUnits.Add(new HandlingUnit { Id = p743ToteId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-TOTE-743", UnitType = HandlingUnitType.Tote, Status = HandlingUnitStatus.InUse, CurrentLocationId = p743StationId, CurrentOutboundOrderId = p743OrderId });
+        p743SeedDb.StockOnHand.Add(new StockOnHand { Id = p743ToteStockId, ClientId = client1Id, FacilityId = facilityId, ItemId = item1Id, LocationId = p743StationId, HandlingUnitId = p743ToteId, LpnCode = "PG-TOTE-743", QtyAvailable = 0m, QtyAllocated = 4m, Version = 1 });
+        p743SeedDb.InventoryAllocations.Add(new InventoryAllocation { Id = p743AllocId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = p743OrderId, OutboundOrderLineId = p743LineId, StockOnHandId = p743ToteStockId, TargetHandlingUnitId = p743ToteId, ItemId = item1Id, LocationId = p743BinId, QuantityRequested = 4m, QuantityAllocated = 4m, QuantityPicked = 4m, Status = AllocationStatus.Picked });
+
+        var p743Wave = new PickWave { Id = p743WaveId, ClientId = client1Id, FacilityId = facilityId, WaveNumber = "PG-WAVE-743", Status = PickWaveStatus.Completed };
+        p743Wave.Tasks.Add(new PickTask { Id = Guid.NewGuid(), ClientId = client1Id, FacilityId = facilityId, PickWaveId = p743WaveId, OutboundOrderId = p743OrderId, OutboundOrderLineId = p743LineId, InventoryAllocationId = p743AllocId, StockOnHandId = p743ToteStockId, ItemId = item1Id, SourceLocationId = p743BinId, TargetHandlingUnitId = p743ToteId, TargetToteBarcode = "PG-TOTE-743", QuantityToPick = 4m, QuantityPicked = 4m, Status = PickTaskStatus.Completed, Version = 1 });
+        p743SeedDb.PickWaves.Add(p743Wave);
+        await p743SeedDb.SaveChangesAsync();
+    }
+
+    // Packing workbench reference lookups & cross-facility 403
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/packing/stations?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.Pack))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/packing/packaging-materials?facilityId={facilityId}&clientId={client1Id}", bOpAId, facilityId, Permissions.Outbound.Pack))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/packing/packable-orders?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.Pack))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/packing/stations?facilityId={p74FacB}", bOpAId, facilityId, $"{Permissions.Outbound.Pack},{Permissions.Analytics.MultiFacilityView}"))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/packing/stations?facilityId={facilityId}", bOpBId, facilityId, Permissions.Outbound.Ship))).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Phase 7.4.3 PostgreSQL reference lookup / permission boundary failed.");
+
+    // Cartonization recommend -> Start session -> Create package
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/cartonization/recommend", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { clientId = client1Id, facilityId, outboundOrderId = p743OrderId, preferredPackagingMaterialId = p743BoxId, volumeUtilizationFactor = 0.85m }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Phase 7.4.3 PostgreSQL cartonization recommendation failed.");
+
+    Guid p743SessionId;
+    using (var startResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/sessions/start", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { facilityId, packingStationLocationId = p743StationId, outboundOrderId = p743OrderId })))
+    {
+        if (startResp.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Phase 7.4.3 PostgreSQL start session failed: {startResp.StatusCode}");
+        p743SessionId = JsonDocument.Parse(await startResp.Content.ReadAsStringAsync()).RootElement.GetProperty("sessionId").GetGuid();
+    }
+
+    // Concurrent session start on same locked order by another operator rejected (422)
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/sessions/start", bOpBId, facilityId, Permissions.Outbound.Pack,
+        new { facilityId, packingStationLocationId = p743StationId, outboundOrderId = p743OrderId }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+        throw new InvalidOperationException("Phase 7.4.3 PostgreSQL concurrent packing session lock expected 422.");
+
+    Guid p743PackageId;
+    using (var pkgResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/packages/create", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { packingSessionId = p743SessionId, packagingMaterialId = p743BoxId })))
+    {
+        if (pkgResp.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Phase 7.4.3 PostgreSQL create package failed: {pkgResp.StatusCode}");
+        p743PackageId = JsonDocument.Parse(await pkgResp.Content.ReadAsStringAsync()).RootElement.GetProperty("packageId").GetGuid();
+    }
+
+    // Release tote BEFORE packing blocked (still holds stock -> 422)
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/totes/release", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { toteLpn = "PG-TOTE-743", facilityId }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+        throw new InvalidOperationException("Phase 7.4.3 PostgreSQL non-empty tote release expected 422.");
+
+    // Idempotent item packing (twice with same idempotencyKey -> exact single inventory transfer & ledger tx)
+    const string pgPackIdemp = "pg-pack-idemp-743";
+    for (int i = 0; i < 2; i++)
+    {
+        using var pkResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", bOpAId, facilityId, Permissions.Outbound.Pack,
+            new { packingSessionId = p743SessionId, packageId = p743PackageId, scannedToteLpn = "PG-TOTE-743", scannedItemBarcode = itemSku, quantity = 4m, idempotencyKey = pgPackIdemp }));
+        if (pkResp.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Phase 7.4.3 PostgreSQL pack attempt {i + 1} failed: {pkResp.StatusCode}");
+    }
+
+    await using (var p743StockCheck = CreateDb(operationalConn, user))
+    {
+        var tStk = await p743StockCheck.StockOnHand.SingleAsync(s => s.Id == p743ToteStockId);
+        var packTxs = await p743StockCheck.InventoryTransactions.Where(t => t.ReferenceId == p743PackageId && t.TxType == InventoryTxType.Pack).ToListAsync();
+        if (tStk.QtyAllocated != 0m || packTxs.Count != 1 || packTxs[0].Quantity != 4m)
+            throw new InvalidOperationException($"Phase 7.4.3 PostgreSQL pack idempotency conservation check failed: toteAlloc={tStk.QtyAllocated}, txCount={packTxs.Count}");
+    }
+
+    // Complete blocked while package Open -> Close package -> Release empty tote -> Complete session
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/packing/sessions/{p743SessionId}/complete", bOpAId, facilityId, Permissions.Outbound.Pack))).StatusCode != HttpStatusCode.UnprocessableEntity)
+        throw new InvalidOperationException("Phase 7.4.3 PostgreSQL complete session expected 422 while carton is still Open.");
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/packing/packages/{p743PackageId}/close", bOpAId, facilityId, Permissions.Outbound.Pack, new { scaleGrossWeightKg = 5.2m }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/totes/release", bOpAId, facilityId, Permissions.Outbound.Pack, new { toteLpn = "PG-TOTE-743", facilityId }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/packing/sessions/{p743SessionId}/complete", bOpAId, facilityId, Permissions.Outbound.Pack))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Phase 7.4.3 PostgreSQL close/release/complete lifecycle failed.");
+
+    // PackOnly denied 403 on shipping rates; ShipOnly quotes rates, handles simulated label failure, idempotent label generation, and voiding!
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/shipping/rates", bOpAId, facilityId, Permissions.Outbound.Pack, new { packageId = p743PackageId }))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/shipping/rates", bOpBId, facilityId, Permissions.Outbound.Ship, new { packageId = p743PackageId }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Phase 7.4.3 PostgreSQL shipping rate permission check failed.");
+
+    using (var failLbl = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/shipping/labels/generate", bOpBId, facilityId, Permissions.Outbound.Ship,
+        new { packageId = p743PackageId, carrierCode = "SIM-UPS", serviceLevel = 1, labelFormat = "ZPL", idempotencyKey = "pg-lbl-fail", simulateFailure = true })))
+    {
+        var j = JsonDocument.Parse(await failLbl.Content.ReadAsStringAsync()).RootElement;
+        if (failLbl.StatusCode != HttpStatusCode.OK || j.GetProperty("isSuccess").GetBoolean() || j.GetProperty("packageStatus").GetString() != "Packed")
+            throw new InvalidOperationException("Phase 7.4.3 PostgreSQL decoupled simulated label failure should leave package in Packed status.");
+    }
+
+    Guid p743LabelId;
+    using (var okLbl = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/shipping/labels/generate", bOpBId, facilityId, Permissions.Outbound.Ship,
+        new { packageId = p743PackageId, carrierCode = "SIM-UPS", serviceLevel = 1, labelFormat = "ZPL", idempotencyKey = "pg-lbl-ok", simulateFailure = false })))
+    {
+        var j = JsonDocument.Parse(await okLbl.Content.ReadAsStringAsync()).RootElement;
+        if (okLbl.StatusCode != HttpStatusCode.OK || !j.GetProperty("isSuccess").GetBoolean() || j.GetProperty("packageStatus").GetString() != "LabelPrinted")
+            throw new InvalidOperationException("Phase 7.4.3 PostgreSQL shipping label generation failed.");
+        p743LabelId = j.GetProperty("labelId").GetGuid();
+    }
+
+    // Idempotent repeat returns exact same labelId, then simulated void failure leaves LabelPrinted, then genuine void reverts Packed
+    using (var dupLbl = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/shipping/labels/generate", bOpBId, facilityId, Permissions.Outbound.Ship,
+        new { packageId = p743PackageId, carrierCode = "SIM-UPS", serviceLevel = 1, labelFormat = "ZPL", idempotencyKey = "pg-lbl-ok", simulateFailure = false })))
+    {
+        var j = JsonDocument.Parse(await dupLbl.Content.ReadAsStringAsync()).RootElement;
+        if (j.GetProperty("labelId").GetGuid() != p743LabelId)
+            throw new InvalidOperationException("Phase 7.4.3 PostgreSQL idempotent label retry returned different labelId.");
+    }
+
+    using (var failVoid = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipping/labels/{p743LabelId}/void", bOpBId, facilityId, Permissions.Outbound.Ship,
+        new { reason = "test fail", idempotencyKey = "pg-void-fail", simulateFailure = true })))
+    {
+        var j = JsonDocument.Parse(await failVoid.Content.ReadAsStringAsync()).RootElement;
+        if (j.GetProperty("isSuccess").GetBoolean() || j.GetProperty("packageStatus").GetString() != "LabelPrinted")
+            throw new InvalidOperationException("Phase 7.4.3 PostgreSQL simulated void failure should leave LabelPrinted.");
+    }
+
+    using (var okVoid = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipping/labels/{p743LabelId}/void", bOpBId, facilityId, Permissions.Outbound.Ship,
+        new { reason = "Re-rate needed", idempotencyKey = "pg-void-ok", simulateFailure = false })))
+    {
+        var j = JsonDocument.Parse(await okVoid.Content.ReadAsStringAsync()).RootElement;
+        if (!j.GetProperty("isSuccess").GetBoolean() || j.GetProperty("packageStatus").GetString() != "Packed" || j.GetProperty("labelStatus").GetString() != "Voided")
+            throw new InvalidOperationException("Phase 7.4.3 PostgreSQL shipping label void failed.");
+    }
+
+    Console.WriteLine("PASS PostgreSQL Phase 7.4.3 Packing, Cartonization, Idempotent Scan, Scale Close, Tote Release, Decoupled Carrier Rating, Label Generation/Void Recovery verified cleanly.");
+
     if (Directory.Exists(pgPodStorageDir))
     {
         try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }

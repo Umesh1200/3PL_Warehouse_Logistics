@@ -3,32 +3,63 @@ import { ClientDto, PagedResult } from '../types/auth';
 import {
   AllocationExecutionResultDto,
   AllocationStrategyType,
+  CarrierRateQuoteDto,
+  CartonizationRecommendationDto,
+  CartonizationRecommendRequest,
+  ClosePackageResultDto,
+  CompletePackingSessionResultDto,
   ConfirmPickTaskRequest,
+  CreatePackageRequest,
+  CreatePackageResultDto,
   DeallocationExecutionResultDto,
   EligiblePickOperatorDto,
+  GenerateShippingLabelRequest,
+  GenerateShippingLabelResultDto,
   GetOutboundOrdersParams,
+  GetPackageRatesRequest,
+  GetPackingPackagesParams,
+  GetPackingSessionsParams,
   GetPickTasksParams,
   GetPickWavesParams,
   ImportOutboundOrdersBulkRequest,
   OrderImportBatchDto,
   OutboundItemOptionDto,
   OutboundOrderDto,
+  PackableOrderSummaryDto,
+  PackagingMaterialDto,
+  PackageSummaryDto,
+  PackingSessionDetailDto,
+  PackingSessionResultDto,
+  PackingSessionSummaryDto,
+  PackingStationLocationDto,
+  PackItemRequest,
+  PackItemResultDto,
   PickConfirmationResultDto,
   PickTaskDto,
   PickWaveDto,
   PickWaveGenerationRequest,
   ReleaseAllocationResultDto,
+  ReleaseToteResultDto,
   ReportShortPickRequest,
+  ShippingLabelDto,
   ShortPickExecutionResultDto,
+  StartPackingSessionRequest,
   StockAvailabilityAssessmentDto,
+  VoidShippingLabelRequest,
+  VoidShippingLabelResultDto,
   WarehouseLocationNodeDto,
   CreateOutboundOrderRequest,
   normalizeAllocationStatus,
+  normalizeHandlingUnitStatus,
   normalizeImportBatchStatus,
   normalizeLineStatus,
   normalizeOrderStatus,
   normalizeOrderType,
+  normalizePackageStatus,
+  normalizePackagingMaterialType,
+  normalizePackingSessionStatus,
   normalizeServiceLevel,
+  normalizeShippingLabelStatus,
   normalizeShortPickReason,
   normalizeShortageReason,
   normalizeStorageTempClass,
@@ -135,6 +166,70 @@ function normalizePickWaveDto(raw: unknown): PickWaveDto {
         }))
       : [],
     tasks: Array.isArray(wave.tasks) ? wave.tasks.map(normalizePickTaskDto) : [],
+  };
+}
+
+function normalizePackingSessionSummaryDto(raw: unknown): PackingSessionSummaryDto {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Received malformed packing session response from server.');
+  }
+  const s = raw as PackingSessionSummaryDto;
+  if (!s.id || !s.outboundOrderId || !s.orderNumber || !s.facilityId) {
+    throw new Error('Received incomplete packing session record missing required identifiers.');
+  }
+  return {
+    ...s,
+    status: normalizePackingSessionStatus(s.status),
+    activePackagesCount: Number(s.activePackagesCount ?? 0),
+  };
+}
+
+function normalizePackageSummaryDto(raw: unknown): PackageSummaryDto {
+  if (!raw || typeof raw !== 'object') {
+    throw new Error('Received malformed package summary response from server.');
+  }
+  const p = raw as PackageSummaryDto;
+  if (!p.id || !p.packageNumber || !p.facilityId) {
+    throw new Error('Received incomplete package record missing required identifiers.');
+  }
+  return {
+    ...p,
+    status: normalizePackageStatus(p.status),
+    cartonSequence: Number(p.cartonSequence ?? 0),
+    grossWeightKg: Number(p.grossWeightKg ?? 0),
+    tareWeightKg: Number(p.tareWeightKg ?? 0),
+    netWeightKg: Number(p.netWeightKg ?? 0),
+    lengthCm: Number(p.lengthCm ?? 0),
+    widthCm: Number(p.widthCm ?? 0),
+    heightCm: Number(p.heightCm ?? 0),
+    volumetricWeightKg: Number(p.volumetricWeightKg ?? 0),
+  };
+}
+
+function normalizePackingSessionDetailDto(raw: unknown): PackingSessionDetailDto {
+  const base = normalizePackingSessionSummaryDto(raw);
+  const d = raw as PackingSessionDetailDto;
+  return {
+    ...base,
+    orderLines: Array.isArray(d.orderLines)
+      ? d.orderLines.map((l) => ({
+          ...l,
+          lineStatus: normalizeLineStatus(l.lineStatus),
+          quantityOrdered: Number(l.quantityOrdered ?? 0),
+          quantityAllocated: Number(l.quantityAllocated ?? 0),
+          quantityPicked: Number(l.quantityPicked ?? 0),
+          quantityPacked: Number(l.quantityPacked ?? 0),
+          remainingToPack: Number(l.remainingToPack ?? 0),
+        }))
+      : [],
+    packages: Array.isArray(d.packages) ? d.packages.map(normalizePackageSummaryDto) : [],
+    pickedTotes: Array.isArray(d.pickedTotes)
+      ? d.pickedTotes.map((t) => ({
+          ...t,
+          status: normalizeHandlingUnitStatus(t.status),
+          totalQuantity: Number(t.totalQuantity ?? 0),
+        }))
+      : [],
   };
 }
 
@@ -668,6 +763,460 @@ export const outboundApi = {
       taskStatus: normalizeTaskStatus(res.taskStatus),
       quantityPicked: Number(res.quantityPicked ?? 0),
       discrepancyQuantity: Number(res.discrepancyQuantity ?? 0),
+    };
+  },
+
+  // =========================================================================
+  // 5. Packing, Cartonization & Carrier Labeling (Phase 7.4.3)
+  // =========================================================================
+  getPackingStations: async (
+    facilityId: string,
+    signal?: AbortSignal
+  ): Promise<PackingStationLocationDto[]> => {
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/packing/stations?facilityId=${encodeURIComponent(facilityId)}`,
+      { method: 'GET', signal }
+    );
+    if (!Array.isArray(data)) {
+      throw new Error('Received malformed packing stations response from server.');
+    }
+    return data.map((raw) => {
+      const s = raw as PackingStationLocationDto;
+      if (!s || !s.id || !s.locationCode) {
+        throw new Error('Received incomplete packing station record from server.');
+      }
+      return s;
+    });
+  },
+
+  getPackagingMaterials: async (
+    facilityId: string,
+    clientId?: string,
+    signal?: AbortSignal
+  ): Promise<PackagingMaterialDto[]> => {
+    const query = new URLSearchParams();
+    query.set('facilityId', facilityId);
+    if (clientId) query.set('clientId', clientId);
+
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/packing/packaging-materials?${query.toString()}`,
+      { method: 'GET', signal }
+    );
+    if (!Array.isArray(data)) {
+      throw new Error('Received malformed packaging materials response from server.');
+    }
+    return data.map((raw) => {
+      const m = raw as PackagingMaterialDto;
+      if (!m || !m.id || !m.code) {
+        throw new Error('Received incomplete packaging material record from server.');
+      }
+      return {
+        ...m,
+        materialType: normalizePackagingMaterialType(m.materialType),
+        lengthCm: Number(m.lengthCm ?? 0),
+        widthCm: Number(m.widthCm ?? 0),
+        heightCm: Number(m.heightCm ?? 0),
+        maxWeightKg: Number(m.maxWeightKg ?? 0),
+        tareWeightKg: Number(m.tareWeightKg ?? 0),
+        costPerUnit: m.costPerUnit !== undefined && m.costPerUnit !== null ? Number(m.costPerUnit) : null,
+      };
+    });
+  },
+
+  getPackableOrders: async (
+    facilityId: string,
+    searchTerm?: string,
+    signal?: AbortSignal
+  ): Promise<PagedResult<PackableOrderSummaryDto>> => {
+    const query = new URLSearchParams();
+    query.set('facilityId', facilityId);
+    if (searchTerm?.trim()) query.set('searchTerm', searchTerm.trim());
+    query.set('pageNumber', '1');
+    query.set('pageSize', '50');
+
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/packing/packable-orders?${query.toString()}`,
+      { method: 'GET', signal }
+    );
+    const paged = assertPagedResult<PackableOrderSummaryDto>(data, 'packable orders');
+    return {
+      ...paged,
+      items: paged.items.map((o) => {
+        if (!o || !o.id || !o.orderNumber) {
+          throw new Error('Received incomplete packable order record from server.');
+        }
+        return {
+          ...o,
+          status: normalizeOrderStatus(o.status),
+          serviceLevel: normalizeServiceLevel(o.serviceLevel),
+          totalAllocatedUnits: Number(o.totalAllocatedUnits ?? 0),
+          totalPickedUnits: Number(o.totalPickedUnits ?? 0),
+          totalPackedUnits: Number(o.totalPackedUnits ?? 0),
+        };
+      }),
+    };
+  },
+
+  getPackingSessions: async (
+    params: GetPackingSessionsParams,
+    signal?: AbortSignal
+  ): Promise<PagedResult<PackingSessionSummaryDto>> => {
+    const query = new URLSearchParams();
+    query.set('facilityId', params.facilityId);
+    if (params.clientId) query.set('clientId', params.clientId);
+    if (params.status) query.set('status', params.status);
+    if (params.outboundOrderId) query.set('outboundOrderId', params.outboundOrderId);
+    if (params.packingStationLocationId) query.set('packingStationLocationId', params.packingStationLocationId);
+    if (params.searchTerm?.trim()) query.set('searchTerm', params.searchTerm.trim());
+    if (params.pageNumber) query.set('pageNumber', String(params.pageNumber));
+    if (params.pageSize) query.set('pageSize', String(params.pageSize));
+
+    const data = await apiClient<unknown>(`/api/v1/outbound/packing/sessions?${query.toString()}`, {
+      method: 'GET',
+      signal,
+    });
+    const paged = assertPagedResult<unknown>(data, 'packing sessions');
+    return {
+      ...paged,
+      items: paged.items.map(normalizePackingSessionSummaryDto),
+    };
+  },
+
+  getPackingSessionById: async (id: string, signal?: AbortSignal): Promise<PackingSessionDetailDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/packing/sessions/${id}`, {
+      method: 'GET',
+      signal,
+    });
+    return normalizePackingSessionDetailDto(data);
+  },
+
+  getPackingPackages: async (
+    params: GetPackingPackagesParams,
+    signal?: AbortSignal
+  ): Promise<PagedResult<PackageSummaryDto>> => {
+    const query = new URLSearchParams();
+    query.set('facilityId', params.facilityId);
+    if (params.clientId) query.set('clientId', params.clientId);
+    if (params.packingSessionId) query.set('packingSessionId', params.packingSessionId);
+    if (params.outboundOrderId) query.set('outboundOrderId', params.outboundOrderId);
+    if (params.status) query.set('status', params.status);
+    if (params.searchTerm?.trim()) query.set('searchTerm', params.searchTerm.trim());
+    if (params.pageNumber) query.set('pageNumber', String(params.pageNumber));
+    if (params.pageSize) query.set('pageSize', String(params.pageSize));
+
+    const data = await apiClient<unknown>(`/api/v1/outbound/packing/packages?${query.toString()}`, {
+      method: 'GET',
+      signal,
+    });
+    const paged = assertPagedResult<unknown>(data, 'packages');
+    return {
+      ...paged,
+      items: paged.items.map(normalizePackageSummaryDto),
+    };
+  },
+
+  getEligibleShipmentPackages: async (
+    facilityId: string,
+    searchTerm?: string,
+    signal?: AbortSignal
+  ): Promise<PagedResult<PackageSummaryDto>> => {
+    const query = new URLSearchParams();
+    query.set('facilityId', facilityId);
+    if (searchTerm?.trim()) query.set('searchTerm', searchTerm.trim());
+    query.set('pageNumber', '1');
+    query.set('pageSize', '50');
+
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/shipments/eligible-packages?${query.toString()}`,
+      { method: 'GET', signal }
+    );
+    const paged = assertPagedResult<unknown>(data, 'eligible shipment packages');
+    return {
+      ...paged,
+      items: paged.items.map(normalizePackageSummaryDto),
+    };
+  },
+
+  startPackingSession: async (
+    payload: StartPackingSessionRequest,
+    signal?: AbortSignal
+  ): Promise<PackingSessionResultDto> => {
+    const data = await apiClient<unknown>('/api/v1/outbound/packing/sessions/start', {
+      method: 'POST',
+      body: JSON.stringify(payload),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as PackingSessionResultDto).sessionId) {
+      throw new Error('Received malformed start packing session response from server.');
+    }
+    const res = data as PackingSessionResultDto;
+    return {
+      ...res,
+      status: normalizePackingSessionStatus(res.status),
+      activePackagesCount: Number(res.activePackagesCount ?? 0),
+    };
+  },
+
+  recommendCartonization: async (
+    payload: CartonizationRecommendRequest,
+    signal?: AbortSignal
+  ): Promise<CartonizationRecommendationDto> => {
+    const data = await apiClient<unknown>('/api/v1/outbound/packing/cartonization/recommend', {
+      method: 'POST',
+      body: JSON.stringify({
+        clientId: payload.clientId,
+        facilityId: payload.facilityId,
+        outboundOrderId: payload.outboundOrderId ?? null,
+        items: null,
+        preferredPackagingMaterialId: payload.preferredPackagingMaterialId ?? null,
+        volumeUtilizationFactor: payload.volumeUtilizationFactor ?? 0.85,
+      }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !Array.isArray((data as CartonizationRecommendationDto).recommendedPackages)) {
+      throw new Error('Received malformed cartonization recommendation response from server.');
+    }
+    const rec = data as CartonizationRecommendationDto;
+    return {
+      ...rec,
+      recommendedPackageCount: Number(rec.recommendedPackageCount ?? rec.recommendedPackages.length),
+      totalEstimatedGrossWeightKg: Number(rec.totalEstimatedGrossWeightKg ?? 0),
+      totalEstimatedVolumeCm3: Number(rec.totalEstimatedVolumeCm3 ?? 0),
+      warnings: Array.isArray(rec.warnings) ? rec.warnings : [],
+      recommendedPackages: rec.recommendedPackages.map((p) => ({
+        ...p,
+        materialType: normalizePackagingMaterialType(p.materialType),
+        boxLengthCm: Number(p.boxLengthCm ?? 0),
+        boxWidthCm: Number(p.boxWidthCm ?? 0),
+        boxHeightCm: Number(p.boxHeightCm ?? 0),
+        boxMaxWeightKg: Number(p.boxMaxWeightKg ?? 0),
+        tareWeightKg: Number(p.tareWeightKg ?? 0),
+        estimatedNetWeightKg: Number(p.estimatedNetWeightKg ?? 0),
+        estimatedGrossWeightKg: Number(p.estimatedGrossWeightKg ?? 0),
+        estimatedVolumeCm3: Number(p.estimatedVolumeCm3 ?? 0),
+        boxCapacityVolumeCm3: Number(p.boxCapacityVolumeCm3 ?? 0),
+        volumetricWeightKg: Number(p.volumetricWeightKg ?? 0),
+        volumeUtilizationPercentage: Number(p.volumeUtilizationPercentage ?? 0),
+        items: Array.isArray(p.items) ? p.items : [],
+      })),
+    };
+  },
+
+  createPackage: async (
+    payload: CreatePackageRequest,
+    signal?: AbortSignal
+  ): Promise<CreatePackageResultDto> => {
+    const data = await apiClient<unknown>('/api/v1/outbound/packing/packages/create', {
+      method: 'POST',
+      body: JSON.stringify({
+        packingSessionId: payload.packingSessionId,
+        packagingMaterialId: payload.packagingMaterialId ?? null,
+        overrideReason: payload.overrideReason?.trim() || null,
+      }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as CreatePackageResultDto).packageId) {
+      throw new Error('Received malformed create package response from server.');
+    }
+    const res = data as CreatePackageResultDto;
+    return {
+      ...res,
+      status: normalizePackageStatus(res.status),
+      lengthCm: Number(res.lengthCm ?? 0),
+      widthCm: Number(res.widthCm ?? 0),
+      heightCm: Number(res.heightCm ?? 0),
+      tareWeightKg: Number(res.tareWeightKg ?? 0),
+    };
+  },
+
+  packItem: async (payload: PackItemRequest, signal?: AbortSignal): Promise<PackItemResultDto> => {
+    const data = await apiClient<unknown>('/api/v1/outbound/packing/items/pack', {
+      method: 'POST',
+      body: JSON.stringify({
+        packingSessionId: payload.packingSessionId,
+        packageId: payload.packageId,
+        scannedToteLpn: payload.scannedToteLpn,
+        scannedItemBarcode: payload.scannedItemBarcode,
+        scannedLotNumber: payload.scannedLotNumber?.trim() || null,
+        quantity: payload.quantity,
+        idempotencyKey: payload.idempotencyKey ?? null,
+      }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as PackItemResultDto).packageId) {
+      throw new Error('Received malformed pack item response from server.');
+    }
+    const res = data as PackItemResultDto;
+    return {
+      ...res,
+      quantityPacked: Number(res.quantityPacked ?? 0),
+      remainingToteQuantity: Number(res.remainingToteQuantity ?? 0),
+      remainingOrderLineDemand: Number(res.remainingOrderLineDemand ?? 0),
+      inventoryTransactionId: Number(res.inventoryTransactionId ?? 0),
+    };
+  },
+
+  closePackage: async (
+    packageId: string,
+    scaleGrossWeightKg: number,
+    signal?: AbortSignal
+  ): Promise<ClosePackageResultDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/packing/packages/${packageId}/close`, {
+      method: 'POST',
+      body: JSON.stringify({ scaleGrossWeightKg }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as ClosePackageResultDto).packageId) {
+      throw new Error('Received malformed close package response from server.');
+    }
+    const res = data as ClosePackageResultDto;
+    return {
+      ...res,
+      status: normalizePackageStatus(res.status),
+      grossWeightKg: Number(res.grossWeightKg ?? 0),
+      tareWeightKg: Number(res.tareWeightKg ?? 0),
+      netWeightKg: Number(res.netWeightKg ?? 0),
+      volumetricWeightKg: Number(res.volumetricWeightKg ?? 0),
+    };
+  },
+
+  releaseTote: async (
+    toteLpn: string,
+    facilityId: string,
+    signal?: AbortSignal
+  ): Promise<ReleaseToteResultDto> => {
+    const data = await apiClient<unknown>('/api/v1/outbound/packing/totes/release', {
+      method: 'POST',
+      body: JSON.stringify({ toteLpn, facilityId }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as ReleaseToteResultDto).handlingUnitId) {
+      throw new Error('Received malformed release tote response from server.');
+    }
+    const res = data as ReleaseToteResultDto;
+    return {
+      ...res,
+      status: normalizeHandlingUnitStatus(res.status),
+    };
+  },
+
+  completePackingSession: async (
+    sessionId: string,
+    signal?: AbortSignal
+  ): Promise<CompletePackingSessionResultDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/packing/sessions/${sessionId}/complete`, {
+      method: 'POST',
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as CompletePackingSessionResultDto).sessionId) {
+      throw new Error('Received malformed complete packing session response from server.');
+    }
+    const res = data as CompletePackingSessionResultDto;
+    return {
+      ...res,
+      status: normalizePackingSessionStatus(res.status),
+      totalPackagesCount: Number(res.totalPackagesCount ?? 0),
+      totalWeightKg: Number(res.totalWeightKg ?? 0),
+    };
+  },
+
+  getPackageShippingRates: async (
+    payload: GetPackageRatesRequest,
+    signal?: AbortSignal
+  ): Promise<CarrierRateQuoteDto[]> => {
+    const data = await apiClient<unknown>('/api/v1/outbound/shipping/rates', {
+      method: 'POST',
+      body: JSON.stringify({
+        packageId: payload.packageId,
+        preferredCarrierCode: payload.preferredCarrierCode ?? null,
+        preferredServiceLevel: payload.preferredServiceLevel ?? null,
+      }),
+      signal,
+    });
+    if (!Array.isArray(data)) {
+      throw new Error('Received malformed shipping rates response from server.');
+    }
+    return data.map((raw) => {
+      const q = raw as CarrierRateQuoteDto;
+      if (!q || !q.carrierCode) {
+        throw new Error('Received incomplete shipping rate quote from server.');
+      }
+      return {
+        ...q,
+        serviceLevel: normalizeServiceLevel(q.serviceLevel),
+        totalAmount: Number(q.totalAmount ?? 0),
+        estimatedDeliveryDays: Number(q.estimatedDeliveryDays ?? 0),
+      };
+    });
+  },
+
+  generateShippingLabel: async (
+    payload: GenerateShippingLabelRequest,
+    signal?: AbortSignal
+  ): Promise<GenerateShippingLabelResultDto> => {
+    const data = await apiClient<unknown>('/api/v1/outbound/shipping/labels/generate', {
+      method: 'POST',
+      body: JSON.stringify({
+        packageId: payload.packageId,
+        carrierCode: payload.carrierCode,
+        serviceLevel: payload.serviceLevel,
+        labelFormat: payload.labelFormat || 'ZPL',
+        idempotencyKey: payload.idempotencyKey ?? null,
+        simulateFailure: Boolean(payload.simulateFailure),
+      }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as GenerateShippingLabelResultDto).packageId) {
+      throw new Error('Received malformed generate shipping label response from server.');
+    }
+    const res = data as GenerateShippingLabelResultDto;
+    return {
+      ...res,
+      serviceLevel: normalizeServiceLevel(res.serviceLevel),
+      packageStatus: normalizePackageStatus(res.packageStatus),
+      labelStatus: res.isSuccess ? normalizeShippingLabelStatus(res.labelStatus) : res.labelStatus,
+      rateCharged: Number(res.rateCharged ?? 0),
+    };
+  },
+
+  voidShippingLabel: async (
+    labelId: string,
+    payload: VoidShippingLabelRequest,
+    signal?: AbortSignal
+  ): Promise<VoidShippingLabelResultDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/shipping/labels/${labelId}/void`, {
+      method: 'POST',
+      body: JSON.stringify({
+        reason: payload.reason,
+        idempotencyKey: payload.idempotencyKey ?? null,
+        simulateFailure: Boolean(payload.simulateFailure),
+      }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as VoidShippingLabelResultDto).labelId) {
+      throw new Error('Received malformed void shipping label response from server.');
+    }
+    const res = data as VoidShippingLabelResultDto;
+    return {
+      ...res,
+      labelStatus: normalizeShippingLabelStatus(res.labelStatus),
+      packageStatus: normalizePackageStatus(res.packageStatus),
+    };
+  },
+
+  getShippingLabelById: async (labelId: string, signal?: AbortSignal): Promise<ShippingLabelDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/shipping/labels/${labelId}`, {
+      method: 'GET',
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as ShippingLabelDto).id) {
+      throw new Error('Received malformed shipping label response from server.');
+    }
+    const lbl = data as ShippingLabelDto;
+    return {
+      ...lbl,
+      serviceLevel: normalizeServiceLevel(lbl.serviceLevel),
+      status: normalizeShippingLabelStatus(lbl.status),
     };
   },
 };

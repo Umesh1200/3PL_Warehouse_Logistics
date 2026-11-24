@@ -17,6 +17,7 @@ import { StockOnHandPage } from './pages/inventory/StockOnHandPage';
 import { OutboundOrdersPage } from './pages/outbound/OutboundOrdersPage';
 import { PickWavesPage } from './pages/outbound/PickWavesPage';
 import { PickingWorkstationPage } from './pages/outbound/PickingWorkstationPage';
+import { PackingWorkstationPage } from './pages/outbound/PackingWorkstationPage';
 import './styles/base.css';
 
 const AppRoutes: React.FC = () => {
@@ -75,6 +76,10 @@ const AppRoutes: React.FC = () => {
       content = <PickingWorkstationPage />;
       pageTitle = 'Directed Picking & RF Execution';
       breadcrumb = 'OPERATIONAL WORKFLOWS / DIRECTED PICKING';
+    } else if (path === '/app/outbound/packing') {
+      content = <PackingWorkstationPage />;
+      pageTitle = 'Packing & Cartonization Workbench';
+      breadcrumb = 'OPERATIONAL WORKFLOWS / PACKING & LABELS';
     } else if (
       path === '/app/transportation' ||
       path === '/app/billing'

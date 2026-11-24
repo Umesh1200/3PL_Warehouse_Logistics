@@ -51,6 +51,16 @@ export const LaunchpadGrid: React.FC = () => {
       badge: 'RF Pick',
     },
     {
+      id: 'packing',
+      title: 'Packing & Cartonization',
+      description: '3D box recommendation, tote-to-carton scanning, scale closure, and carrier label issuance.',
+      path: '/app/outbound/packing',
+      icon: 'Package',
+      permissions: ['outbound:pack', 'outbound:ship'],
+      allowedUserTypes: [UserType.Staff],
+      badge: 'Pack Bench',
+    },
+    {
       id: 'putaway',
       title: 'Directed Putaway RF',
       description: 'Mobile-first barcode scanning, staging verification, and directed shelf confirmation.',

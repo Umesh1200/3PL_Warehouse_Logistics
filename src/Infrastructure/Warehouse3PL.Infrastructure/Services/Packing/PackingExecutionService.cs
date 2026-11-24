@@ -291,6 +291,71 @@ public class PackingExecutionService : IPackingExecutionService
             throw new InvalidDomainStateException($"Cannot pack items into package '{package.PackageNumber}' with status '{package.Status}'. Package must be Open.");
         }
 
+        // 2b. Idempotency Retry Protection (prevents duplicate stock transfer on scanner retry)
+        var normalizedIdempKey = string.IsNullOrWhiteSpace(request.IdempotencyKey)
+            ? null
+            : request.IdempotencyKey.Trim();
+        var idempMarker = normalizedIdempKey != null ? $"[IDEMP:{normalizedIdempKey}]" : null;
+
+        if (idempMarker != null)
+        {
+            var existingPackTx = await _context.InventoryTransactions
+                .AsNoTracking()
+                .FirstOrDefaultAsync(t => t.ReferenceType == "Package" &&
+                                          t.ReferenceId == package.Id &&
+                                          t.TxType == InventoryTxType.Pack &&
+                                          t.Notes != null &&
+                                          t.Notes.Contains(idempMarker), cancellationToken);
+
+            if (existingPackTx != null)
+            {
+                var existingItem = await _context.Items
+                    .AsNoTracking()
+                    .Where(i => i.Id == existingPackTx.ItemId)
+                    .Select(i => new { i.Sku })
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                var existingLine = package.Lines.FirstOrDefault(l =>
+                    l.ItemId == existingPackTx.ItemId &&
+                    l.LotId == existingPackTx.LotId);
+
+                var orderLine = order.Lines.FirstOrDefault(l =>
+                    !l.IsDeleted &&
+                    l.Id == existingLine?.OutboundOrderLineId);
+
+                decimal packedForOrderLine = orderLine == null
+                    ? 0m
+                    : await _context.PackageLines
+                        .Where(pl => pl.OutboundOrderLineId == orderLine.Id && !pl.Package.IsDeleted)
+                        .SumAsync(pl => pl.Quantity, cancellationToken);
+
+                decimal allAllocated = order.Lines.Where(l => !l.IsDeleted).Sum(l => l.QuantityAllocated);
+                decimal allPacked = await _context.PackageLines
+                    .Where(pl => pl.Package.OutboundOrderId == order.Id && !pl.Package.IsDeleted)
+                    .SumAsync(pl => pl.Quantity, cancellationToken);
+
+                return new PackItemResult
+                {
+                    IsSuccess = true,
+                    PackageId = package.Id,
+                    PackageNumber = package.PackageNumber,
+                    PackageLineId = existingLine?.Id ?? Guid.Empty,
+                    ItemId = existingPackTx.ItemId,
+                    Sku = existingItem?.Sku ?? request.ScannedItemBarcode,
+                    LotNumber = request.ScannedLotNumber,
+                    QuantityPacked = existingPackTx.Quantity,
+                    RemainingToteQuantity = 0m,
+                    RemainingOrderLineDemand = orderLine == null ? 0m : Math.Max(0m, orderLine.QuantityAllocated - packedForOrderLine),
+                    SourceToteLpn = request.ScannedToteLpn.Trim(),
+                    CartonLpn = package.HandlingUnit.LpnCode,
+                    InventoryTransactionId = existingPackTx.Id,
+                    IsOrderLineComplete = orderLine != null && packedForOrderLine >= orderLine.QuantityAllocated,
+                    IsOrderFullyPacked = allAllocated > 0 && allPacked >= allAllocated,
+                    Message = "Item already packed (idempotent retry)."
+                };
+            }
+        }
+
         // 3. Tote Scan Validation
         if (string.IsNullOrWhiteSpace(request.ScannedToteLpn))
         {
@@ -487,7 +552,9 @@ public class PackingExecutionService : IPackingExecutionService
             ReferenceType = "Package",
             ReferenceId = package.Id,
             UserId = request.UserId,
-            Notes = $"Packed {request.Quantity} units of '{item.Sku}' from Tote '{tote.LpnCode}' into Package '{package.PackageNumber}'",
+            Notes = idempMarker != null
+                ? $"Packed {request.Quantity} units of '{item.Sku}' from Tote '{tote.LpnCode}' into Package '{package.PackageNumber}' {idempMarker}"
+                : $"Packed {request.Quantity} units of '{item.Sku}' from Tote '{tote.LpnCode}' into Package '{package.PackageNumber}'",
             TxTimestamp = DateTime.UtcNow
         };
         _context.InventoryTransactions.Add(tx);

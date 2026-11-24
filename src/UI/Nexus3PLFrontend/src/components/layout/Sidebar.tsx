@@ -99,6 +99,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => 
           icon: 'Barcode',
         },
         {
+          label: 'Packing & Cartonization',
+          path: '/app/outbound/packing',
+          permissions: ['outbound:pack', 'outbound:ship'],
+          allowedUserTypes: [UserType.Staff],
+          icon: 'Package',
+        },
+        {
           label: 'Transportation & Carriers',
           path: '/app/transportation',
           permissions: ['dispatch:view', 'analytics:transportation:view'],
