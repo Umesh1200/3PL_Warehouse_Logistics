@@ -478,12 +478,14 @@ public sealed class Phase744ShipmentConsolidationAndBolTests : IAsyncLifetime
             Assert.Contains(Order1Id, completedOrders);
         }
 
-        // Idempotent second dispatch call
+        // Idempotent second dispatch call with identical custody payload
         using (var rDispIdemp = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shipmentId}/dispatch", ShipStaffAId,
-            new { driverName = "Dan DriverA", driverSignature = "SIG-DAN-744", idempotencyKey = "disp-744-1", assignedDriverUserId = DriverAId })))
+            new { driverName = "Dan DriverA", driverLicenseNumber = "DL-744-IL", driverSignature = "SIG-DAN-744", trailerNumber = "TRL-744-A", sealNumber = "SEAL-744-1", idempotencyKey = "disp-744-1", assignedDriverUserId = DriverAId })))
         {
             Assert.Equal(HttpStatusCode.OK, rDispIdemp.StatusCode);
-            Assert.Equal("Dispatched", JsonDocument.Parse(await rDispIdemp.Content.ReadAsStringAsync()).RootElement.GetProperty("status").GetString());
+            var repRoot = JsonDocument.Parse(await rDispIdemp.Content.ReadAsStringAsync()).RootElement;
+            Assert.Equal("Dispatched", repRoot.GetProperty("status").GetString());
+            Assert.Equal("Dan DriverA", repRoot.GetProperty("driverName").GetString());
         }
 
         // 8. Verify persistence: Order1 Completed, custody record created, ZERO secondary stock or ledger mutation
@@ -503,6 +505,274 @@ public sealed class Phase744ShipmentConsolidationAndBolTests : IAsyncLifetime
             Assert.Equal(initialAvail, stk.QtyAvailable);
             Assert.Equal(initialAlloc, stk.QtyAllocated);
             Assert.Equal(initialTxCount, postTxCount);
+        }
+    }
+
+    [Fact]
+    public async Task P744R01_KathmanduFacility_And_MultiConsignee_BolSnapshot_UsesPersistedAddressesWithoutFallback()
+    {
+        var facKtmId = Guid.NewGuid();
+        var facIncompleteId = Guid.NewGuid();
+        var ktmStaffId = Guid.NewGuid();
+        var incStaffId = Guid.NewGuid();
+        var ktmStageId = Guid.NewGuid();
+        var incStageId = Guid.NewGuid();
+        var ordPatanId = Guid.NewGuid();
+        var ordPokharaId = Guid.NewGuid();
+        var ordIncId = Guid.NewGuid();
+        var pkgPatanId = Guid.NewGuid();
+        var pkgPokharaId = Guid.NewGuid();
+        var pkgIncId = Guid.NewGuid();
+
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var shipRole = await db.Roles.SingleAsync(r => r.RoleName == "ShipOperator744");
+
+            db.Facilities.AddRange(
+                new Facility
+                {
+                    Id = facKtmId,
+                    FacilityCode = "KTM-NP-01",
+                    Name = "Kathmandu Valley Logistics Hub",
+                    AddressLine1 = "Durbar Marg, Ward 1",
+                    AddressLine2 = "Ring Road Cargo Complex",
+                    City = "Kathmandu",
+                    StateOrProvince = "Bagmati",
+                    PostalCode = "44600",
+                    CountryCode = "NP",
+                    Timezone = "Asia/Kathmandu",
+                    IsActive = true
+                },
+                new Facility
+                {
+                    Id = facIncompleteId,
+                    FacilityCode = "INC-01",
+                    Name = "Unconfigured Address Hub",
+                    AddressLine1 = null,
+                    City = null,
+                    CountryCode = "NP",
+                    IsActive = true
+                });
+
+            db.ClientFacilityAccesses.AddRange(
+                new ClientFacilityAccess { ClientId = ClientA, FacilityId = facKtmId, Status = FacilityAccessStatus.Active },
+                new ClientFacilityAccess { ClientId = ClientA, FacilityId = facIncompleteId, Status = FacilityAccessStatus.Active });
+
+            db.Users.AddRange(
+                new User { Id = ktmStaffId, Email = "ktm@744.test", FirstName = "Kiran", LastName = "Ktm", UserType = UserType.Staff, AssignedFacilityId = facKtmId, Status = UserStatus.Active, UserRoles = [new UserRole { Role = shipRole }] },
+                new User { Id = incStaffId, Email = "inc@744.test", FirstName = "Ian", LastName = "Inc", UserType = UserType.Staff, AssignedFacilityId = facIncompleteId, Status = UserStatus.Active, UserRoles = [new UserRole { Role = shipRole }] });
+
+            db.Locations.AddRange(
+                new Location { Id = ktmStageId, FacilityId = facKtmId, LocationCode = "KTM-STG-01", Barcode = "KTM-STG-01", LocationType = LocationType.StagingLane, IsActive = true },
+                new Location { Id = incStageId, FacilityId = facIncompleteId, LocationCode = "INC-STG-01", Barcode = "INC-STG-01", LocationType = LocationType.StagingLane, IsActive = true });
+
+            db.OutboundOrders.AddRange(
+                new OutboundOrder
+                {
+                    Id = ordPatanId, ClientId = ClientA, FacilityId = facKtmId, OrderNumber = "SO-NP-PATAN-1", CustomerName = "Patan Medical Supply", Status = OutboundOrderStatus.InProgress,
+                    ShippingAddress = new ShippingAddress { OutboundOrderId = ordPatanId, RecipientName = "Patan Receiving Depot", AddressLine1 = "Jawalakhel Chowk", City = "Lalitpur", StateOrProvince = "Bagmati", PostalCode = "44700", CountryCode = "NP" }
+                },
+                new OutboundOrder
+                {
+                    Id = ordPokharaId, ClientId = ClientA, FacilityId = facKtmId, OrderNumber = "SO-NP-PKR-2", CustomerName = "Pokhara Trade Co", Status = OutboundOrderStatus.InProgress,
+                    ShippingAddress = new ShippingAddress { OutboundOrderId = ordPokharaId, RecipientName = "Lakeside Freight Dock", AddressLine1 = "Prithvi Chowk", City = "Pokhara", StateOrProvince = "Gandaki", PostalCode = "33700", CountryCode = "NP" }
+                },
+                new OutboundOrder { Id = ordIncId, ClientId = ClientA, FacilityId = facIncompleteId, OrderNumber = "SO-INC-1", CustomerName = "Test", Status = OutboundOrderStatus.InProgress });
+
+            var huP = Guid.NewGuid();
+            var huK = Guid.NewGuid();
+            var huI = Guid.NewGuid();
+            db.HandlingUnits.AddRange(
+                new HandlingUnit { Id = huP, ClientId = ClientA, FacilityId = facKtmId, LpnCode = "KTM-CTN-1", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse },
+                new HandlingUnit { Id = huK, ClientId = ClientA, FacilityId = facKtmId, LpnCode = "KTM-CTN-2", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse },
+                new HandlingUnit { Id = huI, ClientId = ClientA, FacilityId = facIncompleteId, LpnCode = "INC-CTN-1", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse });
+
+            db.Packages.AddRange(
+                new Package { Id = pkgPatanId, ClientId = ClientA, FacilityId = facKtmId, OutboundOrderId = ordPatanId, HandlingUnitId = huP, PackageNumber = "PKG-KTM-01", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FREIGHT", TrackingNumber = "NP-TRK-01", GrossWeightKg = 5m, TareWeightKg = 0.5m, NetWeightKg = 4.5m, LengthCm = 30, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FREIGHT", ServiceLevel = CarrierServiceLevel.FreightLTL, TrackingNumber = "NP-TRK-01", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] },
+                new Package { Id = pkgPokharaId, ClientId = ClientA, FacilityId = facKtmId, OutboundOrderId = ordPokharaId, HandlingUnitId = huK, PackageNumber = "PKG-KTM-02", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FREIGHT", TrackingNumber = "NP-TRK-02", GrossWeightKg = 7m, TareWeightKg = 0.5m, NetWeightKg = 6.5m, LengthCm = 35, WidthCm = 25, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FREIGHT", ServiceLevel = CarrierServiceLevel.FreightLTL, TrackingNumber = "NP-TRK-02", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] },
+                new Package { Id = pkgIncId, ClientId = ClientA, FacilityId = facIncompleteId, OutboundOrderId = ordIncId, HandlingUnitId = huI, PackageNumber = "PKG-INC-01", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "INC-TRK-01", GrossWeightKg = 2m, TareWeightKg = 0.2m, NetWeightKg = 1.8m, LengthCm = 20, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "INC-TRK-01", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] });
+
+            await db.SaveChangesAsync();
+        }
+
+        // 1. Facility with missing address rejects BOL issuance (400 BadRequest) instead of fabricating Columbus fallback
+        using var rIncShp = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/shipments", incStaffId,
+            new { clientId = ClientA, facilityId = facIncompleteId, carrierCode = "SIM-FEDEX", serviceLevel = "StandardGround" }));
+        var incShpId = JsonDocument.Parse(await rIncShp.Content.ReadAsStringAsync()).RootElement.GetProperty("shipmentId").GetGuid();
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{incShpId}/packages", incStaffId, new { packageId = pkgIncId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgIncId}/stage", incStaffId, new { stagingLocationId = incStageId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgIncId}/load", incStaffId, new { shipmentId = incShpId }))).StatusCode);
+        using (var rIncBol = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{incShpId}/bol", incStaffId, new { })))
+            Assert.Equal(HttpStatusCode.BadRequest, rIncBol.StatusCode);
+
+        // 2. Kathmandu hub multi-consignee shipment produces Nepal shipper address and multiple consignee destinations
+        using var rKtmShp = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/shipments", ktmStaffId,
+            new { clientId = ClientA, facilityId = facKtmId, carrierCode = "SIM-FREIGHT", serviceLevel = "FreightLTL", stagingLocationId = ktmStageId }));
+        var ktmShpId = JsonDocument.Parse(await rKtmShp.Content.ReadAsStringAsync()).RootElement.GetProperty("shipmentId").GetGuid();
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/packages", ktmStaffId, new { packageId = pkgPatanId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/packages", ktmStaffId, new { packageId = pkgPokharaId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgPatanId}/stage", ktmStaffId, new { stagingLocationId = ktmStageId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgPokharaId}/stage", ktmStaffId, new { stagingLocationId = ktmStageId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgPatanId}/load", ktmStaffId, new { shipmentId = ktmShpId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgPokharaId}/load", ktmStaffId, new { shipmentId = ktmShpId }))).StatusCode);
+
+        using var rKtmBol = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/bol", ktmStaffId,
+            new { trailerNumber = "NP-TRK-BA1", sealNumber = "NP-SEAL-09" }));
+        Assert.Equal(HttpStatusCode.OK, rKtmBol.StatusCode);
+        var bolId = JsonDocument.Parse(await rKtmBol.Content.ReadAsStringAsync()).RootElement.GetProperty("bolId").GetGuid();
+
+        using var rBolView = await _http.SendAsync(JsonReq(HttpMethod.Get, $"/api/v1/outbound/shipments/bol/{bolId}", ktmStaffId));
+        Assert.Equal(HttpStatusCode.OK, rBolView.StatusCode);
+        var bolDto = JsonDocument.Parse(await rBolView.Content.ReadAsStringAsync()).RootElement;
+
+        var shipperAddr = bolDto.GetProperty("shipperAddressSnapshot").GetString()!;
+        Assert.Contains("Durbar Marg, Ward 1", shipperAddr);
+        Assert.Contains("Kathmandu", shipperAddr);
+        Assert.Contains("Bagmati 44600", shipperAddr);
+        Assert.Contains("NP", shipperAddr);
+        Assert.DoesNotContain("Columbus", shipperAddr);
+        Assert.DoesNotContain("43215", shipperAddr);
+
+        var consigneeName = bolDto.GetProperty("consigneeName").GetString()!;
+        var consigneeAddr = bolDto.GetProperty("consigneeAddressSnapshot").GetString()!;
+        Assert.Contains("Multiple Consignees (2 Destinations)", consigneeName);
+        Assert.Contains("Lalitpur", consigneeAddr);
+        Assert.Contains("Pokhara", consigneeAddr);
+
+        var snapshotRoot = JsonDocument.Parse(bolDto.GetProperty("documentSnapshotJson").GetString()!).RootElement;
+        Assert.Equal("Kathmandu", snapshotRoot.GetProperty("Shipper").GetProperty("City").GetString());
+        Assert.Equal("NP", snapshotRoot.GetProperty("Shipper").GetProperty("CountryCode").GetString());
+        Assert.Equal(2, snapshotRoot.GetProperty("Consignees").GetArrayLength());
+    }
+
+    [Fact]
+    public async Task P744R02_R03_R04_NegativeWorkflowGuards_VoidReissue_DockValidation_And_DispatchConcurrencyConflict()
+    {
+        var inactiveStageId = Guid.NewGuid();
+        var inactiveDockId = Guid.NewGuid();
+        var wrongFacDockId = Guid.NewGuid();
+        var ordExtraId = Guid.NewGuid();
+        var pkgAId = Guid.NewGuid();
+        var pkgBId = Guid.NewGuid();
+        var pkgOtherShpId = Guid.NewGuid();
+
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Locations.AddRange(
+                new Location { Id = inactiveStageId, FacilityId = FacilityA, LocationCode = "STG-INACT", Barcode = "STG-INACT", LocationType = LocationType.StagingLane, IsActive = false },
+                new Location { Id = inactiveDockId, FacilityId = FacilityA, LocationCode = "DOCK-INACT", Barcode = "DOCK-INACT", LocationType = LocationType.DockDoor, IsActive = false },
+                new Location { Id = wrongFacDockId, FacilityId = FacilityB, LocationCode = "DOCK-FACB", Barcode = "DOCK-FACB", LocationType = LocationType.DockDoor, IsActive = true });
+
+            db.OutboundOrders.Add(new OutboundOrder { Id = ordExtraId, ClientId = ClientA, FacilityId = FacilityA, OrderNumber = "SO-744-NEG", CustomerName = "Neg Buyer", Status = OutboundOrderStatus.InProgress });
+
+            var huA = Guid.NewGuid();
+            var huB = Guid.NewGuid();
+            var huC = Guid.NewGuid();
+            db.HandlingUnits.AddRange(
+                new HandlingUnit { Id = huA, ClientId = ClientA, FacilityId = FacilityA, LpnCode = "NEG-CTN-A", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse },
+                new HandlingUnit { Id = huB, ClientId = ClientA, FacilityId = FacilityA, LpnCode = "NEG-CTN-B", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse },
+                new HandlingUnit { Id = huC, ClientId = ClientA, FacilityId = FacilityA, LpnCode = "NEG-CTN-C", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse });
+
+            db.Packages.AddRange(
+                new Package { Id = pkgAId, ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = ordExtraId, HandlingUnitId = huA, PackageNumber = "PKG-NEG-A", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-NEG-A", GrossWeightKg = 3m, TareWeightKg = 0.4m, NetWeightKg = 2.6m, LengthCm = 20, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "TRK-NEG-A", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] },
+                new Package { Id = pkgBId, ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = ordExtraId, HandlingUnitId = huB, PackageNumber = "PKG-NEG-B", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-NEG-B", GrossWeightKg = 3m, TareWeightKg = 0.4m, NetWeightKg = 2.6m, LengthCm = 20, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "TRK-NEG-B", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] },
+                new Package { Id = pkgOtherShpId, ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = Order2Id, HandlingUnitId = huC, PackageNumber = "PKG-NEG-C", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-NEG-C", GrossWeightKg = 3m, TareWeightKg = 0.4m, NetWeightKg = 2.6m, LengthCm = 20, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "TRK-NEG-C", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] });
+            await db.SaveChangesAsync();
+        }
+
+        // Create Shipment 1
+        var shp1Id = JsonDocument.Parse(await (await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/shipments", ShipStaffAId,
+            new { clientId = ClientA, facilityId = FacilityA, carrierCode = "SIM-FEDEX", serviceLevel = "StandardGround" }))).Content.ReadAsStringAsync()).RootElement.GetProperty("shipmentId").GetGuid();
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp1Id}/packages", ShipStaffAId, new { packageId = pkgAId }))).StatusCode);
+
+        // P744-R02: Early BOL generation in Draft status -> 422 UnprocessableEntity
+        using (var rEarlyBol = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp1Id}/bol", ShipStaffAId, new { })))
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rEarlyBol.StatusCode);
+
+        // P744-R04: Inactive staging lane -> 400; invalid DockLocationId on Load -> 400
+        using (var rInactStg = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgAId}/stage", ShipStaffAId, new { stagingLocationId = inactiveStageId })))
+            Assert.Equal(HttpStatusCode.BadRequest, rInactStg.StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgAId}/stage", ShipStaffAId, new { stagingLocationId = StagingLaneAId }))).StatusCode);
+
+        foreach (var badDockId in new[] { Guid.Empty, inactiveDockId, wrongFacDockId, StorageBinAId })
+        {
+            using var rBadDock = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgAId}/load", ShipStaffAId,
+                new { shipmentId = shp1Id, trailerNumber = "TRL-NEG-1", dockLocationId = badDockId }));
+            Assert.Equal(HttpStatusCode.BadRequest, rBadDock.StatusCode);
+        }
+
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgAId}/load", ShipStaffAId,
+            new { shipmentId = shp1Id, trailerNumber = "TRL-NEG-1", dockLocationId = DockDoorAId }))).StatusCode);
+
+        // P744-R02: Dispatch without active BOL -> 422
+        using (var rNoBolDisp = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp1Id}/dispatch", ShipStaffAId,
+            new { driverName = "Dan DriverA", driverSignature = "SIG-1", trailerNumber = "TRL-NEG-1" })))
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rNoBolDisp.StatusCode);
+
+        // Issue BOL R1
+        var rBol1 = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp1Id}/bol", ShipStaffAId,
+            new { trailerNumber = "TRL-NEG-1", sealNumber = "SEAL-NEG-1" }));
+        Assert.Equal(HttpStatusCode.OK, rBol1.StatusCode);
+        var bol1Id = JsonDocument.Parse(await rBol1.Content.ReadAsStringAsync()).RootElement.GetProperty("bolId").GetGuid();
+
+        // P744-R02: Manifest locked once active BOL issued -> add & remove rejected 422
+        using (var rAddLocked = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp1Id}/packages", ShipStaffAId, new { packageId = pkgBId })))
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rAddLocked.StatusCode);
+        using (var rRemLocked = await _http.SendAsync(JsonReq(HttpMethod.Delete, $"/api/v1/outbound/shipments/{shp1Id}/packages/{pkgAId}", ShipStaffAId, new { reason = "Tamper" })))
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rRemLocked.StatusCode);
+
+        // P744-R02: Explicit void unlocks manifest & enables reissue (-R2)
+        using (var rVoidCross = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/bol/{bol1Id}/void", ShipStaffBId, new { reason = "Cross facility" })))
+            Assert.Equal(HttpStatusCode.Forbidden, rVoidCross.StatusCode);
+        using (var rVoidOk = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/bol/{bol1Id}/void", ShipStaffAId, new { reason = "Need updated seal" })))
+            Assert.Equal(HttpStatusCode.OK, rVoidOk.StatusCode);
+
+        var rBol2 = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp1Id}/bol", ShipStaffAId,
+            new { trailerNumber = "TRL-NEG-1", sealNumber = "SEAL-NEG-R2" }));
+        Assert.Equal(HttpStatusCode.OK, rBol2.StatusCode);
+        var bol2Root = JsonDocument.Parse(await rBol2.Content.ReadAsStringAsync()).RootElement;
+        var bol2Id = bol2Root.GetProperty("bolId").GetGuid();
+        Assert.EndsWith("-R2", bol2Root.GetProperty("bolNumber").GetString()!);
+
+        // P744-R02: Conflicting trailer or seal on dispatch vs active BOL -> 422
+        using (var rBadTrailer = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp1Id}/dispatch", ShipStaffAId,
+            new { driverName = "Dan DriverA", driverSignature = "SIG-1", trailerNumber = "TRL-SPOOF", sealNumber = "SEAL-NEG-R2" })))
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rBadTrailer.StatusCode);
+        using (var rBadSeal = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp1Id}/dispatch", ShipStaffAId,
+            new { driverName = "Dan DriverA", driverSignature = "SIG-1", trailerNumber = "TRL-NEG-1", sealNumber = "SEAL-SPOOF" })))
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rBadSeal.StatusCode);
+
+        // P744-R03: Concurrent conflicting dispatch calls -> 1x 200 OK, 1x 409 Conflict
+        var concResps = await Task.WhenAll(
+            _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp1Id}/dispatch", ShipStaffAId,
+                new { driverName = "Dan DriverA", driverSignature = "SIG-DAN", trailerNumber = "TRL-NEG-1", sealNumber = "SEAL-NEG-R2", idempotencyKey = "disp-neg-key-1" })),
+            _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp1Id}/dispatch", ShipStaffAId,
+                new { driverName = "Impostor Driver", driverSignature = "SIG-IMP", trailerNumber = "TRL-NEG-1", sealNumber = "SEAL-NEG-R2", idempotencyKey = "disp-neg-key-2" })));
+        var concStatuses = concResps.Select(r => r.StatusCode).ToArray();
+        foreach (var r in concResps) r.Dispose();
+
+        Assert.Single(concStatuses, s => s == HttpStatusCode.OK);
+        Assert.Single(concStatuses, s => s == HttpStatusCode.Conflict);
+
+        // Dispatched BOL cannot be voided -> 422
+        using (var rVoidAfterDisp = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/bol/{bol2Id}/void", ShipStaffAId, new { reason = "Too late" })))
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, rVoidAfterDisp.StatusCode);
+
+        // Cross-shipment reuse of an already-consumed dispatch IdempotencyKey -> 409 Conflict
+        var shp2Id = JsonDocument.Parse(await (await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/shipments", ShipStaffAId,
+            new { clientId = ClientA, facilityId = FacilityA, carrierCode = "SIM-FEDEX", serviceLevel = "StandardGround" }))).Content.ReadAsStringAsync()).RootElement.GetProperty("shipmentId").GetGuid();
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp2Id}/packages", ShipStaffAId, new { packageId = pkgOtherShpId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgOtherShpId}/stage", ShipStaffAId, new { stagingLocationId = StagingLaneAId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgOtherShpId}/load", ShipStaffAId, new { shipmentId = shp2Id }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp2Id}/bol", ShipStaffAId, new { trailerNumber = "TRL-2", sealNumber = "SEAL-2" }))).StatusCode);
+
+        var winnerKey = concStatuses[0] == HttpStatusCode.OK ? "disp-neg-key-1" : "disp-neg-key-2";
+        using (var rCrossKeyReuse = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shp2Id}/dispatch", ShipStaffAId,
+            new { driverName = "Dan DriverA", driverSignature = "SIG-DAN", trailerNumber = "TRL-2", sealNumber = "SEAL-2", idempotencyKey = winnerKey })))
+        {
+            Assert.Equal(HttpStatusCode.Conflict, rCrossKeyReuse.StatusCode);
         }
     }
 }

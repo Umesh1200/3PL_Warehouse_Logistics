@@ -222,6 +222,24 @@ public class ShipmentsController : BaseApiController
     }
 
     /// <summary>
+    /// Explicitly voids an un-dispatched Bill of Lading so shipment contents or trailer/seal metadata can be amended and reissued.
+    /// </summary>
+    [HttpPost("bol/{id:guid}/void")]
+    [HasPermission(Permissions.Outbound.Ship)]
+    [ProducesResponseType(typeof(VoidBolResult), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
+    [ProducesResponseType(StatusCodes.Status404NotFound)]
+    [ProducesResponseType(StatusCodes.Status422UnprocessableEntity)]
+    public async Task<IActionResult> VoidBillOfLading(
+        [FromRoute] Guid id,
+        [FromBody] VoidBolApiRequest request,
+        CancellationToken ct)
+    {
+        var result = await Mediator.Send(new VoidBillOfLadingCommand(id, request.Reason), ct);
+        return Ok(result);
+    }
+
+    /// <summary>
     /// Confirms driver handover and custody transfer, recording driver signature, trailer, and seal.
     /// Verifies all packages are loaded, transitions shipment to Dispatched, and updates completed orders.
     /// Zero inventory quantity mutation (stock balances unchanged). Idempotent on repeated calls.
@@ -273,6 +291,8 @@ public record GenerateBolApiRequest(
     string? TrailerNumber = null,
     string? SealNumber = null,
     string? SpecialInstructions = null);
+
+public record VoidBolApiRequest(string Reason);
 
 public record ConfirmDispatchCustodyApiRequest(
     string DriverName,

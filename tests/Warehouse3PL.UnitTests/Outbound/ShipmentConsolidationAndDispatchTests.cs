@@ -52,7 +52,12 @@ public class ShipmentConsolidationAndDispatchTests
         {
             Id = fix.FacilityId,
             Name = "Apex Central Gateway Hub",
-            FacilityCode = "APX-HUB-01"
+            FacilityCode = "APX-HUB-01",
+            AddressLine1 = "100 Gateway Pkwy",
+            City = "Columbus",
+            StateOrProvince = "OH",
+            PostalCode = "43215",
+            CountryCode = "USA"
         });
 
         context.Locations.AddRange(
@@ -795,6 +800,11 @@ public class ShipmentConsolidationAndDispatchTests
         await service.AddPackageToShipmentAsync(new AddPackageToShipmentRequest { ShipmentId = shp.ShipmentId, PackageId = pkg1.Id, UserId = fix.UserId });
         await service.AddPackageToShipmentAsync(new AddPackageToShipmentRequest { ShipmentId = shp.ShipmentId, PackageId = pkg2.Id, UserId = fix.UserId });
 
+        await service.StagePackageAsync(new StagePackageRequest { PackageId = pkg1.Id, StagingLocationId = fix.StagingLaneId, UserId = fix.UserId });
+        await service.LoadPackageAsync(new LoadPackageRequest { PackageId = pkg1.Id, UserId = fix.UserId });
+        await service.StagePackageAsync(new StagePackageRequest { PackageId = pkg2.Id, StagingLocationId = fix.StagingLaneId, UserId = fix.UserId });
+        await service.LoadPackageAsync(new LoadPackageRequest { PackageId = pkg2.Id, UserId = fix.UserId });
+
         var bolResult = await service.GenerateBillOfLadingAsync(new GenerateBolRequest
         {
             ShipmentId = shp.ShipmentId,
@@ -875,6 +885,8 @@ public class ShipmentConsolidationAndDispatchTests
             UserId = fix.UserId
         });
         await service.AddPackageToShipmentAsync(new AddPackageToShipmentRequest { ShipmentId = shp.ShipmentId, PackageId = pkg1.Id, UserId = fix.UserId });
+        await service.StagePackageAsync(new StagePackageRequest { PackageId = pkg1.Id, StagingLocationId = fix.StagingLaneId, UserId = fix.UserId });
+        await service.LoadPackageAsync(new LoadPackageRequest { PackageId = pkg1.Id, UserId = fix.UserId });
 
         // Initial Generation
         var bol1 = await service.GenerateBillOfLadingAsync(new GenerateBolRequest
@@ -1141,6 +1153,7 @@ public class ShipmentConsolidationAndDispatchTests
         await service.AddPackageToShipmentAsync(new AddPackageToShipmentRequest { ShipmentId = shp1.ShipmentId, PackageId = pkgA.Id, UserId = fix.UserId });
         await service.StagePackageAsync(new StagePackageRequest { PackageId = pkgA.Id, StagingLocationId = fix.StagingLaneId, UserId = fix.UserId });
         await service.LoadPackageAsync(new LoadPackageRequest { PackageId = pkgA.Id, UserId = fix.UserId });
+        await service.GenerateBillOfLadingAsync(new GenerateBolRequest { ShipmentId = shp1.ShipmentId, UserId = fix.UserId });
 
         // Shipment 2: Only Package B
         var shp2 = await service.CreateShipmentAsync(new CreateShipmentRequest
@@ -1153,6 +1166,7 @@ public class ShipmentConsolidationAndDispatchTests
         await service.AddPackageToShipmentAsync(new AddPackageToShipmentRequest { ShipmentId = shp2.ShipmentId, PackageId = pkgB.Id, UserId = fix.UserId });
         await service.StagePackageAsync(new StagePackageRequest { PackageId = pkgB.Id, StagingLocationId = fix.StagingLaneId, UserId = fix.UserId });
         await service.LoadPackageAsync(new LoadPackageRequest { PackageId = pkgB.Id, UserId = fix.UserId });
+        await service.GenerateBillOfLadingAsync(new GenerateBolRequest { ShipmentId = shp2.ShipmentId, UserId = fix.UserId });
 
         // Dispatch Shipment 1 (Partial fulfillment)
         var disp1 = await service.ConfirmDispatchAsync(new ConfirmDispatchCustodyRequest
@@ -1206,6 +1220,7 @@ public class ShipmentConsolidationAndDispatchTests
         await service.AddPackageToShipmentAsync(new AddPackageToShipmentRequest { ShipmentId = shp.ShipmentId, PackageId = pkg.Id, UserId = fix.UserId });
         await service.StagePackageAsync(new StagePackageRequest { PackageId = pkg.Id, StagingLocationId = fix.StagingLaneId, UserId = fix.UserId });
         await service.LoadPackageAsync(new LoadPackageRequest { PackageId = pkg.Id, UserId = fix.UserId });
+        await service.GenerateBillOfLadingAsync(new GenerateBolRequest { ShipmentId = shp.ShipmentId, UserId = fix.UserId });
 
         // First dispatch
         var res1 = await service.ConfirmDispatchAsync(new ConfirmDispatchCustodyRequest
@@ -1213,22 +1228,35 @@ public class ShipmentConsolidationAndDispatchTests
             ShipmentId = shp.ShipmentId,
             DriverName = "Marcus Brody",
             DriverSignature = "M.Brody",
+            IdempotencyKey = "disp-unit-idemp-1",
             AuthorizedUserId = fix.UserId
         });
         Assert.True(res1.IsSuccess);
         Assert.Equal(ShipmentStatus.Dispatched, res1.Status);
 
-        // Second dispatch (idempotent retry)
+        // Second dispatch (identical idempotent retry)
         var res2 = await service.ConfirmDispatchAsync(new ConfirmDispatchCustodyRequest
         {
             ShipmentId = shp.ShipmentId,
             DriverName = "Marcus Brody",
             DriverSignature = "M.Brody",
+            IdempotencyKey = "disp-unit-idemp-1",
             AuthorizedUserId = fix.UserId
         });
         Assert.True(res2.IsSuccess);
         Assert.Equal(ShipmentStatus.Dispatched, res2.Status);
         Assert.Contains("Idempotent", res2.Message);
+
+        // Conflicting driver retry must throw ConcurrencyException (409 Conflict)
+        await Assert.ThrowsAsync<ConcurrencyException>(() =>
+            service.ConfirmDispatchAsync(new ConfirmDispatchCustodyRequest
+            {
+                ShipmentId = shp.ShipmentId,
+                DriverName = "Impostor Driver",
+                DriverSignature = "I.Driver",
+                IdempotencyKey = "disp-unit-idemp-1",
+                AuthorizedUserId = fix.UserId
+            }));
     }
 
     #endregion

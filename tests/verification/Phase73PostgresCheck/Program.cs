@@ -445,7 +445,7 @@ try
             new Client { Id = client1Id, AccountCode = "CL1", CompanyName = "Operational Client 1", Status = ClientStatus.Active, SlaTier = SlaTier.Standard, Currency = "USD" },
             new Client { Id = client2Id, AccountCode = "CL2", CompanyName = "Operational Client 2", Status = ClientStatus.Active, SlaTier = SlaTier.Standard, Currency = "USD" });
 
-        seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "OP-FAC", Name = "Operational Facility", Timezone = "UTC", CountryCode = "USA", DockDoorCount = 4, IsActive = true });
+        seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "OP-FAC", Name = "Operational Facility", AddressLine1 = "100 Operational Blvd", City = "Chicago", StateOrProvince = "IL", PostalCode = "60601", Timezone = "UTC", CountryCode = "USA", DockDoorCount = 4, IsActive = true });
 
         seed.Users.Add(new User
         {
@@ -3098,6 +3098,13 @@ try
         throw new InvalidOperationException("Assigned driver must be denied (403) before custody dispatch confirmation.");
     TestAuthHandler.CustomClaims = null;
 
+    // Issue immutable BOL before dispatch custody transfer (P744-R02)
+    using (var r740cBol = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{cShipmentId}/bol", bSupId, facilityId, Permissions.Outbound.Ship, new { })))
+    {
+        if (r740cBol.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Phase 7.4.0C pre-dispatch BOL failed: {r740cBol.StatusCode}");
+    }
+
     // 8.2 Dispatch custody transfer binds ShipmentCustodyTransfer.AssignedDriverUserId = DriverA
     using (var rDispOk = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{cShipmentId}/dispatch", bSupId, facilityId, Permissions.Outbound.Ship, new { driverName = "PG DriverA", driverSignature = "SIG-DRV-A" })))
     {
@@ -4129,6 +4136,121 @@ try
     }
 
     Console.WriteLine("PASS PostgreSQL Phase 7.4.4 Shipment Consolidation (Draft -> ReadyForDispatch -> Dispatched), Immutable BOL Snapshot, Custody Transfer, OutboundOrder.Completed & Zero Secondary Stock Mutation verified cleanly.");
+
+    // P744-R01 .. P744-R04 Live PostgreSQL Regressions (Kathmandu Origin + Multi-Consignee BOL, BOL Readiness/Void/Mismatch, Dispatch Concurrency 409, Dock Validation)
+    var pgKtmFacId = Guid.NewGuid();
+    var pgKtmStageId = Guid.NewGuid();
+    var pgInactStageId = Guid.NewGuid();
+    var pgDockDoorId = Guid.NewGuid();
+    var pgInactDockId = Guid.NewGuid();
+    var pgKtmOrd1Id = Guid.NewGuid();
+    var pgKtmOrd2Id = Guid.NewGuid();
+    var pgKtmPkg1Id = Guid.NewGuid();
+    var pgKtmPkg2Id = Guid.NewGuid();
+    var pgKtmStaffId = Guid.NewGuid();
+
+    await using (var r744Db = CreateDb(operationalConn, user))
+    {
+        r744Db.Facilities.Add(new Facility
+        {
+            Id = pgKtmFacId, FacilityCode = "PG-KTM-01", Name = "Kathmandu Valley Hub",
+            AddressLine1 = "Durbar Marg, Ward 1", AddressLine2 = "Ring Road Cargo Complex",
+            City = "Kathmandu", StateOrProvince = "Bagmati", PostalCode = "44600", CountryCode = "NP",
+            Timezone = "Asia/Kathmandu", DockDoorCount = 2, IsActive = true
+        });
+        r744Db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = client1Id, FacilityId = pgKtmFacId, Status = FacilityAccessStatus.Active });
+        r744Db.Users.Add(new User { Id = pgKtmStaffId, Email = "pg-ktm@744.test", FirstName = "Sita", LastName = "Ktm", UserType = UserType.Staff, AssignedFacilityId = pgKtmFacId, PasswordHash = "x", Status = UserStatus.Active });
+        r744Db.Locations.AddRange(
+            new Location { Id = pgKtmStageId, FacilityId = pgKtmFacId, LocationCode = "KTM-PG-STG", Barcode = "KTM-PG-STG", LocationType = LocationType.StagingLane, IsActive = true },
+            new Location { Id = pgInactStageId, FacilityId = pgKtmFacId, LocationCode = "KTM-INACT-STG", Barcode = "KTM-INACT-STG", LocationType = LocationType.StagingLane, IsActive = false },
+            new Location { Id = pgDockDoorId, FacilityId = pgKtmFacId, LocationCode = "KTM-PG-DOCK", Barcode = "KTM-PG-DOCK", LocationType = LocationType.DockDoor, IsActive = true },
+            new Location { Id = pgInactDockId, FacilityId = pgKtmFacId, LocationCode = "KTM-INACT-DOCK", Barcode = "KTM-INACT-DOCK", LocationType = LocationType.DockDoor, IsActive = false });
+
+        r744Db.OutboundOrders.AddRange(
+            new OutboundOrder { Id = pgKtmOrd1Id, ClientId = client1Id, FacilityId = pgKtmFacId, OrderNumber = "PG-NP-ORD-1", CustomerName = "Patan Buyer", Status = OutboundOrderStatus.InProgress, ShippingAddress = new ShippingAddress { OutboundOrderId = pgKtmOrd1Id, RecipientName = "Patan Depot", AddressLine1 = "Jawalakhel", City = "Lalitpur", StateOrProvince = "Bagmati", PostalCode = "44700", CountryCode = "NP" } },
+            new OutboundOrder { Id = pgKtmOrd2Id, ClientId = client1Id, FacilityId = pgKtmFacId, OrderNumber = "PG-NP-ORD-2", CustomerName = "Pokhara Buyer", Status = OutboundOrderStatus.InProgress, ShippingAddress = new ShippingAddress { OutboundOrderId = pgKtmOrd2Id, RecipientName = "Pokhara Dock", AddressLine1 = "Prithvi Chowk", City = "Pokhara", StateOrProvince = "Gandaki", PostalCode = "33700", CountryCode = "NP" } });
+
+        var huK1 = Guid.NewGuid();
+        var huK2 = Guid.NewGuid();
+        r744Db.HandlingUnits.AddRange(
+            new HandlingUnit { Id = huK1, ClientId = client1Id, FacilityId = pgKtmFacId, LpnCode = "PG-KTM-CTN1", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse },
+            new HandlingUnit { Id = huK2, ClientId = client1Id, FacilityId = pgKtmFacId, LpnCode = "PG-KTM-CTN2", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse });
+        r744Db.Packages.AddRange(
+            new Package { Id = pgKtmPkg1Id, ClientId = client1Id, FacilityId = pgKtmFacId, OutboundOrderId = pgKtmOrd1Id, HandlingUnitId = huK1, PackageNumber = "PG-KTM-PKG1", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "PG-NP-TRK1", GrossWeightKg = 4m, TareWeightKg = 0.4m, NetWeightKg = 3.6m, LengthCm = 30, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "PG-NP-TRK1", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] },
+            new Package { Id = pgKtmPkg2Id, ClientId = client1Id, FacilityId = pgKtmFacId, OutboundOrderId = pgKtmOrd2Id, HandlingUnitId = huK2, PackageNumber = "PG-KTM-PKG2", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "PG-NP-TRK2", GrossWeightKg = 5m, TareWeightKg = 0.4m, NetWeightKg = 4.6m, LengthCm = 30, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "PG-NP-TRK2", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] });
+        await r744Db.SaveChangesAsync();
+    }
+
+    var ktmShpId = JsonDocument.Parse(await (await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/shipments", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship,
+        new { clientId = client1Id, facilityId = pgKtmFacId, carrierCode = "SIM-FEDEX", serviceLevel = "StandardGround" }))).Content.ReadAsStringAsync()).RootElement.GetProperty("shipmentId").GetGuid();
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/packages", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { packageId = pgKtmPkg1Id }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/packages", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { packageId = pgKtmPkg2Id }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("P744 PostgreSQL KTM add packages failed.");
+
+    // P744-R02 Early BOL -> 422; P744-R04 Inactive Staging -> 400
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/bol", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { }))).StatusCode != HttpStatusCode.UnprocessableEntity ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pgKtmPkg1Id}/stage", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { stagingLocationId = pgInactStageId }))).StatusCode != HttpStatusCode.BadRequest)
+        throw new InvalidOperationException("P744-R02/R04 PostgreSQL early BOL or inactive staging check failed.");
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pgKtmPkg1Id}/stage", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { stagingLocationId = pgKtmStageId }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pgKtmPkg2Id}/stage", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { stagingLocationId = pgKtmStageId }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("P744 PostgreSQL KTM staging failed.");
+
+    // P744-R04 Invalid DockLocationId on Load -> 400
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pgKtmPkg1Id}/load", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { shipmentId = ktmShpId, dockLocationId = pgInactDockId }))).StatusCode != HttpStatusCode.BadRequest ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pgKtmPkg1Id}/load", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { shipmentId = ktmShpId, dockLocationId = p743BinId }))).StatusCode != HttpStatusCode.BadRequest)
+        throw new InvalidOperationException("P744-R04 PostgreSQL invalid DockLocationId check failed.");
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pgKtmPkg1Id}/load", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { shipmentId = ktmShpId, trailerNumber = "NP-TRL-1", dockLocationId = pgDockDoorId }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pgKtmPkg2Id}/load", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { shipmentId = ktmShpId, trailerNumber = "NP-TRL-1", dockLocationId = pgDockDoorId }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("P744 PostgreSQL KTM load failed.");
+
+    // P744-R02 Dispatch without BOL -> 422
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/dispatch", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship,
+        new { driverName = "PG KTM Driver", driverSignature = "SIG-KTM" }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+        throw new InvalidOperationException("P744-R02 PostgreSQL dispatch without BOL should return 422.");
+
+    // P744-R01 Issue Kathmandu Multi-Consignee BOL & verify persisted Nepal origin + both destinations (zero Columbus)
+    var rKtmBol1 = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/bol", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship,
+        new { trailerNumber = "NP-TRL-1", sealNumber = "NP-SEAL-1" }));
+    if (rKtmBol1.StatusCode != HttpStatusCode.OK) throw new InvalidOperationException("P744-R01 PostgreSQL KTM BOL failed.");
+    var ktmBol1Id = JsonDocument.Parse(await rKtmBol1.Content.ReadAsStringAsync()).RootElement.GetProperty("bolId").GetGuid();
+
+    var ktmBolDto = JsonDocument.Parse(await (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/shipments/bol/{ktmBol1Id}", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship))).Content.ReadAsStringAsync()).RootElement;
+    var ktmShipperAddr = ktmBolDto.GetProperty("shipperAddressSnapshot").GetString()!;
+    var ktmConsigneeAddr = ktmBolDto.GetProperty("consigneeAddressSnapshot").GetString()!;
+    if (!ktmShipperAddr.Contains("Durbar Marg, Ward 1") || !ktmShipperAddr.Contains("Kathmandu") || !ktmShipperAddr.Contains("NP") || ktmShipperAddr.Contains("Columbus") ||
+        !ktmConsigneeAddr.Contains("Lalitpur") || !ktmConsigneeAddr.Contains("Pokhara"))
+        throw new InvalidOperationException($"P744-R01 PostgreSQL KTM BOL address/consignee mismatch: shipper='{ktmShipperAddr}', consignee='{ktmConsigneeAddr}'");
+
+    // P744-R02 Post-BOL package removal -> 422; Void -> Reissue -R2; Mismatched seal dispatch -> 422
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Delete, $"/api/v1/outbound/shipments/{ktmShpId}/packages/{pgKtmPkg2Id}", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { reason = "Tamper" }))).StatusCode != HttpStatusCode.UnprocessableEntity ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/bol/{ktmBol1Id}/void", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { reason = "Seal update" }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/bol", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { trailerNumber = "NP-TRL-1", sealNumber = "NP-SEAL-R2" }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/dispatch", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship,
+            new { driverName = "PG KTM Driver", driverSignature = "SIG-KTM", trailerNumber = "NP-TRL-1", sealNumber = "NP-SEAL-WRONG" }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+        throw new InvalidOperationException("P744-R02 PostgreSQL post-BOL lock/void/seal-mismatch check failed.");
+
+    // P744-R03 Live PostgreSQL concurrent conflicting dispatch race -> 1x 200, 1x 409 Conflict, 1 custody row persisted
+    var pgDispRace = await Task.WhenAll(
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/dispatch", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship,
+            new { driverName = "PG KTM Driver A", driverSignature = "SIG-KTM-A", trailerNumber = "NP-TRL-1", sealNumber = "NP-SEAL-R2", idempotencyKey = "pg-ktm-disp-1" })),
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{ktmShpId}/dispatch", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship,
+            new { driverName = "PG KTM Impostor", driverSignature = "SIG-KTM-B", trailerNumber = "NP-TRL-1", sealNumber = "NP-SEAL-R2", idempotencyKey = "pg-ktm-disp-2" })));
+    var pgDispRaceStatuses = pgDispRace.Select(r => r.StatusCode).ToArray();
+    foreach (var r in pgDispRace) r.Dispose();
+
+    if (pgDispRaceStatuses.Count(s => s == HttpStatusCode.OK) != 1 || pgDispRaceStatuses.Count(s => s == HttpStatusCode.Conflict) != 1)
+        throw new InvalidOperationException($"P744-R03 PostgreSQL concurrent dispatch race expected 1x 200 and 1x 409, got: {string.Join(", ", pgDispRaceStatuses)}");
+
+    await using (var ktmCheckDb = CreateDb(operationalConn, user))
+    {
+        var custodyCount = await ktmCheckDb.ShipmentCustodyTransfers.CountAsync(c => c.ShipmentId == ktmShpId);
+        if (custodyCount != 1)
+            throw new InvalidOperationException($"P744-R03 PostgreSQL expected exactly 1 custody transfer row, found {custodyCount}.");
+    }
+
+    Console.WriteLine("PASS PostgreSQL P744-R01..R04 Kathmandu BOL Address, Multi-Consignee Snapshot, Readiness/Manifest Lock/Void-R2, Trailer/Seal Consistency, Concurrent Dispatch 409 & Dock Location Validation verified cleanly.");
 
     if (Directory.Exists(pgPodStorageDir))
     {

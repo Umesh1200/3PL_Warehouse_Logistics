@@ -660,7 +660,11 @@ export const ShipmentConsolidationPage: React.FC = () => {
                     type="button"
                     className="btn btn-secondary btn-sm"
                     onClick={() => setBolModalOpen(true)}
-                    disabled={activeShipment.totalPackagesCount === 0}
+                    disabled={
+                      activeShipment.totalPackagesCount === 0 ||
+                      (!activeShipment.billOfLadingId &&
+                        activeShipment.status !== ShipmentStatus.ReadyForDispatch)
+                    }
                     data-testid="open-bol-modal-btn"
                   >
                     <AppIcon name="Receipt" size="xs" />{' '}

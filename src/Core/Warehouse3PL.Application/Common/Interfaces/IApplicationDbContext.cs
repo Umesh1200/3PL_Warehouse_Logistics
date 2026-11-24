@@ -191,6 +191,7 @@ public interface IApplicationDbContext
     Task<TResult> ExecuteWithShipmentLockAsync<TResult>(Guid? shipmentId, Func<Task<TResult>> action, CancellationToken cancellationToken = default);
     Task<TResult> ExecuteWithPackageLockAsync<TResult>(Guid? packageId, Guid? shipmentId, Func<Task<TResult>> action, CancellationToken cancellationToken = default);
     Task<IAsyncDisposable> AcquirePackIdempotencyLockAsync(Guid facilityId, string idempotencyKey, CancellationToken cancellationToken = default);
+    Task<IAsyncDisposable> AcquireScopedIdempotencyLockAsync(string lockScope, Guid facilityId, string idempotencyKey, CancellationToken cancellationToken = default);
     bool IsRelationalDatabase { get; }
     void ClearChangeTracker();
     bool AllowExplicitAuditTimestamps { get; set; }

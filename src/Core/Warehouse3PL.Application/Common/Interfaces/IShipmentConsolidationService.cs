@@ -147,6 +147,22 @@ public class ConfirmDispatchCustodyResult
     public string Message { get; set; } = string.Empty;
 }
 
+public class VoidBolRequest
+{
+    public Guid BolId { get; set; }
+    public string Reason { get; set; } = string.Empty;
+    public Guid UserId { get; set; }
+}
+
+public class VoidBolResult
+{
+    public bool IsSuccess { get; set; }
+    public Guid BolId { get; set; }
+    public string BolNumber { get; set; } = string.Empty;
+    public Guid ShipmentId { get; set; }
+    public string Message { get; set; } = string.Empty;
+}
+
 public interface IShipmentConsolidationService
 {
     Task<CreateShipmentResult> CreateShipmentAsync(
@@ -171,6 +187,10 @@ public interface IShipmentConsolidationService
 
     Task<GenerateBolResult> GenerateBillOfLadingAsync(
         GenerateBolRequest request,
+        CancellationToken cancellationToken = default);
+
+    Task<VoidBolResult> VoidBillOfLadingAsync(
+        VoidBolRequest request,
         CancellationToken cancellationToken = default);
 
     Task<ConfirmDispatchCustodyResult> ConfirmDispatchAsync(

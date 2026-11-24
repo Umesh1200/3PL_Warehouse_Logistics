@@ -260,9 +260,30 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
             new OutboundOrder { Id = OrderClientAFacB, ClientId = ClientA, FacilityId = FacilityB, OrderNumber = "ORD-740C-AB", CustomerName = "Buyer AB", Status = OutboundOrderStatus.Completed, DeliveryStatus = OrderDeliveryStatus.Dispatched });
 
         db.Shipments.AddRange(
-            new Shipment { Id = ShipmentDraftId, ClientId = ClientA, FacilityId = FacilityA, ShipmentNumber = "SHP-740C-DRAFT", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.ReadyForDispatch, CustodyStatus = ShipmentCustodyStatus.Unassigned, Version = 1 },
+            new Shipment { Id = ShipmentDraftId, ClientId = ClientA, FacilityId = FacilityA, ShipmentNumber = "SHP-740C-DRAFT", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.ReadyForDispatch, BillOfLadingNumber = "BOL-SHP-740C-DRAFT", CustodyStatus = ShipmentCustodyStatus.Unassigned, Version = 1 },
             new Shipment { Id = ShipmentDispatchedId, ClientId = ClientA, FacilityId = FacilityA, ShipmentNumber = "SHP-740C-DISP", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, CustodyStatus = ShipmentCustodyStatus.Confirmed, DeliveryStatus = TrackingMilestoneStatus.OutForDelivery, AssignedDriverUserId = DriverAId, DispatchedAtUtc = DateTime.UtcNow.AddHours(-1), Version = 2 },
             new Shipment { Id = ShipmentFacBId, ClientId = ClientA, FacilityId = FacilityB, ShipmentNumber = "SHP-740C-FACB", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, CustodyStatus = ShipmentCustodyStatus.Confirmed, DeliveryStatus = TrackingMilestoneStatus.InTransit, AssignedDriverUserId = DriverAId, DispatchedAtUtc = DateTime.UtcNow.AddHours(-1), Version = 1 });
+
+        db.BillsOfLading.Add(new BillOfLading
+        {
+            ClientId = ClientA,
+            FacilityId = FacilityA,
+            ShipmentId = ShipmentDraftId,
+            BolNumber = "BOL-SHP-740C-DRAFT",
+            CarrierCode = "SIM-FEDEX",
+            CarrierName = "SIM-FEDEX",
+            ServiceLevel = nameof(CarrierServiceLevel.StandardGround),
+            TotalPackageCount = 1,
+            TotalGrossWeightKg = 2m,
+            TotalVolumeCm3 = 1000m,
+            ShipperName = "Hub Alpha",
+            ShipperAddressSnapshot = "1 Main, Chicago, US",
+            ConsigneeName = "Buyer A",
+            ConsigneeAddressSnapshot = "Buyer A Address",
+            PackageTrackingNumbers = "TRK-740C-DRAFT",
+            DocumentSnapshotJson = "{}",
+            PreparedByUserId = SupervisorFacAId
+        });
 
         db.ShipmentCustodyTransfers.Add(new ShipmentCustodyTransfer
         {

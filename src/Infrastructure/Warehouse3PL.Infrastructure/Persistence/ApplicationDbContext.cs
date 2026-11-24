@@ -298,12 +298,19 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         }
     }
 
-    public async Task<IAsyncDisposable> AcquirePackIdempotencyLockAsync(
+    public Task<IAsyncDisposable> AcquirePackIdempotencyLockAsync(
+        Guid facilityId,
+        string idempotencyKey,
+        CancellationToken cancellationToken = default)
+        => AcquireScopedIdempotencyLockAsync("PACK", facilityId, idempotencyKey, cancellationToken);
+
+    public async Task<IAsyncDisposable> AcquireScopedIdempotencyLockAsync(
+        string lockScope,
         Guid facilityId,
         string idempotencyKey,
         CancellationToken cancellationToken = default)
     {
-        var lockKey = $"PACK:{facilityId:N}:{idempotencyKey}";
+        var lockKey = $"{lockScope}:{facilityId:N}:{idempotencyKey}";
 
         if (!Database.IsRelational())
         {
@@ -314,7 +321,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
 
         if (Database.CurrentTransaction == null)
         {
-            throw new InvalidOperationException("Pack idempotency lock requires an active database transaction.");
+            throw new InvalidOperationException($"{lockScope} idempotency lock requires an active database transaction.");
         }
 
         if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
