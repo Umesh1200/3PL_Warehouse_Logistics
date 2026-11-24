@@ -4504,7 +4504,7 @@ try
     // ManualVerification audit reason & explicit timestamp binding on PostgreSQL
     TestAuthHandler.CustomClaims = null;
     var pgExplicitTs = new DateTime(2026, 11, 24, 11, 15, 0, DateTimeKind.Utc);
-    using (var rManInit = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{r01PkgManualId}/pod", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new
+    using (var rManInit = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{r01PkgManualId}/pod", bSupId, facilityId, Permissions.Dispatch.ExecuteDelivery, new
     {
         evidenceSource = PodEvidenceSource.ManualVerification,
         verificationReason = "Gatehouse log #42",
@@ -4516,7 +4516,7 @@ try
         if (rManInit.StatusCode != HttpStatusCode.OK)
             throw new InvalidOperationException($"P745-R02 PostgreSQL manual POD failed: {rManInit.StatusCode}");
     }
-    using (var rManReplay = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{r01PkgManualId}/pod", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new
+    using (var rManReplay = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{r01PkgManualId}/pod", bSupId, facilityId, Permissions.Dispatch.ExecuteDelivery, new
     {
         evidenceSource = PodEvidenceSource.ManualVerification,
         verificationReason = "Gatehouse log #42",
@@ -4529,7 +4529,7 @@ try
         if (rManReplay.StatusCode != HttpStatusCode.OK || !manJson.GetProperty("isDuplicate").GetBoolean())
             throw new InvalidOperationException("P745-R02 PostgreSQL manual POD identical replay failed.");
     }
-    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{r01PkgManualId}/pod", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{r01PkgManualId}/pod", bSupId, facilityId, Permissions.Dispatch.ExecuteDelivery, new
         {
             evidenceSource = PodEvidenceSource.ManualVerification,
             verificationReason = "Gatehouse log #99-CHANGED",
@@ -4537,7 +4537,7 @@ try
             deliveredAtUtc = pgExplicitTs,
             idempotencyKey = "PG-R02-MANUAL-KEY"
         }))).StatusCode != HttpStatusCode.Conflict ||
-        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{r01PkgManualId}/pod", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{r01PkgManualId}/pod", bSupId, facilityId, Permissions.Dispatch.ExecuteDelivery, new
         {
             evidenceSource = PodEvidenceSource.ManualVerification,
             verificationReason = "Gatehouse log #42",
@@ -4545,7 +4545,7 @@ try
             deliveredAtUtc = pgExplicitTs.AddMinutes(-5),
             idempotencyKey = "PG-R02-MANUAL-KEY"
         }))).StatusCode != HttpStatusCode.Conflict ||
-        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{r01PkgManualId}/pod", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/packages/{r01PkgManualId}/pod", bSupId, facilityId, Permissions.Dispatch.ExecuteDelivery, new
         {
             evidenceSource = PodEvidenceSource.ManualVerification,
             verificationReason = "Gatehouse log #42",
