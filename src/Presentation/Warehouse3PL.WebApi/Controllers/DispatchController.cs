@@ -88,6 +88,20 @@ public class DispatchController : BaseApiController
     }
 
     // =========================================================================
+    // 1B. Courier-Scoped Active Custody Runs (UserType.Driver ExecuteDelivery)
+    // =========================================================================
+
+    [HttpGet("courier/shipments")]
+    [HasPermission(Permissions.Dispatch.ExecuteDelivery)]
+    [ProducesResponseType(typeof(IReadOnlyList<DispatchBoardShipmentDto>), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<IActionResult> GetCourierAssignedShipments(CancellationToken ct)
+    {
+        var result = await Mediator.Send(new GetCourierAssignedShipmentsQuery(), ct);
+        return Ok(result);
+    }
+
+    // =========================================================================
     // 2. Supervisor Dispatch & Exception Management
     // =========================================================================
 

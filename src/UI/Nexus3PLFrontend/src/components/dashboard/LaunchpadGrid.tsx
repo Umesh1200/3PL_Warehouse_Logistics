@@ -71,6 +71,15 @@ export const LaunchpadGrid: React.FC = () => {
       badge: 'Dock Dispatch',
     },
     {
+      id: 'transportation',
+      title: 'Dispatch & Courier Operations',
+      description: 'Track in-transit carrier milestones, assign drivers, capture Proof of Delivery, and resolve delivery exceptions.',
+      path: '/app/transportation',
+      icon: 'Truck',
+      permissions: ['dispatch:view', 'dispatch:manage-runs', 'dispatch:execute-delivery'],
+      badge: 'Tracking & POD',
+    },
+    {
       id: 'putaway',
       title: 'Directed Putaway RF',
       description: 'Mobile-first barcode scanning, staging verification, and directed shelf confirmation.',

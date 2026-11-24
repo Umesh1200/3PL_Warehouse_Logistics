@@ -4375,6 +4375,49 @@ try
 
     Console.WriteLine("PASS PostgreSQL P744-R05 Concurrent Load/Remove/Add/BOL/Void/Dispatch Serialization & Snapshot Parity verified cleanly.");
 
+    // Phase 7.4.5 Live PostgreSQL Verification: Courier Scoped Stops (/courier/shipments), Sync Tracking, Exception Lifecycle (Report -> Contact -> Reattempt -> Address -> Depot -> Resolve -> Reopen -> Void) & RBAC
+    SetDriverClaims(cDriverAId);
+    using (var rCourierRuns = await p74Client.GetAsync("/api/v1/outbound/dispatch/courier/shipments"))
+    {
+        if (rCourierRuns.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Phase 7.4.5 PostgreSQL GET /courier/shipments failed: {rCourierRuns.StatusCode}");
+        var runs = JsonDocument.Parse(await rCourierRuns.Content.ReadAsStringAsync()).RootElement;
+        if (runs.ValueKind != JsonValueKind.Array || !runs.EnumerateArray().Any(s => s.GetProperty("shipmentId").GetGuid() == pg744ShipId))
+            throw new InvalidOperationException("Phase 7.4.5 PostgreSQL expected pg744ShipId in DriverA assigned courier shipments.");
+    }
+    TestAuthHandler.CustomClaims = null;
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/shipments/{pg744ShipId}/sync-tracking", bSupId, facilityId, Permissions.Dispatch.ManageRuns))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Phase 7.4.5 PostgreSQL sync-tracking failed.");
+
+    SetDriverClaims(cDriverAId);
+    Guid pg745ExcId;
+    using (var rDrvExc = await p74Client.PostAsJsonAsync("/api/v1/outbound/dispatch/exceptions/driver-report", new
+    {
+        packageId = pg744PkgId,
+        exceptionType = DeliveryExceptionType.AccessRestricted,
+        driverNotes = "PG Phase 7.4.5 Gate keypad locked"
+    }))
+    {
+        if (rDrvExc.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"Phase 7.4.5 PostgreSQL driver-report exception failed: {rDrvExc.StatusCode}");
+        pg745ExcId = JsonDocument.Parse(await rDrvExc.Content.ReadAsStringAsync()).RootElement.GetProperty("exceptionId").GetGuid();
+    }
+    TestAuthHandler.CustomClaims = null;
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/dispatch/exceptions?facilityId={facilityId}&packageId={pg744PkgId}", bSupId, facilityId, Permissions.Dispatch.View))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/exceptions/{pg745ExcId}/contact", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { contactMethod = CustomerContactMethod.PhoneCall, outcome = CustomerContactOutcome.ReachedAgreedToReattempt, notes = "PG Gate code obtained" }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/exceptions/{pg745ExcId}/reattempt", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { scheduledDateUtc = DateTime.UtcNow.AddDays(1), notes = "Reattempt tomorrow" }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/exceptions/{pg745ExcId}/reschedule", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { newScheduledDateUtc = DateTime.UtcNow.AddDays(2), reason = "Consignee holiday" }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/exceptions/{pg745ExcId}/update-address", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { correctedAddress = "744 Harbor Way Suite 200", notes = "Added suite" }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/exceptions/{pg745ExcId}/redirect-depot", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { depotLocation = "ORD-DEPOT-01", notes = "Customer pickup option" }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/exceptions/{pg745ExcId}/resolve", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { resolution = DeliveryExceptionResolution.Resolved, resolutionNotes = "Delivered cleanly" }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/exceptions/{pg745ExcId}/reopen", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { reason = "Re-check scan" }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/dispatch/exceptions/{pg745ExcId}/void", bSupId, facilityId, Permissions.Dispatch.ManageRuns, new { reason = "Duplicate report" }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Phase 7.4.5 PostgreSQL delivery exception full resolution lifecycle failed.");
+
+    Console.WriteLine("PASS PostgreSQL Phase 7.4.5 Courier Scoped Stops, Tracking Sync & Delivery Exception Resolution Lifecycle verified cleanly.");
+
     if (Directory.Exists(pgPodStorageDir))
     {
         try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }

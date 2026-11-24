@@ -115,7 +115,8 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => 
         {
           label: 'Transportation & Carriers',
           path: '/app/transportation',
-          permissions: ['dispatch:view', 'analytics:transportation:view'],
+          activePaths: ['/app/transportation', '/app/transportation/dispatch'],
+          permissions: ['dispatch:view', 'dispatch:manage-runs', 'dispatch:execute-delivery', 'analytics:transportation:view'],
           icon: 'Truck',
         },
         {

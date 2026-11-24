@@ -19,6 +19,7 @@ import { PickWavesPage } from './pages/outbound/PickWavesPage';
 import { PickingWorkstationPage } from './pages/outbound/PickingWorkstationPage';
 import { PackingWorkstationPage } from './pages/outbound/PackingWorkstationPage';
 import { ShipmentConsolidationPage } from './pages/outbound/ShipmentConsolidationPage';
+import { DispatchAndCourierPage } from './pages/transportation/DispatchAndCourierPage';
 import './styles/base.css';
 
 const AppRoutes: React.FC = () => {
@@ -85,10 +86,11 @@ const AppRoutes: React.FC = () => {
       content = <ShipmentConsolidationPage />;
       pageTitle = 'Shipment Consolidation & BOL';
       breadcrumb = 'OPERATIONAL WORKFLOWS / SHIPMENT CONSOLIDATION';
-    } else if (
-      path === '/app/transportation' ||
-      path === '/app/billing'
-    ) {
+    } else if (path === '/app/transportation' || path === '/app/transportation/dispatch') {
+      content = <DispatchAndCourierPage />;
+      pageTitle = 'Dispatch, Tracking & Courier Operations';
+      breadcrumb = 'OPERATIONAL WORKFLOWS / DISPATCH & COURIER';
+    } else if (path === '/app/billing') {
       content = (
         <div className="card-placeholder" role="region" aria-label="Workflow module placeholder">
           <h3>Workflow Integration Pending</h3>

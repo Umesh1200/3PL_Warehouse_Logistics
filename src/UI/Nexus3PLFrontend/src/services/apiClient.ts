@@ -277,10 +277,13 @@ export async function apiClient<T>(endpoint: string, options: RequestOptions = {
   }
 
   const buildHeaders = (token: string | null): HeadersInit => {
+    const isFormData = typeof FormData !== 'undefined' && fetchOptions.body instanceof FormData;
     const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
       Accept: 'application/json',
     };
+    if (!isFormData) {
+      headers['Content-Type'] = 'application/json';
+    }
 
     if (!skipAuth && token) {
       headers['Authorization'] = `Bearer ${token}`;

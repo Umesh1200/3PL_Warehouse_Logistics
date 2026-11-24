@@ -1,7 +1,10 @@
 import React from 'react';
 import {
   CarrierServiceLevel,
+  DeliveryExceptionSeverity,
+  DeliveryExceptionStatus,
   ImportBatchStatus,
+  OrderDeliveryStatus,
   OutboundOrderDto,
   OutboundOrderStatus,
   OutboundOrderType,
@@ -15,6 +18,7 @@ import {
   ShipmentStatus,
   ShippingLabelStatus,
   ShortPickReason,
+  TrackingMilestoneStatus,
 } from '../../types/outbound';
 
 export function getOrderStatusBadgeClass(status: OutboundOrderStatus): string {
@@ -271,4 +275,76 @@ export const ShipmentStatusBadge: React.FC<{ status: ShipmentStatus }> = ({ stat
 
 export const ShipmentCustodyBadge: React.FC<{ status: ShipmentCustodyStatus }> = ({ status }) => (
   <span className={`badge ${getShipmentCustodyBadgeClass(status)}`}>{status}</span>
+);
+
+export function getTrackingMilestoneBadgeClass(status: TrackingMilestoneStatus): string {
+  switch (status) {
+    case TrackingMilestoneStatus.Delivered:
+      return 'badge-success';
+    case TrackingMilestoneStatus.DeliveryException:
+    case TrackingMilestoneStatus.ReturnedToSender:
+      return 'badge-danger';
+    case TrackingMilestoneStatus.OutForDelivery:
+    case TrackingMilestoneStatus.PendingHandover:
+      return 'badge-warning';
+    default:
+      return 'badge-info';
+  }
+}
+
+export function getOrderDeliveryStatusBadgeClass(status: OrderDeliveryStatus): string {
+  switch (status) {
+    case OrderDeliveryStatus.Delivered:
+      return 'badge-success';
+    case OrderDeliveryStatus.DeliveryException:
+      return 'badge-danger';
+    case OrderDeliveryStatus.PartiallyDelivered:
+    case OrderDeliveryStatus.PendingShipment:
+      return 'badge-warning';
+    default:
+      return 'badge-info';
+  }
+}
+
+export function getDeliveryExceptionStatusBadgeClass(status: DeliveryExceptionStatus): string {
+  switch (status) {
+    case DeliveryExceptionStatus.Resolved:
+      return 'badge-success';
+    case DeliveryExceptionStatus.Open:
+    case DeliveryExceptionStatus.PendingReturnAuthorization:
+    case DeliveryExceptionStatus.ReturnToSenderInitiated:
+      return 'badge-danger';
+    case DeliveryExceptionStatus.Voided:
+      return 'badge-info';
+    default:
+      return 'badge-warning';
+  }
+}
+
+export function getDeliveryExceptionSeverityBadgeClass(severity: DeliveryExceptionSeverity): string {
+  switch (severity) {
+    case DeliveryExceptionSeverity.Critical:
+    case DeliveryExceptionSeverity.High:
+      return 'badge-danger';
+    case DeliveryExceptionSeverity.Medium:
+      return 'badge-warning';
+    default:
+      return 'badge-info';
+  }
+}
+
+export const TrackingMilestoneBadge: React.FC<{ status: TrackingMilestoneStatus }> = ({ status }) => (
+  <span className={`badge ${getTrackingMilestoneBadgeClass(status)}`}>{status}</span>
+);
+
+export const OrderDeliveryStatusBadge: React.FC<{ status: OrderDeliveryStatus }> = ({ status }) => (
+  <span className={`badge ${getOrderDeliveryStatusBadgeClass(status)}`}>{status}</span>
+);
+
+export const DeliveryExceptionStatusBadge: React.FC<{ status: DeliveryExceptionStatus }> = ({ status }) => (
+  <span className={`badge ${getDeliveryExceptionStatusBadgeClass(status)}`}>{status}</span>
+);
+
+export const DeliveryExceptionSeverityBadge: React.FC<{ severity: DeliveryExceptionSeverity }> = ({ severity }) => (
+  <span className={`badge ${getDeliveryExceptionSeverityBadgeClass(severity)}`}>{severity}</span>
 );

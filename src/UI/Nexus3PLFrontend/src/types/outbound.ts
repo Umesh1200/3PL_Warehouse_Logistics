@@ -1405,3 +1405,565 @@ export interface ConfirmDispatchCustodyResultDto {
 }
 
 export type OutboundPagedResult<T> = PagedResult<T>;
+
+// ============================================================================
+// Phase 7.4.5 — Dispatch Board, Tracking, Proof of Delivery & Delivery Exceptions
+// ============================================================================
+
+export enum TrackingMilestoneStatus {
+  PendingHandover = 'PendingHandover',
+  Accepted = 'Accepted',
+  InTransit = 'InTransit',
+  OutForDelivery = 'OutForDelivery',
+  Delivered = 'Delivered',
+  DeliveryException = 'DeliveryException',
+  ReturnedToSender = 'ReturnedToSender',
+}
+
+export enum OrderDeliveryStatus {
+  PendingShipment = 'PendingShipment',
+  Dispatched = 'Dispatched',
+  InTransit = 'InTransit',
+  PartiallyDelivered = 'PartiallyDelivered',
+  Delivered = 'Delivered',
+  DeliveryException = 'DeliveryException',
+}
+
+export enum PodEvidenceSource {
+  CarrierApi = 'CarrierApi',
+  DriverHandheld = 'DriverHandheld',
+  ConsigneePortal = 'ConsigneePortal',
+  ManualVerification = 'ManualVerification',
+}
+
+export enum DeliveryExceptionType {
+  AddressNotFound = 'AddressNotFound',
+  RecipientUnavailable = 'RecipientUnavailable',
+  CustomerRefused = 'CustomerRefused',
+  WeatherOrNaturalDisaster = 'WeatherOrNaturalDisaster',
+  CarrierOperationalDelay = 'CarrierOperationalDelay',
+  PackageDamagedInTransit = 'PackageDamagedInTransit',
+  LostInTransit = 'LostInTransit',
+  AccessRestricted = 'AccessRestricted',
+  MissedDeliveryAppointment = 'MissedDeliveryAppointment',
+  DocumentationMissing = 'DocumentationMissing',
+  Other = 'Other',
+}
+
+export enum DeliveryExceptionStatus {
+  Open = 'Open',
+  UnderReview = 'UnderReview',
+  ScheduledForReattempt = 'ScheduledForReattempt',
+  PendingCustomerAction = 'PendingCustomerAction',
+  PendingReturnAuthorization = 'PendingReturnAuthorization',
+  Resolved = 'Resolved',
+  ReturnToSenderInitiated = 'ReturnToSenderInitiated',
+  Voided = 'Voided',
+}
+
+export enum DeliveryExceptionSeverity {
+  Low = 'Low',
+  Medium = 'Medium',
+  High = 'High',
+  Critical = 'Critical',
+}
+
+export enum DeliveryExceptionResolution {
+  PendingCarrierReattempt = 'PendingCarrierReattempt',
+  CustomerContacted = 'CustomerContacted',
+  AddressCorrected = 'AddressCorrected',
+  HoldAtCarrierDepot = 'HoldAtCarrierDepot',
+  ReturnToSenderRequested = 'ReturnToSenderRequested',
+  ClaimInitiated = 'ClaimInitiated',
+  Resolved = 'Resolved',
+  RedeliveryScheduled = 'RedeliveryScheduled',
+  ReturnToSenderAuthorized = 'ReturnToSenderAuthorized',
+  PackageDestroyedAbandoned = 'PackageDestroyedAbandoned',
+  CarrierErrorRescinded = 'CarrierErrorRescinded',
+}
+
+export enum DeliveryExceptionSource {
+  CarrierWebhook = 'CarrierWebhook',
+  CarrierPolling = 'CarrierPolling',
+  DriverHandheld = 'DriverHandheld',
+  ManualStaffEntry = 'ManualStaffEntry',
+}
+
+export enum CustomerContactMethod {
+  PhoneCall = 'PhoneCall',
+  Sms = 'Sms',
+  Email = 'Email',
+  CustomerPortal = 'CustomerPortal',
+  CarrierMessaging = 'CarrierMessaging',
+  InPerson = 'InPerson',
+}
+
+export enum CustomerContactOutcome {
+  ReachedAgreedToReattempt = 'ReachedAgreedToReattempt',
+  ReachedAddressCorrected = 'ReachedAddressCorrected',
+  ReachedRefusedDelivery = 'ReachedRefusedDelivery',
+  ConsigneeRequestedDepotPickup = 'ConsigneeRequestedDepotPickup',
+  LeftVoicemail = 'LeftVoicemail',
+  NoAnswer = 'NoAnswer',
+  InvalidContactDetails = 'InvalidContactDetails',
+  AwaitingCustomerCallback = 'AwaitingCustomerCallback',
+}
+
+const TRACKING_MILESTONE_NUM: Record<number, TrackingMilestoneStatus> = {
+  1: TrackingMilestoneStatus.PendingHandover,
+  2: TrackingMilestoneStatus.Accepted,
+  3: TrackingMilestoneStatus.InTransit,
+  4: TrackingMilestoneStatus.OutForDelivery,
+  5: TrackingMilestoneStatus.Delivered,
+  6: TrackingMilestoneStatus.DeliveryException,
+  7: TrackingMilestoneStatus.ReturnedToSender,
+};
+
+const ORDER_DELIVERY_STATUS_NUM: Record<number, OrderDeliveryStatus> = {
+  1: OrderDeliveryStatus.PendingShipment,
+  2: OrderDeliveryStatus.Dispatched,
+  3: OrderDeliveryStatus.InTransit,
+  4: OrderDeliveryStatus.PartiallyDelivered,
+  5: OrderDeliveryStatus.Delivered,
+  6: OrderDeliveryStatus.DeliveryException,
+};
+
+const POD_SOURCE_NUM: Record<number, PodEvidenceSource> = {
+  1: PodEvidenceSource.CarrierApi,
+  2: PodEvidenceSource.DriverHandheld,
+  3: PodEvidenceSource.ConsigneePortal,
+  4: PodEvidenceSource.ManualVerification,
+};
+
+const DELIVERY_EXC_TYPE_NUM: Record<number, DeliveryExceptionType> = {
+  1: DeliveryExceptionType.AddressNotFound,
+  2: DeliveryExceptionType.RecipientUnavailable,
+  3: DeliveryExceptionType.CustomerRefused,
+  4: DeliveryExceptionType.WeatherOrNaturalDisaster,
+  5: DeliveryExceptionType.CarrierOperationalDelay,
+  6: DeliveryExceptionType.PackageDamagedInTransit,
+  7: DeliveryExceptionType.LostInTransit,
+  8: DeliveryExceptionType.AccessRestricted,
+  9: DeliveryExceptionType.MissedDeliveryAppointment,
+  10: DeliveryExceptionType.DocumentationMissing,
+  99: DeliveryExceptionType.Other,
+};
+
+const DELIVERY_EXC_STATUS_NUM: Record<number, DeliveryExceptionStatus> = {
+  1: DeliveryExceptionStatus.Open,
+  2: DeliveryExceptionStatus.UnderReview,
+  3: DeliveryExceptionStatus.ScheduledForReattempt,
+  4: DeliveryExceptionStatus.PendingCustomerAction,
+  5: DeliveryExceptionStatus.PendingReturnAuthorization,
+  6: DeliveryExceptionStatus.Resolved,
+  7: DeliveryExceptionStatus.ReturnToSenderInitiated,
+  8: DeliveryExceptionStatus.Voided,
+};
+
+const DELIVERY_EXC_SEVERITY_NUM: Record<number, DeliveryExceptionSeverity> = {
+  1: DeliveryExceptionSeverity.Low,
+  2: DeliveryExceptionSeverity.Medium,
+  3: DeliveryExceptionSeverity.High,
+  4: DeliveryExceptionSeverity.Critical,
+};
+
+const DELIVERY_EXC_RESOLUTION_NUM: Record<number, DeliveryExceptionResolution> = {
+  1: DeliveryExceptionResolution.PendingCarrierReattempt,
+  2: DeliveryExceptionResolution.CustomerContacted,
+  3: DeliveryExceptionResolution.AddressCorrected,
+  4: DeliveryExceptionResolution.HoldAtCarrierDepot,
+  5: DeliveryExceptionResolution.ReturnToSenderRequested,
+  6: DeliveryExceptionResolution.ClaimInitiated,
+  7: DeliveryExceptionResolution.Resolved,
+  8: DeliveryExceptionResolution.RedeliveryScheduled,
+  9: DeliveryExceptionResolution.ReturnToSenderAuthorized,
+  10: DeliveryExceptionResolution.PackageDestroyedAbandoned,
+  11: DeliveryExceptionResolution.CarrierErrorRescinded,
+};
+
+const DELIVERY_EXC_SOURCE_NUM: Record<number, DeliveryExceptionSource> = {
+  1: DeliveryExceptionSource.CarrierWebhook,
+  2: DeliveryExceptionSource.CarrierPolling,
+  3: DeliveryExceptionSource.DriverHandheld,
+  4: DeliveryExceptionSource.ManualStaffEntry,
+};
+
+export const normalizeTrackingMilestoneStatus = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    TRACKING_MILESTONE_NUM,
+    Object.values(TrackingMilestoneStatus),
+    'TrackingMilestoneStatus'
+  );
+
+export const normalizeOrderDeliveryStatus = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    ORDER_DELIVERY_STATUS_NUM,
+    Object.values(OrderDeliveryStatus),
+    'OrderDeliveryStatus'
+  );
+
+export const normalizePodEvidenceSource = (v: unknown) =>
+  normalizeStringEnum(v, POD_SOURCE_NUM, Object.values(PodEvidenceSource), 'PodEvidenceSource');
+
+export const normalizeDeliveryExceptionType = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    DELIVERY_EXC_TYPE_NUM,
+    Object.values(DeliveryExceptionType),
+    'DeliveryExceptionType'
+  );
+
+export const normalizeDeliveryExceptionStatus = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    DELIVERY_EXC_STATUS_NUM,
+    Object.values(DeliveryExceptionStatus),
+    'DeliveryExceptionStatus'
+  );
+
+export const normalizeDeliveryExceptionSeverity = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    DELIVERY_EXC_SEVERITY_NUM,
+    Object.values(DeliveryExceptionSeverity),
+    'DeliveryExceptionSeverity'
+  );
+
+export const normalizeDeliveryExceptionResolution = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    DELIVERY_EXC_RESOLUTION_NUM,
+    Object.values(DeliveryExceptionResolution),
+    'DeliveryExceptionResolution'
+  );
+
+export const normalizeDeliveryExceptionSource = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    DELIVERY_EXC_SOURCE_NUM,
+    Object.values(DeliveryExceptionSource),
+    'DeliveryExceptionSource'
+  );
+
+export interface DispatchBoardPackageDto {
+  packageId: string;
+  packageNumber: string;
+  trackingNumber?: string | null;
+  carrierCode?: string | null;
+  packageStatus: PackageStatus;
+  trackingStatus: TrackingMilestoneStatus;
+  deliveredAtUtc?: string | null;
+  outboundOrderId: string;
+  orderNumber?: string | null;
+  hasActivePod: boolean;
+}
+
+export interface DispatchBoardShipmentDto {
+  shipmentId: string;
+  shipmentNumber: string;
+  clientId: string;
+  clientName?: string | null;
+  facilityId: string;
+  facilityName?: string | null;
+  carrierCode: string;
+  carrierServiceLevel: CarrierServiceLevel;
+  status: ShipmentStatus;
+  custodyStatus: ShipmentCustodyStatus;
+  deliveryStatus: TrackingMilestoneStatus;
+  deliveryStatusUpdatedAtUtc?: string | null;
+  dispatchedAtUtc?: string | null;
+  deliveredAtUtc?: string | null;
+  assignedDriverUserId?: string | null;
+  assignedDriverName?: string | null;
+  assignedDriverEmail?: string | null;
+  trailerNumber?: string | null;
+  sealNumber?: string | null;
+  billOfLadingNumber?: string | null;
+  totalPackagesCount: number;
+  deliveredPackagesCount: number;
+  openExceptionsCount: number;
+  totalWeightKg: number;
+  version: number;
+  latestCustodyTransferredAtUtc?: string | null;
+  packages: DispatchBoardPackageDto[];
+}
+
+export interface GetDispatchBoardParams {
+  facilityId?: string;
+  clientId?: string;
+  status?: ShipmentStatus;
+  deliveryStatus?: TrackingMilestoneStatus;
+  carrierCode?: string;
+  assignedDriverUserId?: string;
+  hasOpenExceptions?: boolean;
+  searchTerm?: string;
+  pageNumber?: number;
+  pageSize?: number;
+}
+
+export interface AssignShipmentDriverRequest {
+  driverUserId?: string | null;
+  expectedVersion?: number | null;
+  reason?: string | null;
+}
+
+export interface AssignShipmentDriverResultDto {
+  isSuccess: boolean;
+  shipmentId: string;
+  shipmentNumber: string;
+  shipmentStatus: ShipmentStatus;
+  custodyStatus: ShipmentCustodyStatus;
+  assignedDriverUserId?: string | null;
+  assignedDriverName?: string | null;
+  assignedDriverEmail?: string | null;
+  version: number;
+  message: string;
+}
+
+export interface AcknowledgeShipmentCustodyRequest {
+  driverSignature: string;
+  driverLicenseNumber?: string | null;
+  trailerNumber?: string | null;
+  sealNumber?: string | null;
+  expectedVersion?: number | null;
+  notes?: string | null;
+}
+
+export interface AcknowledgeShipmentCustodyResultDto {
+  isSuccess: boolean;
+  shipmentId: string;
+  shipmentNumber: string;
+  assignedDriverUserId: string;
+  custodyStatus: ShipmentCustodyStatus;
+  custodyTransferId: string;
+  transferredAtUtc: string;
+  version: number;
+  message: string;
+}
+
+export interface TrackingTimelineEventDto {
+  id: string;
+  milestoneStatus: TrackingMilestoneStatus;
+  carrierEventCode: string;
+  carrierDescription: string;
+  location?: string | null;
+  occurredAtUtc: string;
+  receivedAtUtc: string;
+}
+
+export interface PackageTrackingTimelineDto {
+  packageId: string;
+  packageNumber: string;
+  trackingNumber: string;
+  carrierCode: string;
+  currentTrackingStatus: TrackingMilestoneStatus;
+  deliveredAtUtc?: string | null;
+  events: TrackingTimelineEventDto[];
+}
+
+export interface EvaluateOrderDeliveryRollupResultDto {
+  outboundOrderId: string;
+  deliveryStatus: OrderDeliveryStatus;
+  totalPackages: number;
+  deliveredPackages: number;
+  inTransitPackages: number;
+  exceptionPackages: number;
+  deliveredAtUtc?: string | null;
+}
+
+export interface SyncShipmentTrackingResultDto {
+  isSuccess: boolean;
+  shipmentId: string;
+  packagesEvaluated: number;
+  newEventsIngested: number;
+  duplicateEventsSkipped: number;
+  shipmentDeliveryStatus: TrackingMilestoneStatus;
+  message: string;
+}
+
+export interface ProofOfDeliveryDto {
+  id: string;
+  clientId: string;
+  facilityId: string;
+  packageId: string;
+  packageNumber: string;
+  shipmentId?: string | null;
+  trackingNumber: string;
+  carrierCode: string;
+  recipientName?: string | null;
+  deliveryLocationDescription?: string | null;
+  isSigned: boolean;
+  isStorageFinalized: boolean;
+  preSignedSignatureUrl?: string | null;
+  preSignedPhotoUrl?: string | null;
+  signatureSha256?: string | null;
+  photoSha256?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  carrierConfirmationNumber?: string | null;
+  carrierEventId?: string | null;
+  idempotencyKey?: string | null;
+  evidenceSource: PodEvidenceSource;
+  capturedAtUtc: string;
+  deliveredAtUtc: string;
+  isSuperseded: boolean;
+  supersededByPodId?: string | null;
+  supersededReason?: string | null;
+  supersededAtUtc?: string | null;
+  preSignedUrlsExpireAtUtc?: string | null;
+}
+
+export interface SubmitProofOfDeliveryRequest {
+  recipientName?: string | null;
+  deliveryLocationDescription?: string | null;
+  isSigned: boolean;
+  signatureFile?: File | null;
+  photoFile?: File | null;
+  signatureBase64?: string | null;
+  signatureContentType?: string | null;
+  photoBase64?: string | null;
+  photoContentType?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+  carrierConfirmationNumber?: string | null;
+  idempotencyKey?: string | null;
+  evidenceSource: PodEvidenceSource;
+  deliveredAtUtc?: string | null;
+  verificationReason?: string | null;
+  consigneeAcknowledgmentText?: string | null;
+}
+
+export interface SubmitProofOfDeliveryResultDto {
+  isSuccess: boolean;
+  isDuplicate: boolean;
+  proofOfDeliveryId: string;
+  packageId: string;
+  packageNumber: string;
+  trackingNumber: string;
+  carrierCode: string;
+  isStorageFinalized: boolean;
+  signatureSha256?: string | null;
+  photoSha256?: string | null;
+  preSignedSignatureUrl?: string | null;
+  preSignedPhotoUrl?: string | null;
+  preSignedUrlsExpireAtUtc?: string | null;
+  message: string;
+}
+
+export interface SupersedeProofOfDeliveryJsonRequest {
+  reason: string;
+  replacementSubmission: {
+    recipientName?: string | null;
+    deliveryLocationDescription?: string | null;
+    isSigned: boolean;
+    signatureBase64?: string | null;
+    signatureContentType?: string | null;
+    photoBase64?: string | null;
+    photoContentType?: string | null;
+    latitude?: number | null;
+    longitude?: number | null;
+    idempotencyKey?: string | null;
+    evidenceSource: PodEvidenceSource;
+    deliveredAtUtc?: string | null;
+    verificationReason?: string | null;
+  };
+}
+
+export interface ConfirmPackageDeliveryRequest {
+  proofOfDeliveryId?: string | null;
+  deliveredAtUtcOverride?: string | null;
+  confirmationNotes?: string | null;
+}
+
+export interface DeliveryConfirmationResultDto {
+  isSuccess: boolean;
+  isAlreadyDelivered: boolean;
+  packageId: string;
+  packageNumber: string;
+  trackingNumber: string;
+  carrierCode: string;
+  proofOfDeliveryId: string;
+  deliveredAtUtc: string;
+  packageTrackingStatus: TrackingMilestoneStatus;
+  orderDeliveryStatus: OrderDeliveryStatus;
+  outboundOrderId?: string | null;
+  orderNumber?: string | null;
+  shipmentId?: string | null;
+  message: string;
+}
+
+export interface DeliveryExceptionQueueItemDto {
+  exceptionId: string;
+  clientId: string;
+  facilityId: string;
+  packageId: string;
+  packageNumber?: string | null;
+  shipmentId?: string | null;
+  shipmentNumber?: string | null;
+  orderId?: string | null;
+  orderNumber?: string | null;
+  trackingNumber: string;
+  carrierCode: string;
+  exceptionType: DeliveryExceptionType;
+  status: DeliveryExceptionStatus;
+  severity: DeliveryExceptionSeverity;
+  resolution: DeliveryExceptionResolution;
+  source: DeliveryExceptionSource;
+  carrierExceptionCode: string;
+  carrierDescription: string;
+  occurredAtUtc: string;
+  attemptNumber: number;
+  reattemptCount: number;
+  scheduledReattemptDateUtc?: string | null;
+  contactAttemptsCount: number;
+  correctedAddress?: string | null;
+  holdDepotLocation?: string | null;
+  reportedByUserId?: string | null;
+  resolvedAtUtc?: string | null;
+  resolvedByUserId?: string | null;
+  resolutionNotes?: string | null;
+  createdAt: string;
+}
+
+export interface GetDeliveryExceptionsParams {
+  facilityId?: string;
+  clientId?: string;
+  packageId?: string;
+  shipmentId?: string;
+  orderId?: string;
+  status?: DeliveryExceptionStatus;
+  severity?: DeliveryExceptionSeverity;
+  exceptionType?: DeliveryExceptionType;
+  openOnly?: boolean;
+  searchTerm?: string;
+  pageNumber?: number;
+  pageSize?: number;
+}
+
+export interface ReportDriverExceptionRequest {
+  packageId: string;
+  exceptionType: DeliveryExceptionType;
+  driverNotes: string;
+  occurredAtUtc?: string | null;
+  latitude?: number | null;
+  longitude?: number | null;
+}
+
+export interface DeliveryExceptionResultDto {
+  isSuccess: boolean;
+  isDuplicate: boolean;
+  exceptionId: string;
+  packageId: string;
+  shipmentId?: string | null;
+  orderId: string;
+  trackingNumber: string;
+  carrierCode: string;
+  exceptionType: DeliveryExceptionType;
+  status: DeliveryExceptionStatus;
+  severity: DeliveryExceptionSeverity;
+  packageTrackingStatus: TrackingMilestoneStatus;
+  orderDeliveryStatus: OrderDeliveryStatus;
+  message: string;
+}

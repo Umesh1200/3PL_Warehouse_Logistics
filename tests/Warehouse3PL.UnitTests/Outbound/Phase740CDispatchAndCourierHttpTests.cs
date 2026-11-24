@@ -558,6 +558,30 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
         using (var rRevokedDriver = await _http.SendAsync(BearerRequest(HttpMethod.Post,
             $"/api/v1/outbound/dispatch/packages/{PkgDraftId}/confirm-delivery", driverBToken, new { })))
             Assert.Equal(HttpStatusCode.Forbidden, rRevokedDriver.StatusCode);
+
+        // Client denied 403 on courier/shipments; revoked DriverB no longer sees ShipmentDraftId
+        using (var rClientCourier = await _http.SendAsync(BearerRequest(HttpMethod.Get,
+            "/api/v1/outbound/dispatch/courier/shipments", clientToken)))
+            Assert.Equal(HttpStatusCode.Forbidden, rClientCourier.StatusCode);
+
+        using (var rDriverBList = await _http.SendAsync(BearerRequest(HttpMethod.Get,
+            "/api/v1/outbound/dispatch/courier/shipments", driverBToken)))
+        {
+            Assert.Equal(HttpStatusCode.OK, rDriverBList.StatusCode);
+            var list = await rDriverBList.Content.ReadFromJsonAsync<List<DispatchBoardShipmentDto>>(JsonOptions);
+            Assert.NotNull(list);
+            Assert.DoesNotContain(list!, s => s.ShipmentId == ShipmentDraftId);
+        }
+
+        using (var rDriverAList = await _http.SendAsync(BearerRequest(HttpMethod.Get,
+            "/api/v1/outbound/dispatch/courier/shipments", driverAToken)))
+        {
+            Assert.Equal(HttpStatusCode.OK, rDriverAList.StatusCode);
+            var list = await rDriverAList.Content.ReadFromJsonAsync<List<DispatchBoardShipmentDto>>(JsonOptions);
+            Assert.NotNull(list);
+            Assert.Contains(list!, s => s.ShipmentId == ShipmentDispatchedId);
+            Assert.All(list!, s => Assert.Equal(DriverAId, s.AssignedDriverUserId));
+        }
     }
 
     [Fact]
