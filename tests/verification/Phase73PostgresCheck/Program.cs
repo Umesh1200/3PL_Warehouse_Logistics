@@ -3682,7 +3682,15 @@ try
         (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/packing/stations?facilityId={facilityId}", bOpBId, facilityId, Permissions.Outbound.Ship))).StatusCode != HttpStatusCode.Forbidden)
         throw new InvalidOperationException("Phase 7.4.3 PostgreSQL reference lookup / permission boundary failed.");
 
-    // Cartonization recommend -> Start session -> Create package
+    // Cartonization recommend -> Start session -> Create package (also verify Pack + MultiFacilityView denied FacilityB cartonization)
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/cartonization/recommend", bOpAId, facilityId,
+        $"{Permissions.Outbound.Pack},{Permissions.Analytics.MultiFacilityView}",
+        new { clientId = client1Id, facilityId = p74FacB, items = new[] { new { itemId = item1Id, sku = itemSku, quantity = 1m, lengthCm = 10m, widthCm = 10m, heightCm = 10m, weightKg = 1m } } }))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/cartonization/recommend", bOpAId, facilityId,
+        $"{Permissions.Outbound.Pack},{Permissions.Analytics.MultiFacilityView}",
+        new { clientId = client1Id, facilityId = p74FacB, outboundOrderId = p743OrderId }))).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("P743-R03 PostgreSQL cross-facility cartonization boundary failed.");
+
     if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/cartonization/recommend", bOpAId, facilityId, Permissions.Outbound.Pack,
         new { clientId = client1Id, facilityId, outboundOrderId = p743OrderId, preferredPackagingMaterialId = p743BoxId, volumeUtilizationFactor = 0.85m }))).StatusCode != HttpStatusCode.OK)
         throw new InvalidOperationException("Phase 7.4.3 PostgreSQL cartonization recommendation failed.");
@@ -3715,15 +3723,25 @@ try
         new { toteLpn = "PG-TOTE-743", facilityId }))).StatusCode != HttpStatusCode.UnprocessableEntity)
         throw new InvalidOperationException("Phase 7.4.3 PostgreSQL non-empty tote release expected 422.");
 
-    // Idempotent item packing (twice with same idempotencyKey -> exact single inventory transfer & ledger tx)
+    // P743-R02 Concurrent same-key PackItemAsync race + conflicting payload 409 rejection on live PostgreSQL!
     const string pgPackIdemp = "pg-pack-idemp-743";
-    for (int i = 0; i < 2; i++)
+    var concPackPayload = new { packingSessionId = p743SessionId, packageId = p743PackageId, scannedToteLpn = "PG-TOTE-743", scannedItemBarcode = itemSku, quantity = 4m, idempotencyKey = pgPackIdemp };
+    var concPackResps = await Task.WhenAll(
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", bOpAId, facilityId, Permissions.Outbound.Pack, concPackPayload)),
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", bOpAId, facilityId, Permissions.Outbound.Pack, concPackPayload)));
+    foreach (var r in concPackResps)
     {
-        using var pkResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", bOpAId, facilityId, Permissions.Outbound.Pack,
-            new { packingSessionId = p743SessionId, packageId = p743PackageId, scannedToteLpn = "PG-TOTE-743", scannedItemBarcode = itemSku, quantity = 4m, idempotencyKey = pgPackIdemp }));
-        if (pkResp.StatusCode != HttpStatusCode.OK)
-            throw new InvalidOperationException($"Phase 7.4.3 PostgreSQL pack attempt {i + 1} failed: {pkResp.StatusCode}");
+        if (r.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"P743-R02 PostgreSQL concurrent identical pack failed: {r.StatusCode}");
+        r.Dispose();
     }
+
+    // Reusing same idempotencyKey with a conflicting payload (different quantity or SKU) MUST return 409 Conflict!
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { packingSessionId = p743SessionId, packageId = p743PackageId, scannedToteLpn = "PG-TOTE-743", scannedItemBarcode = itemSku, quantity = 1m, idempotencyKey = pgPackIdemp }))).StatusCode != HttpStatusCode.Conflict ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { packingSessionId = p743SessionId, packageId = p743PackageId, scannedToteLpn = "PG-TOTE-743", scannedItemBarcode = "OTHER-SKU", quantity = 4m, idempotencyKey = pgPackIdemp }))).StatusCode != HttpStatusCode.Conflict)
+        throw new InvalidOperationException("P743-R02 PostgreSQL idempotency conflict check expected 409 Conflict.");
 
     await using (var p743StockCheck = CreateDb(operationalConn, user))
     {
@@ -3790,7 +3808,91 @@ try
             throw new InvalidOperationException("Phase 7.4.3 PostgreSQL shipping label void failed.");
     }
 
-    Console.WriteLine("PASS PostgreSQL Phase 7.4.3 Packing, Cartonization, Idempotent Scan, Scale Close, Tote Release, Decoupled Carrier Rating, Label Generation/Void Recovery verified cleanly.");
+    // P743-R01 Live PostgreSQL Mixed-SKU Cumulative Weight & Overweight Scale Close Enforcement
+    var p743MixedBoxId = Guid.NewGuid();
+    var pgHeavyItemId = Guid.NewGuid();
+    var pgLightItemId = Guid.NewGuid();
+    var pgMixedOrderId = Guid.NewGuid();
+    var pgHeavyLineId = Guid.NewGuid();
+    var pgLightLineId = Guid.NewGuid();
+    var pgMixedToteId = Guid.NewGuid();
+    var pgHeavyStockId = Guid.NewGuid();
+    var pgLightStockId = Guid.NewGuid();
+
+    await using (var mixSeedDb = CreateDb(operationalConn, user))
+    {
+        mixSeedDb.PackagingMaterials.Add(new PackagingMaterial
+        {
+            Id = p743MixedBoxId,
+            FacilityId = facilityId,
+            ClientId = client1Id,
+            Code = "PG-BOX-20KG",
+            Name = "PG 20kg Limit Box",
+            MaterialType = PackagingMaterialType.CorrugatedBox,
+            LengthCm = 40m,
+            WidthCm = 30m,
+            HeightCm = 25m,
+            MaxWeightKg = 20m,
+            TareWeightKg = 0.50m,
+            IsActive = true
+        });
+        mixSeedDb.Items.AddRange(
+            new Item { Id = pgHeavyItemId, ClientId = client1Id, Sku = "PG-SKU-HEAVY18", Description = "PG 18kg Unit", LengthCm = 20m, WidthCm = 20m, HeightCm = 15m, WeightKg = 18m },
+            new Item { Id = pgLightItemId, ClientId = client1Id, Sku = "PG-SKU-LIGHT03", Description = "PG 3kg Unit", LengthCm = 10m, WidthCm = 10m, HeightCm = 10m, WeightKg = 3m });
+
+        var mixOrd = new OutboundOrder { Id = pgMixedOrderId, ClientId = client1Id, FacilityId = facilityId, OrderNumber = "PG-SO-MIXED-WT", CustomerName = "PG Mixed Weight Buyer", Status = OutboundOrderStatus.InProgress };
+        mixOrd.Lines.Add(new OutboundOrderLine { Id = pgHeavyLineId, OutboundOrderId = pgMixedOrderId, ItemId = pgHeavyItemId, LineNumber = 1, QuantityOrdered = 1m, QuantityAllocated = 1m, Status = OutboundOrderLineStatus.Allocated });
+        mixOrd.Lines.Add(new OutboundOrderLine { Id = pgLightLineId, OutboundOrderId = pgMixedOrderId, ItemId = pgLightItemId, LineNumber = 2, QuantityOrdered = 1m, QuantityAllocated = 1m, Status = OutboundOrderLineStatus.Allocated });
+        mixSeedDb.OutboundOrders.Add(mixOrd);
+
+        mixSeedDb.HandlingUnits.Add(new HandlingUnit { Id = pgMixedToteId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-TOTE-MIX-WT", UnitType = HandlingUnitType.Tote, Status = HandlingUnitStatus.InUse, CurrentLocationId = p743StationId, CurrentOutboundOrderId = pgMixedOrderId });
+        mixSeedDb.StockOnHand.AddRange(
+            new StockOnHand { Id = pgHeavyStockId, ClientId = client1Id, FacilityId = facilityId, ItemId = pgHeavyItemId, LocationId = p743StationId, HandlingUnitId = pgMixedToteId, LpnCode = "PG-TOTE-MIX-WT", QtyAvailable = 0m, QtyAllocated = 1m, Version = 1 },
+            new StockOnHand { Id = pgLightStockId, ClientId = client1Id, FacilityId = facilityId, ItemId = pgLightItemId, LocationId = p743StationId, HandlingUnitId = pgMixedToteId, LpnCode = "PG-TOTE-MIX-WT", QtyAvailable = 0m, QtyAllocated = 1m, Version = 1 });
+        mixSeedDb.InventoryAllocations.AddRange(
+            new InventoryAllocation { Id = Guid.NewGuid(), ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = pgMixedOrderId, OutboundOrderLineId = pgHeavyLineId, StockOnHandId = pgHeavyStockId, TargetHandlingUnitId = pgMixedToteId, ItemId = pgHeavyItemId, LocationId = p743BinId, QuantityRequested = 1m, QuantityAllocated = 1m, QuantityPicked = 1m, Status = AllocationStatus.Picked },
+            new InventoryAllocation { Id = Guid.NewGuid(), ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = pgMixedOrderId, OutboundOrderLineId = pgLightLineId, StockOnHandId = pgLightStockId, TargetHandlingUnitId = pgMixedToteId, ItemId = pgLightItemId, LocationId = p743BinId, QuantityRequested = 1m, QuantityAllocated = 1m, QuantityPicked = 1m, Status = AllocationStatus.Picked });
+        await mixSeedDb.SaveChangesAsync();
+    }
+
+    Guid mixSessionId;
+    using (var sr = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/sessions/start", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { facilityId, packingStationLocationId = p743StationId, outboundOrderId = pgMixedOrderId })))
+    {
+        if (sr.StatusCode != HttpStatusCode.OK) throw new InvalidOperationException($"P743-R01 mixed session start failed: {sr.StatusCode}");
+        mixSessionId = JsonDocument.Parse(await sr.Content.ReadAsStringAsync()).RootElement.GetProperty("sessionId").GetGuid();
+    }
+
+    Guid mixPackageId;
+    using (var pr = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/packages/create", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { packingSessionId = mixSessionId, packagingMaterialId = p743MixedBoxId })))
+    {
+        if (pr.StatusCode != HttpStatusCode.OK) throw new InvalidOperationException($"P743-R01 mixed package create failed: {pr.StatusCode}");
+        mixPackageId = JsonDocument.Parse(await pr.Content.ReadAsStringAsync()).RootElement.GetProperty("packageId").GetGuid();
+    }
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { packingSessionId = mixSessionId, packageId = mixPackageId, scannedToteLpn = "PG-TOTE-MIX-WT", scannedItemBarcode = "PG-SKU-HEAVY18", quantity = 1m, idempotencyKey = "pg-mix-heavy" }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("P743-R01 PostgreSQL heavy SKU pack failed.");
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { packingSessionId = mixSessionId, packageId = mixPackageId, scannedToteLpn = "PG-TOTE-MIX-WT", scannedItemBarcode = "PG-SKU-LIGHT03", quantity = 1m, idempotencyKey = "pg-mix-light" }))).StatusCode != HttpStatusCode.BadRequest)
+        throw new InvalidOperationException("P743-R01 PostgreSQL mixed-SKU cumulative weight overflow should return 400 BadRequest.");
+
+    await using (var mixCheckDb = CreateDb(operationalConn, user))
+    {
+        var lightStk = await mixCheckDb.StockOnHand.SingleAsync(s => s.Id == pgLightStockId);
+        if (lightStk.QtyAllocated != 1m)
+            throw new InvalidOperationException("P743-R01 PostgreSQL rejected overweight mixed-SKU pack unexpectedly modified light item stock.");
+    }
+
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/packing/packages/{mixPackageId}/close", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { scaleGrossWeightKg = 21.50m }))).StatusCode != HttpStatusCode.BadRequest ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/packing/packages/{mixPackageId}/close", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { scaleGrossWeightKg = 18.50m }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("P743-R01 PostgreSQL scale close MaxWeightKg limit check failed.");
+
+    Console.WriteLine("PASS PostgreSQL Phase 7.4.3 Packing, Cartonization, Mixed-SKU Weight Limits, Concurrent Idempotent Scan/409 Conflict, Scale Close, Tote Release, Decoupled Carrier Rating, Label Generation/Void Recovery verified cleanly.");
 
     if (Directory.Exists(pgPodStorageDir))
     {

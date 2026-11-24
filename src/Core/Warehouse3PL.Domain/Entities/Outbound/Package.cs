@@ -166,8 +166,15 @@ public class Package : AuditableEntity<Guid>, ITenantEntity, ISoftDeletable
                 $"Scale gross weight ({scaleGrossWeightKg}kg) cannot be less than packaging tare weight ({TareWeightKg}kg).");
         }
 
+        var proposedNetWeightKg = scaleGrossWeightKg - TareWeightKg;
+        if (PackagingMaterial != null && PackagingMaterial.MaxWeightKg > 0 && proposedNetWeightKg > PackagingMaterial.MaxWeightKg)
+        {
+            throw new ValidationException(nameof(scaleGrossWeightKg),
+                $"Net packed weight ({proposedNetWeightKg:F2}kg from scale gross {scaleGrossWeightKg:F2}kg minus {TareWeightKg:F2}kg tare) exceeds packaging material '{PackagingMaterial.Code}' maximum weight limit ({PackagingMaterial.MaxWeightKg:F2}kg).");
+        }
+
         GrossWeightKg = scaleGrossWeightKg;
-        NetWeightKg = scaleGrossWeightKg - TareWeightKg;
+        NetWeightKg = proposedNetWeightKg;
         RecalculateVolumetricWeight();
 
         Status = PackageStatus.Packed;

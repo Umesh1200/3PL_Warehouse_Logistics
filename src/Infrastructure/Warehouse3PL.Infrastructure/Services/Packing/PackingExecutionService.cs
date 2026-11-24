@@ -1,6 +1,10 @@
+using System.Globalization;
+using System.Security.Cryptography;
+using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Domain.Entities.Catalog;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Entities.Outbound;
@@ -249,354 +253,399 @@ public class PackingExecutionService : IPackingExecutionService
         PackItemRequest request,
         CancellationToken cancellationToken = default)
     {
-        // 1. Session and Order Validation
-        var session = await _context.PackingSessions
-            .Include(s => s.OutboundOrder)
-                .ThenInclude(o => o.Lines)
-                    .ThenInclude(l => l.Item)
-                        .ThenInclude(i => i.Barcodes)
-            .FirstOrDefaultAsync(s => s.Id == request.PackingSessionId && !s.IsDeleted, cancellationToken);
-
-        if (session == null)
+        return await _context.ExecuteWithPackageLockAsync(request.PackageId, shipmentId: null, async () =>
         {
-            throw new EntityNotFoundException(nameof(PackingSession), request.PackingSessionId);
-        }
+            // 1. Session and Order Validation
+            var session = await _context.PackingSessions
+                .Include(s => s.OutboundOrder)
+                    .ThenInclude(o => o.Lines)
+                        .ThenInclude(l => l.Item)
+                            .ThenInclude(i => i.Barcodes)
+                .FirstOrDefaultAsync(s => s.Id == request.PackingSessionId && !s.IsDeleted, cancellationToken);
 
-        if (session.Status != PackingSessionStatus.Active)
-        {
-            throw new InvalidDomainStateException($"Cannot pack items in session with status '{session.Status}'. Session must be Active.");
-        }
-
-        var order = session.OutboundOrder;
-
-        // 2. Package Validation
-        var package = await _context.Packages
-            .Include(p => p.HandlingUnit)
-            .Include(p => p.PackagingMaterial)
-            .Include(p => p.Lines)
-            .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
-
-        if (package == null)
-        {
-            throw new EntityNotFoundException(nameof(Package), request.PackageId);
-        }
-
-        if (package.OutboundOrderId != order.Id)
-        {
-            throw new ValidationException(nameof(request.PackageId), "Package does not belong to the active packing session order.");
-        }
-
-        if (package.Status != PackageStatus.Open)
-        {
-            throw new InvalidDomainStateException($"Cannot pack items into package '{package.PackageNumber}' with status '{package.Status}'. Package must be Open.");
-        }
-
-        // 2b. Idempotency Retry Protection (prevents duplicate stock transfer on scanner retry)
-        var normalizedIdempKey = string.IsNullOrWhiteSpace(request.IdempotencyKey)
-            ? null
-            : request.IdempotencyKey.Trim();
-        var idempMarker = normalizedIdempKey != null ? $"[IDEMP:{normalizedIdempKey}]" : null;
-
-        if (idempMarker != null)
-        {
-            var existingPackTx = await _context.InventoryTransactions
-                .AsNoTracking()
-                .FirstOrDefaultAsync(t => t.ReferenceType == "Package" &&
-                                          t.ReferenceId == package.Id &&
-                                          t.TxType == InventoryTxType.Pack &&
-                                          t.Notes != null &&
-                                          t.Notes.Contains(idempMarker), cancellationToken);
-
-            if (existingPackTx != null)
+            if (session == null)
             {
-                var existingItem = await _context.Items
+                throw new EntityNotFoundException(nameof(PackingSession), request.PackingSessionId);
+            }
+
+            if (session.Status != PackingSessionStatus.Active)
+            {
+                throw new InvalidDomainStateException($"Cannot pack items in session with status '{session.Status}'. Session must be Active.");
+            }
+
+            var order = session.OutboundOrder;
+
+            // 2. Package Validation
+            var package = await _context.Packages
+                .Include(p => p.HandlingUnit)
+                .Include(p => p.PackagingMaterial)
+                .Include(p => p.Lines)
+                    .ThenInclude(l => l.Item)
+                .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
+
+            if (package == null)
+            {
+                throw new EntityNotFoundException(nameof(Package), request.PackageId);
+            }
+
+            if (package.OutboundOrderId != order.Id)
+            {
+                throw new ValidationException(nameof(request.PackageId), "Package does not belong to the active packing session order.");
+            }
+
+            if (package.Status != PackageStatus.Open)
+            {
+                throw new InvalidDomainStateException($"Cannot pack items into package '{package.PackageNumber}' with status '{package.Status}'. Package must be Open.");
+            }
+
+            // 2b. Idempotency Retry & Payload Fingerprint Verification
+            var normalizedIdempKey = string.IsNullOrWhiteSpace(request.IdempotencyKey)
+                ? null
+                : request.IdempotencyKey.Trim();
+            var idempMarker = normalizedIdempKey != null ? $"[IDEMP:{normalizedIdempKey}]" : null;
+            var fingerprint = normalizedIdempKey != null ? ComputePackFingerprint(request) : null;
+            var fpMarker = fingerprint != null ? $"[FP:{fingerprint}]" : null;
+
+            if (idempMarker != null)
+            {
+                var existingPackTx = await _context.InventoryTransactions
                     .AsNoTracking()
-                    .Where(i => i.Id == existingPackTx.ItemId)
-                    .Select(i => new { i.Sku })
-                    .FirstOrDefaultAsync(cancellationToken);
+                    .FirstOrDefaultAsync(t => t.FacilityId == session.FacilityId &&
+                                              t.TxType == InventoryTxType.Pack &&
+                                              t.Notes != null &&
+                                              t.Notes.Contains(idempMarker), cancellationToken);
 
-                var existingLine = package.Lines.FirstOrDefault(l =>
-                    l.ItemId == existingPackTx.ItemId &&
-                    l.LotId == existingPackTx.LotId);
+                if (existingPackTx != null)
+                {
+                    if (fpMarker == null || existingPackTx.Notes == null ||
+                        !existingPackTx.Notes.Contains(fpMarker, StringComparison.Ordinal))
+                    {
+                        throw new ConcurrencyException(
+                            $"Idempotency key '{normalizedIdempKey}' was already used with a different packing payload.",
+                            "IDEMPOTENCY_CONFLICT");
+                    }
 
-                var orderLine = order.Lines.FirstOrDefault(l =>
-                    !l.IsDeleted &&
-                    l.Id == existingLine?.OutboundOrderLineId);
+                    var existingItem = await _context.Items
+                        .AsNoTracking()
+                        .Where(i => i.Id == existingPackTx.ItemId)
+                        .Select(i => new { i.Sku })
+                        .FirstOrDefaultAsync(cancellationToken);
 
-                decimal packedForOrderLine = orderLine == null
-                    ? 0m
-                    : await _context.PackageLines
-                        .Where(pl => pl.OutboundOrderLineId == orderLine.Id && !pl.Package.IsDeleted)
+                    var existingLine = package.Lines.FirstOrDefault(l =>
+                        l.ItemId == existingPackTx.ItemId &&
+                        l.LotId == existingPackTx.LotId);
+
+                    var orderLine = order.Lines.FirstOrDefault(l =>
+                        !l.IsDeleted &&
+                        l.Id == existingLine?.OutboundOrderLineId);
+
+                    decimal packedForOrderLine = orderLine == null
+                        ? 0m
+                        : await _context.PackageLines
+                            .Where(pl => pl.OutboundOrderLineId == orderLine.Id && !pl.Package.IsDeleted)
+                            .SumAsync(pl => pl.Quantity, cancellationToken);
+
+                    decimal remainingToteQty = existingLine?.SourceHandlingUnitId == null
+                        ? 0m
+                        : await _context.StockOnHand
+                            .AsNoTracking()
+                            .Where(s => s.HandlingUnitId == existingLine.SourceHandlingUnitId.Value &&
+                                        s.ItemId == existingPackTx.ItemId &&
+                                        s.LotId == existingPackTx.LotId)
+                            .SumAsync(s => s.QtyAllocated, cancellationToken);
+
+                    decimal allAllocated = order.Lines.Where(l => !l.IsDeleted).Sum(l => l.QuantityAllocated);
+                    decimal allPacked = await _context.PackageLines
+                        .Where(pl => pl.Package.OutboundOrderId == order.Id && !pl.Package.IsDeleted)
                         .SumAsync(pl => pl.Quantity, cancellationToken);
 
-                decimal allAllocated = order.Lines.Where(l => !l.IsDeleted).Sum(l => l.QuantityAllocated);
-                decimal allPacked = await _context.PackageLines
-                    .Where(pl => pl.Package.OutboundOrderId == order.Id && !pl.Package.IsDeleted)
-                    .SumAsync(pl => pl.Quantity, cancellationToken);
+                    return new PackItemResult
+                    {
+                        IsSuccess = true,
+                        PackageId = package.Id,
+                        PackageNumber = package.PackageNumber,
+                        PackageLineId = existingLine?.Id ?? Guid.Empty,
+                        ItemId = existingPackTx.ItemId,
+                        Sku = existingItem?.Sku ?? request.ScannedItemBarcode,
+                        LotNumber = request.ScannedLotNumber,
+                        QuantityPacked = existingPackTx.Quantity,
+                        RemainingToteQuantity = remainingToteQty,
+                        RemainingOrderLineDemand = orderLine == null ? 0m : Math.Max(0m, orderLine.QuantityAllocated - packedForOrderLine),
+                        SourceToteLpn = request.ScannedToteLpn.Trim(),
+                        CartonLpn = package.HandlingUnit.LpnCode,
+                        InventoryTransactionId = existingPackTx.Id,
+                        IsOrderLineComplete = orderLine != null && packedForOrderLine >= orderLine.QuantityAllocated,
+                        IsOrderFullyPacked = allAllocated > 0 && allPacked >= allAllocated,
+                        Message = "Item already packed (idempotent retry)."
+                    };
+                }
+            }
 
-                return new PackItemResult
+            // 3. Tote Scan Validation
+            if (string.IsNullOrWhiteSpace(request.ScannedToteLpn))
+            {
+                throw new ValidationException(nameof(request.ScannedToteLpn), "Source tote LPN is required.");
+            }
+
+            var scannedToteLpn = request.ScannedToteLpn.Trim();
+            var tote = await _context.HandlingUnits
+                .FirstOrDefaultAsync(h => h.FacilityId == session.FacilityId &&
+                                          h.LpnCode == scannedToteLpn &&
+                                          !h.IsDeleted, cancellationToken);
+
+            if (tote == null)
+            {
+                throw new ValidationException(nameof(request.ScannedToteLpn),
+                    $"Source tote with LPN '{scannedToteLpn}' was not found in facility.");
+            }
+
+            // Cross-tenant protection: tote must match order client
+            if (tote.ClientId != order.ClientId)
+            {
+                throw new ValidationException(nameof(request.ScannedToteLpn),
+                    $"Tote '{scannedToteLpn}' belongs to a different client. Cross-tenant packing rejected.");
+            }
+
+            if (tote.Status != HandlingUnitStatus.InUse && tote.Status != HandlingUnitStatus.InTransit)
+            {
+                throw new InvalidDomainStateException(
+                    $"Tote '{scannedToteLpn}' has status '{tote.Status}' and cannot be used for packing.");
+            }
+
+            // 4. Item Scan Validation
+            if (string.IsNullOrWhiteSpace(request.ScannedItemBarcode))
+            {
+                throw new ValidationException(nameof(request.ScannedItemBarcode), "Item barcode is required.");
+            }
+
+            var scannedBarcode = request.ScannedItemBarcode.Trim();
+            var matchingLine = order.Lines.FirstOrDefault(l =>
+                !l.IsDeleted &&
+                (string.Equals(l.Item.Sku, scannedBarcode, StringComparison.OrdinalIgnoreCase) ||
+                 l.Item.Barcodes.Any(b => string.Equals(b.BarcodeValue, scannedBarcode, StringComparison.OrdinalIgnoreCase))));
+
+            if (matchingLine == null)
+            {
+                throw new ValidationException(nameof(request.ScannedItemBarcode),
+                    $"Scanned item barcode '{scannedBarcode}' does not match any item on Order '{order.OrderNumber}'.");
+            }
+
+            var item = matchingLine.Item;
+
+            // 5. Lot Validation
+            if (item.IsLotTracked && !string.IsNullOrWhiteSpace(request.ScannedLotNumber))
+            {
+                var scannedLot = request.ScannedLotNumber.Trim();
+                if (!string.IsNullOrWhiteSpace(matchingLine.RequiredLotNumber) &&
+                    !string.Equals(matchingLine.RequiredLotNumber.Trim(), scannedLot, StringComparison.OrdinalIgnoreCase))
                 {
-                    IsSuccess = true,
-                    PackageId = package.Id,
-                    PackageNumber = package.PackageNumber,
-                    PackageLineId = existingLine?.Id ?? Guid.Empty,
-                    ItemId = existingPackTx.ItemId,
-                    Sku = existingItem?.Sku ?? request.ScannedItemBarcode,
-                    LotNumber = request.ScannedLotNumber,
-                    QuantityPacked = existingPackTx.Quantity,
-                    RemainingToteQuantity = 0m,
-                    RemainingOrderLineDemand = orderLine == null ? 0m : Math.Max(0m, orderLine.QuantityAllocated - packedForOrderLine),
-                    SourceToteLpn = request.ScannedToteLpn.Trim(),
-                    CartonLpn = package.HandlingUnit.LpnCode,
-                    InventoryTransactionId = existingPackTx.Id,
-                    IsOrderLineComplete = orderLine != null && packedForOrderLine >= orderLine.QuantityAllocated,
-                    IsOrderFullyPacked = allAllocated > 0 && allPacked >= allAllocated,
-                    Message = "Item already packed (idempotent retry)."
-                };
+                    throw new ValidationException(nameof(request.ScannedLotNumber),
+                        $"Scanned lot '{scannedLot}' does not match order requirement '{matchingLine.RequiredLotNumber}'.");
+                }
             }
-        }
 
-        // 3. Tote Scan Validation
-        if (string.IsNullOrWhiteSpace(request.ScannedToteLpn))
-        {
-            throw new ValidationException(nameof(request.ScannedToteLpn), "Source tote LPN is required.");
-        }
-
-        var scannedToteLpn = request.ScannedToteLpn.Trim();
-        var tote = await _context.HandlingUnits
-            .FirstOrDefaultAsync(h => h.FacilityId == session.FacilityId &&
-                                      h.LpnCode == scannedToteLpn &&
-                                      !h.IsDeleted, cancellationToken);
-
-        if (tote == null)
-        {
-            throw new ValidationException(nameof(request.ScannedToteLpn),
-                $"Source tote with LPN '{scannedToteLpn}' was not found in facility.");
-        }
-
-        // Cross-tenant protection: tote must match order client
-        if (tote.ClientId != order.ClientId)
-        {
-            throw new ValidationException(nameof(request.ScannedToteLpn),
-                $"Tote '{scannedToteLpn}' belongs to a different client. Cross-tenant packing rejected.");
-        }
-
-        if (tote.Status != HandlingUnitStatus.InUse && tote.Status != HandlingUnitStatus.InTransit)
-        {
-            throw new InvalidDomainStateException(
-                $"Tote '{scannedToteLpn}' has status '{tote.Status}' and cannot be used for packing.");
-        }
-
-        // 4. Item Scan Validation
-        if (string.IsNullOrWhiteSpace(request.ScannedItemBarcode))
-        {
-            throw new ValidationException(nameof(request.ScannedItemBarcode), "Item barcode is required.");
-        }
-
-        var scannedBarcode = request.ScannedItemBarcode.Trim();
-        var matchingLine = order.Lines.FirstOrDefault(l =>
-            !l.IsDeleted &&
-            (string.Equals(l.Item.Sku, scannedBarcode, StringComparison.OrdinalIgnoreCase) ||
-             l.Item.Barcodes.Any(b => string.Equals(b.BarcodeValue, scannedBarcode, StringComparison.OrdinalIgnoreCase))));
-
-        if (matchingLine == null)
-        {
-            throw new ValidationException(nameof(request.ScannedItemBarcode),
-                $"Scanned item barcode '{scannedBarcode}' does not match any item on Order '{order.OrderNumber}'.");
-        }
-
-        var item = matchingLine.Item;
-
-        // 5. Lot Validation
-        if (item.IsLotTracked && !string.IsNullOrWhiteSpace(request.ScannedLotNumber))
-        {
-            var scannedLot = request.ScannedLotNumber.Trim();
-            if (!string.IsNullOrWhiteSpace(matchingLine.RequiredLotNumber) &&
-                !string.Equals(matchingLine.RequiredLotNumber.Trim(), scannedLot, StringComparison.OrdinalIgnoreCase))
+            // 6. Quantity Validation
+            if (request.Quantity <= 0)
             {
-                throw new ValidationException(nameof(request.ScannedLotNumber),
-                    $"Scanned lot '{scannedLot}' does not match order requirement '{matchingLine.RequiredLotNumber}'.");
+                throw new ValidationException(nameof(request.Quantity), "Pack quantity must be greater than zero.");
             }
-        }
 
-        // 6. Quantity Validation
-        if (request.Quantity <= 0)
-        {
-            throw new ValidationException(nameof(request.Quantity), "Pack quantity must be greater than zero.");
-        }
+            // Locate StockOnHand in Tote
+            var toteStockList = await _context.StockOnHand
+                .Include(s => s.Lot)
+                .Where(s => s.HandlingUnitId == tote.Id &&
+                            s.ItemId == item.Id &&
+                            s.QtyAllocated > 0)
+                .ToListAsync(cancellationToken);
 
-        // Locate StockOnHand in Tote
-        var toteStockList = await _context.StockOnHand
-            .Include(s => s.Lot)
-            .Where(s => s.HandlingUnitId == tote.Id &&
-                        s.ItemId == item.Id &&
-                        s.QtyAllocated > 0)
-            .ToListAsync(cancellationToken);
-
-        if (toteStockList.Count == 0)
-        {
-            throw new ValidationException(nameof(request.ScannedToteLpn),
-                $"Tote '{scannedToteLpn}' does not contain picked stock for SKU '{item.Sku}'.");
-        }
-
-        StockOnHand? toteStock = null;
-        if (!string.IsNullOrWhiteSpace(request.ScannedLotNumber))
-        {
-            var scannedLot = request.ScannedLotNumber.Trim();
-            toteStock = toteStockList.FirstOrDefault(s => s.Lot != null &&
-                string.Equals(s.Lot.LotNumber.Trim(), scannedLot, StringComparison.OrdinalIgnoreCase));
-
-            if (toteStock == null)
+            if (toteStockList.Count == 0)
             {
-                throw new ValidationException(nameof(request.ScannedLotNumber),
-                    $"Tote '{scannedToteLpn}' contains SKU '{item.Sku}', but not lot '{scannedLot}'.");
+                throw new ValidationException(nameof(request.ScannedToteLpn),
+                    $"Tote '{scannedToteLpn}' does not contain picked stock for SKU '{item.Sku}'.");
             }
-        }
-        else
-        {
-            toteStock = toteStockList.First();
-        }
 
-        if (request.Quantity > toteStock.QtyAllocated)
-        {
-            throw new ValidationException(nameof(request.Quantity),
-                $"Pack quantity {request.Quantity} exceeds available picked quantity {toteStock.QtyAllocated} in tote '{tote.LpnCode}'.");
-        }
+            StockOnHand? toteStock = null;
+            if (!string.IsNullOrWhiteSpace(request.ScannedLotNumber))
+            {
+                var scannedLot = request.ScannedLotNumber.Trim();
+                toteStock = toteStockList.FirstOrDefault(s => s.Lot != null &&
+                    string.Equals(s.Lot.LotNumber.Trim(), scannedLot, StringComparison.OrdinalIgnoreCase));
 
-        // Check already packed quantity for order line across all packages
-        var packedForLine = await _context.PackageLines
-            .Where(pl => pl.OutboundOrderLineId == matchingLine.Id && !pl.Package.IsDeleted)
-            .SumAsync(pl => pl.Quantity, cancellationToken);
+                if (toteStock == null)
+                {
+                    throw new ValidationException(nameof(request.ScannedLotNumber),
+                        $"Tote '{scannedToteLpn}' contains SKU '{item.Sku}', but not lot '{scannedLot}'.");
+                }
+            }
+            else
+            {
+                toteStock = toteStockList.First();
+            }
 
-        var remainingLineDemand = matchingLine.QuantityAllocated - packedForLine;
-        if (request.Quantity > remainingLineDemand)
-        {
-            throw new ValidationException(nameof(request.Quantity),
-                $"Pack quantity {request.Quantity} exceeds remaining order line un-packed demand {remainingLineDemand}.");
-        }
-
-        // Locate Allocation link
-        var allocation = await _context.InventoryAllocations
-            .FirstOrDefaultAsync(a => a.OutboundOrderLineId == matchingLine.Id &&
-                                      a.ItemId == item.Id &&
-                                      (a.TargetHandlingUnitId == tote.Id || a.TargetHandlingUnitId == null) &&
-                                      !a.IsDeleted, cancellationToken);
-
-        if (allocation == null)
-        {
-            throw new DomainException($"No active allocation found for order line '{matchingLine.Id}'.");
-        }
-
-        // Check box max weight limit
-        if (package.PackagingMaterial != null && package.PackagingMaterial.MaxWeightKg > 0)
-        {
-            var currentNetWeight = package.Lines.Sum(l => l.Quantity * (item.WeightKg > 0 ? item.WeightKg : 0.5m));
-            var newTotalNetWeight = currentNetWeight + (request.Quantity * (item.WeightKg > 0 ? item.WeightKg : 0.5m));
-            if (newTotalNetWeight > package.PackagingMaterial.MaxWeightKg)
+            if (request.Quantity > toteStock.QtyAllocated)
             {
                 throw new ValidationException(nameof(request.Quantity),
-                    $"Adding {request.Quantity} units would cause package net weight ({newTotalNetWeight:F2}kg) to exceed carton limit ({package.PackagingMaterial.MaxWeightKg:F2}kg).");
+                    $"Pack quantity {request.Quantity} exceeds available picked quantity {toteStock.QtyAllocated} in tote '{tote.LpnCode}'.");
             }
-        }
 
-        // 7. Atomic Inventory Transfer (Physical Conservation: Delta Q_tote = -Q, Delta Q_carton = +Q)
-        // a. Deduct from tote
-        toteStock.QtyAllocated -= request.Quantity;
-        toteStock.Version++;
+            // Check already packed quantity for order line across all packages
+            var packedForLine = await _context.PackageLines
+                .Where(pl => pl.OutboundOrderLineId == matchingLine.Id && !pl.Package.IsDeleted)
+                .SumAsync(pl => pl.Quantity, cancellationToken);
 
-        // b. Add to carton
-        var cartonStock = await _context.StockOnHand
-            .FirstOrDefaultAsync(s => s.HandlingUnitId == package.HandlingUnitId &&
-                                      s.ItemId == item.Id &&
-                                      s.LotId == toteStock.LotId, cancellationToken);
-
-        if (cartonStock != null)
-        {
-            cartonStock.QtyAllocated += request.Quantity;
-            cartonStock.Version++;
-        }
-        else
-        {
-            cartonStock = new StockOnHand
+            var remainingLineDemand = matchingLine.QuantityAllocated - packedForLine;
+            if (request.Quantity > remainingLineDemand)
             {
-                Id = Guid.NewGuid(),
+                throw new ValidationException(nameof(request.Quantity),
+                    $"Pack quantity {request.Quantity} exceeds remaining order line un-packed demand {remainingLineDemand}.");
+            }
+
+            // Locate Allocation link
+            var allocation = await _context.InventoryAllocations
+                .FirstOrDefaultAsync(a => a.OutboundOrderLineId == matchingLine.Id &&
+                                          a.ItemId == item.Id &&
+                                          (a.TargetHandlingUnitId == tote.Id || a.TargetHandlingUnitId == null) &&
+                                          !a.IsDeleted, cancellationToken);
+
+            if (allocation == null)
+            {
+                throw new DomainException($"No active allocation found for order line '{matchingLine.Id}'.");
+            }
+
+            // Check box max weight limit using EACH packed line's actual item weight
+            if (package.PackagingMaterial != null && package.PackagingMaterial.MaxWeightKg > 0)
+            {
+                var currentNetWeight = package.Lines.Sum(l => l.Quantity * ResolvePackedLineUnitWeightKg(l, order));
+                var incomingUnitWeight = ResolveItemUnitWeightKg(item);
+                var newTotalNetWeight = currentNetWeight + (request.Quantity * incomingUnitWeight);
+                if (newTotalNetWeight > package.PackagingMaterial.MaxWeightKg)
+                {
+                    throw new ValidationException(nameof(request.Quantity),
+                        $"Adding {request.Quantity} units would cause package net weight ({newTotalNetWeight:F2}kg) to exceed carton limit ({package.PackagingMaterial.MaxWeightKg:F2}kg).");
+                }
+            }
+
+            // 7. Atomic Inventory Transfer (Physical Conservation: Delta Q_tote = -Q, Delta Q_carton = +Q)
+            // a. Deduct from tote
+            toteStock.QtyAllocated -= request.Quantity;
+            toteStock.Version++;
+
+            // b. Add to carton
+            var cartonStock = await _context.StockOnHand
+                .FirstOrDefaultAsync(s => s.HandlingUnitId == package.HandlingUnitId &&
+                                          s.ItemId == item.Id &&
+                                          s.LotId == toteStock.LotId, cancellationToken);
+
+            if (cartonStock != null)
+            {
+                cartonStock.QtyAllocated += request.Quantity;
+                cartonStock.Version++;
+            }
+            else
+            {
+                cartonStock = new StockOnHand
+                {
+                    Id = Guid.NewGuid(),
+                    ClientId = order.ClientId,
+                    FacilityId = session.FacilityId,
+                    ItemId = item.Id,
+                    LotId = toteStock.LotId,
+                    LocationId = session.PackingStationLocationId,
+                    HandlingUnitId = package.HandlingUnitId,
+                    LpnCode = package.HandlingUnit.LpnCode,
+                    QtyAvailable = 0m, // Invariant: QtyAvailable must remain 0
+                    QtyAllocated = request.Quantity,
+                    ReceivedAtUtc = DateTime.UtcNow,
+                    Version = 1
+                };
+                _context.StockOnHand.Add(cartonStock);
+            }
+
+            // c. Record Package Line
+            package.AddLine(matchingLine.Id, item.Id, toteStock.LotId, request.Quantity, tote.Id, allocation.Id);
+
+            // d. Record Immutable Inventory Transaction Ledger
+            var tx = new InventoryTransaction
+            {
                 ClientId = order.ClientId,
                 FacilityId = session.FacilityId,
                 ItemId = item.Id,
                 LotId = toteStock.LotId,
-                LocationId = session.PackingStationLocationId,
-                HandlingUnitId = package.HandlingUnitId,
-                LpnCode = package.HandlingUnit.LpnCode,
-                QtyAvailable = 0m, // Invariant: QtyAvailable must remain 0
-                QtyAllocated = request.Quantity,
-                ReceivedAtUtc = DateTime.UtcNow,
-                Version = 1
+                FromLocationId = tote.CurrentLocationId ?? session.PackingStationLocationId,
+                ToLocationId = session.PackingStationLocationId,
+                TxType = InventoryTxType.Pack,
+                Quantity = request.Quantity,
+                ReferenceType = "Package",
+                ReferenceId = package.Id,
+                UserId = request.UserId,
+                Notes = idempMarker != null
+                    ? $"Packed {request.Quantity} units of '{item.Sku}' from Tote '{tote.LpnCode}' into Package '{package.PackageNumber}' {idempMarker}{fpMarker}"
+                    : $"Packed {request.Quantity} units of '{item.Sku}' from Tote '{tote.LpnCode}' into Package '{package.PackageNumber}'",
+                TxTimestamp = DateTime.UtcNow
             };
-            _context.StockOnHand.Add(cartonStock);
-        }
+            _context.InventoryTransactions.Add(tx);
 
-        // c. Record Package Line
-        package.AddLine(matchingLine.Id, item.Id, toteStock.LotId, request.Quantity, tote.Id, allocation.Id);
+            await _context.SaveChangesAsync(cancellationToken);
 
-        // d. Record Immutable Inventory Transaction Ledger
-        var tx = new InventoryTransaction
-        {
-            ClientId = order.ClientId,
-            FacilityId = session.FacilityId,
-            ItemId = item.Id,
-            LotId = toteStock.LotId,
-            FromLocationId = tote.CurrentLocationId ?? session.PackingStationLocationId,
-            ToLocationId = session.PackingStationLocationId,
-            TxType = InventoryTxType.Pack,
-            Quantity = request.Quantity,
-            ReferenceType = "Package",
-            ReferenceId = package.Id,
-            UserId = request.UserId,
-            Notes = idempMarker != null
-                ? $"Packed {request.Quantity} units of '{item.Sku}' from Tote '{tote.LpnCode}' into Package '{package.PackageNumber}' {idempMarker}"
-                : $"Packed {request.Quantity} units of '{item.Sku}' from Tote '{tote.LpnCode}' into Package '{package.PackageNumber}'",
-            TxTimestamp = DateTime.UtcNow
-        };
-        _context.InventoryTransactions.Add(tx);
+            // Calculate order packing completion
+            var updatedPackedForLine = packedForLine + request.Quantity;
+            var isLineComplete = updatedPackedForLine >= matchingLine.QuantityAllocated;
 
-        await _context.SaveChangesAsync(cancellationToken);
+            var allLinesAllocated = order.Lines.Sum(l => l.QuantityAllocated);
+            var totalOrderPacked = await _context.PackageLines
+                .Where(pl => pl.Package.OutboundOrderId == order.Id && !pl.Package.IsDeleted)
+                .SumAsync(pl => pl.Quantity, cancellationToken);
 
-        // Calculate order packing completion
-        var updatedPackedForLine = packedForLine + request.Quantity;
-        var isLineComplete = updatedPackedForLine >= matchingLine.QuantityAllocated;
+            var isOrderFullyPacked = totalOrderPacked >= allLinesAllocated && allLinesAllocated > 0;
 
-        var allLinesAllocated = order.Lines.Sum(l => l.QuantityAllocated);
-        var totalOrderPacked = await _context.PackageLines
-            .Where(pl => pl.Package.OutboundOrderId == order.Id && !pl.Package.IsDeleted)
-            .SumAsync(pl => pl.Quantity, cancellationToken);
+            _logger.LogInformation(
+                "Packed {Qty} units of SKU '{Sku}' into Package '{Package}' from Tote '{Tote}'. Remaining in tote: {RemainingTote}",
+                request.Quantity, item.Sku, package.PackageNumber, tote.LpnCode, toteStock.QtyAllocated);
 
-        var isOrderFullyPacked = totalOrderPacked >= allLinesAllocated && allLinesAllocated > 0;
+            var pkgLine = package.Lines.First(l => l.OutboundOrderLineId == matchingLine.Id && l.LotId == toteStock.LotId);
 
-        _logger.LogInformation(
-            "Packed {Qty} units of SKU '{Sku}' into Package '{Package}' from Tote '{Tote}'. Remaining in tote: {RemainingTote}",
-            request.Quantity, item.Sku, package.PackageNumber, tote.LpnCode, toteStock.QtyAllocated);
+            return new PackItemResult
+            {
+                IsSuccess = true,
+                PackageId = package.Id,
+                PackageNumber = package.PackageNumber,
+                PackageLineId = pkgLine.Id,
+                ItemId = item.Id,
+                Sku = item.Sku,
+                LotNumber = toteStock.Lot?.LotNumber,
+                QuantityPacked = request.Quantity,
+                RemainingToteQuantity = toteStock.QtyAllocated,
+                RemainingOrderLineDemand = Math.Max(0m, matchingLine.QuantityAllocated - updatedPackedForLine),
+                SourceToteLpn = tote.LpnCode,
+                CartonLpn = package.HandlingUnit.LpnCode,
+                InventoryTransactionId = tx.Id,
+                IsOrderLineComplete = isLineComplete,
+                IsOrderFullyPacked = isOrderFullyPacked,
+                Message = $"Successfully packed {request.Quantity} units."
+            };
+        }, cancellationToken);
+    }
 
-        var pkgLine = package.Lines.First(l => l.OutboundOrderLineId == matchingLine.Id && l.LotId == toteStock.LotId);
+    private static decimal ResolveItemUnitWeightKg(Item? item)
+        => item != null && item.WeightKg > 0m ? item.WeightKg : 0.5m;
 
-        return new PackItemResult
-        {
-            IsSuccess = true,
-            PackageId = package.Id,
-            PackageNumber = package.PackageNumber,
-            PackageLineId = pkgLine.Id,
-            ItemId = item.Id,
-            Sku = item.Sku,
-            LotNumber = toteStock.Lot?.LotNumber,
-            QuantityPacked = request.Quantity,
-            RemainingToteQuantity = toteStock.QtyAllocated,
-            RemainingOrderLineDemand = Math.Max(0m, matchingLine.QuantityAllocated - updatedPackedForLine),
-            SourceToteLpn = tote.LpnCode,
-            CartonLpn = package.HandlingUnit.LpnCode,
-            InventoryTransactionId = tx.Id,
-            IsOrderLineComplete = isLineComplete,
-            IsOrderFullyPacked = isOrderFullyPacked,
-            Message = $"Successfully packed {request.Quantity} units."
-        };
+    private static decimal ResolvePackedLineUnitWeightKg(PackageLine line, OutboundOrder order)
+    {
+        var resolvedItem = line.Item ?? order.Lines.FirstOrDefault(ol => ol.ItemId == line.ItemId)?.Item;
+        return ResolveItemUnitWeightKg(resolvedItem);
+    }
+
+    private static string ComputePackFingerprint(PackItemRequest request)
+    {
+        var canonical = string.Join("|",
+            request.PackingSessionId.ToString("D"),
+            request.PackageId.ToString("D"),
+            (request.ScannedToteLpn ?? string.Empty).Trim().ToUpperInvariant(),
+            (request.ScannedItemBarcode ?? string.Empty).Trim().ToUpperInvariant(),
+            (request.ScannedLotNumber ?? string.Empty).Trim().ToUpperInvariant(),
+            request.Quantity.ToString("0.########", CultureInfo.InvariantCulture));
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(canonical));
+        return Convert.ToHexString(hash)[..24];
     }
 
     public async Task<ClosePackageResult> ClosePackageAsync(
@@ -605,12 +654,19 @@ public class PackingExecutionService : IPackingExecutionService
     {
         var package = await _context.Packages
             .Include(p => p.Lines)
+                .ThenInclude(l => l.Item)
             .Include(p => p.PackagingMaterial)
             .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
 
         if (package == null)
         {
             throw new EntityNotFoundException(nameof(Package), request.PackageId);
+        }
+
+        if (package.PackagingMaterial == null && package.PackagingMaterialId.HasValue)
+        {
+            package.PackagingMaterial = await _context.PackagingMaterials
+                .FirstOrDefaultAsync(m => m.Id == package.PackagingMaterialId.Value && !m.IsDeleted, cancellationToken);
         }
 
         package.Close(request.ScaleGrossWeightKg, request.UserId);

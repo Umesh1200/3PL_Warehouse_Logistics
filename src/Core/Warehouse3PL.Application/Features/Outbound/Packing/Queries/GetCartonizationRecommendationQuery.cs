@@ -35,7 +35,7 @@ public class GetCartonizationRecommendationQueryHandler : IRequestHandler<GetCar
         GetCartonizationRecommendationQuery query,
         CancellationToken cancellationToken)
     {
-        _outboundAuth.ValidateStaffReadFacilityAccess(query.FacilityId, nameof(GetCartonizationRecommendationQuery));
+        _outboundAuth.ValidateStaffMutationFacilityAccess(query.FacilityId, nameof(GetCartonizationRecommendationQuery));
 
         if (query.OutboundOrderId.HasValue)
         {

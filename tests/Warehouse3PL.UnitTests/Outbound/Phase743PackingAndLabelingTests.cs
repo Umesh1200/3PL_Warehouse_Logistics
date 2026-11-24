@@ -400,6 +400,30 @@ public sealed class Phase743PackingAndLabelingTests : IAsyncLifetime
             Assert.Equal(HttpStatusCode.Forbidden, badCarton.StatusCode);
         }
 
+        // Combined Outbound.Pack + Analytics.MultiFacilityView MUST BE DENIED FacilityB cartonization (both WITH and WITHOUT OutboundOrderId)
+        using (var crossFacCartonNoOrder = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/cartonization/recommend", PackAndShipStaffId, new
+        {
+            clientId = ClientA,
+            facilityId = FacilityB,
+            items = new[]
+            {
+                new { itemId = ItemAId, sku = "SKU-PACK-743", quantity = 1m, lengthCm = 10m, widthCm = 10m, heightCm = 8m, weightKg = 1.5m }
+            }
+        })))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, crossFacCartonNoOrder.StatusCode);
+        }
+
+        using (var crossFacCartonWithOrder = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/cartonization/recommend", PackAndShipStaffId, new
+        {
+            clientId = ClientA,
+            facilityId = FacilityB,
+            outboundOrderId = OrderBId
+        })))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, crossFacCartonWithOrder.StatusCode);
+        }
+
         // ShipOnly, ClientAdmin (legacy pack/ship claims), and Driver denied from packing reference & session endpoints
         foreach (var forbiddenUser in new[] { ShipOnlyStaffId, ClientAdminId, DriverUserId })
         {
@@ -602,6 +626,240 @@ public sealed class Phase743PackingAndLabelingTests : IAsyncLifetime
             Assert.True(json.GetProperty("isSuccess").GetBoolean());
             Assert.Equal("Packed", json.GetProperty("packageStatus").GetString());
             Assert.Equal("Voided", json.GetProperty("labelStatus").GetString());
+        }
+    }
+
+    [Fact]
+    public async Task MixedSkuPackingAndScaleClose_EnforcesActualPerLineWeightAndMaterialMaxWeight()
+    {
+        var heavyItemId = Guid.NewGuid();
+        var lightItemId = Guid.NewGuid();
+        var mixedOrderId = Guid.NewGuid();
+        var heavyLineId = Guid.NewGuid();
+        var lightLineId = Guid.NewGuid();
+        var mixedToteId = Guid.NewGuid();
+        var heavyStockId = Guid.NewGuid();
+        var lightStockId = Guid.NewGuid();
+
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Items.AddRange(
+                new Item { Id = heavyItemId, ClientId = ClientA, Sku = "SKU-HEAVY-18", Description = "18kg Pump", LengthCm = 20m, WidthCm = 20m, HeightCm = 15m, WeightKg = 18m },
+                new Item { Id = lightItemId, ClientId = ClientA, Sku = "SKU-LIGHT-03", Description = "3kg Valve", LengthCm = 10m, WidthCm = 10m, HeightCm = 10m, WeightKg = 3m });
+
+            var mixedOrder = new OutboundOrder
+            {
+                Id = mixedOrderId,
+                ClientId = ClientA,
+                FacilityId = FacilityA,
+                OrderNumber = "SO-743-MIXED-WT",
+                CustomerName = "Heavy Industrial Buyer",
+                Status = OutboundOrderStatus.InProgress
+            };
+            mixedOrder.Lines.Add(new OutboundOrderLine { Id = heavyLineId, OutboundOrderId = mixedOrderId, ItemId = heavyItemId, LineNumber = 1, QuantityOrdered = 1m, QuantityAllocated = 1m, Status = OutboundOrderLineStatus.Allocated });
+            mixedOrder.Lines.Add(new OutboundOrderLine { Id = lightLineId, OutboundOrderId = mixedOrderId, ItemId = lightItemId, LineNumber = 2, QuantityOrdered = 1m, QuantityAllocated = 1m, Status = OutboundOrderLineStatus.Allocated });
+            db.OutboundOrders.Add(mixedOrder);
+
+            db.HandlingUnits.Add(new HandlingUnit
+            {
+                Id = mixedToteId,
+                ClientId = ClientA,
+                FacilityId = FacilityA,
+                LpnCode = "TOTE-MIXED-WT",
+                UnitType = HandlingUnitType.Tote,
+                Status = HandlingUnitStatus.InUse,
+                CurrentLocationId = StationAId,
+                CurrentOutboundOrderId = mixedOrderId
+            });
+
+            db.StockOnHand.AddRange(
+                new StockOnHand { Id = heavyStockId, ClientId = ClientA, FacilityId = FacilityA, ItemId = heavyItemId, LocationId = StationAId, HandlingUnitId = mixedToteId, LpnCode = "TOTE-MIXED-WT", QtyAvailable = 0m, QtyAllocated = 1m, Version = 1 },
+                new StockOnHand { Id = lightStockId, ClientId = ClientA, FacilityId = FacilityA, ItemId = lightItemId, LocationId = StationAId, HandlingUnitId = mixedToteId, LpnCode = "TOTE-MIXED-WT", QtyAvailable = 0m, QtyAllocated = 1m, Version = 1 });
+
+            var dummyLocId = db.Locations.IgnoreQueryFilters().First(l => l.FacilityId == FacilityA).Id;
+            db.InventoryAllocations.AddRange(
+                new InventoryAllocation { Id = Guid.NewGuid(), ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = mixedOrderId, OutboundOrderLineId = heavyLineId, StockOnHandId = heavyStockId, TargetHandlingUnitId = mixedToteId, ItemId = heavyItemId, LocationId = dummyLocId, QuantityRequested = 1m, QuantityAllocated = 1m, QuantityPicked = 1m, Status = AllocationStatus.Picked },
+                new InventoryAllocation { Id = Guid.NewGuid(), ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = mixedOrderId, OutboundOrderLineId = lightLineId, StockOnHandId = lightStockId, TargetHandlingUnitId = mixedToteId, ItemId = lightItemId, LocationId = dummyLocId, QuantityRequested = 1m, QuantityAllocated = 1m, QuantityPicked = 1m, Status = AllocationStatus.Picked });
+
+            await db.SaveChangesAsync();
+        }
+
+        // Start session & create BoxMediumId (MaxWeightKg = 20kg, TareWeightKg = 0.45kg)
+        Guid sessionId;
+        using (var startResp = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/sessions/start", PackOnlyStaffId, new
+        {
+            facilityId = FacilityA,
+            packingStationLocationId = StationAId,
+            outboundOrderId = mixedOrderId
+        })))
+        {
+            Assert.Equal(HttpStatusCode.OK, startResp.StatusCode);
+            sessionId = JsonSerializer.Deserialize<JsonElement>(await startResp.Content.ReadAsStringAsync()).GetProperty("sessionId").GetGuid();
+        }
+
+        Guid packageId;
+        using (var pkgResp = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/packages/create", PackOnlyStaffId, new
+        {
+            packingSessionId = sessionId,
+            packagingMaterialId = BoxMediumId
+        })))
+        {
+            Assert.Equal(HttpStatusCode.OK, pkgResp.StatusCode);
+            packageId = JsonSerializer.Deserialize<JsonElement>(await pkgResp.Content.ReadAsStringAsync()).GetProperty("packageId").GetGuid();
+        }
+
+        // Pack heavy SKU (18 kg <= 20 kg) -> 200 OK
+        using (var packHeavy = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", PackOnlyStaffId, new
+        {
+            packingSessionId = sessionId,
+            packageId,
+            scannedToteLpn = "TOTE-MIXED-WT",
+            scannedItemBarcode = "SKU-HEAVY-18",
+            quantity = 1m,
+            idempotencyKey = "pack-heavy-1"
+        })))
+        {
+            Assert.Equal(HttpStatusCode.OK, packHeavy.StatusCode);
+        }
+
+        // Attempt light SKU (3 kg -> actual cumulative 18 + 3 = 21 kg > 20 kg) -> MUST fail 400 BadRequest!
+        using (var packLightOverweight = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", PackOnlyStaffId, new
+        {
+            packingSessionId = sessionId,
+            packageId,
+            scannedToteLpn = "TOTE-MIXED-WT",
+            scannedItemBarcode = "SKU-LIGHT-03",
+            quantity = 1m,
+            idempotencyKey = "pack-light-overweight"
+        })))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, packLightOverweight.StatusCode);
+        }
+
+        // Verify SKU-LIGHT-03 remained unmoved in tote
+        using (var verifyScope = _app.Services.CreateScope())
+        {
+            var db = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var lightStock = await db.StockOnHand.IgnoreQueryFilters().SingleAsync(s => s.Id == lightStockId);
+            Assert.Equal(1m, lightStock.QtyAllocated);
+        }
+
+        // Overweight scale close (21.50 kg gross - 0.45 kg tare = 21.05 kg net > 20 kg MaxWeightKg) -> MUST fail 400 BadRequest!
+        using (var overweightClose = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/packing/packages/{packageId}/close", PackOnlyStaffId, new
+        {
+            scaleGrossWeightKg = 21.50m
+        })))
+        {
+            Assert.Equal(HttpStatusCode.BadRequest, overweightClose.StatusCode);
+        }
+
+        // Valid scale close (18.45 kg gross - 0.45 kg tare = 18.00 kg net <= 20 kg) -> 200 OK
+        using (var validClose = await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/packing/packages/{packageId}/close", PackOnlyStaffId, new
+        {
+            scaleGrossWeightKg = 18.45m
+        })))
+        {
+            Assert.Equal(HttpStatusCode.OK, validClose.StatusCode);
+        }
+    }
+
+    [Fact]
+    public async Task PackItemIdempotency_EnforcesPayloadFingerprintConflict409_AndConcurrentSameKeyDeduplication()
+    {
+        var concOrderId = Guid.NewGuid();
+        var concLineId = Guid.NewGuid();
+        var concToteId = Guid.NewGuid();
+        var concStockId = Guid.NewGuid();
+
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var ord = new OutboundOrder
+            {
+                Id = concOrderId,
+                ClientId = ClientA,
+                FacilityId = FacilityA,
+                OrderNumber = "SO-743-IDEMP-CONC",
+                CustomerName = "Idempotency Buyer",
+                Status = OutboundOrderStatus.InProgress
+            };
+            ord.Lines.Add(new OutboundOrderLine { Id = concLineId, OutboundOrderId = concOrderId, ItemId = ItemAId, LineNumber = 1, QuantityOrdered = 10m, QuantityAllocated = 10m, Status = OutboundOrderLineStatus.Allocated });
+            db.OutboundOrders.Add(ord);
+
+            db.HandlingUnits.Add(new HandlingUnit { Id = concToteId, ClientId = ClientA, FacilityId = FacilityA, LpnCode = "TOTE-IDEMP-CONC", UnitType = HandlingUnitType.Tote, Status = HandlingUnitStatus.InUse, CurrentLocationId = StationAId, CurrentOutboundOrderId = concOrderId });
+            db.StockOnHand.Add(new StockOnHand { Id = concStockId, ClientId = ClientA, FacilityId = FacilityA, ItemId = ItemAId, LocationId = StationAId, HandlingUnitId = concToteId, LpnCode = "TOTE-IDEMP-CONC", QtyAvailable = 0m, QtyAllocated = 10m, Version = 1 });
+
+            var locId = db.Locations.IgnoreQueryFilters().First(l => l.FacilityId == FacilityA).Id;
+            db.InventoryAllocations.Add(new InventoryAllocation { Id = Guid.NewGuid(), ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = concOrderId, OutboundOrderLineId = concLineId, StockOnHandId = concStockId, TargetHandlingUnitId = concToteId, ItemId = ItemAId, LocationId = locId, QuantityRequested = 10m, QuantityAllocated = 10m, QuantityPicked = 10m, Status = AllocationStatus.Picked });
+            await db.SaveChangesAsync();
+        }
+
+        Guid sessionId;
+        using (var startResp = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/sessions/start", PackOnlyStaffId, new
+        {
+            facilityId = FacilityA,
+            packingStationLocationId = StationAId,
+            outboundOrderId = concOrderId
+        })))
+        {
+            Assert.Equal(HttpStatusCode.OK, startResp.StatusCode);
+            sessionId = JsonSerializer.Deserialize<JsonElement>(await startResp.Content.ReadAsStringAsync()).GetProperty("sessionId").GetGuid();
+        }
+
+        Guid pkg1Id;
+        Guid pkg2Id;
+        using (var r1 = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/packages/create", PackOnlyStaffId, new { packingSessionId = sessionId, packagingMaterialId = BoxMediumId })))
+        using (var r2 = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/packages/create", PackOnlyStaffId, new { packingSessionId = sessionId, packagingMaterialId = BoxMediumId })))
+        {
+            pkg1Id = JsonSerializer.Deserialize<JsonElement>(await r1.Content.ReadAsStringAsync()).GetProperty("packageId").GetGuid();
+            pkg2Id = JsonSerializer.Deserialize<JsonElement>(await r2.Content.ReadAsStringAsync()).GetProperty("packageId").GetGuid();
+        }
+
+        // Concurrent duplicate request with identical IdempotencyKey & payload -> both return 200, stock deducted ONCE (10 -> 7)
+        const string sharedKey = "pack-conc-key-743";
+        var payload = new
+        {
+            packingSessionId = sessionId,
+            packageId = pkg1Id,
+            scannedToteLpn = "TOTE-IDEMP-CONC",
+            scannedItemBarcode = "SKU-PACK-743",
+            quantity = 3m,
+            idempotencyKey = sharedKey
+        };
+
+        var concurrentResps = await Task.WhenAll(
+            _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", PackOnlyStaffId, payload)),
+            _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", PackOnlyStaffId, payload)));
+        foreach (var r in concurrentResps)
+        {
+            Assert.Equal(HttpStatusCode.OK, r.StatusCode);
+            r.Dispose();
+        }
+
+        // Reusing same IdempotencyKey with different quantity, item, tote, OR packageId MUST fail with 409 Conflict!
+        var conflictPayloads = new object[]
+        {
+            new { packingSessionId = sessionId, packageId = pkg1Id, scannedToteLpn = "TOTE-IDEMP-CONC", scannedItemBarcode = "SKU-PACK-743", quantity = 4m, idempotencyKey = sharedKey },
+            new { packingSessionId = sessionId, packageId = pkg1Id, scannedToteLpn = "TOTE-IDEMP-CONC", scannedItemBarcode = "SKU-OTHER", quantity = 3m, idempotencyKey = sharedKey },
+            new { packingSessionId = sessionId, packageId = pkg1Id, scannedToteLpn = "TOTE-743-01", scannedItemBarcode = "SKU-PACK-743", quantity = 3m, idempotencyKey = sharedKey },
+            new { packingSessionId = sessionId, packageId = pkg2Id, scannedToteLpn = "TOTE-IDEMP-CONC", scannedItemBarcode = "SKU-PACK-743", quantity = 3m, idempotencyKey = sharedKey }
+        };
+
+        foreach (var bad in conflictPayloads)
+        {
+            using var resp = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", PackOnlyStaffId, bad));
+            Assert.Equal(HttpStatusCode.Conflict, resp.StatusCode);
+        }
+
+        using (var verifyScope = _app.Services.CreateScope())
+        {
+            var db = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var toteStk = await db.StockOnHand.IgnoreQueryFilters().SingleAsync(s => s.Id == concStockId);
+            var packTxs = await db.InventoryTransactions.IgnoreQueryFilters().Where(t => t.ReferenceId == pkg1Id && t.TxType == InventoryTxType.Pack).ToListAsync();
+            Assert.Equal(7m, toteStk.QtyAllocated);
+            Assert.Single(packTxs);
+            Assert.Equal(3m, packTxs[0].Quantity);
         }
     }
 }
