@@ -221,7 +221,7 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
 
             if (existingIdempPod != null)
             {
-                EnsureIdempotencyKeyReusableForSubmission(existingIdempPod, package.Id, canonicalIdempKey, isSupersession);
+                EnsureIdempotencyKeyReusableForSubmission(existingIdempPod, package.Id, package.ClientId, canonicalIdempKey, isSupersession);
             }
         }
 
@@ -444,7 +444,7 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
                             cancellationToken);
                         if (racedIdempPod != null)
                         {
-                            EnsureIdempotencyKeyReusableForSubmission(racedIdempPod, package.Id, canonicalIdempKey, isSupersession: false);
+                            EnsureIdempotencyKeyReusableForSubmission(racedIdempPod, package.Id, package.ClientId, canonicalIdempKey, isSupersession: false);
                         }
                     }
 
@@ -784,7 +784,11 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
         bool includePackage,
         CancellationToken cancellationToken)
     {
-        IQueryable<ProofOfDelivery> query = _context.ProofOfDeliveries.AsNoTracking();
+        // Facility-scoped idempotency uniqueness spans all client tenants sharing the facility;
+        // callers must not disclose foreign-client metadata when rejecting collisions.
+        IQueryable<ProofOfDelivery> query = _context.ProofOfDeliveries
+            .IgnoreQueryFilters()
+            .AsNoTracking();
         if (includePackage)
         {
             query = query.Include(p => p.Package);
@@ -800,10 +804,11 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
     private static void EnsureIdempotencyKeyReusableForSubmission(
         ProofOfDelivery existingIdempPod,
         Guid targetPackageId,
+        Guid targetClientId,
         string canonicalIdempKey,
         bool isSupersession)
     {
-        if (isSupersession)
+        if (isSupersession || existingIdempPod.ClientId != targetClientId)
         {
             throw new ConcurrencyException(
                 $"Proof of Delivery idempotency key '{canonicalIdempKey}' has already been consumed in this facility.");
@@ -830,6 +835,8 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
         string? incomingSigSha256,
         string? incomingPhotoSha256) =>
         supersededOriginalPod.SupersededByPodId == candidateReplacementPod.Id &&
+        candidateReplacementPod.PackageId == supersededOriginalPod.PackageId &&
+        candidateReplacementPod.ClientId == supersededOriginalPod.ClientId &&
         TextEq(supersededOriginalPod.SupersededReason, supersessionReason) &&
         HasMatchingEvidencePayload(candidateReplacementPod, replacementRequest, incomingSigSha256, incomingPhotoSha256);
 

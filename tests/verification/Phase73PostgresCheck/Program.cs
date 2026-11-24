@@ -4590,6 +4590,191 @@ try
 
     Console.WriteLine("PASS PostgreSQL P745-R01 & P745-R02 POD Signed Artifact Derivation & Idempotency Fingerprint 409 Conflict verified cleanly.");
 
+    // P745-R03 Live PostgreSQL Regression: Cross-Client Shared-Facility Driver POD Idempotency Collision -> 409 Conflict (No 500, No Cross-Client Disclosure)
+    var r03OrdBId = Guid.NewGuid();
+    var r03ShpBId = Guid.NewGuid();
+    var r03PkgAId = Guid.NewGuid();
+    var r03PkgBId = Guid.NewGuid();
+    await using (var p745R03Db = CreateDb(operationalConn, user))
+    {
+        p745R03Db.OutboundOrders.Add(new OutboundOrder { Id = r03OrdBId, ClientId = client2Id, FacilityId = facilityId, OrderNumber = "PG-ORD-745-R03-B", CustomerName = "ClientB Auditor", Status = OutboundOrderStatus.Completed });
+        p745R03Db.Shipments.Add(new Shipment { Id = r03ShpBId, ClientId = client2Id, FacilityId = facilityId, ShipmentNumber = "PG-SHP-745-R03-B", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, CustodyStatus = ShipmentCustodyStatus.Confirmed, AssignedDriverUserId = cDriverBId, DispatchedAtUtc = DateTime.UtcNow.AddMinutes(-5), Version = 1 });
+        p745R03Db.ShipmentCustodyTransfers.Add(new ShipmentCustodyTransfer { ClientId = client2Id, FacilityId = facilityId, ShipmentId = r03ShpBId, CarrierCode = "SIM-FEDEX", DriverName = "PG DriverB", DriverSignatureAcknowledgment = "SIG-745-R03-B", TotalPackagesConfirmed = 1, TotalWeightKg = 2m, AuthorizedByUserId = bSupId, AssignedDriverUserId = cDriverBId, CustodyStatus = ShipmentCustodyStatus.Confirmed, TransferredAtUtc = DateTime.UtcNow.AddMinutes(-5) });
+        var huR03A = Guid.NewGuid();
+        var huR03B = Guid.NewGuid();
+        p745R03Db.HandlingUnits.AddRange(
+            new HandlingUnit { Id = huR03A, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-745-R03-A", UnitType = HandlingUnitType.ShippingCarton },
+            new HandlingUnit { Id = huR03B, ClientId = client2Id, FacilityId = facilityId, LpnCode = "PG-745-R03-B", UnitType = HandlingUnitType.ShippingCarton });
+        p745R03Db.Packages.AddRange(
+            new Package { Id = r03PkgAId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = r01OrdId, ShipmentId = r01ShpId, HandlingUnitId = huR03A, PackageNumber = "PG-745-R03-PKG-A", CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-PG-R03-SECRET-A", Status = PackageStatus.Loaded, GrossWeightKg = 2m, LengthCm = 10, WidthCm = 10, HeightCm = 10 },
+            new Package { Id = r03PkgBId, ClientId = client2Id, FacilityId = facilityId, OutboundOrderId = r03OrdBId, ShipmentId = r03ShpBId, HandlingUnitId = huR03B, PackageNumber = "PG-745-R03-PKG-B", CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-PG-R03-B", Status = PackageStatus.Loaded, GrossWeightKg = 2m, LengthCm = 10, WidthCm = 10, HeightCm = 10 });
+        await p745R03Db.SaveChangesAsync();
+    }
+
+    SetDriverClaims(cDriverAId);
+    using (var r03A = await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{r03PkgAId}/pod", new { recipientName = "Confidential Client1 Consignee", deliveryLocationDescription = "Client1 Private Gate", idempotencyKey = "DELIVERY-100" }))
+    {
+        if (r03A.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"P745-R03 PostgreSQL Client1 driver POD failed: {r03A.StatusCode}");
+    }
+
+    SetDriverClaims(cDriverBId);
+    using (var r03B = await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{r03PkgBId}/pod", new { recipientName = "Client2 Consignee", idempotencyKey = "delivery-100" }))
+    {
+        var r03BBody = await r03B.Content.ReadAsStringAsync();
+        if (r03B.StatusCode != HttpStatusCode.Conflict)
+            throw new InvalidOperationException($"P745-R03 PostgreSQL cross-client shared-facility driver POD expected 409 Conflict, got {r03B.StatusCode}: {r03BBody}");
+        if (r03BBody.Contains("Confidential Client1 Consignee", StringComparison.OrdinalIgnoreCase) ||
+            r03BBody.Contains("Client1 Private Gate", StringComparison.OrdinalIgnoreCase) ||
+            r03BBody.Contains("TRK-PG-R03-SECRET-A", StringComparison.OrdinalIgnoreCase) ||
+            r03BBody.Contains(r03PkgAId.ToString(), StringComparison.OrdinalIgnoreCase) ||
+            r03BBody.Contains(client1Id.ToString(), StringComparison.OrdinalIgnoreCase))
+            throw new InvalidOperationException("P745-R03 PostgreSQL cross-client 409 response leaked foreign client metadata.");
+    }
+    TestAuthHandler.CustomClaims = null;
+
+    await using (var r03CheckDb = CreateDb(operationalConn, user))
+    {
+        var podsA = await r03CheckDb.ProofOfDeliveries.IgnoreQueryFilters().Where(p => p.PackageId == r03PkgAId).ToListAsync();
+        var podsB = await r03CheckDb.ProofOfDeliveries.IgnoreQueryFilters().Where(p => p.PackageId == r03PkgBId).ToListAsync();
+        if (podsA.Count != 1 || podsA[0].IdempotencyKey != "DELIVERY-100" || podsB.Count != 0)
+            throw new InvalidOperationException("P745-R03 PostgreSQL cross-client POD persistence invariant failed.");
+    }
+    Console.WriteLine("PASS PostgreSQL P745-R03 Cross-Client Shared-Facility Driver POD Idempotency (409 Conflict, Zero Disclosure) verified cleanly.");
+
+    // P745-R04 Live PostgreSQL Regression: Pre-Migration Legacy Colliding Keys -> Fail-Closed Block (Zero Mutation) -> Auditable Disambiguation -> Clean Upgrade
+    var p745MigDbName = $"nexus_mig_p745_{Guid.NewGuid():N}";
+    var p745MigConn = new NpgsqlConnectionStringBuilder(builder.ConnectionString) { Database = p745MigDbName }.ConnectionString;
+    await CreateDatabaseAsync(builder.ConnectionString, p745MigDbName);
+    try
+    {
+        var migFacId = Guid.NewGuid();
+        var migCliAId = Guid.NewGuid();
+        var migCliBId = Guid.NewGuid();
+        var migOrdAId = Guid.NewGuid();
+        var migOrdBId = Guid.NewGuid();
+        var migOrdCId = Guid.NewGuid();
+        var migHuAId = Guid.NewGuid();
+        var migHuBId = Guid.NewGuid();
+        var migHuCId = Guid.NewGuid();
+        var migPkgAId = Guid.NewGuid();
+        var migPkgBId = Guid.NewGuid();
+        var migPkgCId = Guid.NewGuid();
+        var legPod1Id = Guid.NewGuid();
+        var legPod2Id = Guid.NewGuid();
+        var legPod3Id = Guid.NewGuid();
+        var migVerifier = new VerificationIdentity(migFacId);
+
+        await using (var preMigDb = CreateDb(p745MigConn, migVerifier))
+        {
+            var preMigrator = preMigDb.GetInfrastructure().GetRequiredService<IMigrator>();
+            await preMigrator.MigrateAsync("20261122154043_Phase740CCustodyHandoverAndFencing");
+
+            preMigDb.Facilities.Add(new Facility { Id = migFacId, FacilityCode = "MIG745", Name = "Migration 745 Hub", Timezone = "UTC", CountryCode = "US", DockDoorCount = 2, IsActive = true });
+            preMigDb.Clients.AddRange(
+                new Client { Id = migCliAId, CompanyName = "Legacy Client A", AccountCode = "LCA1", Status = ClientStatus.Active, SlaTier = SlaTier.Standard, Currency = "USD" },
+                new Client { Id = migCliBId, CompanyName = "Legacy Client B", AccountCode = "LCB1", Status = ClientStatus.Active, SlaTier = SlaTier.Standard, Currency = "USD" });
+            preMigDb.OutboundOrders.AddRange(
+                new OutboundOrder { Id = migOrdAId, ClientId = migCliAId, FacilityId = migFacId, OrderNumber = "LEG-ORD-A", CustomerName = "Legacy Cust A", Status = OutboundOrderStatus.Completed },
+                new OutboundOrder { Id = migOrdBId, ClientId = migCliBId, FacilityId = migFacId, OrderNumber = "LEG-ORD-B", CustomerName = "Legacy Cust B", Status = OutboundOrderStatus.Completed },
+                new OutboundOrder { Id = migOrdCId, ClientId = migCliAId, FacilityId = migFacId, OrderNumber = "LEG-ORD-C", CustomerName = "Legacy Cust C", Status = OutboundOrderStatus.Completed });
+            preMigDb.HandlingUnits.AddRange(
+                new HandlingUnit { Id = migHuAId, ClientId = migCliAId, FacilityId = migFacId, LpnCode = "LEG-HU-A", UnitType = HandlingUnitType.ShippingCarton },
+                new HandlingUnit { Id = migHuBId, ClientId = migCliBId, FacilityId = migFacId, LpnCode = "LEG-HU-B", UnitType = HandlingUnitType.ShippingCarton },
+                new HandlingUnit { Id = migHuCId, ClientId = migCliAId, FacilityId = migFacId, LpnCode = "LEG-HU-C", UnitType = HandlingUnitType.ShippingCarton });
+            preMigDb.Packages.AddRange(
+                new Package { Id = migPkgAId, ClientId = migCliAId, FacilityId = migFacId, OutboundOrderId = migOrdAId, HandlingUnitId = migHuAId, PackageNumber = "LEG-PKG-A", TrackingNumber = "LEG-TRK-A", CarrierCode = "SIM-FEDEX", Status = PackageStatus.Loaded, GrossWeightKg = 1m, LengthCm = 10, WidthCm = 10, HeightCm = 10 },
+                new Package { Id = migPkgBId, ClientId = migCliBId, FacilityId = migFacId, OutboundOrderId = migOrdBId, HandlingUnitId = migHuBId, PackageNumber = "LEG-PKG-B", TrackingNumber = "LEG-TRK-B", CarrierCode = "SIM-FEDEX", Status = PackageStatus.Loaded, GrossWeightKg = 1m, LengthCm = 10, WidthCm = 10, HeightCm = 10 },
+                new Package { Id = migPkgCId, ClientId = migCliAId, FacilityId = migFacId, OutboundOrderId = migOrdCId, HandlingUnitId = migHuCId, PackageNumber = "LEG-PKG-C", TrackingNumber = "LEG-TRK-C", CarrierCode = "SIM-FEDEX", Status = PackageStatus.Loaded, GrossWeightKg = 1m, LengthCm = 10, WidthCm = 10, HeightCm = 10 });
+            await preMigDb.SaveChangesAsync();
+        }
+
+        await using (var migSqlConn = new NpgsqlConnection(p745MigConn))
+        {
+            await migSqlConn.OpenAsync();
+            await using var seedCmd = new NpgsqlCommand($@"
+                INSERT INTO proof_of_deliveries (pod_id, client_id, facility_id, package_id, tracking_number, carrier_code, recipient_name, is_signed, is_storage_finalized, idempotency_key, evidence_source, captured_at_utc, delivered_at_utc, is_superseded, created_at)
+                VALUES
+                    ('{legPod1Id}', '{migCliAId}', '{migFacId}', '{migPkgAId}', 'LEG-TRK-A', 'SIM-FEDEX', 'Legacy Recip 1', false, true, 'DELIVERY-LEGACY-1', 'DriverHandheld', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours', false, NOW()),
+                    ('{legPod2Id}', '{migCliBId}', '{migFacId}', '{migPkgBId}', 'LEG-TRK-B', 'SIM-FEDEX', 'Legacy Recip 2', false, true, '  delivery-legacy-1  ', 'DriverHandheld', NOW() - INTERVAL '1 hour', NOW() - INTERVAL '1 hour', false, NOW()),
+                    ('{legPod3Id}', '{migCliAId}', '{migFacId}', '{migPkgCId}', 'LEG-TRK-C', 'SIM-FEDEX', 'Legacy Recip 3', false, true, '  legacy-ok-2  ', 'DriverHandheld', NOW() - INTERVAL '30 minutes', NOW() - INTERVAL '30 minutes', false, NOW());
+            ", migSqlConn);
+            await seedCmd.ExecuteNonQueryAsync();
+        }
+
+        // Verify fail-closed migration block reports exact colliding POD IDs without modifying any existing rows
+        bool migBlockedCorrectly = false;
+        try
+        {
+            await using var failDb = CreateDb(p745MigConn, migVerifier);
+            await failDb.Database.MigrateAsync();
+        }
+        catch (PostgresException pgEx) when (
+            pgEx.MessageText.Contains("Phase745PodIdempotencyAndAuditColumns blocked", StringComparison.Ordinal) &&
+            pgEx.MessageText.Contains(legPod1Id.ToString(), StringComparison.Ordinal) &&
+            pgEx.MessageText.Contains(legPod2Id.ToString(), StringComparison.Ordinal))
+        {
+            migBlockedCorrectly = true;
+        }
+        if (!migBlockedCorrectly)
+            throw new InvalidOperationException("P745-R04 pre-migration colliding-key check did not block with diagnostic POD IDs.");
+
+        await using (var migSqlConn = new NpgsqlConnection(p745MigConn))
+        {
+            await migSqlConn.OpenAsync();
+            await using (var checkIntactCmd = new NpgsqlCommand(
+                "SELECT idempotency_key FROM proof_of_deliveries ORDER BY captured_at_utc ASC;", migSqlConn))
+            {
+                await using var rdr = await checkIntactCmd.ExecuteReaderAsync();
+                var keys = new List<string>();
+                while (await rdr.ReadAsync()) keys.Add(rdr.GetString(0));
+                if (keys.Count != 3 || keys[0] != "DELIVERY-LEGACY-1" || keys[1] != "  delivery-legacy-1  " || keys[2] != "  legacy-ok-2  ")
+                    throw new InvalidOperationException($"P745-R04 blocked migration unexpectedly altered legacy POD keys: {string.Join("|", keys)}");
+            }
+
+            // Documented conflict-resolution step: preserve all 3 historical POD rows while disambiguating duplicate key cleanly
+            await using var resolveCmd = new NpgsqlCommand($@"
+                UPDATE proof_of_deliveries
+                SET idempotency_key = 'LEGACY-CONFLICT:' || pod_id::text
+                WHERE pod_id = '{legPod2Id}';
+            ", migSqlConn);
+            await resolveCmd.ExecuteNonQueryAsync();
+        }
+
+        // Re-running MigrateAsync() now succeeds, normalizes remaining keys, creates unique index, and preserves all 3 PODs
+        await using (var passDb = CreateDb(p745MigConn, migVerifier))
+        {
+            await passDb.Database.MigrateAsync();
+        }
+
+        await using (var migVerifyConn = new NpgsqlConnection(p745MigConn))
+        {
+            await migVerifyConn.OpenAsync();
+            await using var verifyMigCmd = new NpgsqlCommand($@"
+                SELECT
+                    (SELECT COUNT(*) FROM pg_indexes WHERE tablename = 'proof_of_deliveries' AND indexname = 'ix_proof_of_deliveries_facility_idempotency'),
+                    (SELECT COUNT(*) FROM proof_of_deliveries),
+                    (SELECT idempotency_key FROM proof_of_deliveries WHERE pod_id = '{legPod1Id}'),
+                    (SELECT idempotency_key FROM proof_of_deliveries WHERE pod_id = '{legPod2Id}'),
+                    (SELECT idempotency_key FROM proof_of_deliveries WHERE pod_id = '{legPod3Id}');
+            ", migVerifyConn);
+            await using var rdr = await verifyMigCmd.ExecuteReaderAsync();
+            await rdr.ReadAsync();
+            if (rdr.GetInt64(0) != 1 || rdr.GetInt64(1) != 3 ||
+                rdr.GetString(2) != "DELIVERY-LEGACY-1" ||
+                rdr.GetString(3) != $"LEGACY-CONFLICT:{legPod2Id}" ||
+                rdr.GetString(4) != "LEGACY-OK-2")
+                throw new InvalidOperationException("P745-R04 post-resolution upgrade verification failed.");
+        }
+
+        Console.WriteLine("PASS PostgreSQL P745-R04 Legacy-Data Pre-Migration Collision Block & Evidence-Preserving Upgrade verified cleanly.");
+    }
+    finally
+    {
+        NpgsqlConnection.ClearAllPools();
+        await DropDatabaseAsync(builder.ConnectionString, p745MigDbName);
+    }
+
     if (Directory.Exists(pgPodStorageDir))
     {
         try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }

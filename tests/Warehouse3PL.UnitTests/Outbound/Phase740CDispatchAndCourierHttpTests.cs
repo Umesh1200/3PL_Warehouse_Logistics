@@ -1549,6 +1549,93 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
             Assert.Equal(HttpStatusCode.Conflict, rHistOtherPkg.StatusCode);
     }
 
+    [Fact]
+    public async Task P745R03_CrossClientSharedFacility_DriverPodIdempotency_Returns409WithoutCrossClientDisclosure()
+    {
+        // Configure an authorized Client B dispatched shipment & custody for DriverB in shared FacilityA
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var shipBId = Guid.NewGuid();
+            db.Shipments.Add(new Shipment
+            {
+                Id = shipBId,
+                ClientId = ClientB,
+                FacilityId = FacilityA,
+                ShipmentNumber = "SHP-740C-CLIENTB",
+                CarrierCode = "SIM-FEDEX",
+                Status = ShipmentStatus.Dispatched,
+                CustodyStatus = ShipmentCustodyStatus.Confirmed,
+                DeliveryStatus = TrackingMilestoneStatus.OutForDelivery,
+                AssignedDriverUserId = DriverBId,
+                DispatchedAtUtc = DateTime.UtcNow.AddHours(-1),
+                Version = 1
+            });
+            db.ShipmentCustodyTransfers.Add(new ShipmentCustodyTransfer
+            {
+                ClientId = ClientB,
+                FacilityId = FacilityA,
+                ShipmentId = shipBId,
+                CarrierCode = "SIM-FEDEX",
+                DriverName = "Driver Beta",
+                DriverSignatureAcknowledgment = "SIG-BETA",
+                TotalPackagesConfirmed = 1,
+                TotalWeightKg = 2m,
+                AuthorizedByUserId = SupervisorFacAId,
+                AssignedDriverUserId = DriverBId,
+                CustodyStatus = ShipmentCustodyStatus.Confirmed,
+                TransferredAtUtc = DateTime.UtcNow.AddHours(-1)
+            });
+            var pkgB = await db.Packages.IgnoreQueryFilters().SingleAsync(p => p.Id == PkgForeignBId);
+            pkgB.ShipmentId = shipBId;
+            await db.SaveChangesAsync();
+        }
+
+        var driverAToken = await LoginAsync("drivera@740c.test");
+        var driverBToken = await LoginAsync("driverb@740c.test");
+
+        // Driver A commits POD for Client A in shared FacilityA with 'DELIVERY-100'
+        using (var rClientA = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Confidential ClientA Consignee",
+                deliveryLocationDescription = "Alpha Dock 99",
+                idempotencyKey = "DELIVERY-100"
+            })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rClientA.StatusCode);
+            var okRes = await rClientA.Content.ReadFromJsonAsync<SubmitProofOfDeliveryResult>(JsonOptions);
+            Assert.False(okRes!.IsDuplicate);
+            Assert.Equal("Confidential ClientA Consignee", okRes.RecipientName);
+        }
+
+        // Driver B attempts Client B POD in shared FacilityA with same/case-variant key 'delivery-100' -> 409 Conflict & zero Client A disclosure
+        using (var rClientB = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{PkgForeignBId}/pod", driverBToken, new
+            {
+                recipientName = "ClientB Consignee",
+                idempotencyKey = "delivery-100"
+            })))
+        {
+            Assert.Equal(HttpStatusCode.Conflict, rClientB.StatusCode);
+            var body = await rClientB.Content.ReadAsStringAsync();
+            Assert.DoesNotContain("Confidential ClientA Consignee", body, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("Alpha Dock 99", body, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain("TRK-740C-1", body, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(Pkg1DispatchedId.ToString(), body, StringComparison.OrdinalIgnoreCase);
+            Assert.DoesNotContain(ClientA.ToString(), body, StringComparison.OrdinalIgnoreCase);
+        }
+
+        using (var verifyScope = _app.Services.CreateScope())
+        {
+            var verifyDb = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var podsA = await verifyDb.ProofOfDeliveries.IgnoreQueryFilters().Where(p => p.PackageId == Pkg1DispatchedId).ToListAsync();
+            var podsB = await verifyDb.ProofOfDeliveries.IgnoreQueryFilters().Where(p => p.PackageId == PkgForeignBId).ToListAsync();
+            Assert.Single(podsA);
+            Assert.Empty(podsB);
+        }
+    }
+
     private sealed class RaceDbBarrierInterceptor : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
     {
         private (TaskCompletionSource<bool> Entered, TaskCompletionSource<bool> Release)? _podConfirmPause;
