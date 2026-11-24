@@ -26,6 +26,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private IDbContextTransaction? _currentTransaction;
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryShipmentLocks = new();
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryPackageLocks = new();
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryPackIdempotencyLocks = new(StringComparer.Ordinal);
 
     public ApplicationDbContext(
         DbContextOptions<ApplicationDbContext> options,
@@ -295,6 +296,57 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             await RollbackTransactionAsync(cancellationToken);
             throw;
         }
+    }
+
+    public async Task<IAsyncDisposable> AcquirePackIdempotencyLockAsync(
+        Guid facilityId,
+        string idempotencyKey,
+        CancellationToken cancellationToken = default)
+    {
+        var lockKey = $"PACK:{facilityId:N}:{idempotencyKey}";
+
+        if (!Database.IsRelational())
+        {
+            var gate = InMemoryPackIdempotencyLocks.GetOrAdd(lockKey, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken);
+            return new SemaphoreReleaser(gate);
+        }
+
+        if (Database.CurrentTransaction == null)
+        {
+            throw new InvalidOperationException("Pack idempotency lock requires an active database transaction.");
+        }
+
+        if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            await Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0::bigint))",
+                cancellationToken);
+        }
+
+        return NoOpAsyncDisposable.Instance;
+    }
+
+    private sealed class SemaphoreReleaser(SemaphoreSlim semaphore) : IAsyncDisposable
+    {
+        private int _released;
+
+        public ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                semaphore.Release();
+            }
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
+    private sealed class NoOpAsyncDisposable : IAsyncDisposable
+    {
+        public static readonly NoOpAsyncDisposable Instance = new();
+
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
     }
 
     public async Task<TResult> ExecuteWithShipmentLockAsync<TResult>(

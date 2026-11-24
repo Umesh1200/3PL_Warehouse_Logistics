@@ -862,4 +862,130 @@ public sealed class Phase743PackingAndLabelingTests : IAsyncLifetime
             Assert.Equal(3m, packTxs[0].Quantity);
         }
     }
+
+    [Fact]
+    public async Task ConcurrentCrossPackagePack_WithSameIdempotencyKey_OnlyOneCommitsAndOtherReturns409Conflict()
+    {
+        var itemId = Guid.NewGuid();
+        var orderId = Guid.NewGuid();
+        var lineId = Guid.NewGuid();
+        var tote1Id = Guid.NewGuid();
+        var tote2Id = Guid.NewGuid();
+        var stock1Id = Guid.NewGuid();
+        var stock2Id = Guid.NewGuid();
+        var binId = Guid.NewGuid();
+        const string skuBarcode = "BC-743-CROSS-CONC";
+
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Items.Add(new Item
+            {
+                Id = itemId,
+                ClientId = ClientA,
+                Sku = "SKU-743-CROSS-CONC",
+                Description = "Cross-package concurrency item",
+                WeightKg = 1.0m,
+                LengthCm = 10m,
+                WidthCm = 10m,
+                HeightCm = 10m,
+                VolumeCm3 = 1000m,
+                Status = ItemStatus.Active
+            });
+            db.ItemBarcodes.Add(new ItemBarcode
+            {
+                Id = Guid.NewGuid(),
+                ItemId = itemId,
+                BarcodeValue = skuBarcode,
+                IsPrimary = true
+            });
+            var ord = new OutboundOrder
+            {
+                Id = orderId,
+                ClientId = ClientA,
+                FacilityId = FacilityA,
+                OrderNumber = "SO-743-CROSS-CONC",
+                CustomerName = "Cross Package Corp",
+                Status = OutboundOrderStatus.Allocated
+            };
+            ord.Lines.Add(new OutboundOrderLine
+            {
+                Id = lineId,
+                OutboundOrderId = orderId,
+                ItemId = itemId,
+                LineNumber = 1,
+                QuantityOrdered = 10m,
+                QuantityAllocated = 10m,
+                Status = OutboundOrderLineStatus.Allocated
+            });
+            db.OutboundOrders.Add(ord);
+            db.HandlingUnits.AddRange(
+                new HandlingUnit { Id = tote1Id, ClientId = ClientA, FacilityId = FacilityA, LpnCode = "TOTE-743-C1", UnitType = HandlingUnitType.Tote, Status = HandlingUnitStatus.InUse, CurrentLocationId = StationAId, CurrentOutboundOrderId = orderId },
+                new HandlingUnit { Id = tote2Id, ClientId = ClientA, FacilityId = FacilityA, LpnCode = "TOTE-743-C2", UnitType = HandlingUnitType.Tote, Status = HandlingUnitStatus.InUse, CurrentLocationId = StationAId, CurrentOutboundOrderId = orderId });
+            db.StockOnHand.AddRange(
+                new StockOnHand { Id = stock1Id, ClientId = ClientA, FacilityId = FacilityA, ItemId = itemId, LocationId = StationAId, HandlingUnitId = tote1Id, LpnCode = "TOTE-743-C1", QtyAvailable = 0m, QtyAllocated = 5m, Version = 1 },
+                new StockOnHand { Id = stock2Id, ClientId = ClientA, FacilityId = FacilityA, ItemId = itemId, LocationId = StationAId, HandlingUnitId = tote2Id, LpnCode = "TOTE-743-C2", QtyAvailable = 0m, QtyAllocated = 5m, Version = 1 });
+            db.InventoryAllocations.AddRange(
+                new InventoryAllocation { Id = Guid.NewGuid(), ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = orderId, OutboundOrderLineId = lineId, StockOnHandId = stock1Id, TargetHandlingUnitId = tote1Id, ItemId = itemId, LocationId = binId, QuantityRequested = 5m, QuantityAllocated = 5m, QuantityPicked = 5m, Status = AllocationStatus.Picked },
+                new InventoryAllocation { Id = Guid.NewGuid(), ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = orderId, OutboundOrderLineId = lineId, StockOnHandId = stock2Id, TargetHandlingUnitId = tote2Id, ItemId = itemId, LocationId = binId, QuantityRequested = 5m, QuantityAllocated = 5m, QuantityPicked = 5m, Status = AllocationStatus.Picked });
+            await db.SaveChangesAsync();
+        }
+
+        Guid sessionId;
+        using (var sr = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/sessions/start", PackOnlyStaffId,
+            new { facilityId = FacilityA, packingStationLocationId = StationAId, outboundOrderId = orderId })))
+        {
+            Assert.Equal(HttpStatusCode.OK, sr.StatusCode);
+            sessionId = JsonDocument.Parse(await sr.Content.ReadAsStringAsync()).RootElement.GetProperty("sessionId").GetGuid();
+        }
+
+        Guid pkg1Id;
+        using (var p1 = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/packages/create", PackOnlyStaffId,
+            new { packingSessionId = sessionId, packagingMaterialId = BoxMediumId })))
+        {
+            Assert.Equal(HttpStatusCode.OK, p1.StatusCode);
+            pkg1Id = JsonDocument.Parse(await p1.Content.ReadAsStringAsync()).RootElement.GetProperty("packageId").GetGuid();
+        }
+
+        Guid pkg2Id;
+        using (var p2 = await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/packages/create", PackOnlyStaffId,
+            new { packingSessionId = sessionId, packagingMaterialId = BoxMediumId })))
+        {
+            Assert.Equal(HttpStatusCode.OK, p2.StatusCode);
+            pkg2Id = JsonDocument.Parse(await p2.Content.ReadAsStringAsync()).RootElement.GetProperty("packageId").GetGuid();
+        }
+
+        const string sharedIdempKey = "p743-cross-pkg-conc-key";
+        var responses = await Task.WhenAll(
+            _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", PackOnlyStaffId,
+                new { packingSessionId = sessionId, packageId = pkg1Id, scannedToteLpn = "TOTE-743-C1", scannedItemBarcode = skuBarcode, quantity = 2m, idempotencyKey = sharedIdempKey })),
+            _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", PackOnlyStaffId,
+                new { packingSessionId = sessionId, packageId = pkg2Id, scannedToteLpn = "TOTE-743-C2", scannedItemBarcode = skuBarcode, quantity = 2m, idempotencyKey = sharedIdempKey })));
+
+        var statuses = responses.Select(r => r.StatusCode).ToArray();
+        foreach (var r in responses) r.Dispose();
+
+        Assert.Single(statuses, s => s == HttpStatusCode.OK);
+        Assert.Single(statuses, s => s == HttpStatusCode.Conflict);
+
+        using (var verifyScope = _app.Services.CreateScope())
+        {
+            var db = verifyScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var stk1 = await db.StockOnHand.IgnoreQueryFilters().SingleAsync(s => s.Id == stock1Id);
+            var stk2 = await db.StockOnHand.IgnoreQueryFilters().SingleAsync(s => s.Id == stock2Id);
+            var packTxs = await db.InventoryTransactions.IgnoreQueryFilters()
+                .Where(t => (t.ReferenceId == pkg1Id || t.ReferenceId == pkg2Id) && t.TxType == InventoryTxType.Pack)
+                .ToListAsync();
+            var pkgLines = await db.PackageLines.IgnoreQueryFilters()
+                .Where(l => l.PackageId == pkg1Id || l.PackageId == pkg2Id)
+                .ToListAsync();
+
+            Assert.Equal(8m, stk1.QtyAllocated + stk2.QtyAllocated);
+            Assert.Single(packTxs);
+            Assert.Equal(2m, packTxs[0].Quantity);
+            Assert.Single(pkgLines);
+            Assert.Equal(2m, pkgLines[0].Quantity);
+            Assert.Equal(packTxs[0].ReferenceId, pkgLines[0].PackageId);
+        }
+    }
 }

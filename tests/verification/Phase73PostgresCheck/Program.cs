@@ -3892,7 +3892,90 @@ try
         new { scaleGrossWeightKg = 18.50m }))).StatusCode != HttpStatusCode.OK)
         throw new InvalidOperationException("P743-R01 PostgreSQL scale close MaxWeightKg limit check failed.");
 
-    Console.WriteLine("PASS PostgreSQL Phase 7.4.3 Packing, Cartonization, Mixed-SKU Weight Limits, Concurrent Idempotent Scan/409 Conflict, Scale Close, Tote Release, Decoupled Carrier Rating, Label Generation/Void Recovery verified cleanly.");
+    // P743-R02 PostgreSQL Regression: concurrent cross-package pack with the same idempotency key (Carton 1 + Tote 1 vs Carton 2 + Tote 2)
+    var pgConcItemId = Guid.NewGuid();
+    var pgConcOrderId = Guid.NewGuid();
+    var pgConcLineId = Guid.NewGuid();
+    var pgConcTote1Id = Guid.NewGuid();
+    var pgConcTote2Id = Guid.NewGuid();
+    var pgConcStock1Id = Guid.NewGuid();
+    var pgConcStock2Id = Guid.NewGuid();
+    const string pgConcBarcode = "PG-SKU-CROSS-CONC";
+
+    await using (var concSeedDb = CreateDb(operationalConn, user))
+    {
+        concSeedDb.Items.Add(new Item { Id = pgConcItemId, ClientId = client1Id, Sku = pgConcBarcode, Description = "Cross-Pkg Conc Item", WeightKg = 1.0m, LengthCm = 10m, WidthCm = 10m, HeightCm = 10m, VolumeCm3 = 1000m, Status = ItemStatus.Active });
+        concSeedDb.ItemBarcodes.Add(new ItemBarcode { Id = Guid.NewGuid(), ItemId = pgConcItemId, BarcodeValue = pgConcBarcode, IsPrimary = true });
+
+        var concOrd = new OutboundOrder { Id = pgConcOrderId, ClientId = client1Id, FacilityId = facilityId, OrderNumber = "SO-PG-CROSS-CONC", CustomerName = "PG Cross Conc", Status = OutboundOrderStatus.Allocated };
+        concOrd.Lines.Add(new OutboundOrderLine { Id = pgConcLineId, OutboundOrderId = pgConcOrderId, ItemId = pgConcItemId, LineNumber = 1, QuantityOrdered = 10m, QuantityAllocated = 10m, Status = OutboundOrderLineStatus.Allocated });
+        concSeedDb.OutboundOrders.Add(concOrd);
+
+        concSeedDb.HandlingUnits.AddRange(
+            new HandlingUnit { Id = pgConcTote1Id, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-TOTE-CROSS-1", UnitType = HandlingUnitType.Tote, Status = HandlingUnitStatus.InUse, CurrentLocationId = p743StationId, CurrentOutboundOrderId = pgConcOrderId },
+            new HandlingUnit { Id = pgConcTote2Id, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-TOTE-CROSS-2", UnitType = HandlingUnitType.Tote, Status = HandlingUnitStatus.InUse, CurrentLocationId = p743StationId, CurrentOutboundOrderId = pgConcOrderId });
+        concSeedDb.StockOnHand.AddRange(
+            new StockOnHand { Id = pgConcStock1Id, ClientId = client1Id, FacilityId = facilityId, ItemId = pgConcItemId, LocationId = p743StationId, HandlingUnitId = pgConcTote1Id, LpnCode = "PG-TOTE-CROSS-1", QtyAvailable = 0m, QtyAllocated = 5m, Version = 1 },
+            new StockOnHand { Id = pgConcStock2Id, ClientId = client1Id, FacilityId = facilityId, ItemId = pgConcItemId, LocationId = p743StationId, HandlingUnitId = pgConcTote2Id, LpnCode = "PG-TOTE-CROSS-2", QtyAvailable = 0m, QtyAllocated = 5m, Version = 1 });
+        concSeedDb.InventoryAllocations.AddRange(
+            new InventoryAllocation { Id = Guid.NewGuid(), ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = pgConcOrderId, OutboundOrderLineId = pgConcLineId, StockOnHandId = pgConcStock1Id, TargetHandlingUnitId = pgConcTote1Id, ItemId = pgConcItemId, LocationId = p743BinId, QuantityRequested = 5m, QuantityAllocated = 5m, QuantityPicked = 5m, Status = AllocationStatus.Picked },
+            new InventoryAllocation { Id = Guid.NewGuid(), ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = pgConcOrderId, OutboundOrderLineId = pgConcLineId, StockOnHandId = pgConcStock2Id, TargetHandlingUnitId = pgConcTote2Id, ItemId = pgConcItemId, LocationId = p743BinId, QuantityRequested = 5m, QuantityAllocated = 5m, QuantityPicked = 5m, Status = AllocationStatus.Picked });
+        await concSeedDb.SaveChangesAsync();
+    }
+
+    Guid pgConcSessionId;
+    using (var sr = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/sessions/start", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { facilityId, packingStationLocationId = p743StationId, outboundOrderId = pgConcOrderId })))
+    {
+        if (sr.StatusCode != HttpStatusCode.OK) throw new InvalidOperationException($"P743-R02 PostgreSQL cross-pkg session start failed: {sr.StatusCode}");
+        pgConcSessionId = JsonDocument.Parse(await sr.Content.ReadAsStringAsync()).RootElement.GetProperty("sessionId").GetGuid();
+    }
+
+    Guid pgConcPkg1Id;
+    using (var p1 = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/packages/create", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { packingSessionId = pgConcSessionId, packagingMaterialId = p743MixedBoxId })))
+    {
+        if (p1.StatusCode != HttpStatusCode.OK) throw new InvalidOperationException($"P743-R02 PostgreSQL cross-pkg 1 create failed: {p1.StatusCode}");
+        pgConcPkg1Id = JsonDocument.Parse(await p1.Content.ReadAsStringAsync()).RootElement.GetProperty("packageId").GetGuid();
+    }
+
+    Guid pgConcPkg2Id;
+    using (var p2 = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/packages/create", bOpAId, facilityId, Permissions.Outbound.Pack,
+        new { packingSessionId = pgConcSessionId, packagingMaterialId = p743MixedBoxId })))
+    {
+        if (p2.StatusCode != HttpStatusCode.OK) throw new InvalidOperationException($"P743-R02 PostgreSQL cross-pkg 2 create failed: {p2.StatusCode}");
+        pgConcPkg2Id = JsonDocument.Parse(await p2.Content.ReadAsStringAsync()).RootElement.GetProperty("packageId").GetGuid();
+    }
+
+    const string pgSharedCrossKey = "pg-p743-cross-pkg-conc-key";
+    var pgCrossResponses = await Task.WhenAll(
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", bOpAId, facilityId, Permissions.Outbound.Pack,
+            new { packingSessionId = pgConcSessionId, packageId = pgConcPkg1Id, scannedToteLpn = "PG-TOTE-CROSS-1", scannedItemBarcode = pgConcBarcode, quantity = 2m, idempotencyKey = pgSharedCrossKey })),
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/packing/items/pack", bOpAId, facilityId, Permissions.Outbound.Pack,
+            new { packingSessionId = pgConcSessionId, packageId = pgConcPkg2Id, scannedToteLpn = "PG-TOTE-CROSS-2", scannedItemBarcode = pgConcBarcode, quantity = 2m, idempotencyKey = pgSharedCrossKey })));
+
+    var pgCrossStatuses = pgCrossResponses.Select(r => r.StatusCode).ToArray();
+    foreach (var r in pgCrossResponses) r.Dispose();
+
+    if (pgCrossStatuses.Count(s => s == HttpStatusCode.OK) != 1 || pgCrossStatuses.Count(s => s == HttpStatusCode.Conflict) != 1)
+        throw new InvalidOperationException($"P743-R02 PostgreSQL concurrent cross-package same-key expected 1x 200 and 1x 409, got: {string.Join(", ", pgCrossStatuses)}");
+
+    await using (var concCheckDb = CreateDb(operationalConn, user))
+    {
+        var stk1 = await concCheckDb.StockOnHand.SingleAsync(s => s.Id == pgConcStock1Id);
+        var stk2 = await concCheckDb.StockOnHand.SingleAsync(s => s.Id == pgConcStock2Id);
+        var packTxs = await concCheckDb.InventoryTransactions
+            .Where(t => (t.ReferenceId == pgConcPkg1Id || t.ReferenceId == pgConcPkg2Id) && t.TxType == InventoryTxType.Pack)
+            .ToListAsync();
+        var pkgLines = await concCheckDb.PackageLines
+            .Where(l => l.PackageId == pgConcPkg1Id || l.PackageId == pgConcPkg2Id)
+            .ToListAsync();
+
+        if (stk1.QtyAllocated + stk2.QtyAllocated != 8m || packTxs.Count != 1 || packTxs[0].Quantity != 2m || pkgLines.Count != 1 || pkgLines[0].Quantity != 2m || packTxs[0].ReferenceId != pkgLines[0].PackageId)
+            throw new InvalidOperationException($"P743-R02 PostgreSQL concurrent cross-package inventory conservation failed: stkTotal={stk1.QtyAllocated + stk2.QtyAllocated}, txs={packTxs.Count}, lines={pkgLines.Count}");
+    }
+
+    Console.WriteLine("PASS PostgreSQL Phase 7.4.3 Packing, Cartonization, Mixed-SKU Weight Limits, Concurrent Idempotent Scan/409 Conflict (Same & Cross Package), Scale Close, Tote Release, Decoupled Carrier Rating, Label Generation/Void Recovery verified cleanly.");
 
     if (Directory.Exists(pgPodStorageDir))
     {

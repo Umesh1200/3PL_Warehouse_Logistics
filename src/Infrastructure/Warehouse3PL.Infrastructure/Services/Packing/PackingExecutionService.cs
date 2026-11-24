@@ -306,6 +306,10 @@ public class PackingExecutionService : IPackingExecutionService
             var fingerprint = normalizedIdempKey != null ? ComputePackFingerprint(request) : null;
             var fpMarker = fingerprint != null ? $"[FP:{fingerprint}]" : null;
 
+            await using var idempotencyLock = normalizedIdempKey != null
+                ? await _context.AcquirePackIdempotencyLockAsync(session.FacilityId, normalizedIdempKey, cancellationToken)
+                : null;
+
             if (idempMarker != null)
             {
                 var existingPackTx = await _context.InventoryTransactions
