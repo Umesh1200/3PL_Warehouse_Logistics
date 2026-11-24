@@ -62,12 +62,28 @@ export const FacilitiesPage: React.FC = () => {
                           <td>
                             <div className="facility-cell">
                               <span className="facility-name">{fac.name}</span>
-                              {fac.addressLine1 && (
-                                <span className="facility-address">{fac.addressLine1}</span>
+                              {(fac.addressLine1 || fac.addressLine2) && (
+                                <span className="facility-address">
+                                  {[fac.addressLine1, fac.addressLine2].filter(Boolean).join(', ')}
+                                </span>
+                              )}
+                              {(fac.contactEmail || fac.contactPhone) && (
+                                <span className="facility-address">
+                                  {[fac.contactEmail, fac.contactPhone].filter(Boolean).join(' • ')}
+                                </span>
                               )}
                             </div>
                           </td>
-                          <td>{fac.city || 'Standard'}</td>
+                          <td>
+                            <div className="facility-cell">
+                              <span>
+                                {[fac.city, fac.stateOrProvince, fac.postalCode].filter(Boolean).join(', ') || 'Standard'}
+                              </span>
+                              {fac.countryCode && (
+                                <span className="facility-address">{fac.countryCode}</span>
+                              )}
+                            </div>
+                          </td>
                           <td>
                             <span className="tz-badge">{fac.timezone}</span>
                           </td>

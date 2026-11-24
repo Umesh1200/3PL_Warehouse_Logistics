@@ -1,7 +1,9 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -11,10 +13,94 @@ namespace Warehouse3PL.Infrastructure.Services.Shipping;
 /// <summary>
 /// Operational shipping service orchestrating carrier rate quotes, label generation, and voiding.
 /// Strictly enforces decoupled execution: carrier API calls execute OUTSIDE database transactions.
-/// DB-SPEC-3PL-2026 Phase 4.4 Packing & Dispatch Preparation (Step 3A).
+/// DB-SPEC-3PL-2026 Phase 4.4 Packing & Dispatch Preparation (Step 3A), hardened in MDM-0.1.
 /// </summary>
 public class ShippingLabelService : IShippingLabelService
 {
+    private static readonly IReadOnlyDictionary<string, string> CountryAliasMap =
+        new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["USA"] = "US",
+            ["U.S.A."] = "US",
+            ["U.S."] = "US",
+            ["UNITED STATES"] = "US",
+            ["UNITED STATES OF AMERICA"] = "US",
+            ["NPL"] = "NP",
+            ["NEPAL"] = "NP",
+            ["CAN"] = "CA",
+            ["CANADA"] = "CA",
+            ["GBR"] = "GB",
+            ["UK"] = "GB",
+            ["UNITED KINGDOM"] = "GB",
+            ["IND"] = "IN",
+            ["INDIA"] = "IN",
+            ["AUS"] = "AU",
+            ["AUSTRALIA"] = "AU",
+            ["DEU"] = "DE",
+            ["GERMANY"] = "DE",
+            ["FRA"] = "FR",
+            ["FRANCE"] = "FR",
+            ["JPN"] = "JP",
+            ["JAPAN"] = "JP",
+            ["SGP"] = "SG",
+            ["SINGAPORE"] = "SG",
+            ["ARE"] = "AE",
+            ["UAE"] = "AE",
+            ["ITA"] = "IT",
+            ["ITALY"] = "IT",
+            ["CHN"] = "CN",
+            ["CHINA"] = "CN",
+            ["MEX"] = "MX",
+            ["MEXICO"] = "MX",
+            ["BRA"] = "BR",
+            ["BRAZIL"] = "BR",
+            ["KOR"] = "KR",
+            ["SOUTH KOREA"] = "KR",
+            ["NLD"] = "NL",
+            ["NETHERLANDS"] = "NL",
+            ["ESP"] = "ES",
+            ["SPAIN"] = "ES",
+            ["CHE"] = "CH",
+            ["SWITZERLAND"] = "CH",
+            ["BGD"] = "BD",
+            ["BANGLADESH"] = "BD",
+            ["BTN"] = "BT",
+            ["BHUTAN"] = "BT",
+            ["LKA"] = "LK",
+            ["SRI LANKA"] = "LK",
+            ["PAK"] = "PK",
+            ["PAKISTAN"] = "PK",
+            ["MYS"] = "MY",
+            ["MALAYSIA"] = "MY",
+            ["THA"] = "TH",
+            ["THAILAND"] = "TH"
+        };
+
+    private static readonly Lazy<HashSet<string>> ValidIsoAlpha2Codes = new(() =>
+    {
+        var codes = new HashSet<string>(CountryAliasMap.Values, StringComparer.OrdinalIgnoreCase);
+        foreach (var culture in CultureInfo.GetCultures(CultureTypes.SpecificCultures))
+        {
+            try
+            {
+                var region = new RegionInfo(culture.Name);
+                var twoLetter = region.TwoLetterISORegionName;
+                if (!string.IsNullOrWhiteSpace(twoLetter) &&
+                    twoLetter.Length == 2 &&
+                    char.IsAsciiLetterUpper(twoLetter[0]) &&
+                    char.IsAsciiLetterUpper(twoLetter[1]))
+                {
+                    codes.Add(twoLetter);
+                }
+            }
+            catch
+            {
+                // Ignore custom/non-standard culture identifiers without ISO region mapping.
+            }
+        }
+        return codes;
+    });
+
     private readonly IApplicationDbContext _context;
     private readonly IShippingCarrierService _carrierService;
     private readonly ILogger<ShippingLabelService> _logger;
@@ -34,6 +120,8 @@ public class ShippingLabelService : IShippingLabelService
         CancellationToken cancellationToken = default)
     {
         var package = await _context.Packages
+            .AsNoTracking()
+            .Include(p => p.Facility)
             .Include(p => p.OutboundOrder)
                 .ThenInclude(o => o.ShippingAddress)
             .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
@@ -43,34 +131,15 @@ public class ShippingLabelService : IShippingLabelService
             throw new EntityNotFoundException(nameof(Package), request.PackageId);
         }
 
-        var dest = package.OutboundOrder.ShippingAddress;
+        var (originAddress, destinationAddress) = ResolveValidatedAddresses(package);
         var rateRequest = new CarrierRateRequest
         {
             ClientId = package.ClientId,
             FacilityId = package.FacilityId,
             PreferredCarrierCode = request.PreferredCarrierCode,
             PreferredServiceLevel = request.PreferredServiceLevel,
-            OriginAddress = new CarrierAddress
-            {
-                Name = "Warehouse 3PL Logistics",
-                StreetLine1 = "100 Distribution Way",
-                City = "Columbus",
-                StateOrProvince = "OH",
-                PostalCode = "43215",
-                CountryCode = "US"
-            },
-            DestinationAddress = new CarrierAddress
-            {
-                Name = dest?.RecipientName ?? "Valued Customer",
-                CompanyName = dest?.CompanyName,
-                StreetLine1 = dest?.AddressLine1 ?? "123 Main St",
-                StreetLine2 = dest?.AddressLine2,
-                City = dest?.City ?? "Springfield",
-                StateOrProvince = dest?.StateOrProvince ?? "IL",
-                PostalCode = dest?.PostalCode ?? "62701",
-                CountryCode = dest?.CountryCode ?? "US",
-                Phone = dest?.PhoneNumber
-            },
+            OriginAddress = originAddress,
+            DestinationAddress = destinationAddress,
             Parcel = new CarrierParcel
             {
                 PackageNumber = package.PackageNumber,
@@ -92,6 +161,7 @@ public class ShippingLabelService : IShippingLabelService
         // STEP 1: Validate Package and Eligibility
         // -------------------------------------------------------------
         var package = await _context.Packages
+            .Include(p => p.Facility)
             .Include(p => p.OutboundOrder)
                 .ThenInclude(o => o.ShippingAddress)
             .Include(p => p.ShippingLabels)
@@ -112,7 +182,7 @@ public class ShippingLabelService : IShippingLabelService
             ? $"IDEMP-{package.Id}-{request.CarrierCode}-{request.ServiceLevel}"
             : request.IdempotencyKey.Trim();
 
-        // Check for existing active label or matching idempotency key
+        // Check for existing active label or matching idempotency key (preserves previously issued historical labels)
         var activeLabel = package.ShippingLabels.FirstOrDefault(l => l.Status != ShippingLabelStatus.Voided);
         if (activeLabel != null)
         {
@@ -149,10 +219,10 @@ public class ShippingLabelService : IShippingLabelService
         }
 
         // -------------------------------------------------------------
-        // STEP 2 & 3: Persist Pending Carrier Operation & Commit
-        // (Ensures carrier request is logged BEFORE external call)
+        // STEP 2 & 3: Validate Origin & Destination, then Persist Pending Carrier Operation
+        // (Fail closed before logging or calling external carrier; never rewrite DB country codes)
         // -------------------------------------------------------------
-        var dest = package.OutboundOrder.ShippingAddress;
+        var (originAddress, destinationAddress) = ResolveValidatedAddresses(package);
         var carrierReq = new CarrierShipmentRequest
         {
             ClientId = package.ClientId,
@@ -164,27 +234,8 @@ public class ShippingLabelService : IShippingLabelService
             LabelFormat = request.LabelFormat,
             IdempotencyKey = idempotencyKey,
             SimulateFailure = request.SimulateFailure,
-            OriginAddress = new CarrierAddress
-            {
-                Name = "Warehouse 3PL Logistics",
-                StreetLine1 = "100 Distribution Way",
-                City = "Columbus",
-                StateOrProvince = "OH",
-                PostalCode = "43215",
-                CountryCode = "US"
-            },
-            DestinationAddress = new CarrierAddress
-            {
-                Name = dest?.RecipientName ?? "Valued Customer",
-                CompanyName = dest?.CompanyName,
-                StreetLine1 = dest?.AddressLine1 ?? "123 Main St",
-                StreetLine2 = dest?.AddressLine2,
-                City = dest?.City ?? "Springfield",
-                StateOrProvince = dest?.StateOrProvince ?? "IL",
-                PostalCode = dest?.PostalCode ?? "62701",
-                CountryCode = dest?.CountryCode ?? "US",
-                Phone = dest?.PhoneNumber
-            },
+            OriginAddress = originAddress,
+            DestinationAddress = destinationAddress,
             Parcel = new CarrierParcel
             {
                 PackageNumber = package.PackageNumber,
@@ -468,5 +519,113 @@ public class ShippingLabelService : IShippingLabelService
         }
 
         return await _carrierService.TrackShipmentAsync(package.TrackingNumber, package.CarrierCode, cancellationToken);
+    }
+
+    /// <summary>
+    /// Resolves and validates persisted dispatching facility origin and order shipping destination
+    /// for both carrier rate quoting and shipping label generation without mutating database records.
+    /// </summary>
+    private static (CarrierAddress Origin, CarrierAddress Destination) ResolveValidatedAddresses(Package package)
+    {
+        var facility = package.Facility
+            ?? throw new ValidationException(
+                nameof(Package.Facility),
+                $"Dispatching facility '{package.FacilityId}' was not found for package '{package.PackageNumber}'.");
+
+        var originName = !string.IsNullOrWhiteSpace(facility.Name)
+            ? facility.Name.Trim()
+            : facility.FacilityCode.Trim();
+        if (string.IsNullOrWhiteSpace(originName))
+        {
+            throw new ValidationException(
+                nameof(Facility.Name),
+                $"Dispatching facility '{facility.Id}' is missing a facility name or code for carrier shipment.");
+        }
+
+        if (string.IsNullOrWhiteSpace(facility.AddressLine1) ||
+            string.IsNullOrWhiteSpace(facility.City) ||
+            string.IsNullOrWhiteSpace(facility.CountryCode))
+        {
+            throw new ValidationException(
+                nameof(Package.Facility),
+                $"Dispatching facility '{facility.FacilityCode}' is missing required origin address fields (AddressLine1, City, CountryCode).");
+        }
+
+        var normalizedOriginCountry = NormalizeIsoCountryCode(
+            facility.CountryCode,
+            $"{nameof(CarrierRateRequest.OriginAddress)}.{nameof(CarrierAddress.CountryCode)}");
+
+        var origin = new CarrierAddress
+        {
+            Name = originName,
+            CompanyName = originName,
+            StreetLine1 = facility.AddressLine1.Trim(),
+            StreetLine2 = string.IsNullOrWhiteSpace(facility.AddressLine2) ? null : facility.AddressLine2.Trim(),
+            City = facility.City.Trim(),
+            StateOrProvince = facility.StateOrProvince?.Trim() ?? string.Empty,
+            PostalCode = facility.PostalCode?.Trim() ?? string.Empty,
+            CountryCode = normalizedOriginCountry,
+            Phone = string.IsNullOrWhiteSpace(facility.ContactPhone) ? null : facility.ContactPhone.Trim()
+        };
+
+        var dest = package.OutboundOrder?.ShippingAddress;
+        if (dest == null)
+        {
+            throw new ValidationException(
+                nameof(OutboundOrder.ShippingAddress),
+                $"Outbound order '{package.OutboundOrder?.OrderNumber ?? package.OutboundOrderId.ToString()}' is missing a shipping destination address.");
+        }
+
+        if (string.IsNullOrWhiteSpace(dest.RecipientName) ||
+            string.IsNullOrWhiteSpace(dest.AddressLine1) ||
+            string.IsNullOrWhiteSpace(dest.City) ||
+            string.IsNullOrWhiteSpace(dest.CountryCode))
+        {
+            throw new ValidationException(
+                nameof(OutboundOrder.ShippingAddress),
+                $"Outbound order '{package.OutboundOrder?.OrderNumber ?? package.OutboundOrderId.ToString()}' has incomplete destination address fields (RecipientName, AddressLine1, City, CountryCode).");
+        }
+
+        var normalizedDestinationCountry = NormalizeIsoCountryCode(
+            dest.CountryCode,
+            $"{nameof(CarrierRateRequest.DestinationAddress)}.{nameof(CarrierAddress.CountryCode)}");
+
+        var destination = new CarrierAddress
+        {
+            Name = dest.RecipientName.Trim(),
+            CompanyName = string.IsNullOrWhiteSpace(dest.CompanyName) ? null : dest.CompanyName.Trim(),
+            StreetLine1 = dest.AddressLine1.Trim(),
+            StreetLine2 = string.IsNullOrWhiteSpace(dest.AddressLine2) ? null : dest.AddressLine2.Trim(),
+            City = dest.City.Trim(),
+            StateOrProvince = dest.StateOrProvince?.Trim() ?? string.Empty,
+            PostalCode = dest.PostalCode?.Trim() ?? string.Empty,
+            CountryCode = normalizedDestinationCountry,
+            Phone = string.IsNullOrWhiteSpace(dest.PhoneNumber) ? null : dest.PhoneNumber.Trim()
+        };
+
+        return (origin, destination);
+    }
+
+    private static string NormalizeIsoCountryCode(string? rawCountryCode, string fieldName)
+    {
+        if (string.IsNullOrWhiteSpace(rawCountryCode))
+        {
+            throw new ValidationException(fieldName, $"Country code is required for '{fieldName}'.");
+        }
+
+        var normalized = rawCountryCode.Trim().ToUpperInvariant();
+        if (CountryAliasMap.TryGetValue(normalized, out var mapped))
+        {
+            return mapped;
+        }
+
+        if (normalized.Length == 2 && ValidIsoAlpha2Codes.Value.Contains(normalized))
+        {
+            return normalized;
+        }
+
+        throw new ValidationException(
+            fieldName,
+            $"Country code '{rawCountryCode.Trim()}' for '{fieldName}' is not a supported ISO 3166-1 country code or recognized legacy alias.");
     }
 }

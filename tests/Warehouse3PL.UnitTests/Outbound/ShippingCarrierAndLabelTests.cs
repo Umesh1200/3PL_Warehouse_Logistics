@@ -502,7 +502,17 @@ public class ShippingCarrierAndLabelTests
         using (var seed = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName))
         {
             seed.Clients.Add(new Client { Id = clientId, CompanyName = "Shipping Client", AccountCode = "SC" });
-            seed.Facilities.Add(new Facility { Id = facilityId, Name = "Columbus Logistics Hub", FacilityCode = "CMH-01" });
+            seed.Facilities.Add(new Facility
+            {
+                Id = facilityId,
+                Name = "Columbus Logistics Hub",
+                FacilityCode = "CMH-01",
+                AddressLine1 = "4500 Groveport Rd",
+                City = "Columbus",
+                StateOrProvince = "OH",
+                PostalCode = "43207",
+                CountryCode = "USA"
+            });
 
             seed.Locations.Add(new Location
             {

@@ -153,8 +153,30 @@ public sealed class Phase743PackingAndLabelingTests : IAsyncLifetime
     private static async Task SeedAsync(ApplicationDbContext db, IPasswordHasher hasher)
     {
         db.Facilities.AddRange(
-            new Facility { Id = FacilityA, FacilityCode = "FAC-743-A", Name = "Chicago Packing Hub", CountryCode = "USA", IsActive = true },
-            new Facility { Id = FacilityB, FacilityCode = "FAC-743-B", Name = "Dallas Packing Hub", CountryCode = "USA", IsActive = true });
+            new Facility
+            {
+                Id = FacilityA,
+                FacilityCode = "FAC-743-A",
+                Name = "Chicago Packing Hub",
+                AddressLine1 = "1000 Logistics Parkway",
+                City = "Chicago",
+                StateOrProvince = "IL",
+                PostalCode = "60601",
+                CountryCode = "USA",
+                IsActive = true
+            },
+            new Facility
+            {
+                Id = FacilityB,
+                FacilityCode = "FAC-743-B",
+                Name = "Dallas Packing Hub",
+                AddressLine1 = "2200 Freight Blvd",
+                City = "Dallas",
+                StateOrProvince = "TX",
+                PostalCode = "75201",
+                CountryCode = "USA",
+                IsActive = true
+            });
 
         db.Clients.Add(new Client { Id = ClientA, AccountCode = "CL-743", CompanyName = "Vanguard Logistics", Status = ClientStatus.Active });
 

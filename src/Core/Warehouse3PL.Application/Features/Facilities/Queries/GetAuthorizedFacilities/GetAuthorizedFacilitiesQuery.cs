@@ -2,7 +2,6 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
-using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Application.Features.Facilities.Queries.GetAuthorizedFacilities;
@@ -22,29 +21,14 @@ public class GetAuthorizedFacilitiesQueryHandler : IRequestHandler<GetAuthorized
 
     public async Task<List<FacilityDto>> Handle(GetAuthorizedFacilitiesQuery request, CancellationToken cancellationToken)
     {
-        // 1. Explicitly allow SuperAdmin or staff callers with multi-facility view (global facility access)
-        if (_currentUser.IsSuperAdmin ||
-            (_currentUser.IsStaff && (
-                _currentUser.HasPermission(Permissions.Analytics.MultiFacilityView) ||
-                _currentUser.HasPermission("Analytics:CrossFacility") ||
-                _currentUser.HasPermission("Shipments:CrossFacility") ||
-                _currentUser.HasPermission("Financial:CrossFacility") ||
-                _currentUser.HasPermission("Financials:CrossFacility"))))
+        // 1. Platform SuperAdmin or staff callers with cross-facility read scope
+        if (FacilityProjections.IsCrossFacilityStaff(_currentUser))
         {
             return await _context.Facilities
                 .AsNoTracking()
                 .Where(f => !f.IsDeleted && f.IsActive)
                 .OrderBy(f => f.FacilityCode)
-                .Select(f => new FacilityDto
-                {
-                    Id = f.Id,
-                    FacilityCode = f.FacilityCode,
-                    Name = f.Name,
-                    AddressLine1 = f.AddressLine1,
-                    City = f.City,
-                    Timezone = f.Timezone,
-                    IsActive = f.IsActive
-                })
+                .Select(FacilityProjections.ToSummaryDto)
                 .ToListAsync(cancellationToken);
         }
 
@@ -58,20 +42,10 @@ public class GetAuthorizedFacilitiesQueryHandler : IRequestHandler<GetAuthorized
                     .AsNoTracking()
                     .Where(f => !f.IsDeleted && f.IsActive && f.Id == assignedId)
                     .OrderBy(f => f.FacilityCode)
-                    .Select(f => new FacilityDto
-                    {
-                        Id = f.Id,
-                        FacilityCode = f.FacilityCode,
-                        Name = f.Name,
-                        AddressLine1 = f.AddressLine1,
-                        City = f.City,
-                        Timezone = f.Timezone,
-                        IsActive = f.IsActive
-                    })
+                    .Select(FacilityProjections.ToSummaryDto)
                     .ToListAsync(cancellationToken);
             }
 
-            // Unassigned staff without cross-facility permissions fail closed
             return [];
         }
 
@@ -94,20 +68,11 @@ public class GetAuthorizedFacilitiesQueryHandler : IRequestHandler<GetAuthorized
                 .AsNoTracking()
                 .Where(f => !f.IsDeleted && f.IsActive && authorizedFacilityIds.Contains(f.Id))
                 .OrderBy(f => f.FacilityCode)
-                .Select(f => new FacilityDto
-                {
-                    Id = f.Id,
-                    FacilityCode = f.FacilityCode,
-                    Name = f.Name,
-                    AddressLine1 = f.AddressLine1,
-                    City = f.City,
-                    Timezone = f.Timezone,
-                    IsActive = f.IsActive
-                })
+                .Select(FacilityProjections.ToSummaryDto)
                 .ToListAsync(cancellationToken);
         }
 
-        // 4. Deny missing-tenant callers, unsupported nonstaff identities (e.g. Driver), or unauthenticated callers (Fail closed)
+        // 4. Fail closed for Drivers, missing-tenant callers, or unauthenticated callers
         return [];
     }
 }

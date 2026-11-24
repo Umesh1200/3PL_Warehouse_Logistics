@@ -4775,6 +4775,15 @@ try
         await DropDatabaseAsync(builder.ConnectionString, p745MigDbName);
     }
 
+    await Mdm01PostgresCheck.RunAsync(
+        operationalConn,
+        p74Client,
+        client1Id,
+        facilityId,
+        StaffReq,
+        bOpBId,
+        claims => TestAuthHandler.CustomClaims = claims);
+
     if (Directory.Exists(pgPodStorageDir))
     {
         try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }

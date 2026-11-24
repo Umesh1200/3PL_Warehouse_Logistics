@@ -95,8 +95,16 @@ export interface FacilityDto {
   facilityCode: string;
   name: string;
   addressLine1?: string | null;
+  addressLine2?: string | null;
   city?: string | null;
+  stateOrProvince?: string | null;
+  postalCode?: string | null;
+  countryCode?: string;
   timezone: string;
+  contactEmail?: string | null;
+  contactPhone?: string | null;
+  totalAreaSqM?: number | null;
+  dockDoorCount?: number;
   isActive: boolean;
 }
 
