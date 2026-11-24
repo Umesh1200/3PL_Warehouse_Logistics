@@ -4762,7 +4762,7 @@ try
             await rdr.ReadAsync();
             if (rdr.GetInt64(0) != 1 || rdr.GetInt64(1) != 3 ||
                 rdr.GetString(2) != "DELIVERY-LEGACY-1" ||
-                rdr.GetString(3) != $"LEGACY-CONFLICT:{legPod2Id}" ||
+                rdr.GetString(3) != $"LEGACY-CONFLICT:{legPod2Id}".ToUpperInvariant() ||
                 rdr.GetString(4) != "LEGACY-OK-2")
                 throw new InvalidOperationException("P745-R04 post-resolution upgrade verification failed.");
         }
