@@ -4252,6 +4252,129 @@ try
 
     Console.WriteLine("PASS PostgreSQL P744-R01..R04 Kathmandu BOL Address, Multi-Consignee Snapshot, Readiness/Manifest Lock/Void-R2, Trailer/Seal Consistency, Concurrent Dispatch 409 & Dock Location Validation verified cleanly.");
 
+    // P744-R05 Live PostgreSQL Concurrency Regressions (Remove+BOL Manifest Consistency, Concurrent BOL Idempotency, Void+Dispatch Mutual Exclusion, Concurrent Load -> ReadyForDispatch)
+    var r05Ord1Id = Guid.NewGuid();
+    var r05Ord2Id = Guid.NewGuid();
+    var r05Pkg1Id = Guid.NewGuid();
+    var r05Pkg2Id = Guid.NewGuid();
+    var r05Pkg3Id = Guid.NewGuid();
+
+    await using (var r05Db = CreateDb(operationalConn, user))
+    {
+        r05Db.OutboundOrders.AddRange(
+            new OutboundOrder { Id = r05Ord1Id, ClientId = client1Id, FacilityId = pgKtmFacId, OrderNumber = "PG-R05-ORD-1", CustomerName = "Patan Buyer", Status = OutboundOrderStatus.InProgress, ShippingAddress = new ShippingAddress { OutboundOrderId = r05Ord1Id, RecipientName = "Patan Depot", AddressLine1 = "Jawalakhel", City = "Lalitpur", StateOrProvince = "Bagmati", PostalCode = "44700", CountryCode = "NP" } },
+            new OutboundOrder { Id = r05Ord2Id, ClientId = client1Id, FacilityId = pgKtmFacId, OrderNumber = "PG-R05-ORD-2", CustomerName = "Pokhara Buyer", Status = OutboundOrderStatus.InProgress, ShippingAddress = new ShippingAddress { OutboundOrderId = r05Ord2Id, RecipientName = "Pokhara Dock", AddressLine1 = "Prithvi Chowk", City = "Pokhara", StateOrProvince = "Gandaki", PostalCode = "33700", CountryCode = "NP" } });
+        var huR1 = Guid.NewGuid();
+        var huR2 = Guid.NewGuid();
+        var huR3 = Guid.NewGuid();
+        r05Db.HandlingUnits.AddRange(
+            new HandlingUnit { Id = huR1, ClientId = client1Id, FacilityId = pgKtmFacId, LpnCode = "PG-R05-CTN1", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse },
+            new HandlingUnit { Id = huR2, ClientId = client1Id, FacilityId = pgKtmFacId, LpnCode = "PG-R05-CTN2", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse },
+            new HandlingUnit { Id = huR3, ClientId = client1Id, FacilityId = pgKtmFacId, LpnCode = "PG-R05-CTN3", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse });
+        r05Db.Packages.AddRange(
+            new Package { Id = r05Pkg1Id, ClientId = client1Id, FacilityId = pgKtmFacId, OutboundOrderId = r05Ord1Id, HandlingUnitId = huR1, PackageNumber = "PG-R05-PKG1", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "PG-R05-TRK1", GrossWeightKg = 3m, TareWeightKg = 0.3m, NetWeightKg = 2.7m, LengthCm = 25, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "PG-R05-TRK1", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] },
+            new Package { Id = r05Pkg2Id, ClientId = client1Id, FacilityId = pgKtmFacId, OutboundOrderId = r05Ord2Id, HandlingUnitId = huR2, PackageNumber = "PG-R05-PKG2", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "PG-R05-TRK2", GrossWeightKg = 4m, TareWeightKg = 0.3m, NetWeightKg = 3.7m, LengthCm = 25, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "PG-R05-TRK2", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] },
+            new Package { Id = r05Pkg3Id, ClientId = client1Id, FacilityId = pgKtmFacId, OutboundOrderId = r05Ord2Id, HandlingUnitId = huR3, PackageNumber = "PG-R05-PKG3", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "PG-R05-TRK3", GrossWeightKg = 2m, TareWeightKg = 0.2m, NetWeightKg = 1.8m, LengthCm = 25, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "PG-R05-TRK3", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] });
+        await r05Db.SaveChangesAsync();
+    }
+
+    var r05ShpId = JsonDocument.Parse(await (await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/shipments", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship,
+        new { clientId = client1Id, facilityId = pgKtmFacId, carrierCode = "SIM-FEDEX", serviceLevel = "StandardGround" }))).Content.ReadAsStringAsync()).RootElement.GetProperty("shipmentId").GetGuid();
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{r05ShpId}/packages", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { packageId = r05Pkg1Id }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{r05ShpId}/packages", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { packageId = r05Pkg2Id }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{r05Pkg1Id}/stage", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { stagingLocationId = pgKtmStageId }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{r05Pkg2Id}/stage", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { stagingLocationId = pgKtmStageId }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("P744-R05 PostgreSQL setup add/stage failed.");
+
+    // 1. Concurrent Load + Load under live Postgres row locking must reliably transition to ReadyForDispatch
+    var r05LoadRace = await Task.WhenAll(
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{r05Pkg1Id}/load", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { shipmentId = r05ShpId, trailerNumber = "NP-R05-TRL", dockLocationId = pgDockDoorId })),
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{r05Pkg2Id}/load", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { shipmentId = r05ShpId, trailerNumber = "NP-R05-TRL", dockLocationId = pgDockDoorId })));
+    if (r05LoadRace.Any(r => r.StatusCode != HttpStatusCode.OK))
+        throw new InvalidOperationException("P744-R05 PostgreSQL concurrent package load failed.");
+    foreach (var r in r05LoadRace) r.Dispose();
+
+    // 2. Simultaneous RemovePackage + GenerateBOL -> serialized so BOL snapshot ALWAYS equals persisted manifest
+    var r05RemoveBolRace = await Task.WhenAll(
+        p74Client.SendAsync(StaffReq(HttpMethod.Delete, $"/api/v1/outbound/shipments/{r05ShpId}/packages/{r05Pkg2Id}", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { reason = "PG Concurrent remove" })),
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{r05ShpId}/bol", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { trailerNumber = "NP-R05-TRL", sealNumber = "NP-R05-SEAL" })));
+    var r05RemoveStatus = r05RemoveBolRace[0].StatusCode;
+    var r05BolStatus = r05RemoveBolRace[1].StatusCode;
+    foreach (var r in r05RemoveBolRace) r.Dispose();
+
+    if (r05BolStatus != HttpStatusCode.OK || (r05RemoveStatus != HttpStatusCode.UnprocessableEntity && r05RemoveStatus != HttpStatusCode.OK))
+        throw new InvalidOperationException($"P744-R05 PostgreSQL Remove+BOL race returned unexpected statuses: remove={r05RemoveStatus}, bol={r05BolStatus}");
+
+    Guid r05ActiveBolId;
+    await using (var r05CheckDb = CreateDb(operationalConn, user))
+    {
+        var r05Shp = await r05CheckDb.Shipments.SingleAsync(s => s.Id == r05ShpId);
+        if (r05Shp.Status != ShipmentStatus.ReadyForDispatch)
+            throw new InvalidOperationException($"P744-R05 PostgreSQL expected ReadyForDispatch after concurrent loads, got {r05Shp.Status}");
+
+        var persistedPkgs = await r05CheckDb.Packages
+            .Where(p => p.ShipmentId == r05ShpId && !p.IsDeleted)
+            .OrderBy(p => p.PackageNumber)
+            .Select(p => p.PackageNumber)
+            .ToListAsync();
+        var activeBol = await r05CheckDb.BillsOfLading
+            .SingleAsync(b => b.ShipmentId == r05ShpId && !b.IsVoided && !b.IsDeleted);
+        r05ActiveBolId = activeBol.Id;
+        var snapPkgNums = JsonDocument.Parse(activeBol.DocumentSnapshotJson).RootElement
+            .GetProperty("Packages").EnumerateArray()
+            .Select(e => e.GetProperty("PackageNumber").GetString()!)
+            .OrderBy(x => x)
+            .ToList();
+
+        if (activeBol.TotalPackageCount != persistedPkgs.Count || !persistedPkgs.SequenceEqual(snapPkgNums))
+            throw new InvalidOperationException($"P744-R05 PostgreSQL BOL manifest mismatch! persisted=[{string.Join(",", persistedPkgs)}], bolTotal={activeBol.TotalPackageCount}, snapshot=[{string.Join(",", snapPkgNums)}]");
+    }
+
+    // 3. Simultaneous AddPackage (late carton) + duplicate GenerateBOL against active BOL -> Add rejected 422, both BOL calls idempotent single active BOL
+    var r05AddBolRace = await Task.WhenAll(
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{r05ShpId}/packages", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { packageId = r05Pkg3Id })),
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{r05ShpId}/bol", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { trailerNumber = "NP-R05-TRL", sealNumber = "NP-R05-SEAL" })));
+    var addRaceStatus = r05AddBolRace[0].StatusCode;
+    var dupBolStatus = r05AddBolRace[1].StatusCode;
+    var dupBolId = JsonDocument.Parse(await r05AddBolRace[1].Content.ReadAsStringAsync()).RootElement.GetProperty("bolId").GetGuid();
+    foreach (var r in r05AddBolRace) r.Dispose();
+
+    if (addRaceStatus != HttpStatusCode.UnprocessableEntity || dupBolStatus != HttpStatusCode.OK || dupBolId != r05ActiveBolId)
+        throw new InvalidOperationException($"P744-R05 PostgreSQL Add+BOL guard check failed: add={addRaceStatus}, dupBol={dupBolStatus}, bolId={dupBolId}/{r05ActiveBolId}");
+
+    // 4. Simultaneous VoidBOL + ConfirmDispatch -> strictly serialized mutual exclusion (either Dispatch=200/Void=422 OR Void=200/Dispatch=422)
+    var r05VoidDispRace = await Task.WhenAll(
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/bol/{r05ActiveBolId}/void", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship, new { reason = "PG Concurrent void" })),
+        p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{r05ShpId}/dispatch", pgKtmStaffId, pgKtmFacId, Permissions.Outbound.Ship,
+            new { driverName = "PG R05 Driver", driverSignature = "SIG-R05", trailerNumber = "NP-R05-TRL", sealNumber = "NP-R05-SEAL", idempotencyKey = "pg-r05-disp-1" })));
+    var r05VoidStatus = r05VoidDispRace[0].StatusCode;
+    var r05DispStatus = r05VoidDispRace[1].StatusCode;
+    foreach (var r in r05VoidDispRace) r.Dispose();
+
+    if (r05VoidStatus == r05DispStatus ||
+        (r05VoidStatus != HttpStatusCode.OK && r05DispStatus != HttpStatusCode.OK) ||
+        (r05VoidStatus != HttpStatusCode.UnprocessableEntity && r05DispStatus != HttpStatusCode.UnprocessableEntity))
+        throw new InvalidOperationException($"P744-R05 PostgreSQL Void+Dispatch race expected (200, 422) or (422, 200), got void={r05VoidStatus}, disp={r05DispStatus}");
+
+    await using (var r05PostDb = CreateDb(operationalConn, user))
+    {
+        var r05Shp = await r05PostDb.Shipments.SingleAsync(s => s.Id == r05ShpId);
+        var r05Bol = await r05PostDb.BillsOfLading.SingleAsync(b => b.Id == r05ActiveBolId);
+        var custodyCount = await r05PostDb.ShipmentCustodyTransfers.CountAsync(c => c.ShipmentId == r05ShpId);
+        if (r05DispStatus == HttpStatusCode.OK)
+        {
+            if (r05Shp.Status != ShipmentStatus.Dispatched || r05Bol.IsVoided || custodyCount != 1)
+                throw new InvalidOperationException($"P744-R05 PostgreSQL Dispatch-won invariant failed: status={r05Shp.Status}, isVoided={r05Bol.IsVoided}, custody={custodyCount}");
+        }
+        else
+        {
+            if (r05Shp.Status != ShipmentStatus.ReadyForDispatch || !r05Bol.IsVoided || custodyCount != 0)
+                throw new InvalidOperationException($"P744-R05 PostgreSQL Void-won invariant failed: status={r05Shp.Status}, isVoided={r05Bol.IsVoided}, custody={custodyCount}");
+        }
+    }
+
+    Console.WriteLine("PASS PostgreSQL P744-R05 Concurrent Load/Remove/Add/BOL/Void/Dispatch Serialization & Snapshot Parity verified cleanly.");
+
     if (Directory.Exists(pgPodStorageDir))
     {
         try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }

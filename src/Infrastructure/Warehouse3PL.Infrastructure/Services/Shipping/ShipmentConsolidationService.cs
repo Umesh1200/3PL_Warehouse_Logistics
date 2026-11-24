@@ -115,99 +115,102 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
         AddPackageToShipmentRequest request,
         CancellationToken cancellationToken = default)
     {
-        var shipment = await _context.Shipments
-            .Include(s => s.Packages)
-            .FirstOrDefaultAsync(s => s.Id == request.ShipmentId && !s.IsDeleted, cancellationToken);
-
-        if (shipment == null)
+        return await _context.ExecuteWithPackageLockAsync(request.PackageId, request.ShipmentId, async () =>
         {
-            throw new EntityNotFoundException(nameof(Shipment), request.ShipmentId);
-        }
+            var shipment = await _context.Shipments
+                .Include(s => s.Packages)
+                .FirstOrDefaultAsync(s => s.Id == request.ShipmentId && !s.IsDeleted, cancellationToken);
 
-        if (await HasActiveBolAsync(shipment.Id, cancellationToken))
-        {
-            throw new InvalidDomainStateException(
-                $"Cannot modify manifested contents of shipment '{shipment.ShipmentNumber}' after an active Bill of Lading ('{shipment.BillOfLadingNumber}') has been issued. Void and reissue the Bill of Lading first.");
-        }
+            if (shipment == null)
+            {
+                throw new EntityNotFoundException(nameof(Shipment), request.ShipmentId);
+            }
 
-        var package = await _context.Packages
-            .Include(p => p.ShippingLabels)
-            .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
+            if (await HasActiveBolAsync(shipment.Id, cancellationToken))
+            {
+                throw new InvalidDomainStateException(
+                    $"Cannot modify manifested contents of shipment '{shipment.ShipmentNumber}' after an active Bill of Lading ('{shipment.BillOfLadingNumber}') has been issued. Void and reissue the Bill of Lading first.");
+            }
 
-        if (package == null)
-        {
-            throw new EntityNotFoundException(nameof(Package), request.PackageId);
-        }
+            var package = await _context.Packages
+                .Include(p => p.ShippingLabels)
+                .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
 
-        // 1. Tenant Isolation Guard
-        if (package.ClientId != shipment.ClientId)
-        {
-            throw new ValidationException(nameof(request.PackageId),
-                $"Package '{package.PackageNumber}' belongs to a different client tenant. Cross-tenant consolidation rejected.");
-        }
+            if (package == null)
+            {
+                throw new EntityNotFoundException(nameof(Package), request.PackageId);
+            }
 
-        // 2. Facility Guard
-        if (package.FacilityId != shipment.FacilityId)
-        {
-            throw new ValidationException(nameof(request.PackageId),
-                $"Package '{package.PackageNumber}' belongs to a different facility. Cross-facility consolidation rejected.");
-        }
+            // 1. Tenant Isolation Guard
+            if (package.ClientId != shipment.ClientId)
+            {
+                throw new ValidationException(nameof(request.PackageId),
+                    $"Package '{package.PackageNumber}' belongs to a different client tenant. Cross-tenant consolidation rejected.");
+            }
 
-        // 3. Carrier Compatibility Guard
-        if (!string.IsNullOrWhiteSpace(shipment.CarrierCode) && !string.IsNullOrWhiteSpace(package.CarrierCode) &&
-            !string.Equals(shipment.CarrierCode, package.CarrierCode, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new ValidationException(nameof(request.PackageId),
-                $"Package carrier '{package.CarrierCode}' is incompatible with shipment carrier '{shipment.CarrierCode}'.");
-        }
+            // 2. Facility Guard
+            if (package.FacilityId != shipment.FacilityId)
+            {
+                throw new ValidationException(nameof(request.PackageId),
+                    $"Package '{package.PackageNumber}' belongs to a different facility. Cross-facility consolidation rejected.");
+            }
 
-        // 4. Valid Shipping Label Guard
-        var activeLabel = package.ShippingLabels.FirstOrDefault(l => l.Status != ShippingLabelStatus.Voided);
-        if (activeLabel == null || string.IsNullOrWhiteSpace(package.TrackingNumber))
-        {
-            throw new ValidationException(nameof(request.PackageId),
-                $"Package '{package.PackageNumber}' does not have a valid, active shipping label. Voided or missing labels rejected.");
-        }
+            // 3. Carrier Compatibility Guard
+            if (!string.IsNullOrWhiteSpace(shipment.CarrierCode) && !string.IsNullOrWhiteSpace(package.CarrierCode) &&
+                !string.Equals(shipment.CarrierCode, package.CarrierCode, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new ValidationException(nameof(request.PackageId),
+                    $"Package carrier '{package.CarrierCode}' is incompatible with shipment carrier '{shipment.CarrierCode}'.");
+            }
 
-        // 5. Duplicate Active Shipment Membership Guard
-        if (package.ShipmentId.HasValue && package.ShipmentId.Value != shipment.Id)
-        {
-            throw new InvalidDomainStateException(
-                $"Package '{package.PackageNumber}' already belongs to active shipment '{package.ShipmentId.Value}'. Duplicate shipment membership rejected.");
-        }
+            // 4. Valid Shipping Label Guard
+            var activeLabel = package.ShippingLabels.FirstOrDefault(l => l.Status != ShippingLabelStatus.Voided);
+            if (activeLabel == null || string.IsNullOrWhiteSpace(package.TrackingNumber))
+            {
+                throw new ValidationException(nameof(request.PackageId),
+                    $"Package '{package.PackageNumber}' does not have a valid, active shipping label. Voided or missing labels rejected.");
+            }
 
-        // 6. Domain Consolidation (Zero inventory reservation or stock movement)
-        shipment.AddPackage(package);
+            // 5. Duplicate Active Shipment Membership Guard
+            if (package.ShipmentId.HasValue && package.ShipmentId.Value != shipment.Id)
+            {
+                throw new InvalidDomainStateException(
+                    $"Package '{package.PackageNumber}' already belongs to active shipment '{package.ShipmentId.Value}'. Duplicate shipment membership rejected.");
+            }
 
-        _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
-        {
-            ClientId = shipment.ClientId,
-            FacilityId = shipment.FacilityId,
-            ShipmentId = shipment.Id,
-            PackageId = package.Id,
-            Action = "PackageAdded",
-            Details = $"Added package '{package.PackageNumber}' (Tracking: {package.TrackingNumber}, Weight: {package.GrossWeightKg}kg)",
-            UserId = request.UserId,
-            TimestampUtc = DateTime.UtcNow
-        });
+            // 6. Domain Consolidation (Zero inventory reservation or stock movement)
+            shipment.AddPackage(package);
 
-        await _context.SaveChangesAsync(cancellationToken);
+            _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
+            {
+                ClientId = shipment.ClientId,
+                FacilityId = shipment.FacilityId,
+                ShipmentId = shipment.Id,
+                PackageId = package.Id,
+                Action = "PackageAdded",
+                Details = $"Added package '{package.PackageNumber}' (Tracking: {package.TrackingNumber}, Weight: {package.GrossWeightKg}kg)",
+                UserId = request.UserId,
+                TimestampUtc = DateTime.UtcNow
+            });
 
-        _logger.LogInformation(
-            "Added Package '{Pkg}' to Shipment '{Shipment}'. New Total: {Count} packages, {Weight}kg",
-            package.PackageNumber, shipment.ShipmentNumber, shipment.TotalPackagesCount, shipment.TotalWeightKg);
+            await _context.SaveChangesAsync(cancellationToken);
 
-        return new AddPackageToShipmentResult
-        {
-            IsSuccess = true,
-            ShipmentId = shipment.Id,
-            PackageId = package.Id,
-            PackageNumber = package.PackageNumber,
-            TotalPackagesCount = shipment.TotalPackagesCount,
-            TotalGrossWeightKg = shipment.TotalWeightKg,
-            TotalVolumeCm3 = shipment.TotalVolumeCm3,
-            Message = "Package consolidated into shipment successfully."
-        };
+            _logger.LogInformation(
+                "Added Package '{Pkg}' to Shipment '{Shipment}'. New Total: {Count} packages, {Weight}kg",
+                package.PackageNumber, shipment.ShipmentNumber, shipment.TotalPackagesCount, shipment.TotalWeightKg);
+
+            return new AddPackageToShipmentResult
+            {
+                IsSuccess = true,
+                ShipmentId = shipment.Id,
+                PackageId = package.Id,
+                PackageNumber = package.PackageNumber,
+                TotalPackagesCount = shipment.TotalPackagesCount,
+                TotalGrossWeightKg = shipment.TotalWeightKg,
+                TotalVolumeCm3 = shipment.TotalVolumeCm3,
+                Message = "Package consolidated into shipment successfully."
+            };
+        }, cancellationToken);
     }
 
     public async Task<RemovePackageFromShipmentResult> RemovePackageFromShipmentAsync(
@@ -219,540 +222,568 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
             throw new ValidationException(nameof(request.Reason), "A reason must be provided when removing a package from a shipment.");
         }
 
-        var shipment = await _context.Shipments
-            .Include(s => s.Packages)
-            .FirstOrDefaultAsync(s => s.Id == request.ShipmentId && !s.IsDeleted, cancellationToken);
-
-        if (shipment == null)
+        return await _context.ExecuteWithPackageLockAsync(request.PackageId, request.ShipmentId, async () =>
         {
-            throw new EntityNotFoundException(nameof(Shipment), request.ShipmentId);
-        }
+            var shipment = await _context.Shipments
+                .Include(s => s.Packages)
+                .FirstOrDefaultAsync(s => s.Id == request.ShipmentId && !s.IsDeleted, cancellationToken);
 
-        if (await HasActiveBolAsync(shipment.Id, cancellationToken))
-        {
-            throw new InvalidDomainStateException(
-                $"Cannot remove packages from shipment '{shipment.ShipmentNumber}' after an active Bill of Lading ('{shipment.BillOfLadingNumber}') has been issued. Void and reissue the Bill of Lading first.");
-        }
+            if (shipment == null)
+            {
+                throw new EntityNotFoundException(nameof(Shipment), request.ShipmentId);
+            }
 
-        var package = shipment.Packages.FirstOrDefault(p => p.Id == request.PackageId);
-        if (package == null)
-        {
-            throw new EntityNotFoundException(nameof(Package), request.PackageId);
-        }
+            if (await HasActiveBolAsync(shipment.Id, cancellationToken))
+            {
+                throw new InvalidDomainStateException(
+                    $"Cannot remove packages from shipment '{shipment.ShipmentNumber}' after an active Bill of Lading ('{shipment.BillOfLadingNumber}') has been issued. Void and reissue the Bill of Lading first.");
+            }
 
-        shipment.RemovePackage(package.Id);
+            var package = shipment.Packages.FirstOrDefault(p => p.Id == request.PackageId);
+            if (package == null)
+            {
+                throw new EntityNotFoundException(nameof(Package), request.PackageId);
+            }
 
-        _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
-        {
-            ClientId = shipment.ClientId,
-            FacilityId = shipment.FacilityId,
-            ShipmentId = shipment.Id,
-            PackageId = package.Id,
-            Action = "PackageRemoved",
-            Details = $"Removed package '{package.PackageNumber}'. Reason: '{request.Reason}'",
-            UserId = request.UserId,
-            TimestampUtc = DateTime.UtcNow
-        });
+            shipment.RemovePackage(package.Id);
 
-        await _context.SaveChangesAsync(cancellationToken);
+            _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
+            {
+                ClientId = shipment.ClientId,
+                FacilityId = shipment.FacilityId,
+                ShipmentId = shipment.Id,
+                PackageId = package.Id,
+                Action = "PackageRemoved",
+                Details = $"Removed package '{package.PackageNumber}'. Reason: '{request.Reason}'",
+                UserId = request.UserId,
+                TimestampUtc = DateTime.UtcNow
+            });
 
-        _logger.LogInformation(
-            "Removed Package '{Pkg}' from Shipment '{Shipment}'. Reason: '{Reason}'",
-            package.PackageNumber, shipment.ShipmentNumber, request.Reason);
+            await _context.SaveChangesAsync(cancellationToken);
 
-        return new RemovePackageFromShipmentResult
-        {
-            IsSuccess = true,
-            ShipmentId = shipment.Id,
-            PackageId = package.Id,
-            TotalPackagesCount = shipment.TotalPackagesCount,
-            Message = "Package removed from shipment."
-        };
+            _logger.LogInformation(
+                "Removed Package '{Pkg}' from Shipment '{Shipment}'. Reason: '{Reason}'",
+                package.PackageNumber, shipment.ShipmentNumber, request.Reason);
+
+            return new RemovePackageFromShipmentResult
+            {
+                IsSuccess = true,
+                ShipmentId = shipment.Id,
+                PackageId = package.Id,
+                TotalPackagesCount = shipment.TotalPackagesCount,
+                Message = "Package removed from shipment."
+            };
+        }, cancellationToken);
     }
 
     public async Task<StagePackageResult> StagePackageAsync(
         StagePackageRequest request,
         CancellationToken cancellationToken = default)
     {
-        var package = await _context.Packages
-            .Include(p => p.HandlingUnit)
-            .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
+        var shipmentIdForLock = await _context.Packages
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(p => p.Id == request.PackageId && !p.IsDeleted)
+            .Select(p => p.ShipmentId)
+            .FirstOrDefaultAsync(cancellationToken);
 
-        if (package == null)
+        return await _context.ExecuteWithPackageLockAsync(request.PackageId, shipmentIdForLock, async () =>
         {
-            throw new EntityNotFoundException(nameof(Package), request.PackageId);
-        }
+            var package = await _context.Packages
+                .Include(p => p.HandlingUnit)
+                .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
 
-        var location = await _context.Locations
-            .FirstOrDefaultAsync(l => l.Id == request.StagingLocationId && !l.IsDeleted, cancellationToken);
-
-        if (location == null)
-        {
-            throw new EntityNotFoundException(nameof(Location), request.StagingLocationId);
-        }
-
-        // Validate staging location eligibility
-        if (location.LocationType != LocationType.StagingLane && location.LocationType != LocationType.DockDoor)
-        {
-            throw new ValidationException(nameof(request.StagingLocationId),
-                $"Location '{location.LocationCode}' is a '{location.LocationType}'. Staging is only permitted in StagingLane or DockDoor locations.");
-        }
-
-        if (location.FacilityId != package.FacilityId)
-        {
-            throw new ValidationException(nameof(request.StagingLocationId),
-                $"Staging location '{location.LocationCode}' belongs to a different facility.");
-        }
-
-        if (!location.IsActive)
-        {
-            throw new ValidationException(nameof(request.StagingLocationId),
-                $"Staging location '{location.LocationCode}' is inactive and cannot receive staged packages.");
-        }
-
-        package.Stage(location.Id);
-
-        if (package.ShipmentId.HasValue)
-        {
-            _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
+            if (package == null)
             {
-                ClientId = package.ClientId,
-                FacilityId = package.FacilityId,
-                ShipmentId = package.ShipmentId.Value,
+                throw new EntityNotFoundException(nameof(Package), request.PackageId);
+            }
+
+            var location = await _context.Locations
+                .FirstOrDefaultAsync(l => l.Id == request.StagingLocationId && !l.IsDeleted, cancellationToken);
+
+            if (location == null)
+            {
+                throw new EntityNotFoundException(nameof(Location), request.StagingLocationId);
+            }
+
+            // Validate staging location eligibility
+            if (location.LocationType != LocationType.StagingLane && location.LocationType != LocationType.DockDoor)
+            {
+                throw new ValidationException(nameof(request.StagingLocationId),
+                    $"Location '{location.LocationCode}' is a '{location.LocationType}'. Staging is only permitted in StagingLane or DockDoor locations.");
+            }
+
+            if (location.FacilityId != package.FacilityId)
+            {
+                throw new ValidationException(nameof(request.StagingLocationId),
+                    $"Staging location '{location.LocationCode}' belongs to a different facility.");
+            }
+
+            if (!location.IsActive)
+            {
+                throw new ValidationException(nameof(request.StagingLocationId),
+                    $"Staging location '{location.LocationCode}' is inactive and cannot receive staged packages.");
+            }
+
+            package.Stage(location.Id);
+
+            if (package.ShipmentId.HasValue)
+            {
+                _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
+                {
+                    ClientId = package.ClientId,
+                    FacilityId = package.FacilityId,
+                    ShipmentId = package.ShipmentId.Value,
+                    PackageId = package.Id,
+                    Action = "PackageStaged",
+                    Details = $"Package '{package.PackageNumber}' staged at location '{location.LocationCode}'",
+                    UserId = request.UserId,
+                    TimestampUtc = DateTime.UtcNow
+                });
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            _logger.LogInformation("Package '{Pkg}' staged at '{Loc}'", package.PackageNumber, location.LocationCode);
+
+            return new StagePackageResult
+            {
+                IsSuccess = true,
                 PackageId = package.Id,
-                Action = "PackageStaged",
-                Details = $"Package '{package.PackageNumber}' staged at location '{location.LocationCode}'",
-                UserId = request.UserId,
-                TimestampUtc = DateTime.UtcNow
-            });
-        }
-
-        await _context.SaveChangesAsync(cancellationToken);
-
-        _logger.LogInformation("Package '{Pkg}' staged at '{Loc}'", package.PackageNumber, location.LocationCode);
-
-        return new StagePackageResult
-        {
-            IsSuccess = true,
-            PackageId = package.Id,
-            PackageNumber = package.PackageNumber,
-            PackageStatus = package.Status,
-            StagingLocationCode = location.LocationCode,
-            Message = "Package staged successfully."
-        };
+                PackageNumber = package.PackageNumber,
+                PackageStatus = package.Status,
+                StagingLocationCode = location.LocationCode,
+                Message = "Package staged successfully."
+            };
+        }, cancellationToken);
     }
 
     public async Task<LoadPackageResult> LoadPackageAsync(
         LoadPackageRequest request,
         CancellationToken cancellationToken = default)
     {
-        var package = await _context.Packages
-            .Include(p => p.HandlingUnit)
-            .Include(p => p.Shipment)
-                .ThenInclude(s => s!.Packages)
-            .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
+        var actualShipmentId = await _context.Packages
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(p => p.Id == request.PackageId && !p.IsDeleted)
+            .Select(p => p.ShipmentId)
+            .FirstOrDefaultAsync(cancellationToken);
 
-        if (package == null)
-        {
-            throw new EntityNotFoundException(nameof(Package), request.PackageId);
-        }
+        var shipmentIdForLock = actualShipmentId ?? request.ShipmentId;
 
-        // Idempotency: If already loaded, return success idempotently
-        if (package.Status == PackageStatus.Loaded)
+        return await _context.ExecuteWithPackageLockAsync(request.PackageId, shipmentIdForLock, async () =>
         {
+            var package = await _context.Packages
+                .Include(p => p.HandlingUnit)
+                .Include(p => p.Shipment)
+                    .ThenInclude(s => s!.Packages)
+                .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
+
+            if (package == null)
+            {
+                throw new EntityNotFoundException(nameof(Package), request.PackageId);
+            }
+
+            // Idempotency: If already loaded, return success idempotently
+            if (package.Status == PackageStatus.Loaded)
+            {
+                return new LoadPackageResult
+                {
+                    IsSuccess = true,
+                    PackageId = package.Id,
+                    PackageNumber = package.PackageNumber,
+                    PackageStatus = package.Status,
+                    ShipmentStatus = package.Shipment?.Status,
+                    Message = "Package is already loaded (Idempotent)."
+                };
+            }
+
+            // Physical Dock Rule: Package must be Staged before Loading!
+            if (package.Status != PackageStatus.Staged)
+            {
+                throw new InvalidDomainStateException(
+                    $"Cannot load package '{package.PackageNumber}' with status '{package.Status}'. Package must be Staged at dock staging lane before loading onto trailer.");
+            }
+
+            // Must be assigned to a shipment
+            if (!package.ShipmentId.HasValue)
+            {
+                throw new InvalidDomainStateException(
+                    $"Cannot load package '{package.PackageNumber}' without an assigned shipment.");
+            }
+
+            if (request.ShipmentId.HasValue && package.ShipmentId.Value != request.ShipmentId.Value)
+            {
+                throw new ValidationException(nameof(request.ShipmentId),
+                    $"Package '{package.PackageNumber}' belongs to shipment '{package.ShipmentId.Value}', not '{request.ShipmentId.Value}'.");
+            }
+
+            Location? dockLocation = null;
+            if (request.DockLocationId.HasValue)
+            {
+                if (request.DockLocationId.Value == Guid.Empty)
+                {
+                    throw new ValidationException(nameof(request.DockLocationId), "A valid dock location ID is required when provided.");
+                }
+
+                dockLocation = await _context.Locations
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(l => l.Id == request.DockLocationId.Value && !l.IsDeleted, cancellationToken)
+                    ?? throw new EntityNotFoundException(nameof(Location), request.DockLocationId.Value);
+
+                if (!dockLocation.IsActive)
+                {
+                    throw new ValidationException(nameof(request.DockLocationId),
+                        $"Dock location '{dockLocation.LocationCode}' is inactive.");
+                }
+
+                if (dockLocation.FacilityId != package.FacilityId)
+                {
+                    throw new ValidationException(nameof(request.DockLocationId),
+                        $"Dock location '{dockLocation.LocationCode}' belongs to a different facility.");
+                }
+
+                if (dockLocation.LocationType != LocationType.DockDoor && dockLocation.LocationType != LocationType.StagingLane)
+                {
+                    throw new ValidationException(nameof(request.DockLocationId),
+                        $"Location '{dockLocation.LocationCode}' is a '{dockLocation.LocationType}'. Loading requires a DockDoor or StagingLane location.");
+                }
+            }
+
+            package.Load();
+
+            if (dockLocation != null)
+            {
+                package.CurrentLocationId = dockLocation.Id;
+                package.HandlingUnit?.MoveToLocation(dockLocation.Id, HandlingUnitStatus.InTransit);
+            }
+
+            var shipment = package.Shipment;
+            if (shipment != null)
+            {
+                if (!string.IsNullOrWhiteSpace(request.TrailerNumber) && string.IsNullOrWhiteSpace(shipment.TrailerNumber))
+                {
+                    shipment.TrailerNumber = request.TrailerNumber.Trim();
+                }
+
+                var dockSuffix = dockLocation != null ? $" via dock '{dockLocation.LocationCode}'" : string.Empty;
+                _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
+                {
+                    ClientId = package.ClientId,
+                    FacilityId = package.FacilityId,
+                    ShipmentId = shipment.Id,
+                    PackageId = package.Id,
+                    Action = "PackageLoaded",
+                    Details = $"Package '{package.PackageNumber}' loaded onto trailer '{request.TrailerNumber ?? shipment.TrailerNumber}'{dockSuffix}",
+                    UserId = request.UserId,
+                    TimestampUtc = DateTime.UtcNow
+                });
+
+                // If all packages in shipment are now loaded, advance shipment to ReadyForDispatch
+                var allOtherLoaded = await _context.Packages
+                    .Where(p => p.ShipmentId == shipment.Id && p.Id != package.Id && !p.IsDeleted)
+                    .AllAsync(p => p.Status == PackageStatus.Loaded, cancellationToken);
+
+                if (allOtherLoaded && shipment.Status == ShipmentStatus.Draft)
+                {
+                    shipment.MarkReadyForDispatch();
+                }
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            _logger.LogInformation("Package '{Pkg}' confirmed Loaded onto trailer", package.PackageNumber);
+
             return new LoadPackageResult
             {
                 IsSuccess = true,
                 PackageId = package.Id,
                 PackageNumber = package.PackageNumber,
                 PackageStatus = package.Status,
-                ShipmentStatus = package.Shipment?.Status,
-                Message = "Package is already loaded (Idempotent)."
+                ShipmentStatus = shipment?.Status,
+                Message = "Package successfully confirmed Loaded."
             };
-        }
-
-        // Physical Dock Rule: Package must be Staged before Loading!
-        if (package.Status != PackageStatus.Staged)
-        {
-            throw new InvalidDomainStateException(
-                $"Cannot load package '{package.PackageNumber}' with status '{package.Status}'. Package must be Staged at dock staging lane before loading onto trailer.");
-        }
-
-        // Must be assigned to a shipment
-        if (!package.ShipmentId.HasValue)
-        {
-            throw new InvalidDomainStateException(
-                $"Cannot load package '{package.PackageNumber}' without an assigned shipment.");
-        }
-
-        if (request.ShipmentId.HasValue && package.ShipmentId.Value != request.ShipmentId.Value)
-        {
-            throw new ValidationException(nameof(request.ShipmentId),
-                $"Package '{package.PackageNumber}' belongs to shipment '{package.ShipmentId.Value}', not '{request.ShipmentId.Value}'.");
-        }
-
-        Location? dockLocation = null;
-        if (request.DockLocationId.HasValue)
-        {
-            if (request.DockLocationId.Value == Guid.Empty)
-            {
-                throw new ValidationException(nameof(request.DockLocationId), "A valid dock location ID is required when provided.");
-            }
-
-            dockLocation = await _context.Locations
-                .AsNoTracking()
-                .FirstOrDefaultAsync(l => l.Id == request.DockLocationId.Value && !l.IsDeleted, cancellationToken)
-                ?? throw new EntityNotFoundException(nameof(Location), request.DockLocationId.Value);
-
-            if (!dockLocation.IsActive)
-            {
-                throw new ValidationException(nameof(request.DockLocationId),
-                    $"Dock location '{dockLocation.LocationCode}' is inactive.");
-            }
-
-            if (dockLocation.FacilityId != package.FacilityId)
-            {
-                throw new ValidationException(nameof(request.DockLocationId),
-                    $"Dock location '{dockLocation.LocationCode}' belongs to a different facility.");
-            }
-
-            if (dockLocation.LocationType != LocationType.DockDoor && dockLocation.LocationType != LocationType.StagingLane)
-            {
-                throw new ValidationException(nameof(request.DockLocationId),
-                    $"Location '{dockLocation.LocationCode}' is a '{dockLocation.LocationType}'. Loading requires a DockDoor or StagingLane location.");
-            }
-        }
-
-        package.Load();
-
-        if (dockLocation != null)
-        {
-            package.CurrentLocationId = dockLocation.Id;
-            package.HandlingUnit?.MoveToLocation(dockLocation.Id, HandlingUnitStatus.InTransit);
-        }
-
-        var shipment = package.Shipment;
-        if (shipment != null)
-        {
-            if (!string.IsNullOrWhiteSpace(request.TrailerNumber) && string.IsNullOrWhiteSpace(shipment.TrailerNumber))
-            {
-                shipment.TrailerNumber = request.TrailerNumber.Trim();
-            }
-
-            var dockSuffix = dockLocation != null ? $" via dock '{dockLocation.LocationCode}'" : string.Empty;
-            _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
-            {
-                ClientId = package.ClientId,
-                FacilityId = package.FacilityId,
-                ShipmentId = shipment.Id,
-                PackageId = package.Id,
-                Action = "PackageLoaded",
-                Details = $"Package '{package.PackageNumber}' loaded onto trailer '{request.TrailerNumber ?? shipment.TrailerNumber}'{dockSuffix}",
-                UserId = request.UserId,
-                TimestampUtc = DateTime.UtcNow
-            });
-
-            // If all packages in shipment are now loaded, advance shipment to ReadyForDispatch
-            var allOtherLoaded = await _context.Packages
-                .Where(p => p.ShipmentId == shipment.Id && p.Id != package.Id && !p.IsDeleted)
-                .AllAsync(p => p.Status == PackageStatus.Loaded, cancellationToken);
-
-            if (allOtherLoaded && shipment.Status == ShipmentStatus.Draft)
-            {
-                shipment.MarkReadyForDispatch();
-            }
-        }
-
-        await _context.SaveChangesAsync(cancellationToken);
-
-        _logger.LogInformation("Package '{Pkg}' confirmed Loaded onto trailer", package.PackageNumber);
-
-        return new LoadPackageResult
-        {
-            IsSuccess = true,
-            PackageId = package.Id,
-            PackageNumber = package.PackageNumber,
-            PackageStatus = package.Status,
-            ShipmentStatus = shipment?.Status,
-            Message = "Package successfully confirmed Loaded."
-        };
+        }, cancellationToken);
     }
 
     public async Task<GenerateBolResult> GenerateBillOfLadingAsync(
         GenerateBolRequest request,
         CancellationToken cancellationToken = default)
     {
-        var shipment = await _context.Shipments
-            .Include(s => s.Facility)
-            .Include(s => s.Client)
-            .Include(s => s.Packages)
-                .ThenInclude(p => p.OutboundOrder)
-                    .ThenInclude(o => o.ShippingAddress)
-            .FirstOrDefaultAsync(s => s.Id == request.ShipmentId && !s.IsDeleted, cancellationToken);
-
-        if (shipment == null)
+        return await _context.ExecuteWithShipmentLockAsync(request.ShipmentId, async () =>
         {
-            throw new EntityNotFoundException(nameof(Shipment), request.ShipmentId);
-        }
+            var shipment = await _context.Shipments
+                .Include(s => s.Facility)
+                .Include(s => s.Client)
+                .Include(s => s.Packages)
+                    .ThenInclude(p => p.OutboundOrder)
+                        .ThenInclude(o => o.ShippingAddress)
+                .FirstOrDefaultAsync(s => s.Id == request.ShipmentId && !s.IsDeleted, cancellationToken);
 
-        var activePackages = shipment.Packages.Where(p => !p.IsDeleted).ToList();
-        if (activePackages.Count == 0)
-        {
-            throw new InvalidDomainStateException($"Cannot generate Bill of Lading for empty shipment '{shipment.ShipmentNumber}'.");
-        }
+            if (shipment == null)
+            {
+                throw new EntityNotFoundException(nameof(Shipment), request.ShipmentId);
+            }
 
-        // Return preserved immutable BOL snapshot if an active BOL was already issued
-        var existingBol = await _context.BillsOfLading
-            .FirstOrDefaultAsync(b => b.ShipmentId == shipment.Id && !b.IsVoided && !b.IsDeleted, cancellationToken);
+            var activePackages = shipment.Packages.Where(p => !p.IsDeleted).ToList();
+            if (activePackages.Count == 0)
+            {
+                throw new InvalidDomainStateException($"Cannot generate Bill of Lading for empty shipment '{shipment.ShipmentNumber}'.");
+            }
 
-        if (existingBol != null)
-        {
-            _logger.LogInformation("Returning existing issued Bill of Lading snapshot for Shipment '{Shp}'", shipment.ShipmentNumber);
+            // Return preserved immutable BOL snapshot if an active BOL was already issued
+            var existingBol = await _context.BillsOfLading
+                .FirstOrDefaultAsync(b => b.ShipmentId == shipment.Id && !b.IsVoided && !b.IsDeleted, cancellationToken);
+
+            if (existingBol != null)
+            {
+                _logger.LogInformation("Returning existing issued Bill of Lading snapshot for Shipment '{Shp}'", shipment.ShipmentNumber);
+                return new GenerateBolResult
+                {
+                    IsSuccess = true,
+                    BolId = existingBol.Id,
+                    BolNumber = existingBol.BolNumber,
+                    ShipmentId = shipment.Id,
+                    TotalPackageCount = existingBol.TotalPackageCount,
+                    TotalGrossWeightKg = existingBol.TotalGrossWeightKg,
+                    CarrierCode = existingBol.CarrierCode,
+                    IssuedAtUtc = existingBol.IssuedAtUtc,
+                    DocumentSnapshotJson = existingBol.DocumentSnapshotJson,
+                    Message = "Returned existing issued Bill of Lading (Preserved Snapshot)."
+                };
+            }
+
+            // P744-R02: Enforce BOL issuance only once all cartons are loaded and shipment is ReadyForDispatch
+            if (shipment.Status != ShipmentStatus.ReadyForDispatch ||
+                activePackages.Any(p => p.Status != PackageStatus.Loaded))
+            {
+                throw new InvalidDomainStateException(
+                    $"Cannot issue Bill of Lading for shipment '{shipment.ShipmentNumber}' with status '{shipment.Status}'. All consolidated packages must be Loaded and shipment ReadyForDispatch before BOL issuance.");
+            }
+
+            // P744-R01: Require and build persisted dispatching facility origin address (never fabricate a fallback hub address)
+            var facility = shipment.Facility;
+            if (string.IsNullOrWhiteSpace(facility.AddressLine1) ||
+                string.IsNullOrWhiteSpace(facility.City) ||
+                string.IsNullOrWhiteSpace(facility.CountryCode))
+            {
+                throw new ValidationException(nameof(shipment.Facility),
+                    $"Dispatching facility '{facility.FacilityCode}' is missing required origin address fields (AddressLine1, City, CountryCode) needed to issue a Bill of Lading.");
+            }
+
+            var shipperAddressSnapshot = FormatPostalAddress(
+                facility.AddressLine1,
+                facility.AddressLine2,
+                facility.City,
+                facility.StateOrProvince,
+                facility.PostalCode,
+                facility.CountryCode);
+
+            // P744-R01: Accurately capture single or multi-consignee destination snapshots
+            var packageConsignees = activePackages.Select(p =>
+            {
+                var order = p.OutboundOrder;
+                var addr = order.ShippingAddress;
+                var recipientName = !string.IsNullOrWhiteSpace(addr?.RecipientName)
+                    ? addr!.RecipientName.Trim()
+                    : !string.IsNullOrWhiteSpace(order.CustomerName)
+                        ? order.CustomerName.Trim()
+                        : "Consignee On File";
+                var formattedAddr = addr != null
+                    ? FormatPostalAddress(addr.AddressLine1, addr.AddressLine2, addr.City, addr.StateOrProvince, addr.PostalCode, addr.CountryCode)
+                    : !string.IsNullOrWhiteSpace(order.DestinationAddress)
+                        ? order.DestinationAddress.Trim()
+                        : "Destination Address Pending";
+
+                return new
+                {
+                    Package = p,
+                    OrderNumber = order.OrderNumber,
+                    RecipientName = recipientName,
+                    AddressLine1 = addr?.AddressLine1,
+                    AddressLine2 = addr?.AddressLine2,
+                    City = addr?.City,
+                    StateOrProvince = addr?.StateOrProvince,
+                    PostalCode = addr?.PostalCode,
+                    CountryCode = addr?.CountryCode,
+                    FormattedAddress = formattedAddr
+                };
+            }).ToList();
+
+            var distinctConsignees = packageConsignees
+                .GroupBy(x => $"{x.RecipientName.ToUpperInvariant()}|{x.FormattedAddress.ToUpperInvariant()}")
+                .Select(g =>
+                {
+                    var first = g.First();
+                    return new
+                    {
+                        first.RecipientName,
+                        first.AddressLine1,
+                        first.AddressLine2,
+                        first.City,
+                        first.StateOrProvince,
+                        first.PostalCode,
+                        first.CountryCode,
+                        first.FormattedAddress,
+                        OrderNumbers = g.Select(x => x.OrderNumber).Distinct().ToList(),
+                        PackageCount = g.Count()
+                    };
+                })
+                .ToList();
+
+            string consigneeName;
+            string consigneeAddressSnapshot;
+            object consigneeSnapshotNode;
+            if (distinctConsignees.Count == 1)
+            {
+                var single = distinctConsignees[0];
+                consigneeName = single.RecipientName.Length > 200 ? single.RecipientName[..200] : single.RecipientName;
+                consigneeAddressSnapshot = single.FormattedAddress;
+                consigneeSnapshotNode = new
+                {
+                    Name = single.RecipientName,
+                    AddressLine1 = single.AddressLine1,
+                    AddressLine2 = single.AddressLine2,
+                    City = single.City,
+                    StateOrProvince = single.StateOrProvince,
+                    PostalCode = single.PostalCode,
+                    CountryCode = single.CountryCode,
+                    Address = single.FormattedAddress,
+                    IsMultiConsignee = false,
+                    DestinationCount = 1
+                };
+            }
+            else
+            {
+                var label = $"Multiple Consignees ({distinctConsignees.Count} Destinations)";
+                consigneeName = label.Length > 200 ? label[..200] : label;
+                consigneeAddressSnapshot = string.Join(" | ", distinctConsignees.Select(c => $"{c.RecipientName}: {c.FormattedAddress}"));
+                consigneeSnapshotNode = new
+                {
+                    Name = consigneeName,
+                    Address = consigneeAddressSnapshot,
+                    IsMultiConsignee = true,
+                    DestinationCount = distinctConsignees.Count
+                };
+            }
+
+            var priorBolCount = await _context.BillsOfLading
+                .AsNoTracking()
+                .CountAsync(b => b.ShipmentId == shipment.Id && !b.IsDeleted, cancellationToken);
+            var revisionNumber = priorBolCount + 1;
+            string bolNumber = revisionNumber == 1
+                ? $"BOL-{shipment.ShipmentNumber}"
+                : $"BOL-{shipment.ShipmentNumber}-R{revisionNumber}";
+
+            var effectiveTrailer = !string.IsNullOrWhiteSpace(request.TrailerNumber)
+                ? request.TrailerNumber.Trim()
+                : shipment.TrailerNumber?.Trim();
+            var effectiveSeal = !string.IsNullOrWhiteSpace(request.SealNumber)
+                ? request.SealNumber.Trim()
+                : shipment.SealNumber?.Trim();
+
+            var trackingList = string.Join(", ", activePackages.Where(p => !string.IsNullOrWhiteSpace(p.TrackingNumber)).Select(p => p.TrackingNumber));
+            var issuedAtUtc = DateTime.UtcNow;
+
+            var snapshotData = new
+            {
+                BolNumber = bolNumber,
+                RevisionNumber = revisionNumber,
+                ShipmentNumber = shipment.ShipmentNumber,
+                CarrierCode = shipment.CarrierCode,
+                CarrierServiceLevel = shipment.CarrierServiceLevel.ToString(),
+                TrailerNumber = effectiveTrailer,
+                SealNumber = effectiveSeal,
+                TotalPackages = shipment.TotalPackagesCount,
+                TotalWeightKg = shipment.TotalWeightKg,
+                TotalVolumeCm3 = shipment.TotalVolumeCm3,
+                Shipper = new
+                {
+                    Name = facility.Name,
+                    Code = facility.FacilityCode,
+                    AddressLine1 = facility.AddressLine1,
+                    AddressLine2 = facility.AddressLine2,
+                    City = facility.City,
+                    StateOrProvince = facility.StateOrProvince,
+                    PostalCode = facility.PostalCode,
+                    CountryCode = facility.CountryCode,
+                    Address = shipperAddressSnapshot
+                },
+                Consignee = consigneeSnapshotNode,
+                Consignees = distinctConsignees,
+                Packages = packageConsignees.Select(pc => new
+                {
+                    PackageNumber = pc.Package.PackageNumber,
+                    OrderNumber = pc.OrderNumber,
+                    TrackingNumber = pc.Package.TrackingNumber,
+                    WeightKg = pc.Package.GrossWeightKg,
+                    Dimensions = $"{pc.Package.LengthCm}x{pc.Package.WidthCm}x{pc.Package.HeightCm} cm",
+                    ConsigneeName = pc.RecipientName,
+                    ConsigneeAddress = pc.FormattedAddress
+                }).ToList(),
+                IssuedAtUtc = issuedAtUtc
+            };
+
+            var bol = new BillOfLading
+            {
+                ClientId = shipment.ClientId,
+                FacilityId = shipment.FacilityId,
+                ShipmentId = shipment.Id,
+                BolNumber = bolNumber,
+                RevisionNumber = revisionNumber,
+                CarrierCode = shipment.CarrierCode,
+                CarrierName = shipment.CarrierCode,
+                ServiceLevel = shipment.CarrierServiceLevel.ToString(),
+                TrailerNumber = effectiveTrailer,
+                SealNumber = effectiveSeal,
+                TotalPackageCount = shipment.TotalPackagesCount,
+                TotalGrossWeightKg = shipment.TotalWeightKg,
+                TotalVolumeCm3 = shipment.TotalVolumeCm3,
+                SpecialInstructions = request.SpecialInstructions,
+                ShipperName = facility.Name,
+                ShipperAddressSnapshot = shipperAddressSnapshot,
+                ConsigneeName = consigneeName,
+                ConsigneeAddressSnapshot = consigneeAddressSnapshot,
+                PackageTrackingNumbers = trackingList,
+                DocumentSnapshotJson = JsonSerializer.Serialize(snapshotData),
+                PreparedByUserId = request.UserId,
+                IssuedAtUtc = issuedAtUtc
+            };
+
+            _context.BillsOfLading.Add(bol);
+            shipment.BillOfLadingNumber = bol.BolNumber;
+            if (!string.IsNullOrWhiteSpace(effectiveTrailer)) shipment.TrailerNumber = effectiveTrailer;
+            if (!string.IsNullOrWhiteSpace(effectiveSeal)) shipment.SealNumber = effectiveSeal;
+
+            _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
+            {
+                ClientId = shipment.ClientId,
+                FacilityId = shipment.FacilityId,
+                ShipmentId = shipment.Id,
+                Action = "BillOfLadingIssued",
+                Details = $"Generated BOL '{bolNumber}' (rev {revisionNumber}) with {shipment.TotalPackagesCount} packages, {shipment.TotalWeightKg}kg",
+                UserId = request.UserId,
+                TimestampUtc = issuedAtUtc
+            });
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            _logger.LogInformation("Issued Bill of Lading '{BOL}' for Shipment '{Shp}'", bol.BolNumber, shipment.ShipmentNumber);
+
             return new GenerateBolResult
             {
                 IsSuccess = true,
-                BolId = existingBol.Id,
-                BolNumber = existingBol.BolNumber,
+                BolId = bol.Id,
+                BolNumber = bol.BolNumber,
                 ShipmentId = shipment.Id,
-                TotalPackageCount = existingBol.TotalPackageCount,
-                TotalGrossWeightKg = existingBol.TotalGrossWeightKg,
-                CarrierCode = existingBol.CarrierCode,
-                IssuedAtUtc = existingBol.IssuedAtUtc,
-                DocumentSnapshotJson = existingBol.DocumentSnapshotJson,
-                Message = "Returned existing issued Bill of Lading (Preserved Snapshot)."
+                TotalPackageCount = bol.TotalPackageCount,
+                TotalGrossWeightKg = bol.TotalGrossWeightKg,
+                CarrierCode = bol.CarrierCode,
+                IssuedAtUtc = bol.IssuedAtUtc,
+                DocumentSnapshotJson = bol.DocumentSnapshotJson,
+                Message = "Bill of Lading issued successfully."
             };
-        }
-
-        // P744-R02: Enforce BOL issuance only once all cartons are loaded and shipment is ReadyForDispatch
-        if (shipment.Status != ShipmentStatus.ReadyForDispatch ||
-            activePackages.Any(p => p.Status != PackageStatus.Loaded))
-        {
-            throw new InvalidDomainStateException(
-                $"Cannot issue Bill of Lading for shipment '{shipment.ShipmentNumber}' with status '{shipment.Status}'. All consolidated packages must be Loaded and shipment ReadyForDispatch before BOL issuance.");
-        }
-
-        // P744-R01: Require and build persisted dispatching facility origin address (never fabricate a fallback hub address)
-        var facility = shipment.Facility;
-        if (string.IsNullOrWhiteSpace(facility.AddressLine1) ||
-            string.IsNullOrWhiteSpace(facility.City) ||
-            string.IsNullOrWhiteSpace(facility.CountryCode))
-        {
-            throw new ValidationException(nameof(shipment.Facility),
-                $"Dispatching facility '{facility.FacilityCode}' is missing required origin address fields (AddressLine1, City, CountryCode) needed to issue a Bill of Lading.");
-        }
-
-        var shipperAddressSnapshot = FormatPostalAddress(
-            facility.AddressLine1,
-            facility.AddressLine2,
-            facility.City,
-            facility.StateOrProvince,
-            facility.PostalCode,
-            facility.CountryCode);
-
-        // P744-R01: Accurately capture single or multi-consignee destination snapshots
-        var packageConsignees = activePackages.Select(p =>
-        {
-            var order = p.OutboundOrder;
-            var addr = order.ShippingAddress;
-            var recipientName = !string.IsNullOrWhiteSpace(addr?.RecipientName)
-                ? addr!.RecipientName.Trim()
-                : !string.IsNullOrWhiteSpace(order.CustomerName)
-                    ? order.CustomerName.Trim()
-                    : "Consignee On File";
-            var formattedAddr = addr != null
-                ? FormatPostalAddress(addr.AddressLine1, addr.AddressLine2, addr.City, addr.StateOrProvince, addr.PostalCode, addr.CountryCode)
-                : !string.IsNullOrWhiteSpace(order.DestinationAddress)
-                    ? order.DestinationAddress.Trim()
-                    : "Destination Address Pending";
-
-            return new
-            {
-                Package = p,
-                OrderNumber = order.OrderNumber,
-                RecipientName = recipientName,
-                AddressLine1 = addr?.AddressLine1,
-                AddressLine2 = addr?.AddressLine2,
-                City = addr?.City,
-                StateOrProvince = addr?.StateOrProvince,
-                PostalCode = addr?.PostalCode,
-                CountryCode = addr?.CountryCode,
-                FormattedAddress = formattedAddr
-            };
-        }).ToList();
-
-        var distinctConsignees = packageConsignees
-            .GroupBy(x => $"{x.RecipientName.ToUpperInvariant()}|{x.FormattedAddress.ToUpperInvariant()}")
-            .Select(g =>
-            {
-                var first = g.First();
-                return new
-                {
-                    first.RecipientName,
-                    first.AddressLine1,
-                    first.AddressLine2,
-                    first.City,
-                    first.StateOrProvince,
-                    first.PostalCode,
-                    first.CountryCode,
-                    first.FormattedAddress,
-                    OrderNumbers = g.Select(x => x.OrderNumber).Distinct().ToList(),
-                    PackageCount = g.Count()
-                };
-            })
-            .ToList();
-
-        string consigneeName;
-        string consigneeAddressSnapshot;
-        object consigneeSnapshotNode;
-        if (distinctConsignees.Count == 1)
-        {
-            var single = distinctConsignees[0];
-            consigneeName = single.RecipientName.Length > 200 ? single.RecipientName[..200] : single.RecipientName;
-            consigneeAddressSnapshot = single.FormattedAddress;
-            consigneeSnapshotNode = new
-            {
-                Name = single.RecipientName,
-                AddressLine1 = single.AddressLine1,
-                AddressLine2 = single.AddressLine2,
-                City = single.City,
-                StateOrProvince = single.StateOrProvince,
-                PostalCode = single.PostalCode,
-                CountryCode = single.CountryCode,
-                Address = single.FormattedAddress,
-                IsMultiConsignee = false,
-                DestinationCount = 1
-            };
-        }
-        else
-        {
-            var label = $"Multiple Consignees ({distinctConsignees.Count} Destinations)";
-            consigneeName = label.Length > 200 ? label[..200] : label;
-            consigneeAddressSnapshot = string.Join(" | ", distinctConsignees.Select(c => $"{c.RecipientName}: {c.FormattedAddress}"));
-            consigneeSnapshotNode = new
-            {
-                Name = consigneeName,
-                Address = consigneeAddressSnapshot,
-                IsMultiConsignee = true,
-                DestinationCount = distinctConsignees.Count
-            };
-        }
-
-        var priorBolCount = await _context.BillsOfLading
-            .AsNoTracking()
-            .CountAsync(b => b.ShipmentId == shipment.Id && !b.IsDeleted, cancellationToken);
-        var revisionNumber = priorBolCount + 1;
-        string bolNumber = revisionNumber == 1
-            ? $"BOL-{shipment.ShipmentNumber}"
-            : $"BOL-{shipment.ShipmentNumber}-R{revisionNumber}";
-
-        var effectiveTrailer = !string.IsNullOrWhiteSpace(request.TrailerNumber)
-            ? request.TrailerNumber.Trim()
-            : shipment.TrailerNumber?.Trim();
-        var effectiveSeal = !string.IsNullOrWhiteSpace(request.SealNumber)
-            ? request.SealNumber.Trim()
-            : shipment.SealNumber?.Trim();
-
-        var trackingList = string.Join(", ", activePackages.Where(p => !string.IsNullOrWhiteSpace(p.TrackingNumber)).Select(p => p.TrackingNumber));
-        var issuedAtUtc = DateTime.UtcNow;
-
-        var snapshotData = new
-        {
-            BolNumber = bolNumber,
-            RevisionNumber = revisionNumber,
-            ShipmentNumber = shipment.ShipmentNumber,
-            CarrierCode = shipment.CarrierCode,
-            CarrierServiceLevel = shipment.CarrierServiceLevel.ToString(),
-            TrailerNumber = effectiveTrailer,
-            SealNumber = effectiveSeal,
-            TotalPackages = shipment.TotalPackagesCount,
-            TotalWeightKg = shipment.TotalWeightKg,
-            TotalVolumeCm3 = shipment.TotalVolumeCm3,
-            Shipper = new
-            {
-                Name = facility.Name,
-                Code = facility.FacilityCode,
-                AddressLine1 = facility.AddressLine1,
-                AddressLine2 = facility.AddressLine2,
-                City = facility.City,
-                StateOrProvince = facility.StateOrProvince,
-                PostalCode = facility.PostalCode,
-                CountryCode = facility.CountryCode,
-                Address = shipperAddressSnapshot
-            },
-            Consignee = consigneeSnapshotNode,
-            Consignees = distinctConsignees,
-            Packages = packageConsignees.Select(pc => new
-            {
-                PackageNumber = pc.Package.PackageNumber,
-                OrderNumber = pc.OrderNumber,
-                TrackingNumber = pc.Package.TrackingNumber,
-                WeightKg = pc.Package.GrossWeightKg,
-                Dimensions = $"{pc.Package.LengthCm}x{pc.Package.WidthCm}x{pc.Package.HeightCm} cm",
-                ConsigneeName = pc.RecipientName,
-                ConsigneeAddress = pc.FormattedAddress
-            }).ToList(),
-            IssuedAtUtc = issuedAtUtc
-        };
-
-        var bol = new BillOfLading
-        {
-            ClientId = shipment.ClientId,
-            FacilityId = shipment.FacilityId,
-            ShipmentId = shipment.Id,
-            BolNumber = bolNumber,
-            RevisionNumber = revisionNumber,
-            CarrierCode = shipment.CarrierCode,
-            CarrierName = shipment.CarrierCode,
-            ServiceLevel = shipment.CarrierServiceLevel.ToString(),
-            TrailerNumber = effectiveTrailer,
-            SealNumber = effectiveSeal,
-            TotalPackageCount = shipment.TotalPackagesCount,
-            TotalGrossWeightKg = shipment.TotalWeightKg,
-            TotalVolumeCm3 = shipment.TotalVolumeCm3,
-            SpecialInstructions = request.SpecialInstructions,
-            ShipperName = facility.Name,
-            ShipperAddressSnapshot = shipperAddressSnapshot,
-            ConsigneeName = consigneeName,
-            ConsigneeAddressSnapshot = consigneeAddressSnapshot,
-            PackageTrackingNumbers = trackingList,
-            DocumentSnapshotJson = JsonSerializer.Serialize(snapshotData),
-            PreparedByUserId = request.UserId,
-            IssuedAtUtc = issuedAtUtc
-        };
-
-        _context.BillsOfLading.Add(bol);
-        shipment.BillOfLadingNumber = bol.BolNumber;
-        if (!string.IsNullOrWhiteSpace(effectiveTrailer)) shipment.TrailerNumber = effectiveTrailer;
-        if (!string.IsNullOrWhiteSpace(effectiveSeal)) shipment.SealNumber = effectiveSeal;
-
-        _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
-        {
-            ClientId = shipment.ClientId,
-            FacilityId = shipment.FacilityId,
-            ShipmentId = shipment.Id,
-            Action = "BillOfLadingIssued",
-            Details = $"Generated BOL '{bolNumber}' (rev {revisionNumber}) with {shipment.TotalPackagesCount} packages, {shipment.TotalWeightKg}kg",
-            UserId = request.UserId,
-            TimestampUtc = issuedAtUtc
-        });
-
-        await _context.SaveChangesAsync(cancellationToken);
-
-        _logger.LogInformation("Issued Bill of Lading '{BOL}' for Shipment '{Shp}'", bol.BolNumber, shipment.ShipmentNumber);
-
-        return new GenerateBolResult
-        {
-            IsSuccess = true,
-            BolId = bol.Id,
-            BolNumber = bol.BolNumber,
-            ShipmentId = shipment.Id,
-            TotalPackageCount = bol.TotalPackageCount,
-            TotalGrossWeightKg = bol.TotalGrossWeightKg,
-            CarrierCode = bol.CarrierCode,
-            IssuedAtUtc = bol.IssuedAtUtc,
-            DocumentSnapshotJson = bol.DocumentSnapshotJson,
-            Message = "Bill of Lading issued successfully."
-        };
+        }, cancellationToken);
     }
 
     public async Task<VoidBolResult> VoidBillOfLadingAsync(
@@ -764,47 +795,62 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
             throw new ValidationException(nameof(request.Reason), "A reason must be provided when voiding a Bill of Lading.");
         }
 
-        var bol = await _context.BillsOfLading
-            .Include(b => b.Shipment)
-            .FirstOrDefaultAsync(b => b.Id == request.BolId && !b.IsDeleted, cancellationToken);
+        var shipmentIdForLock = await _context.BillsOfLading
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(b => b.Id == request.BolId && !b.IsDeleted)
+            .Select(b => (Guid?)b.ShipmentId)
+            .FirstOrDefaultAsync(cancellationToken);
 
-        if (bol == null)
+        if (!shipmentIdForLock.HasValue)
         {
             throw new EntityNotFoundException(nameof(BillOfLading), request.BolId);
         }
 
-        if (bol.Shipment.Status == ShipmentStatus.Dispatched)
+        return await _context.ExecuteWithShipmentLockAsync(shipmentIdForLock.Value, async () =>
         {
-            throw new InvalidDomainStateException($"Cannot void Bill of Lading '{bol.BolNumber}' after shipment '{bol.Shipment.ShipmentNumber}' has been dispatched.");
-        }
+            var bol = await _context.BillsOfLading
+                .Include(b => b.Shipment)
+                .FirstOrDefaultAsync(b => b.Id == request.BolId && !b.IsDeleted, cancellationToken);
 
-        bol.Void(request.Reason.Trim());
-        if (string.Equals(bol.Shipment.BillOfLadingNumber, bol.BolNumber, StringComparison.Ordinal))
-        {
-            bol.Shipment.BillOfLadingNumber = null;
-        }
+            if (bol == null)
+            {
+                throw new EntityNotFoundException(nameof(BillOfLading), request.BolId);
+            }
 
-        _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
-        {
-            ClientId = bol.ClientId,
-            FacilityId = bol.FacilityId,
-            ShipmentId = bol.ShipmentId,
-            Action = "BillOfLadingVoided",
-            Details = $"Voided BOL '{bol.BolNumber}'. Reason: '{request.Reason.Trim()}'",
-            UserId = request.UserId,
-            TimestampUtc = DateTime.UtcNow
-        });
+            if (bol.Shipment.Status == ShipmentStatus.Dispatched)
+            {
+                throw new InvalidDomainStateException($"Cannot void Bill of Lading '{bol.BolNumber}' after shipment '{bol.Shipment.ShipmentNumber}' has been dispatched.");
+            }
 
-        await _context.SaveChangesAsync(cancellationToken);
+            bol.Void(request.Reason.Trim());
+            if (string.Equals(bol.Shipment.BillOfLadingNumber, bol.BolNumber, StringComparison.Ordinal))
+            {
+                bol.Shipment.BillOfLadingNumber = null;
+            }
 
-        return new VoidBolResult
-        {
-            IsSuccess = true,
-            BolId = bol.Id,
-            BolNumber = bol.BolNumber,
-            ShipmentId = bol.ShipmentId,
-            Message = $"Bill of Lading '{bol.BolNumber}' voided."
-        };
+            _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
+            {
+                ClientId = bol.ClientId,
+                FacilityId = bol.FacilityId,
+                ShipmentId = bol.ShipmentId,
+                Action = "BillOfLadingVoided",
+                Details = $"Voided BOL '{bol.BolNumber}'. Reason: '{request.Reason.Trim()}'",
+                UserId = request.UserId,
+                TimestampUtc = DateTime.UtcNow
+            });
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            return new VoidBolResult
+            {
+                IsSuccess = true,
+                BolId = bol.Id,
+                BolNumber = bol.BolNumber,
+                ShipmentId = bol.ShipmentId,
+                Message = $"Bill of Lading '{bol.BolNumber}' voided."
+            };
+        }, cancellationToken);
     }
 
     public async Task<ConfirmDispatchCustodyResult> ConfirmDispatchAsync(

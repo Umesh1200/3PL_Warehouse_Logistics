@@ -775,4 +775,94 @@ public sealed class Phase744ShipmentConsolidationAndBolTests : IAsyncLifetime
             Assert.Equal(HttpStatusCode.Conflict, rCrossKeyReuse.StatusCode);
         }
     }
+
+    [Fact]
+    public async Task P744R05_ConcurrentManifestModification_BolIssuance_VoidAndDispatch_RemainConsistent()
+    {
+        var ordAId = Guid.NewGuid();
+        var ordBId = Guid.NewGuid();
+        var pkgAId = Guid.NewGuid();
+        var pkgBId = Guid.NewGuid();
+        var pkgCId = Guid.NewGuid();
+
+        using (var scope = _app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.OutboundOrders.AddRange(
+                new OutboundOrder { Id = ordAId, ClientId = ClientA, FacilityId = FacilityA, OrderNumber = "SO-744-R05-A", CustomerName = "Race Alpha", Status = OutboundOrderStatus.InProgress },
+                new OutboundOrder { Id = ordBId, ClientId = ClientA, FacilityId = FacilityA, OrderNumber = "SO-744-R05-B", CustomerName = "Race Beta", Status = OutboundOrderStatus.InProgress });
+            var huA = Guid.NewGuid();
+            var huB = Guid.NewGuid();
+            var huC = Guid.NewGuid();
+            db.HandlingUnits.AddRange(
+                new HandlingUnit { Id = huA, ClientId = ClientA, FacilityId = FacilityA, LpnCode = "CTN-744-R05-A", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse },
+                new HandlingUnit { Id = huB, ClientId = ClientA, FacilityId = FacilityA, LpnCode = "CTN-744-R05-B", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse },
+                new HandlingUnit { Id = huC, ClientId = ClientA, FacilityId = FacilityA, LpnCode = "CTN-744-R05-C", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse });
+            db.Packages.AddRange(
+                new Package { Id = pkgAId, ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = ordAId, HandlingUnitId = huA, PackageNumber = "PKG-744-R05-A", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-R05-A", GrossWeightKg = 3m, TareWeightKg = 0.2m, NetWeightKg = 2.8m, LengthCm = 20, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "TRK-R05-A", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] },
+                new Package { Id = pkgBId, ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = ordBId, HandlingUnitId = huB, PackageNumber = "PKG-744-R05-B", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-R05-B", GrossWeightKg = 4m, TareWeightKg = 0.2m, NetWeightKg = 3.8m, LengthCm = 20, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "TRK-R05-B", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] },
+                new Package { Id = pkgCId, ClientId = ClientA, FacilityId = FacilityA, OutboundOrderId = ordBId, HandlingUnitId = huC, PackageNumber = "PKG-744-R05-C", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-R05-C", GrossWeightKg = 2m, TareWeightKg = 0.2m, NetWeightKg = 1.8m, LengthCm = 20, WidthCm = 20, HeightCm = 20, ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "TRK-R05-C", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }] });
+            await db.SaveChangesAsync();
+        }
+
+        // Create 2-package shipment and stage both
+        var shpId = JsonDocument.Parse(await (await _http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/outbound/shipments", ShipStaffAId,
+            new { clientId = ClientA, facilityId = FacilityA, carrierCode = "SIM-FEDEX", serviceLevel = "StandardGround" }))).Content.ReadAsStringAsync()).RootElement.GetProperty("shipmentId").GetGuid();
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shpId}/packages", ShipStaffAId, new { packageId = pkgAId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shpId}/packages", ShipStaffAId, new { packageId = pkgBId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgAId}/stage", ShipStaffAId, new { stagingLocationId = StagingLaneAId }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgBId}/stage", ShipStaffAId, new { stagingLocationId = StagingLaneAId }))).StatusCode);
+
+        // Concurrent Load + Load -> reliably ReadyForDispatch
+        var loadRace = await Task.WhenAll(
+            _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgAId}/load", ShipStaffAId, new { shipmentId = shpId, trailerNumber = "TRL-R05" })),
+            _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pkgBId}/load", ShipStaffAId, new { shipmentId = shpId, trailerNumber = "TRL-R05" })));
+        Assert.All(loadRace, r => Assert.Equal(HttpStatusCode.OK, r.StatusCode));
+        foreach (var r in loadRace) r.Dispose();
+
+        // Concurrent Remove + BOL issuance -> BOL manifest matches persisted shipment packages
+        var removeBolRace = await Task.WhenAll(
+            _http.SendAsync(JsonReq(HttpMethod.Delete, $"/api/v1/outbound/shipments/{shpId}/packages/{pkgBId}", ShipStaffAId, new { reason = "Concurrent pull" })),
+            _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shpId}/bol", ShipStaffAId, new { trailerNumber = "TRL-R05", sealNumber = "SEAL-R05" })));
+        var removeResp = removeBolRace[0];
+        var bolResp = removeBolRace[1];
+        Assert.Equal(HttpStatusCode.OK, bolResp.StatusCode);
+        Assert.True(removeResp.StatusCode == HttpStatusCode.UnprocessableEntity || removeResp.StatusCode == HttpStatusCode.OK);
+        removeResp.Dispose();
+        bolResp.Dispose();
+
+        Guid activeBolId;
+        using (var checkScope = _app.Services.CreateScope())
+        {
+            var db = checkScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            var persistedPkgNums = await db.Packages.IgnoreQueryFilters()
+                .Where(p => p.ShipmentId == shpId && !p.IsDeleted)
+                .OrderBy(p => p.PackageNumber)
+                .Select(p => p.PackageNumber)
+                .ToListAsync();
+            var bol = await db.BillsOfLading.IgnoreQueryFilters()
+                .SingleAsync(b => b.ShipmentId == shpId && !b.IsVoided && !b.IsDeleted);
+            activeBolId = bol.Id;
+            var snapNums = JsonDocument.Parse(bol.DocumentSnapshotJson).RootElement
+                .GetProperty("Packages").EnumerateArray()
+                .Select(e => e.GetProperty("PackageNumber").GetString()!)
+                .OrderBy(x => x)
+                .ToList();
+            Assert.Equal(persistedPkgNums.Count, bol.TotalPackageCount);
+            Assert.Equal(persistedPkgNums, snapNums);
+        }
+
+        // Concurrent Void + Dispatch -> strictly mutually exclusive outcomes
+        var voidDispRace = await Task.WhenAll(
+            _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/bol/{activeBolId}/void", ShipStaffAId, new { reason = "Concurrent void" })),
+            _http.SendAsync(JsonReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{shpId}/dispatch", ShipStaffAId,
+                new { driverName = "Dan DriverA", driverSignature = "SIG-R05", trailerNumber = "TRL-R05", sealNumber = "SEAL-R05", idempotencyKey = "r05-disp-1" })));
+        var voidStatus = voidDispRace[0].StatusCode;
+        var dispStatus = voidDispRace[1].StatusCode;
+        foreach (var r in voidDispRace) r.Dispose();
+
+        Assert.NotEqual(voidStatus, dispStatus);
+        Assert.Contains(HttpStatusCode.OK, new[] { voidStatus, dispStatus });
+        Assert.Contains(HttpStatusCode.UnprocessableEntity, new[] { voidStatus, dispStatus });
+    }
 }
