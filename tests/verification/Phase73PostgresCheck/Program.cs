@@ -3977,6 +3977,159 @@ try
 
     Console.WriteLine("PASS PostgreSQL Phase 7.4.3 Packing, Cartonization, Mixed-SKU Weight Limits, Concurrent Idempotent Scan/409 Conflict (Same & Cross Package), Scale Close, Tote Release, Decoupled Carrier Rating, Label Generation/Void Recovery verified cleanly.");
 
+    // --------------------------------------------------------------------------------------------
+    // 7.12 Live PostgreSQL Phase 7.4.4 Shipment Consolidation, Staging/Loading, Immutable BOL & Dispatch Custody
+    // --------------------------------------------------------------------------------------------
+    Console.WriteLine("\n  Running Phase 7.4.4 Shipment Consolidation, Immutable BOL & Dispatch Custody verification on PostgreSQL...");
+    var pg744StagingLocId = Guid.NewGuid();
+    var pg744UnauthClientId = Guid.NewGuid();
+    var pg744OrderId = Guid.NewGuid();
+    var pg744ExtraOrderId = Guid.NewGuid();
+    var pg744LineId = Guid.NewGuid();
+    var pg744PkgId = Guid.NewGuid();
+    var pg744HuId = Guid.NewGuid();
+    var pg744UnlabeledPkgId = Guid.NewGuid();
+    var pg744UnlabeledHuId = Guid.NewGuid();
+    decimal pre744TotalAvail;
+    decimal pre744TotalAlloc;
+    int pre744LedgerCount;
+
+    await using (var s744Db = CreateDb(operationalConn, user))
+    {
+        s744Db.Clients.Add(new Client { Id = pg744UnauthClientId, AccountCode = "UNAUTH-744", CompanyName = "Unauthorized Fac Client 744", Status = ClientStatus.Active, SlaTier = SlaTier.Standard, Currency = "USD" });
+        s744Db.Locations.Add(new Location { Id = pg744StagingLocId, FacilityId = facilityId, LocationCode = "PG-STG-744-01", Barcode = "PG-STG-744-01", LocationType = LocationType.StagingLane, IsActive = true });
+        var ord744 = new OutboundOrder
+        {
+            Id = pg744OrderId,
+            ClientId = client1Id,
+            FacilityId = facilityId,
+            OrderNumber = "SO-PG-744-01",
+            CustomerName = "PG Freight Consignee",
+            Status = OutboundOrderStatus.InProgress,
+            ShippingAddress = new ShippingAddress { OutboundOrderId = pg744OrderId, RecipientName = "PG Dock Receiver", AddressLine1 = "744 Harbor Way", City = "Chicago", StateOrProvince = "IL", PostalCode = "60601", CountryCode = "US" }
+        };
+        ord744.Lines.Add(new OutboundOrderLine { Id = pg744LineId, OutboundOrderId = pg744OrderId, ItemId = item1Id, LineNumber = 1, QuantityOrdered = 2m, QuantityAllocated = 2m, Status = OutboundOrderLineStatus.Allocated });
+        var ord744Extra = new OutboundOrder
+        {
+            Id = pg744ExtraOrderId,
+            ClientId = client1Id,
+            FacilityId = facilityId,
+            OrderNumber = "SO-PG-744-02",
+            CustomerName = "PG Secondary Order",
+            Status = OutboundOrderStatus.InProgress
+        };
+        s744Db.OutboundOrders.AddRange(ord744, ord744Extra);
+        s744Db.HandlingUnits.AddRange(
+            new HandlingUnit { Id = pg744HuId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-CTN-744-01", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse },
+            new HandlingUnit { Id = pg744UnlabeledHuId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-CTN-744-02", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.InUse });
+        s744Db.Packages.AddRange(
+            new Package
+            {
+                Id = pg744PkgId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = pg744OrderId, HandlingUnitId = pg744HuId,
+                PackageNumber = "PG-PKG-744-01", Status = PackageStatus.LabelPrinted, CarrierCode = "SIM-FEDEX", TrackingNumber = "PG-TRK-744-01",
+                GrossWeightKg = 6.2m, TareWeightKg = 0.4m, NetWeightKg = 5.8m, LengthCm = 40m, WidthCm = 30m, HeightCm = 20m,
+                ShippingLabels = [new ShippingLabel { CarrierCode = "SIM-FEDEX", ServiceLevel = CarrierServiceLevel.StandardGround, TrackingNumber = "PG-TRK-744-01", LabelData = "^XA^XZ", Status = ShippingLabelStatus.Generated }]
+            },
+            new Package
+            {
+                Id = pg744UnlabeledPkgId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = pg744ExtraOrderId, HandlingUnitId = pg744UnlabeledHuId,
+                PackageNumber = "PG-PKG-744-UNLBL", Status = PackageStatus.Packed, CarrierCode = null, TrackingNumber = null,
+                GrossWeightKg = 2.0m, TareWeightKg = 0.4m, NetWeightKg = 1.6m, LengthCm = 20m, WidthCm = 20m, HeightCm = 15m
+            });
+        await s744Db.SaveChangesAsync();
+
+        pre744TotalAvail = await s744Db.StockOnHand.Where(s => s.FacilityId == facilityId).SumAsync(s => s.QtyAvailable);
+        pre744TotalAlloc = await s744Db.StockOnHand.Where(s => s.FacilityId == facilityId).SumAsync(s => s.QtyAllocated);
+        pre744LedgerCount = await s744Db.InventoryTransactions.CountAsync(t => t.FacilityId == facilityId);
+    }
+
+    // Reference endpoints & cross-tenant/facility negative checks
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/shipments/staging-locations?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.Ship))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/shipments/eligible-drivers?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.Ship))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/shipments/reference-clients?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.Ship))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/shipments", bOpAId, facilityId, Permissions.Outbound.Ship,
+            new { clientId = pg744UnauthClientId, facilityId, carrierCode = "SIM-FEDEX", serviceLevel = "StandardGround" }))).StatusCode != HttpStatusCode.Forbidden)
+        throw new InvalidOperationException("Phase 7.4.4 PostgreSQL shipment reference or client/facility authorization check failed.");
+
+    // Create Draft shipment
+    Guid pg744ShipId;
+    using (var rShpCreate = await p74Client.SendAsync(StaffReq(HttpMethod.Post, "/api/v1/outbound/shipments", bOpAId, facilityId, Permissions.Outbound.Ship,
+        new { clientId = client1Id, facilityId, carrierCode = "SIM-FEDEX", serviceLevel = "StandardGround", stagingLocationId = pg744StagingLocId })))
+    {
+        if (rShpCreate.StatusCode != HttpStatusCode.OK) throw new InvalidOperationException($"Phase 7.4.4 PostgreSQL CreateShipment failed: {rShpCreate.StatusCode}");
+        var j = JsonDocument.Parse(await rShpCreate.Content.ReadAsStringAsync()).RootElement;
+        if (j.GetProperty("status").GetString() != "Draft") throw new InvalidOperationException("Phase 7.4.4 PostgreSQL expected Draft shipment status.");
+        pg744ShipId = j.GetProperty("shipmentId").GetGuid();
+    }
+
+    // Add -> Remove -> Re-Add package + load-before-stage guard
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{pg744ShipId}/packages", bOpAId, facilityId, Permissions.Outbound.Ship,
+        new { packageId = pg744UnlabeledPkgId }))).StatusCode != HttpStatusCode.BadRequest ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{pg744ShipId}/packages", bOpAId, facilityId, Permissions.Outbound.Ship,
+        new { packageId = pg744PkgId }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Delete, $"/api/v1/outbound/shipments/{pg744ShipId}/packages/{pg744PkgId}", bOpAId, facilityId, Permissions.Outbound.Ship,
+        new { reason = "Re-assign carton" }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{pg744ShipId}/packages", bOpAId, facilityId, Permissions.Outbound.Ship,
+        new { packageId = pg744PkgId }))).StatusCode != HttpStatusCode.OK ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pg744PkgId}/load", bOpAId, facilityId, Permissions.Outbound.Ship,
+        new { shipmentId = pg744ShipId }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+        throw new InvalidOperationException("Phase 7.4.4 PostgreSQL add/remove/load-guard failed.");
+
+    // Stage -> Load -> ReadyForDispatch
+    if ((await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pg744PkgId}/stage", bOpAId, facilityId, Permissions.Outbound.Ship,
+        new { stagingLocationId = pg744StagingLocId }))).StatusCode != HttpStatusCode.OK)
+        throw new InvalidOperationException("Phase 7.4.4 PostgreSQL stage failed.");
+
+    using (var r744Load = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/packages/{pg744PkgId}/load", bOpAId, facilityId, Permissions.Outbound.Ship,
+        new { shipmentId = pg744ShipId, trailerNumber = "PG-TRL-744" })))
+    {
+        if (r744Load.StatusCode != HttpStatusCode.OK ||
+            JsonDocument.Parse(await r744Load.Content.ReadAsStringAsync()).RootElement.GetProperty("shipmentStatus").GetString() != "ReadyForDispatch")
+            throw new InvalidOperationException("Phase 7.4.4 PostgreSQL load did not transition shipment to ReadyForDispatch.");
+    }
+
+    // Immutable BOL Snapshot
+    Guid pg744BolId;
+    string pg744BolSnapshot;
+    using (var rBol = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{pg744ShipId}/bol", bOpAId, facilityId, Permissions.Outbound.Ship,
+        new { trailerNumber = "PG-TRL-744", sealNumber = "PG-SEAL-744", specialInstructions = "PG Freight Fragile" })))
+    {
+        if (rBol.StatusCode != HttpStatusCode.OK) throw new InvalidOperationException($"Phase 7.4.4 PostgreSQL GenerateBOL failed: {rBol.StatusCode}");
+        var bRoot = JsonDocument.Parse(await rBol.Content.ReadAsStringAsync()).RootElement;
+        pg744BolId = bRoot.GetProperty("bolId").GetGuid();
+        pg744BolSnapshot = bRoot.GetProperty("documentSnapshotJson").GetString()!;
+    }
+
+    using (var rBolRepeat = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{pg744ShipId}/bol", bOpAId, facilityId, Permissions.Outbound.Ship,
+        new { trailerNumber = "TAMPER-TRL", sealNumber = "TAMPER-SEAL", specialInstructions = "Altered" })))
+    {
+        var bRep = JsonDocument.Parse(await rBolRepeat.Content.ReadAsStringAsync()).RootElement;
+        if (rBolRepeat.StatusCode != HttpStatusCode.OK || bRep.GetProperty("bolId").GetGuid() != pg744BolId || bRep.GetProperty("documentSnapshotJson").GetString() != pg744BolSnapshot)
+            throw new InvalidOperationException("Phase 7.4.4 PostgreSQL BOL snapshot was not immutable on repeat call.");
+    }
+
+    using (var r744Disp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/shipments/{pg744ShipId}/dispatch", bOpAId, facilityId, Permissions.Outbound.Ship,
+        new { driverName = "PG Custody Driver", driverLicenseNumber = "PG-DL-744", driverSignature = "PG-SIG-744", trailerNumber = "PG-TRL-744", sealNumber = "PG-SEAL-744", idempotencyKey = "pg-disp-744", assignedDriverUserId = cDriverAId })))
+    {
+        if (r744Disp.StatusCode != HttpStatusCode.OK) throw new InvalidOperationException($"Phase 7.4.4 PostgreSQL ConfirmDispatch failed: {r744Disp.StatusCode}");
+        var dRoot = JsonDocument.Parse(await r744Disp.Content.ReadAsStringAsync()).RootElement;
+        if (dRoot.GetProperty("status").GetString() != "Dispatched" ||
+            !dRoot.GetProperty("completedOrderIds").EnumerateArray().Any(e => e.GetGuid() == pg744OrderId))
+            throw new InvalidOperationException("Phase 7.4.4 PostgreSQL dispatch did not transition Shipment->Dispatched and Order->Completed.");
+    }
+
+    await using (var post744Db = CreateDb(operationalConn, user))
+    {
+        var postAvail = await post744Db.StockOnHand.Where(s => s.FacilityId == facilityId).SumAsync(s => s.QtyAvailable);
+        var postAlloc = await post744Db.StockOnHand.Where(s => s.FacilityId == facilityId).SumAsync(s => s.QtyAllocated);
+        var postLedgerCount = await post744Db.InventoryTransactions.CountAsync(t => t.FacilityId == facilityId);
+        var ordDone = await post744Db.OutboundOrders.SingleAsync(o => o.Id == pg744OrderId);
+        if (postAvail != pre744TotalAvail || postAlloc != pre744TotalAlloc || postLedgerCount != pre744LedgerCount || ordDone.Status != OutboundOrderStatus.Completed)
+            throw new InvalidOperationException($"Phase 7.4.4 PostgreSQL secondary stock mutation or order status check failed: avail={postAvail}/{pre744TotalAvail}, alloc={postAlloc}/{pre744TotalAlloc}, ledger={postLedgerCount}/{pre744LedgerCount}, ord={ordDone.Status}");
+    }
+
+    Console.WriteLine("PASS PostgreSQL Phase 7.4.4 Shipment Consolidation (Draft -> ReadyForDispatch -> Dispatched), Immutable BOL Snapshot, Custody Transfer, OutboundOrder.Completed & Zero Secondary Stock Mutation verified cleanly.");
+
     if (Directory.Exists(pgPodStorageDir))
     {
         try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }

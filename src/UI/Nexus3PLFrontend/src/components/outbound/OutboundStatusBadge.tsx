@@ -11,6 +11,8 @@ import {
   PickTaskStatus,
   PickWaveStatus,
   PickWaveType,
+  ShipmentCustodyStatus,
+  ShipmentStatus,
   ShippingLabelStatus,
   ShortPickReason,
 } from '../../types/outbound';
@@ -235,4 +237,38 @@ export const PackageStatusBadge: React.FC<{ status: PackageStatus }> = ({ status
 
 export const ShippingLabelStatusBadge: React.FC<{ status: ShippingLabelStatus }> = ({ status }) => (
   <span className={`badge ${getShippingLabelStatusBadgeClass(status)}`}>{status}</span>
+);
+
+export function getShipmentStatusBadgeClass(status: ShipmentStatus): string {
+  switch (status) {
+    case ShipmentStatus.Dispatched:
+      return 'badge-success';
+    case ShipmentStatus.ReadyForDispatch:
+      return 'badge-warning';
+    case ShipmentStatus.Cancelled:
+      return 'badge-danger';
+    default:
+      return 'badge-info';
+  }
+}
+
+export function getShipmentCustodyBadgeClass(status: ShipmentCustodyStatus): string {
+  switch (status) {
+    case ShipmentCustodyStatus.Confirmed:
+      return 'badge-success';
+    case ShipmentCustodyStatus.PendingHandover:
+      return 'badge-warning';
+    case ShipmentCustodyStatus.Revoked:
+      return 'badge-danger';
+    default:
+      return 'badge-info';
+  }
+}
+
+export const ShipmentStatusBadge: React.FC<{ status: ShipmentStatus }> = ({ status }) => (
+  <span className={`badge ${getShipmentStatusBadgeClass(status)}`}>{status}</span>
+);
+
+export const ShipmentCustodyBadge: React.FC<{ status: ShipmentCustodyStatus }> = ({ status }) => (
+  <span className={`badge ${getShipmentCustodyBadgeClass(status)}`}>{status}</span>
 );

@@ -106,6 +106,13 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => 
           icon: 'Package',
         },
         {
+          label: 'Shipment Consolidation',
+          path: '/app/outbound/shipping',
+          permission: 'outbound:ship',
+          allowedUserTypes: [UserType.Staff],
+          icon: 'Navigation',
+        },
+        {
           label: 'Transportation & Carriers',
           path: '/app/transportation',
           permissions: ['dispatch:view', 'analytics:transportation:view'],

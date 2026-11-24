@@ -30,7 +30,12 @@ public class GetShipmentByIdQueryHandler : IRequestHandler<GetShipmentByIdQuery,
         _outboundAuth.EnsureStaffOperationalIdentity(nameof(GetShipmentByIdQuery));
 
         var shipment = await _context.Shipments
+            .Include(s => s.Client)
+            .Include(s => s.StagingLocation)
             .Include(s => s.Packages)
+                .ThenInclude(p => p.OutboundOrder)
+            .Include(s => s.Packages)
+                .ThenInclude(p => p.CurrentLocation)
             .AsNoTracking()
             .FirstOrDefaultAsync(s => s.Id == query.Id && !s.IsDeleted, cancellationToken);
 
@@ -41,30 +46,45 @@ public class GetShipmentByIdQueryHandler : IRequestHandler<GetShipmentByIdQuery,
 
         _outboundAuth.ValidateStaffReadFacilityAccess(shipment.FacilityId, nameof(GetShipmentByIdQuery));
 
+        var activeBolId = await _context.BillsOfLading
+            .AsNoTracking()
+            .Where(b => b.ShipmentId == shipment.Id && !b.IsVoided && !b.IsDeleted)
+            .Select(b => (Guid?)b.Id)
+            .FirstOrDefaultAsync(cancellationToken);
+
         return new ShipmentDto
         {
             Id = shipment.Id,
             ClientId = shipment.ClientId,
+            ClientName = shipment.Client?.CompanyName,
             FacilityId = shipment.FacilityId,
             ShipmentNumber = shipment.ShipmentNumber,
             CarrierCode = shipment.CarrierCode,
             CarrierServiceLevel = shipment.CarrierServiceLevel,
             Status = shipment.Status,
+            StagingLocationId = shipment.StagingLocationId,
+            StagingLocationCode = shipment.StagingLocation?.LocationCode,
+            AssignedDriverUserId = shipment.AssignedDriverUserId,
+            CustodyStatus = shipment.CustodyStatus,
             TrailerNumber = shipment.TrailerNumber,
             SealNumber = shipment.SealNumber,
+            BillOfLadingId = activeBolId,
             BillOfLadingNumber = shipment.BillOfLadingNumber,
             TotalPackagesCount = shipment.TotalPackagesCount,
             TotalWeightKg = shipment.TotalWeightKg,
             TotalVolumeCm3 = shipment.TotalVolumeCm3,
             DispatchedAtUtc = shipment.DispatchedAtUtc,
-            Packages = shipment.Packages.Select(p => new ShipmentPackageSummaryDto
+            Packages = shipment.Packages.Where(p => !p.IsDeleted).Select(p => new ShipmentPackageSummaryDto
             {
                 PackageId = p.Id,
                 PackageNumber = p.PackageNumber,
                 TrackingNumber = p.TrackingNumber,
+                CarrierCode = p.CarrierCode,
                 GrossWeightKg = p.GrossWeightKg,
                 Status = p.Status,
-                OutboundOrderId = p.OutboundOrderId
+                OutboundOrderId = p.OutboundOrderId,
+                OrderNumber = p.OutboundOrder?.OrderNumber ?? string.Empty,
+                CurrentLocationCode = p.CurrentLocation?.LocationCode
             }).ToList()
         };
     }

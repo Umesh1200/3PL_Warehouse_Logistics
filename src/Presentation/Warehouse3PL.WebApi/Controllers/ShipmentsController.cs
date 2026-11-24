@@ -1,6 +1,7 @@
 using Microsoft.AspNetCore.Mvc;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Features.Outbound.OrderManagement.Queries.GetOutboundReferenceClients;
 using Warehouse3PL.Application.Features.Outbound.Packing.DTOs;
 using Warehouse3PL.Application.Features.Outbound.Shipping.Commands;
 using Warehouse3PL.Application.Features.Outbound.Shipping.DTOs;
@@ -22,6 +23,45 @@ public class ShipmentsController : BaseApiController
     [HasPermission(Permissions.Outbound.Ship)]
     [ProducesResponseType(typeof(PagedResult<ShipmentDto>), StatusCodes.Status200OK)]
     public async Task<IActionResult> GetShipments([FromQuery] GetShipmentsQuery query, CancellationToken ct)
+    {
+        var result = await Mediator.Send(query, ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Retrieves active StagingLane and DockDoor locations in the active facility for dock staging and consolidation.
+    /// </summary>
+    [HttpGet("staging-locations")]
+    [HasPermission(Permissions.Outbound.Ship)]
+    [ProducesResponseType(typeof(IReadOnlyList<ShipmentStagingLocationDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetStagingLocations([FromQuery] Guid? facilityId, CancellationToken ct)
+    {
+        var result = await Mediator.Send(new GetShipmentStagingLocationsQuery(facilityId), ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Retrieves active Driver accounts eligible for shipment custody assignment in the active facility.
+    /// </summary>
+    [HttpGet("eligible-drivers")]
+    [HasPermission(Permissions.Outbound.Ship)]
+    [ProducesResponseType(typeof(IReadOnlyList<EligibleShipmentDriverDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetEligibleDrivers(
+        [FromQuery] Guid? facilityId,
+        [FromQuery] Guid? clientId,
+        CancellationToken ct)
+    {
+        var result = await Mediator.Send(new GetEligibleShipmentDriversQuery(facilityId, clientId), ct);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Staff-only minimal active client tenant lookup for shipment creation without requiring outbound:orders:view or clients:view.
+    /// </summary>
+    [HttpGet("reference-clients")]
+    [HasPermission(Permissions.Outbound.Ship)]
+    [ProducesResponseType(typeof(PagedResult<OutboundReferenceClientDto>), StatusCodes.Status200OK)]
+    public async Task<IActionResult> GetReferenceClients([FromQuery] GetOutboundReferenceClientsQuery query, CancellationToken ct)
     {
         var result = await Mediator.Send(query, ct);
         return Ok(result);

@@ -33,6 +33,7 @@ public class CreateShipmentCommandHandler : IRequestHandler<CreateShipmentComman
         CancellationToken cancellationToken)
     {
         _outboundAuth.ValidateStaffMutationFacilityAccess(command.FacilityId, nameof(CreateShipmentCommand));
+        await _outboundAuth.EnsureClientHasActiveFacilityAccessAsync(command.ClientId, command.FacilityId, cancellationToken);
 
         return await _consolidationService.CreateShipmentAsync(new CreateShipmentRequest
         {

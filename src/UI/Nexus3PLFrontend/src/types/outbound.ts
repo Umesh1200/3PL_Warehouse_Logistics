@@ -1158,4 +1158,250 @@ export interface GetPackingPackagesParams {
   pageSize?: number;
 }
 
+// ============================================================================
+// Phase 7.4.4 — Shipment Consolidation, Staging/Loading, BOL & Dispatch Custody
+// ============================================================================
+
+export enum ShipmentStatus {
+  Draft = 'Draft',
+  ReadyForDispatch = 'ReadyForDispatch',
+  Dispatched = 'Dispatched',
+  Cancelled = 'Cancelled',
+}
+
+export enum ShipmentCustodyStatus {
+  Unassigned = 'Unassigned',
+  PendingHandover = 'PendingHandover',
+  Confirmed = 'Confirmed',
+  Revoked = 'Revoked',
+}
+
+const SHIPMENT_STATUS_NUM: Record<number, ShipmentStatus> = {
+  1: ShipmentStatus.Draft,
+  2: ShipmentStatus.ReadyForDispatch,
+  3: ShipmentStatus.Dispatched,
+  4: ShipmentStatus.Cancelled,
+};
+
+const SHIPMENT_CUSTODY_STATUS_NUM: Record<number, ShipmentCustodyStatus> = {
+  0: ShipmentCustodyStatus.Unassigned,
+  1: ShipmentCustodyStatus.Confirmed,
+  2: ShipmentCustodyStatus.PendingHandover,
+  3: ShipmentCustodyStatus.Revoked,
+};
+
+export const normalizeShipmentStatus = (v: unknown) =>
+  normalizeStringEnum(v, SHIPMENT_STATUS_NUM, Object.values(ShipmentStatus), 'ShipmentStatus');
+
+export const normalizeShipmentCustodyStatus = (v: unknown) =>
+  normalizeStringEnum(
+    v,
+    SHIPMENT_CUSTODY_STATUS_NUM,
+    Object.values(ShipmentCustodyStatus),
+    'ShipmentCustodyStatus'
+  );
+
+export interface ShipmentStagingLocationDto {
+  id: string;
+  locationCode: string;
+  barcode: string;
+  locationType: string;
+  aisleCode: string;
+  isActive: boolean;
+}
+
+export interface EligibleShipmentDriverDto {
+  id: string;
+  firstName: string;
+  lastName: string;
+  email: string;
+  assignedFacilityId?: string | null;
+  clientId?: string | null;
+}
+
+export interface ShipmentPackageSummaryDto {
+  packageId: string;
+  packageNumber: string;
+  trackingNumber?: string | null;
+  carrierCode?: string | null;
+  grossWeightKg: number;
+  status: PackageStatus;
+  outboundOrderId: string;
+  orderNumber: string;
+  currentLocationCode?: string | null;
+}
+
+export interface ShipmentDto {
+  id: string;
+  clientId: string;
+  clientName?: string | null;
+  facilityId: string;
+  shipmentNumber: string;
+  carrierCode: string;
+  carrierServiceLevel: CarrierServiceLevel;
+  status: ShipmentStatus;
+  stagingLocationId?: string | null;
+  stagingLocationCode?: string | null;
+  assignedDriverUserId?: string | null;
+  custodyStatus: ShipmentCustodyStatus;
+  trailerNumber?: string | null;
+  sealNumber?: string | null;
+  billOfLadingId?: string | null;
+  billOfLadingNumber?: string | null;
+  totalPackagesCount: number;
+  totalWeightKg: number;
+  totalVolumeCm3: number;
+  dispatchedAtUtc?: string | null;
+  packages: ShipmentPackageSummaryDto[];
+}
+
+export interface GetShipmentsParams {
+  facilityId?: string;
+  clientId?: string;
+  status?: ShipmentStatus;
+  carrierCode?: string;
+  searchTerm?: string;
+  pageNumber?: number;
+  pageSize?: number;
+}
+
+export interface GetEligibleShipmentPackagesParams {
+  facilityId?: string;
+  clientId?: string;
+  carrierCode?: string;
+  searchTerm?: string;
+  pageNumber?: number;
+  pageSize?: number;
+}
+
+export interface CreateShipmentRequest {
+  clientId: string;
+  facilityId: string;
+  carrierCode: string;
+  serviceLevel: CarrierServiceLevel;
+  stagingLocationId?: string | null;
+}
+
+export interface CreateShipmentResultDto {
+  isSuccess: boolean;
+  shipmentId: string;
+  shipmentNumber: string;
+  status: ShipmentStatus;
+  totalPackagesCount: number;
+  message: string;
+}
+
+export interface AddPackageToShipmentResultDto {
+  isSuccess: boolean;
+  shipmentId: string;
+  packageId: string;
+  packageNumber: string;
+  totalPackagesCount: number;
+  totalGrossWeightKg: number;
+  totalVolumeCm3: number;
+  message: string;
+}
+
+export interface RemovePackageFromShipmentResultDto {
+  isSuccess: boolean;
+  shipmentId: string;
+  packageId: string;
+  totalPackagesCount: number;
+  message: string;
+}
+
+export interface StagePackageResultDto {
+  isSuccess: boolean;
+  packageId: string;
+  packageNumber: string;
+  packageStatus: PackageStatus;
+  stagingLocationCode: string;
+  message: string;
+}
+
+export interface LoadPackageRequest {
+  shipmentId?: string | null;
+  trailerNumber?: string | null;
+  dockLocationId?: string | null;
+}
+
+export interface LoadPackageResultDto {
+  isSuccess: boolean;
+  packageId: string;
+  packageNumber: string;
+  packageStatus: PackageStatus;
+  shipmentStatus?: ShipmentStatus | null;
+  message: string;
+}
+
+export interface GenerateBolRequest {
+  trailerNumber?: string | null;
+  sealNumber?: string | null;
+  specialInstructions?: string | null;
+}
+
+export interface GenerateBolResultDto {
+  isSuccess: boolean;
+  bolId: string;
+  bolNumber: string;
+  shipmentId: string;
+  totalPackageCount: number;
+  totalGrossWeightKg: number;
+  carrierCode: string;
+  issuedAtUtc: string;
+  documentSnapshotJson: string;
+  message: string;
+}
+
+export interface BillOfLadingDto {
+  id: string;
+  clientId: string;
+  facilityId: string;
+  shipmentId: string;
+  bolNumber: string;
+  carrierCode: string;
+  carrierName: string;
+  serviceLevel: string;
+  trailerNumber?: string | null;
+  sealNumber?: string | null;
+  totalPackageCount: number;
+  totalGrossWeightKg: number;
+  totalVolumeCm3: number;
+  shipperName: string;
+  shipperAddressSnapshot: string;
+  consigneeName: string;
+  consigneeAddressSnapshot: string;
+  packageTrackingNumbers?: string | null;
+  specialInstructions?: string | null;
+  documentSnapshotJson: string;
+  issuedAtUtc: string;
+  isVoided: boolean;
+}
+
+export interface ConfirmDispatchCustodyRequest {
+  driverName: string;
+  driverLicenseNumber?: string | null;
+  driverSignature: string;
+  trailerNumber?: string | null;
+  sealNumber?: string | null;
+  notes?: string | null;
+  idempotencyKey?: string | null;
+  assignedDriverUserId?: string | null;
+}
+
+export interface ConfirmDispatchCustodyResultDto {
+  isSuccess: boolean;
+  shipmentId: string;
+  shipmentNumber: string;
+  status: ShipmentStatus;
+  dispatchedAtUtc: string;
+  totalPackagesDispatched: number;
+  totalWeightKg: number;
+  driverName: string;
+  assignedDriverUserId?: string | null;
+  billOfLadingNumber?: string | null;
+  completedOrderIds: string[];
+  message: string;
+}
+
 export type OutboundPagedResult<T> = PagedResult<T>;

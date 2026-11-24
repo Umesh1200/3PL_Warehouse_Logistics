@@ -3,25 +3,38 @@ import { ClientDto, PagedResult } from '../types/auth';
 import {
   AllocationExecutionResultDto,
   AllocationStrategyType,
+  AddPackageToShipmentResultDto,
+  BillOfLadingDto,
   CarrierRateQuoteDto,
   CartonizationRecommendationDto,
   CartonizationRecommendRequest,
   ClosePackageResultDto,
   CompletePackingSessionResultDto,
+  ConfirmDispatchCustodyRequest,
+  ConfirmDispatchCustodyResultDto,
   ConfirmPickTaskRequest,
   CreatePackageRequest,
   CreatePackageResultDto,
+  CreateShipmentRequest,
+  CreateShipmentResultDto,
   DeallocationExecutionResultDto,
   EligiblePickOperatorDto,
+  EligibleShipmentDriverDto,
+  GenerateBolRequest,
+  GenerateBolResultDto,
   GenerateShippingLabelRequest,
   GenerateShippingLabelResultDto,
+  GetEligibleShipmentPackagesParams,
   GetOutboundOrdersParams,
   GetPackageRatesRequest,
   GetPackingPackagesParams,
   GetPackingSessionsParams,
   GetPickTasksParams,
   GetPickWavesParams,
+  GetShipmentsParams,
   ImportOutboundOrdersBulkRequest,
+  LoadPackageRequest,
+  LoadPackageResultDto,
   OrderImportBatchDto,
   OutboundItemOptionDto,
   OutboundOrderDto,
@@ -40,9 +53,13 @@ import {
   PickWaveGenerationRequest,
   ReleaseAllocationResultDto,
   ReleaseToteResultDto,
+  RemovePackageFromShipmentResultDto,
   ReportShortPickRequest,
+  ShipmentDto,
+  ShipmentStagingLocationDto,
   ShippingLabelDto,
   ShortPickExecutionResultDto,
+  StagePackageResultDto,
   StartPackingSessionRequest,
   StockAvailabilityAssessmentDto,
   VoidShippingLabelRequest,
@@ -59,6 +76,8 @@ import {
   normalizePackagingMaterialType,
   normalizePackingSessionStatus,
   normalizeServiceLevel,
+  normalizeShipmentCustodyStatus,
+  normalizeShipmentStatus,
   normalizeShippingLabelStatus,
   normalizeShortPickReason,
   normalizeShortageReason,
@@ -916,15 +935,26 @@ export const outboundApi = {
   },
 
   getEligibleShipmentPackages: async (
-    facilityId: string,
+    facilityIdOrParams: string | GetEligibleShipmentPackagesParams,
     searchTerm?: string,
     signal?: AbortSignal
   ): Promise<PagedResult<PackageSummaryDto>> => {
     const query = new URLSearchParams();
-    query.set('facilityId', facilityId);
-    if (searchTerm?.trim()) query.set('searchTerm', searchTerm.trim());
-    query.set('pageNumber', '1');
-    query.set('pageSize', '50');
+    if (typeof facilityIdOrParams === 'string') {
+      query.set('facilityId', facilityIdOrParams);
+      if (searchTerm?.trim()) query.set('searchTerm', searchTerm.trim());
+      query.set('pageNumber', '1');
+      query.set('pageSize', '50');
+    } else {
+      if (facilityIdOrParams.facilityId) query.set('facilityId', facilityIdOrParams.facilityId);
+      if (facilityIdOrParams.clientId) query.set('clientId', facilityIdOrParams.clientId);
+      if (facilityIdOrParams.carrierCode) query.set('carrierCode', facilityIdOrParams.carrierCode);
+      if (facilityIdOrParams.searchTerm?.trim()) {
+        query.set('searchTerm', facilityIdOrParams.searchTerm.trim());
+      }
+      query.set('pageNumber', String(facilityIdOrParams.pageNumber ?? 1));
+      query.set('pageSize', String(facilityIdOrParams.pageSize ?? 50));
+    }
 
     const data = await apiClient<unknown>(
       `/api/v1/outbound/shipments/eligible-packages?${query.toString()}`,
@@ -1219,4 +1249,302 @@ export const outboundApi = {
       status: normalizeShippingLabelStatus(lbl.status),
     };
   },
+
+  // =========================================================================
+  // 5. Phase 7.4.4 — Shipment Consolidation, Staging/Load, BOL & Dispatch Custody
+  // =========================================================================
+  getShipmentStagingLocations: async (
+    facilityId: string,
+    signal?: AbortSignal
+  ): Promise<ShipmentStagingLocationDto[]> => {
+    const query = new URLSearchParams();
+    if (facilityId) query.set('facilityId', facilityId);
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/shipments/staging-locations?${query.toString()}`,
+      { method: 'GET', signal }
+    );
+    if (!Array.isArray(data)) {
+      throw new Error('Received malformed staging locations response from server.');
+    }
+    return data as ShipmentStagingLocationDto[];
+  },
+
+  getEligibleShipmentDrivers: async (
+    facilityId: string,
+    clientId?: string,
+    signal?: AbortSignal
+  ): Promise<EligibleShipmentDriverDto[]> => {
+    const query = new URLSearchParams();
+    if (facilityId) query.set('facilityId', facilityId);
+    if (clientId) query.set('clientId', clientId);
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/shipments/eligible-drivers?${query.toString()}`,
+      { method: 'GET', signal }
+    );
+    if (!Array.isArray(data)) {
+      throw new Error('Received malformed eligible drivers response from server.');
+    }
+    return data as EligibleShipmentDriverDto[];
+  },
+
+  getShipmentReferenceClients: async (
+    facilityId: string,
+    signal?: AbortSignal
+  ): Promise<PagedResult<ClientDto>> => {
+    const query = new URLSearchParams();
+    if (facilityId) query.set('facilityId', facilityId);
+    query.set('pageSize', '100');
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/shipments/reference-clients?${query.toString()}`,
+      { method: 'GET', signal }
+    );
+    return assertPagedResult<ClientDto>(data, 'shipment reference clients');
+  },
+
+  getShipments: async (
+    params: GetShipmentsParams = {},
+    signal?: AbortSignal
+  ): Promise<PagedResult<ShipmentDto>> => {
+    const query = new URLSearchParams();
+    if (params.facilityId) query.set('facilityId', params.facilityId);
+    if (params.clientId) query.set('clientId', params.clientId);
+    if (params.status) query.set('status', params.status);
+    if (params.carrierCode) query.set('carrierCode', params.carrierCode);
+    if (params.searchTerm?.trim()) query.set('searchTerm', params.searchTerm.trim());
+    if (params.pageNumber) query.set('pageNumber', String(params.pageNumber));
+    if (params.pageSize) query.set('pageSize', String(params.pageSize));
+
+    const data = await apiClient<unknown>(`/api/v1/outbound/shipments?${query.toString()}`, {
+      method: 'GET',
+      signal,
+    });
+    const paged = assertPagedResult<unknown>(data, 'shipments');
+    return {
+      ...paged,
+      items: paged.items.map(normalizeShipmentDto),
+    };
+  },
+
+  getShipmentById: async (id: string, signal?: AbortSignal): Promise<ShipmentDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/shipments/${id}`, {
+      method: 'GET',
+      signal,
+    });
+    return normalizeShipmentDto(data);
+  },
+
+  createShipment: async (
+    payload: CreateShipmentRequest,
+    signal?: AbortSignal
+  ): Promise<CreateShipmentResultDto> => {
+    const data = await apiClient<unknown>('/api/v1/outbound/shipments', {
+      method: 'POST',
+      body: JSON.stringify({
+        clientId: payload.clientId,
+        facilityId: payload.facilityId,
+        carrierCode: payload.carrierCode,
+        serviceLevel: payload.serviceLevel,
+        stagingLocationId: payload.stagingLocationId || null,
+      }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as CreateShipmentResultDto).shipmentId) {
+      throw new Error('Received malformed create shipment response from server.');
+    }
+    const res = data as CreateShipmentResultDto;
+    return {
+      ...res,
+      status: normalizeShipmentStatus(res.status),
+      totalPackagesCount: Number(res.totalPackagesCount ?? 0),
+    };
+  },
+
+  addPackageToShipment: async (
+    shipmentId: string,
+    packageId: string,
+    signal?: AbortSignal
+  ): Promise<AddPackageToShipmentResultDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/shipments/${shipmentId}/packages`, {
+      method: 'POST',
+      body: JSON.stringify({ packageId }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as AddPackageToShipmentResultDto).packageId) {
+      throw new Error('Received malformed add package to shipment response from server.');
+    }
+    const res = data as AddPackageToShipmentResultDto;
+    return {
+      ...res,
+      totalPackagesCount: Number(res.totalPackagesCount ?? 0),
+      totalGrossWeightKg: Number(res.totalGrossWeightKg ?? 0),
+      totalVolumeCm3: Number(res.totalVolumeCm3 ?? 0),
+    };
+  },
+
+  removePackageFromShipment: async (
+    shipmentId: string,
+    packageId: string,
+    reason: string,
+    signal?: AbortSignal
+  ): Promise<RemovePackageFromShipmentResultDto> => {
+    const data = await apiClient<unknown>(
+      `/api/v1/outbound/shipments/${shipmentId}/packages/${packageId}`,
+      {
+        method: 'DELETE',
+        body: JSON.stringify({ reason }),
+        signal,
+      }
+    );
+    if (!data || typeof data !== 'object' || !(data as RemovePackageFromShipmentResultDto).shipmentId) {
+      throw new Error('Received malformed remove package response from server.');
+    }
+    const res = data as RemovePackageFromShipmentResultDto;
+    return {
+      ...res,
+      totalPackagesCount: Number(res.totalPackagesCount ?? 0),
+    };
+  },
+
+  stagePackage: async (
+    packageId: string,
+    stagingLocationId: string,
+    signal?: AbortSignal
+  ): Promise<StagePackageResultDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/shipments/packages/${packageId}/stage`, {
+      method: 'POST',
+      body: JSON.stringify({ stagingLocationId }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as StagePackageResultDto).packageId) {
+      throw new Error('Received malformed stage package response from server.');
+    }
+    const res = data as StagePackageResultDto;
+    return {
+      ...res,
+      packageStatus: normalizePackageStatus(res.packageStatus),
+    };
+  },
+
+  loadPackage: async (
+    packageId: string,
+    payload: LoadPackageRequest,
+    signal?: AbortSignal
+  ): Promise<LoadPackageResultDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/shipments/packages/${packageId}/load`, {
+      method: 'POST',
+      body: JSON.stringify({
+        shipmentId: payload.shipmentId ?? null,
+        trailerNumber: payload.trailerNumber ?? null,
+        dockLocationId: payload.dockLocationId ?? null,
+      }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as LoadPackageResultDto).packageId) {
+      throw new Error('Received malformed load package response from server.');
+    }
+    const res = data as LoadPackageResultDto;
+    return {
+      ...res,
+      packageStatus: normalizePackageStatus(res.packageStatus),
+      shipmentStatus: res.shipmentStatus ? normalizeShipmentStatus(res.shipmentStatus) : null,
+    };
+  },
+
+  generateBillOfLading: async (
+    shipmentId: string,
+    payload: GenerateBolRequest = {},
+    signal?: AbortSignal
+  ): Promise<GenerateBolResultDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/shipments/${shipmentId}/bol`, {
+      method: 'POST',
+      body: JSON.stringify({
+        trailerNumber: payload.trailerNumber ?? null,
+        sealNumber: payload.sealNumber ?? null,
+        specialInstructions: payload.specialInstructions ?? null,
+      }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as GenerateBolResultDto).bolId) {
+      throw new Error('Received malformed generate BOL response from server.');
+    }
+    const res = data as GenerateBolResultDto;
+    return {
+      ...res,
+      totalPackageCount: Number(res.totalPackageCount ?? 0),
+      totalGrossWeightKg: Number(res.totalGrossWeightKg ?? 0),
+    };
+  },
+
+  getBillOfLadingById: async (bolId: string, signal?: AbortSignal): Promise<BillOfLadingDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/shipments/bol/${bolId}`, {
+      method: 'GET',
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as BillOfLadingDto).id) {
+      throw new Error('Received malformed Bill of Lading response from server.');
+    }
+    const bol = data as BillOfLadingDto;
+    return {
+      ...bol,
+      totalPackageCount: Number(bol.totalPackageCount ?? 0),
+      totalGrossWeightKg: Number(bol.totalGrossWeightKg ?? 0),
+      totalVolumeCm3: Number(bol.totalVolumeCm3 ?? 0),
+    };
+  },
+
+  confirmDispatchCustody: async (
+    shipmentId: string,
+    payload: ConfirmDispatchCustodyRequest,
+    signal?: AbortSignal
+  ): Promise<ConfirmDispatchCustodyResultDto> => {
+    const data = await apiClient<unknown>(`/api/v1/outbound/shipments/${shipmentId}/dispatch`, {
+      method: 'POST',
+      body: JSON.stringify({
+        driverName: payload.driverName,
+        driverLicenseNumber: payload.driverLicenseNumber ?? null,
+        driverSignature: payload.driverSignature,
+        trailerNumber: payload.trailerNumber ?? null,
+        sealNumber: payload.sealNumber ?? null,
+        notes: payload.notes ?? null,
+        idempotencyKey: payload.idempotencyKey ?? null,
+        assignedDriverUserId: payload.assignedDriverUserId ?? null,
+      }),
+      signal,
+    });
+    if (!data || typeof data !== 'object' || !(data as ConfirmDispatchCustodyResultDto).shipmentId) {
+      throw new Error('Received malformed confirm dispatch response from server.');
+    }
+    const res = data as ConfirmDispatchCustodyResultDto;
+    return {
+      ...res,
+      status: normalizeShipmentStatus(res.status),
+      totalPackagesDispatched: Number(res.totalPackagesDispatched ?? 0),
+      totalWeightKg: Number(res.totalWeightKg ?? 0),
+      completedOrderIds: Array.isArray(res.completedOrderIds) ? res.completedOrderIds : [],
+    };
+  },
 };
+
+function normalizeShipmentDto(raw: unknown): ShipmentDto {
+  if (!raw || typeof raw !== 'object' || !(raw as ShipmentDto).id) {
+    throw new Error('Received malformed or incomplete shipment response from server.');
+  }
+  const s = raw as ShipmentDto;
+  return {
+    ...s,
+    carrierServiceLevel: normalizeServiceLevel(s.carrierServiceLevel),
+    status: normalizeShipmentStatus(s.status),
+    custodyStatus: normalizeShipmentCustodyStatus(s.custodyStatus ?? 'Unassigned'),
+    totalPackagesCount: Number(s.totalPackagesCount ?? 0),
+    totalWeightKg: Number(s.totalWeightKg ?? 0),
+    totalVolumeCm3: Number(s.totalVolumeCm3 ?? 0),
+    packages: Array.isArray(s.packages)
+      ? s.packages.map((p) => ({
+          ...p,
+          status: normalizePackageStatus(p.status),
+          grossWeightKg: Number(p.grossWeightKg ?? 0),
+          orderNumber: p.orderNumber ?? '',
+        }))
+      : [],
+  };
+}

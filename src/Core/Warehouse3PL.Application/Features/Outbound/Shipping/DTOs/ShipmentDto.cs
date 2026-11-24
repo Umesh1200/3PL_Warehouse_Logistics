@@ -7,22 +7,31 @@ public class ShipmentPackageSummaryDto
     public Guid PackageId { get; set; }
     public string PackageNumber { get; set; } = string.Empty;
     public string? TrackingNumber { get; set; }
+    public string? CarrierCode { get; set; }
     public decimal GrossWeightKg { get; set; }
     public PackageStatus Status { get; set; }
     public Guid OutboundOrderId { get; set; }
+    public string OrderNumber { get; set; } = string.Empty;
+    public string? CurrentLocationCode { get; set; }
 }
 
 public class ShipmentDto
 {
     public Guid Id { get; set; }
     public Guid ClientId { get; set; }
+    public string? ClientName { get; set; }
     public Guid FacilityId { get; set; }
     public string ShipmentNumber { get; set; } = string.Empty;
     public string CarrierCode { get; set; } = string.Empty;
     public CarrierServiceLevel CarrierServiceLevel { get; set; }
     public ShipmentStatus Status { get; set; }
+    public Guid? StagingLocationId { get; set; }
+    public string? StagingLocationCode { get; set; }
+    public Guid? AssignedDriverUserId { get; set; }
+    public ShipmentCustodyStatus CustodyStatus { get; set; }
     public string? TrailerNumber { get; set; }
     public string? SealNumber { get; set; }
+    public Guid? BillOfLadingId { get; set; }
     public string? BillOfLadingNumber { get; set; }
     public int TotalPackagesCount { get; set; }
     public decimal TotalWeightKg { get; set; }

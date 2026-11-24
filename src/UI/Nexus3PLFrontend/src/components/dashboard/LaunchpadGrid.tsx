@@ -61,6 +61,16 @@ export const LaunchpadGrid: React.FC = () => {
       badge: 'Pack Bench',
     },
     {
+      id: 'shipment-consolidation',
+      title: 'Shipment Consolidation & BOL',
+      description: 'Consolidate labeled cartons, scan dock staging & trailer loads, issue immutable BOLs, and hand over custody.',
+      path: '/app/outbound/shipping',
+      icon: 'Navigation',
+      permission: 'outbound:ship',
+      allowedUserTypes: [UserType.Staff],
+      badge: 'Dock Dispatch',
+    },
+    {
       id: 'putaway',
       title: 'Directed Putaway RF',
       description: 'Mobile-first barcode scanning, staging verification, and directed shelf confirmation.',

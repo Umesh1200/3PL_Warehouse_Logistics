@@ -102,20 +102,43 @@ public class GetShipmentsQueryHandler : IRequestHandler<GetShipmentsQuery, Paged
             .ThenBy(s => s.Id)
             .Skip((pageNumber - 1) * query.PageSize)
             .Take(query.PageSize)
+            .Include(s => s.Client)
+            .Include(s => s.StagingLocation)
             .Include(s => s.Packages)
+                .ThenInclude(p => p.OutboundOrder)
+            .Include(s => s.Packages)
+                .ThenInclude(p => p.CurrentLocation)
             .ToListAsync(cancellationToken);
+
+        var shipmentIds = shipments.Select(s => s.Id).ToList();
+        var bolByShipment = shipmentIds.Count == 0
+            ? new Dictionary<Guid, Guid>()
+            : (await _context.BillsOfLading
+                .AsNoTracking()
+                .Where(b => shipmentIds.Contains(b.ShipmentId) && !b.IsVoided && !b.IsDeleted)
+                .OrderByDescending(b => b.IssuedAtUtc)
+                .Select(b => new { b.ShipmentId, b.Id })
+                .ToListAsync(cancellationToken))
+                .GroupBy(b => b.ShipmentId)
+                .ToDictionary(g => g.Key, g => g.First().Id);
 
         var items = shipments.Select(s => new ShipmentDto
         {
             Id = s.Id,
             ClientId = s.ClientId,
+            ClientName = s.Client?.CompanyName,
             FacilityId = s.FacilityId,
             ShipmentNumber = s.ShipmentNumber,
             CarrierCode = s.CarrierCode,
             CarrierServiceLevel = s.CarrierServiceLevel,
             Status = s.Status,
+            StagingLocationId = s.StagingLocationId,
+            StagingLocationCode = s.StagingLocation?.LocationCode,
+            AssignedDriverUserId = s.AssignedDriverUserId,
+            CustodyStatus = s.CustodyStatus,
             TrailerNumber = s.TrailerNumber,
             SealNumber = s.SealNumber,
+            BillOfLadingId = bolByShipment.TryGetValue(s.Id, out var bolId) ? bolId : null,
             BillOfLadingNumber = s.BillOfLadingNumber,
             TotalPackagesCount = s.TotalPackagesCount,
             TotalWeightKg = s.TotalWeightKg,
@@ -126,9 +149,12 @@ public class GetShipmentsQueryHandler : IRequestHandler<GetShipmentsQuery, Paged
                 PackageId = p.Id,
                 PackageNumber = p.PackageNumber,
                 TrackingNumber = p.TrackingNumber,
+                CarrierCode = p.CarrierCode,
                 GrossWeightKg = p.GrossWeightKg,
                 Status = p.Status,
-                OutboundOrderId = p.OutboundOrderId
+                OutboundOrderId = p.OutboundOrderId,
+                OrderNumber = p.OutboundOrder?.OrderNumber ?? string.Empty,
+                CurrentLocationCode = p.CurrentLocation?.LocationCode
             }).ToList()
         }).ToList();
 

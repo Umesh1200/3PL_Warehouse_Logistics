@@ -44,6 +44,27 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
         var facility = await _context.Facilities.FindAsync([request.FacilityId], cancellationToken);
         if (facility == null) throw new EntityNotFoundException(nameof(facility), request.FacilityId);
 
+        if (request.StagingLocationId.HasValue)
+        {
+            var stagingLoc = await _context.Locations
+                .AsNoTracking()
+                .FirstOrDefaultAsync(l => l.Id == request.StagingLocationId.Value && !l.IsDeleted, cancellationToken);
+            if (stagingLoc == null)
+            {
+                throw new EntityNotFoundException(nameof(Location), request.StagingLocationId.Value);
+            }
+            if (stagingLoc.FacilityId != request.FacilityId)
+            {
+                throw new ValidationException(nameof(request.StagingLocationId),
+                    $"Staging location '{stagingLoc.LocationCode}' belongs to a different facility.");
+            }
+            if (stagingLoc.LocationType != LocationType.StagingLane && stagingLoc.LocationType != LocationType.DockDoor)
+            {
+                throw new ValidationException(nameof(request.StagingLocationId),
+                    $"Location '{stagingLoc.LocationCode}' is '{stagingLoc.LocationType}'. Shipment staging requires StagingLane or DockDoor.");
+            }
+        }
+
         var count = await _context.Shipments
             .CountAsync(s => s.FacilityId == request.FacilityId, cancellationToken);
 
@@ -308,6 +329,7 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
         var package = await _context.Packages
             .Include(p => p.HandlingUnit)
             .Include(p => p.Shipment)
+                .ThenInclude(s => s!.Packages)
             .FirstOrDefaultAsync(p => p.Id == request.PackageId && !p.IsDeleted, cancellationToken);
 
         if (package == null)
@@ -343,11 +365,22 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
                 $"Cannot load package '{package.PackageNumber}' without an assigned shipment.");
         }
 
+        if (request.ShipmentId.HasValue && package.ShipmentId.Value != request.ShipmentId.Value)
+        {
+            throw new ValidationException(nameof(request.ShipmentId),
+                $"Package '{package.PackageNumber}' belongs to shipment '{package.ShipmentId.Value}', not '{request.ShipmentId.Value}'.");
+        }
+
         package.Load();
 
         var shipment = package.Shipment;
         if (shipment != null)
         {
+            if (!string.IsNullOrWhiteSpace(request.TrailerNumber) && string.IsNullOrWhiteSpace(shipment.TrailerNumber))
+            {
+                shipment.TrailerNumber = request.TrailerNumber.Trim();
+            }
+
             _context.ShipmentAuditLogs.Add(new ShipmentAuditLog
             {
                 ClientId = package.ClientId,
@@ -487,7 +520,9 @@ public class ShipmentConsolidationService : IShipmentConsolidationService
             ShipperName = shipment.Facility.Name,
             ShipperAddressSnapshot = "100 Distribution Way, Columbus, OH 43215",
             ConsigneeName = firstDest?.RecipientName ?? "Outbound Consignee",
-            ConsigneeAddressSnapshot = $"{firstDest?.AddressLine1}, {firstDest?.City}, {firstDest?.StateOrProvince} {firstDest?.PostalCode}",
+            ConsigneeAddressSnapshot = firstDest != null
+                ? $"{firstDest.AddressLine1}, {firstDest.City}, {firstDest.StateOrProvince} {firstDest.PostalCode}"
+                : "Delivery Destination on File",
             PackageTrackingNumbers = trackingList,
             DocumentSnapshotJson = JsonSerializer.Serialize(snapshotData),
             PreparedByUserId = request.UserId,

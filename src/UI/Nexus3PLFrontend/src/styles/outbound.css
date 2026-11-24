@@ -810,3 +810,379 @@
     display: block;
   }
 }
+
+/* ============================================================================
+ * Phase 7.4.4 — Shipment Consolidation, BOL & Custody Handover
+ * ============================================================================ */
+
+.outbound-kpi-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.kpi-mini-card {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding: 14px 16px;
+}
+
+.kpi-mini-label {
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-muted);
+}
+
+.kpi-mini-value {
+  font-size: 22px;
+  font-weight: 750;
+  color: var(--text-main);
+}
+
+.outbound-card {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+}
+
+.shipping-builder-card {
+  margin-bottom: 4px;
+}
+
+.shipping-builder-grid {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.shipping-builder-actions {
+  display: flex;
+  justify-content: flex-end;
+  margin-top: 12px;
+}
+
+.shipping-workspace-grid {
+  display: grid;
+  grid-template-columns: minmax(280px, 340px) minmax(0, 1fr);
+  gap: 16px;
+  align-items: start;
+  max-width: 100%;
+}
+
+.shipping-workspace-grid > section {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.shipping-queue-filters {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  gap: 8px;
+  margin-bottom: 12px;
+}
+
+.shipping-queue-filters input,
+.shipping-queue-filters select,
+.dock-scan-toolbar select,
+.dock-scan-toolbar input {
+  min-width: 0;
+  width: 100%;
+  min-height: 38px;
+  padding: 6px 10px;
+  border-radius: var(--radius-sm);
+  border: 1px solid var(--border-actionable);
+  background: var(--bg-input);
+  color: var(--text-main);
+  font-size: 13px;
+}
+
+.shipment-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  max-height: 620px;
+  overflow-y: auto;
+}
+
+.shipment-queue-item {
+  width: 100%;
+  min-width: 0;
+  text-align: left;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: #ffffff;
+  padding: 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+  transition: border-color 0.15s ease, background 0.15s ease;
+}
+
+.shipment-queue-item:hover {
+  border-color: var(--brand-primary);
+}
+
+.shipment-queue-item.active {
+  border-color: var(--brand-primary);
+  background: #eef2ff;
+}
+
+.shipment-queue-top,
+.shipment-queue-bottom {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+}
+
+.shipment-queue-meta {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  font-size: 12.5px;
+  color: var(--text-muted);
+}
+
+.shipping-detail-stack {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  min-width: 0;
+}
+
+.shipping-detail-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 12px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid var(--border-subtle);
+  overflow-wrap: anywhere;
+}
+
+.shipping-detail-title-row {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  margin-bottom: 4px;
+}
+
+.shipping-detail-title-row h3 {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.shipping-header-cta-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.dock-scan-toolbar {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  padding: 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  background: #f8fafc;
+}
+
+.dock-scan-input-group {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.dock-scan-input-group input {
+  flex: 1 1 120px;
+}
+
+.row-action-cluster {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.inline-remove-bar {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 8px;
+  background: #fef2f2;
+  border-radius: var(--radius-xs);
+}
+
+.inline-remove-bar input {
+  flex: 1;
+  min-width: 140px;
+  min-height: 32px;
+  padding: 4px 8px;
+  border: 1px solid var(--border-actionable);
+  border-radius: var(--radius-xs);
+}
+
+.btn-xs {
+  padding: 4px 9px;
+  font-size: 12px;
+  min-height: 28px;
+  border-radius: var(--radius-xs);
+}
+
+.btn-danger {
+  background: #dc2626;
+  color: #ffffff;
+  border: 1px solid #dc2626;
+}
+
+.btn-danger-outline {
+  background: #ffffff;
+  border: 1px solid #fecaca;
+  color: #b91c1c;
+}
+
+.btn-danger-outline:hover:not(:disabled) {
+  background: #fef2f2;
+}
+
+.mono-cell {
+  font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, monospace;
+}
+
+.empty-inline-state {
+  padding: 20px;
+  text-align: center;
+  border: 1px dashed var(--border-subtle);
+  border-radius: var(--radius-sm);
+  color: var(--text-muted);
+  font-size: 13px;
+}
+
+.eligible-picker-section {
+  border-top: 1px solid var(--border-subtle);
+  padding-top: 14px;
+}
+
+.eligible-picker-section input {
+  min-height: 36px;
+  padding: 6px 10px;
+  border: 1px solid var(--border-actionable);
+  border-radius: var(--radius-sm);
+  max-width: 100%;
+}
+
+.bol-modal-body,
+.bol-snapshot-card {
+  display: flex;
+  flex-direction: column;
+  gap: 14px;
+}
+
+.bol-snapshot-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.bol-number-title {
+  font-size: 16px;
+  font-weight: 700;
+  font-family: 'JetBrains Mono', ui-monospace, monospace;
+}
+
+.bol-parties-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.bol-party-box {
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  padding: 10px 12px;
+  background: #f8fafc;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+  font-size: 13px;
+}
+
+.bol-party-label,
+.bol-metric-label {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+  color: var(--text-muted);
+}
+
+.bol-metrics-strip {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: 10px;
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+}
+
+.bol-metrics-strip > div {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.bol-tracking-box,
+.bol-instructions-box {
+  padding: 10px 12px;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  word-break: break-word;
+}
+
+.form-grid-2col {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 12px;
+}
+
+.modal-actions-row,
+.modal-inline-submit {
+  display: flex;
+  justify-content: flex-end;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+@media (max-width: 960px) {
+  .outbound-kpi-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .shipping-workspace-grid,
+  .shipping-builder-grid,
+  .dock-scan-toolbar {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+
+@media (max-width: 640px) {
+  .outbound-kpi-grid,
+  .shipping-queue-filters,
+  .bol-parties-grid,
+  .bol-metrics-strip,
+  .form-grid-2col {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
