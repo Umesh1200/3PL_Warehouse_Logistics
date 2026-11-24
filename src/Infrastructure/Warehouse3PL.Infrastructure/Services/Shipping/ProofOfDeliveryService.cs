@@ -1,3 +1,4 @@
+using System.Security.Cryptography;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Warehouse3PL.Application.Common.Interfaces;
@@ -173,38 +174,42 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
         // 3. MIME Type & File Signature Sanitization
         ValidateEvidenceContentTypes(request);
 
-        // 4. Check for Existing Active POD (Duplicate vs Conflict vs Supersession)
+        var normalizedIdempKey = string.IsNullOrWhiteSpace(request.IdempotencyKey)
+            ? null
+            : request.IdempotencyKey.Trim();
+        var incomingSigSha256 = await ComputeStreamSha256Async(request.SignatureStream, cancellationToken);
+        var incomingPhotoSha256 = await ComputeStreamSha256Async(request.PhotoStream, cancellationToken);
+
+        // 4. Check for Existing Active POD or Cross-Package Idempotency Key Reuse (Duplicate -> 200 vs Conflict -> 409)
         if (!isSupersession)
         {
+            if (normalizedIdempKey != null)
+            {
+                var crossPkgConflict = await _context.ProofOfDeliveries
+                    .AsNoTracking()
+                    .AnyAsync(p => p.FacilityId == package.FacilityId &&
+                                   !p.IsSuperseded &&
+                                   p.PackageId != package.Id &&
+                                   p.IdempotencyKey == normalizedIdempKey, cancellationToken);
+                if (crossPkgConflict)
+                {
+                    throw new ConcurrencyException(
+                        $"Proof of Delivery idempotency key '{normalizedIdempKey}' has already been consumed by a different package in this facility.");
+                }
+            }
+
             var activePod = await _context.ProofOfDeliveries
                 .FirstOrDefaultAsync(p => p.PackageId == package.Id && !p.IsSuperseded, cancellationToken);
 
             if (activePod != null)
             {
-                // Idempotent duplicate check
-                if (activePod.IsIdempotentDuplicate(
-                    request.CarrierConfirmationNumber,
-                    request.CarrierEventId,
-                    request.IdempotencyKey,
-                    request.EvidenceSource))
+                if (EvaluateExistingPodCollision(activePod, request, normalizedIdempKey, incomingSigSha256, incomingPhotoSha256))
                 {
                     _logger.LogInformation("Idempotent duplicate POD detected for package '{Pkg}'. Returning existing POD '{PodId}'.",
                         package.PackageNumber, activePod.Id);
 
                     return await BuildSubmissionResultAsync(activePod, package, isDuplicate: true, "Duplicate Proof of Delivery ignored (Idempotent).", cancellationToken);
                 }
-
-                // Conflict check
-                if (activePod.HasConflictWith(request.RecipientName, request.CarrierConfirmationNumber, request.EvidenceSource))
-                {
-                    _logger.LogWarning("Contradictory POD submission rejected for package '{Pkg}'.", package.PackageNumber);
-                    throw new ValidationException(nameof(request.PackageId),
-                        $"Contradictory delivery confirmation submitted for package '{package.PackageNumber}'. Existing confirmation '{activePod.CarrierConfirmationNumber}', recipient '{activePod.RecipientName}'.");
-                }
-
-                // If existing POD exists and not an exact duplicate, require explicit supersession
-                throw new ValidationException(nameof(request.PackageId),
-                    $"Package '{package.PackageNumber}' already has an active authoritative Proof of Delivery ('{activePod.Id}'). An explicit supersession request is required to amend delivery evidence.");
             }
         }
 
@@ -250,7 +255,7 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             throw;
         }
 
-        // 6. Persist Metadata in Pending State
+        // 6. Persist Metadata in Pending State (P745-R01: IsSigned strictly derived from validated signature artifact)
         var pod = new ProofOfDelivery
         {
             ClientId = package.ClientId,
@@ -261,7 +266,7 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             CarrierCode = package.CarrierCode,
             RecipientName = request.RecipientName?.Trim(),
             DeliveryLocationDescription = request.DeliveryLocationDescription?.Trim(),
-            IsSigned = request.IsSigned || tempSigKey != null,
+            IsSigned = tempSigKey != null,
             SignatureObjectKey = tempSigKey,
             PhotoObjectKey = tempPhotoKey,
             SignatureContentType = request.SignatureContentType?.Trim().ToLowerInvariant(),
@@ -273,12 +278,13 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             Longitude = request.Longitude,
             CarrierConfirmationNumber = request.CarrierConfirmationNumber?.Trim(),
             CarrierEventId = request.CarrierEventId?.Trim(),
-            IdempotencyKey = request.IdempotencyKey?.Trim(),
+            IdempotencyKey = normalizedIdempKey,
             EvidenceSource = request.EvidenceSource,
             CapturedAtUtc = DateTime.UtcNow,
             DeliveredAtUtc = request.DeliveredAtUtc
         };
 
+        ProofOfDelivery? racedDuplicatePod = null;
         try
         {
             pod.Validate();
@@ -289,6 +295,10 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
                 {
                     await request.BeforeCommitCustodyValidationAsync(cancellationToken);
                 }
+
+                await using var podIdempLock = normalizedIdempKey != null
+                    ? await _context.AcquireScopedIdempotencyLockAsync("POD", package.FacilityId, normalizedIdempKey, cancellationToken)
+                    : null;
 
                 if (isSupersession)
                 {
@@ -358,14 +368,31 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
                 }
                 else
                 {
+                    if (normalizedIdempKey != null)
+                    {
+                        var crossPkgRace = await _context.ProofOfDeliveries
+                            .AsNoTracking()
+                            .AnyAsync(p => p.FacilityId == package.FacilityId &&
+                                           !p.IsSuperseded &&
+                                           p.PackageId != package.Id &&
+                                           p.IdempotencyKey == normalizedIdempKey, cancellationToken);
+                        if (crossPkgRace)
+                        {
+                            throw new ConcurrencyException(
+                                $"Proof of Delivery idempotency key '{normalizedIdempKey}' has already been consumed by a different package in this facility.");
+                        }
+                    }
+
                     var racedActivePod = await _context.ProofOfDeliveries
-                        .AsNoTracking()
                         .FirstOrDefaultAsync(p => p.PackageId == package.Id && !p.IsSuperseded, cancellationToken);
 
                     if (racedActivePod != null)
                     {
-                        throw new ValidationException(nameof(request.PackageId),
-                            $"Package '{package.PackageNumber}' already has an active authoritative Proof of Delivery ('{racedActivePod.Id}').");
+                        if (EvaluateExistingPodCollision(racedActivePod, request, normalizedIdempKey, incomingSigSha256, incomingPhotoSha256))
+                        {
+                            racedDuplicatePod = racedActivePod;
+                            return false;
+                        }
                     }
 
                     _context.ProofOfDeliveries.Add(pod);
@@ -380,6 +407,12 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             _logger.LogError(ex, "Failed to persist ProofOfDelivery metadata for package '{Pkg}'. Cleaning up staged objects.", package.PackageNumber);
             await TryDeleteTempObjectsAsync(tempSigKey, tempPhotoKey);
             throw;
+        }
+
+        if (racedDuplicatePod != null)
+        {
+            await TryDeleteTempObjectsAsync(tempSigKey, tempPhotoKey);
+            return await BuildSubmissionResultAsync(racedDuplicatePod, package, isDuplicate: true, "Duplicate Proof of Delivery ignored (Idempotent).", cancellationToken);
         }
 
         // 7. Promote Staged Objects to Final Authoritative Keys
@@ -519,7 +552,7 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
                 break;
 
             case PodEvidenceSource.DriverHandheld:
-                bool hasSignature = (request.IsSigned && request.SignatureStream != null);
+                bool hasSignature = request.SignatureStream != null;
                 bool hasPhoto = request.PhotoStream != null;
                 bool hasRecipient = !string.IsNullOrWhiteSpace(request.RecipientName);
 
@@ -638,6 +671,12 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             PackageNumber = package.PackageNumber,
             TrackingNumber = pod.TrackingNumber,
             CarrierCode = pod.CarrierCode,
+            RecipientName = pod.RecipientName,
+            DeliveryLocationDescription = pod.DeliveryLocationDescription,
+            IsSigned = pod.IsSigned,
+            EvidenceSource = pod.EvidenceSource,
+            CapturedAtUtc = pod.CapturedAtUtc,
+            DeliveredAtUtc = pod.DeliveredAtUtc,
             IsStorageFinalized = pod.IsStorageFinalized,
             SignatureSha256 = pod.SignatureSha256,
             PhotoSha256 = pod.PhotoSha256,
@@ -646,6 +685,92 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             PreSignedUrlsExpireAtUtc = expiresAtUtc,
             Message = message
         };
+    }
+
+    private static async Task<string?> ComputeStreamSha256Async(Stream? stream, CancellationToken cancellationToken)
+    {
+        if (stream == null)
+        {
+            return null;
+        }
+
+        if (stream.CanSeek)
+        {
+            stream.Position = 0;
+        }
+
+        using var sha = SHA256.Create();
+        var hashBytes = await sha.ComputeHashAsync(stream, cancellationToken);
+
+        if (stream.CanSeek)
+        {
+            stream.Position = 0;
+        }
+
+        return Convert.ToHexStringLower(hashBytes);
+    }
+
+    private static bool EvaluateExistingPodCollision(
+        ProofOfDelivery activePod,
+        SubmitProofOfDeliveryRequest request,
+        string? normalizedIdempKey,
+        string? incomingSigSha256,
+        string? incomingPhotoSha256)
+    {
+        bool idempMatches = normalizedIdempKey != null &&
+            !string.IsNullOrWhiteSpace(activePod.IdempotencyKey) &&
+            string.Equals(activePod.IdempotencyKey.Trim(), normalizedIdempKey, StringComparison.OrdinalIgnoreCase);
+
+        bool carrierRefMatches = activePod.EvidenceSource == request.EvidenceSource &&
+            ((!string.IsNullOrWhiteSpace(activePod.CarrierConfirmationNumber) &&
+              !string.IsNullOrWhiteSpace(request.CarrierConfirmationNumber) &&
+              string.Equals(activePod.CarrierConfirmationNumber.Trim(), request.CarrierConfirmationNumber.Trim(), StringComparison.OrdinalIgnoreCase)) ||
+             (!string.IsNullOrWhiteSpace(activePod.CarrierEventId) &&
+              !string.IsNullOrWhiteSpace(request.CarrierEventId) &&
+              string.Equals(activePod.CarrierEventId.Trim(), request.CarrierEventId.Trim(), StringComparison.OrdinalIgnoreCase)));
+
+        if (idempMatches || carrierRefMatches)
+        {
+            if (HasMatchingEvidencePayload(activePod, request, incomingSigSha256, incomingPhotoSha256))
+            {
+                return true;
+            }
+
+            throw new ConcurrencyException(
+                $"Conflicting Proof of Delivery evidence submitted for package '{activePod.PackageId}' under existing idempotency or carrier event identifier.");
+        }
+
+        if (activePod.HasConflictWith(request.RecipientName, request.CarrierConfirmationNumber, request.EvidenceSource))
+        {
+            throw new ValidationException(nameof(request.PackageId),
+                $"Contradictory delivery confirmation submitted for package '{activePod.PackageId}'. Existing confirmation '{activePod.CarrierConfirmationNumber}', recipient '{activePod.RecipientName}'.");
+        }
+
+        throw new ValidationException(nameof(request.PackageId),
+            $"Package '{activePod.PackageId}' already has an active authoritative Proof of Delivery ('{activePod.Id}'). An explicit supersession request is required to amend delivery evidence.");
+    }
+
+    private static bool HasMatchingEvidencePayload(
+        ProofOfDelivery existingPod,
+        SubmitProofOfDeliveryRequest incoming,
+        string? incomingSigSha256,
+        string? incomingPhotoSha256)
+    {
+        static bool TextEq(string? a, string? b) =>
+            string.Equals(a?.Trim() ?? string.Empty, b?.Trim() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+
+        bool incomingSigned = incomingSigSha256 != null;
+
+        return existingPod.EvidenceSource == incoming.EvidenceSource &&
+            existingPod.IsSigned == incomingSigned &&
+            TextEq(existingPod.RecipientName, incoming.RecipientName) &&
+            TextEq(existingPod.DeliveryLocationDescription, incoming.DeliveryLocationDescription) &&
+            TextEq(existingPod.SignatureSha256, incomingSigSha256) &&
+            TextEq(existingPod.PhotoSha256, incomingPhotoSha256) &&
+            existingPod.Latitude == incoming.Latitude &&
+            existingPod.Longitude == incoming.Longitude &&
+            TextEq(existingPod.CarrierConfirmationNumber, incoming.CarrierConfirmationNumber) &&
+            TextEq(existingPod.CarrierEventId, incoming.CarrierEventId);
     }
 
     private async Task<ProofOfDeliveryDto> MapToDtoAsync(

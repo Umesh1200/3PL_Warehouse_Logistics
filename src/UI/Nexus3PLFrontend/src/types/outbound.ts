@@ -1843,6 +1843,12 @@ export interface SubmitProofOfDeliveryResultDto {
   packageNumber: string;
   trackingNumber: string;
   carrierCode: string;
+  recipientName?: string | null;
+  deliveryLocationDescription?: string | null;
+  isSigned: boolean;
+  evidenceSource: PodEvidenceSource;
+  capturedAtUtc: string;
+  deliveredAtUtc: string;
   isStorageFinalized: boolean;
   signatureSha256?: string | null;
   photoSha256?: string | null;

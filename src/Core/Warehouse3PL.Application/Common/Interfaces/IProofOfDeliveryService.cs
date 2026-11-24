@@ -98,6 +98,12 @@ public class SubmitProofOfDeliveryResult
     public string PackageNumber { get; set; } = string.Empty;
     public string TrackingNumber { get; set; } = string.Empty;
     public string CarrierCode { get; set; } = string.Empty;
+    public string? RecipientName { get; set; }
+    public string? DeliveryLocationDescription { get; set; }
+    public bool IsSigned { get; set; }
+    public PodEvidenceSource EvidenceSource { get; set; }
+    public DateTime CapturedAtUtc { get; set; }
+    public DateTime DeliveredAtUtc { get; set; }
     public bool IsStorageFinalized { get; set; }
     public string? SignatureSha256 { get; set; }
     public string? PhotoSha256 { get; set; }

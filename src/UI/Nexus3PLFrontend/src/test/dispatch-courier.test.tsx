@@ -328,6 +328,8 @@ describe('Phase 7.4.5: Dispatch Board, Tracking, POD & Courier Exceptions UI', (
       }
 
       if (url.endsWith(`/api/v1/outbound/dispatch/packages/${PKG_2_ID}/pod`) && method === 'POST') {
+        const isSignedReq =
+          init?.body instanceof FormData ? Boolean(init.body.get('signature')) : Boolean(parsedBody?.signatureBase64);
         shipmentState = {
           ...shipmentState,
           packages: shipmentState.packages.map((p) =>
@@ -343,6 +345,12 @@ describe('Phase 7.4.5: Dispatch Board, Tracking, POD & Courier Exceptions UI', (
             packageNumber: 'PKG-745-002',
             trackingNumber: 'FDX-745-002',
             carrierCode: 'SIM-FEDEX',
+            recipientName: 'Server Alice Official',
+            deliveryLocationDescription: 'Bay 9',
+            isSigned: isSignedReq,
+            evidenceSource: PodEvidenceSource.DriverHandheld,
+            capturedAtUtc: '2026-11-24T11:55:00Z',
+            deliveredAtUtc: '2026-11-24T11:55:00Z',
             isStorageFinalized: true,
             message: 'POD submitted',
           }),
@@ -499,6 +507,12 @@ describe('Phase 7.4.5: Dispatch Board, Tracking, POD & Courier Exceptions UI', (
     fireEvent.click(screen.getByTestId('pod-submit-btn'));
 
     await waitFor(() => expect(screen.getByTestId('pod-preview-card')).toBeTruthy());
+    const podPostCall = calls.find((c) => c.method === 'POST' && c.url.endsWith(`/packages/${PKG_2_ID}/pod`));
+    expect(podPostCall?.body?.isSigned).toBe(false);
+    expect(screen.getByTestId('pod-signed-status').textContent).toContain(
+      'Recipient Name Acknowledgment (Unsigned)'
+    );
+    expect(screen.getByTestId('pod-preview-card').textContent).toContain('Server Alice Official');
     fireEvent.click(screen.getByTestId('pod-confirm-delivery-btn'));
 
     await waitFor(() => expect(screen.getByTestId('pod-confirmation-banner')).toBeTruthy());

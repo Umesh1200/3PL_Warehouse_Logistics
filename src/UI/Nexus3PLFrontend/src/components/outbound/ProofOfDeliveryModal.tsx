@@ -45,7 +45,6 @@ export const ProofOfDeliveryModal: React.FC<ProofOfDeliveryModalProps> = ({
   );
   const [verificationReason, setVerificationReason] = useState('');
   const [supersedeReason, setSupersedeReason] = useState('');
-  const [isSigned, setIsSigned] = useState(true);
   const [signatureFile, setSignatureFile] = useState<File | null>(null);
   const [photoFile, setPhotoFile] = useState<File | null>(null);
   const [latitude, setLatitude] = useState('');
@@ -74,7 +73,6 @@ export const ProofOfDeliveryModal: React.FC<ProofOfDeliveryModalProps> = ({
     setPhotoFile(null);
     setLatitude('');
     setLongitude('');
-    setIsSigned(true);
     setEvidenceSource(
       isDriver ? PodEvidenceSource.DriverHandheld : PodEvidenceSource.ManualVerification
     );
@@ -142,7 +140,7 @@ export const ProofOfDeliveryModal: React.FC<ProofOfDeliveryModalProps> = ({
       const res = await dispatchApi.submitProofOfDelivery(packageId, {
         recipientName: recipientName.trim(),
         deliveryLocationDescription: locationDesc.trim() || null,
-        isSigned,
+        isSigned: Boolean(signatureFile),
         signatureFile,
         photoFile,
         latitude: latitude.trim() ? Number(latitude.trim()) : null,
@@ -156,30 +154,39 @@ export const ProofOfDeliveryModal: React.FC<ProofOfDeliveryModalProps> = ({
       });
 
       idempKeyRef.current = null;
-      setExistingPod({
-        id: res.proofOfDeliveryId,
-        clientId: '',
-        facilityId: '',
-        packageId: res.packageId,
-        packageNumber: res.packageNumber,
-        trackingNumber: res.trackingNumber,
-        carrierCode: res.carrierCode,
-        recipientName: recipientName.trim(),
-        deliveryLocationDescription: locationDesc.trim() || null,
-        isSigned,
-        isStorageFinalized: res.isStorageFinalized,
-        preSignedSignatureUrl: res.preSignedSignatureUrl,
-        preSignedPhotoUrl: res.preSignedPhotoUrl,
-        signatureSha256: res.signatureSha256,
-        photoSha256: res.photoSha256,
-        evidenceSource: effectiveSource,
-        capturedAtUtc: new Date().toISOString(),
-        deliveredAtUtc: new Date().toISOString(),
-        isSuperseded: false,
-      });
+      if (canViewPod && !isDriver) {
+        const serverPod = await dispatchApi.getPackagePod(packageId);
+        if (serverPod) {
+          setExistingPod(serverPod);
+        }
+      } else {
+        setExistingPod({
+          id: res.proofOfDeliveryId,
+          clientId: '',
+          facilityId: '',
+          packageId: res.packageId,
+          packageNumber: res.packageNumber,
+          trackingNumber: res.trackingNumber,
+          carrierCode: res.carrierCode,
+          recipientName: res.recipientName ?? null,
+          deliveryLocationDescription: res.deliveryLocationDescription ?? null,
+          isSigned: Boolean(res.isSigned),
+          isStorageFinalized: res.isStorageFinalized,
+          preSignedSignatureUrl: res.preSignedSignatureUrl,
+          preSignedPhotoUrl: res.preSignedPhotoUrl,
+          signatureSha256: res.signatureSha256,
+          photoSha256: res.photoSha256,
+          evidenceSource: res.evidenceSource,
+          capturedAtUtc: res.capturedAtUtc,
+          deliveredAtUtc: res.deliveredAtUtc,
+          isSuperseded: false,
+        });
+      }
       onFeedback({
         type: 'success',
-        message: `Proof of Delivery recorded for ${res.packageNumber}. Ready to confirm final delivery.`,
+        message: res.isDuplicate
+          ? `Returned existing Proof of Delivery for ${res.packageNumber} (Idempotent replay).`
+          : `Proof of Delivery recorded for ${res.packageNumber}. Ready to confirm final delivery.`,
       });
       await onCompleted();
     } catch (err: any) {
@@ -233,7 +240,7 @@ export const ProofOfDeliveryModal: React.FC<ProofOfDeliveryModalProps> = ({
         replacementSubmission: {
           recipientName: recipientName.trim() || existingPod.recipientName || 'Verified Recipient',
           deliveryLocationDescription: locationDesc.trim() || existingPod.deliveryLocationDescription || null,
-          isSigned: isSigned || Boolean(sigB64),
+          isSigned: Boolean(sigB64),
           signatureBase64: sigB64,
           signatureContentType: signatureFile?.type || null,
           photoBase64: photoB64,
@@ -297,7 +304,12 @@ export const ProofOfDeliveryModal: React.FC<ProofOfDeliveryModalProps> = ({
             <div className="dispatch-shipment-meta">
               <span>Recipient: <strong>{existingPod.recipientName || '—'}</strong></span>
               <span>Location: {existingPod.deliveryLocationDescription || '—'}</span>
-              <span>Signed: {existingPod.isSigned ? 'Yes' : 'No'}</span>
+              <span data-testid="pod-signed-status">
+                Attestation:{' '}
+                {existingPod.isSigned
+                  ? 'Signed (Signature Artifact Verified)'
+                  : 'Recipient Name Acknowledgment (Unsigned)'}
+              </span>
               <span>Delivered: {new Date(existingPod.deliveredAtUtc).toLocaleString()}</span>
             </div>
             {(existingPod.preSignedSignatureUrl || existingPod.preSignedPhotoUrl) && (
@@ -448,6 +460,14 @@ export const ProofOfDeliveryModal: React.FC<ProofOfDeliveryModalProps> = ({
                   data-testid="pod-photo-file"
                 />
               </div>
+            </div>
+
+            <div className="outbound-alert warning" data-testid="pod-attestation-hint">
+              <span>
+                {signatureFile
+                  ? `Signature artifact (${signatureFile.name}) attached — will be recorded as Signed.`
+                  : 'No signature image attached — submission will be recorded as Recipient Name Acknowledgment (Unsigned).'}
+              </span>
             </div>
 
             {!showSupersedeForm && (

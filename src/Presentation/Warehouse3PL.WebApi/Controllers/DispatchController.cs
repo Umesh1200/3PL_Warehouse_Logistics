@@ -546,7 +546,7 @@ public class DispatchController : BaseApiController
             PackageId = packageId,
             RecipientName = apiRequest.RecipientName,
             DeliveryLocationDescription = apiRequest.DeliveryLocationDescription,
-            IsSigned = apiRequest.IsSigned,
+            IsSigned = sigStream != null,
             SignatureStream = sigStream,
             SignatureContentType = apiRequest.SignatureContentType,
             PhotoStream = photoStream,
@@ -575,7 +575,6 @@ public class DispatchController : BaseApiController
         var sigStream = await CopyBoundedFormFileAsync(sigFile, "signature", streams, ct);
         var photoStream = await CopyBoundedFormFileAsync(photoFile, "photo", streams, ct);
 
-        bool.TryParse(form["isSigned"], out var isSigned);
         decimal? lat = decimal.TryParse(form["latitude"], out var parsedLat) ? parsedLat : null;
         decimal? lng = decimal.TryParse(form["longitude"], out var parsedLng) ? parsedLng : null;
         DateTime deliveredAt = DateTime.TryParse(form["deliveredAtUtc"], out var parsedDeliveredAt)
@@ -591,7 +590,7 @@ public class DispatchController : BaseApiController
             PackageId = packageId,
             RecipientName = NullIfEmpty(form["recipientName"]),
             DeliveryLocationDescription = NullIfEmpty(form["deliveryLocationDescription"]),
-            IsSigned = isSigned || sigStream != null,
+            IsSigned = sigStream != null,
             SignatureStream = sigStream,
             SignatureContentType = NullIfEmpty(form["signatureContentType"]) ?? sigFile?.ContentType,
             PhotoStream = photoStream,

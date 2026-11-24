@@ -386,7 +386,16 @@ export const dispatchApi = {
     if (!data || typeof data !== 'object' || !(data as SubmitProofOfDeliveryResultDto).proofOfDeliveryId) {
       throw new Error('Received malformed submit POD response from server.');
     }
-    return data as SubmitProofOfDeliveryResultDto;
+    const res = data as SubmitProofOfDeliveryResultDto;
+    return {
+      ...res,
+      isSigned: Boolean(res.isSigned),
+      evidenceSource: res.evidenceSource
+        ? normalizePodEvidenceSource(res.evidenceSource)
+        : payload.evidenceSource,
+      capturedAtUtc: res.capturedAtUtc || new Date().toISOString(),
+      deliveredAtUtc: res.deliveredAtUtc || new Date().toISOString(),
+    };
   },
 
   supersedeProofOfDelivery: async (
@@ -405,7 +414,16 @@ export const dispatchApi = {
     if (!data || typeof data !== 'object' || !(data as SubmitProofOfDeliveryResultDto).proofOfDeliveryId) {
       throw new Error('Received malformed supersede POD response from server.');
     }
-    return data as SubmitProofOfDeliveryResultDto;
+    const res = data as SubmitProofOfDeliveryResultDto;
+    return {
+      ...res,
+      isSigned: Boolean(res.isSigned),
+      evidenceSource: res.evidenceSource
+        ? normalizePodEvidenceSource(res.evidenceSource)
+        : payload.replacementSubmission.evidenceSource,
+      capturedAtUtc: res.capturedAtUtc || new Date().toISOString(),
+      deliveredAtUtc: res.deliveredAtUtc || new Date().toISOString(),
+    };
   },
 
   confirmPackageDelivery: async (

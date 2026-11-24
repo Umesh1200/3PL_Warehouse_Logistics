@@ -4418,6 +4418,71 @@ try
 
     Console.WriteLine("PASS PostgreSQL Phase 7.4.5 Courier Scoped Stops, Tracking Sync & Delivery Exception Resolution Lifecycle verified cleanly.");
 
+    // P745-R01 & P745-R02 Live PostgreSQL Regressions: Unsigned Name-Only vs Signed POD Derivation & Idempotency Fingerprint 409 Conflict
+    var r01OrdId = Guid.NewGuid();
+    var r01ShpId = Guid.NewGuid();
+    var r01PkgUnsignedId = Guid.NewGuid();
+    var r01PkgSignedId = Guid.NewGuid();
+    await using (var p745SeedDb = CreateDb(operationalConn, user))
+    {
+        p745SeedDb.OutboundOrders.Add(new OutboundOrder { Id = r01OrdId, ClientId = client1Id, FacilityId = facilityId, OrderNumber = "PG-ORD-745-POD", CustomerName = "POD Auditor", Status = OutboundOrderStatus.Completed });
+        p745SeedDb.Shipments.Add(new Shipment { Id = r01ShpId, ClientId = client1Id, FacilityId = facilityId, ShipmentNumber = "PG-SHP-745-POD", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, CustodyStatus = ShipmentCustodyStatus.Confirmed, AssignedDriverUserId = cDriverAId, DispatchedAtUtc = DateTime.UtcNow.AddMinutes(-5), Version = 1 });
+        p745SeedDb.ShipmentCustodyTransfers.Add(new ShipmentCustodyTransfer { ClientId = client1Id, FacilityId = facilityId, ShipmentId = r01ShpId, CarrierCode = "SIM-FEDEX", DriverName = "PG DriverA", DriverSignatureAcknowledgment = "SIG-745-R", TotalPackagesConfirmed = 2, TotalWeightKg = 4m, AuthorizedByUserId = bSupId, AssignedDriverUserId = cDriverAId, CustodyStatus = ShipmentCustodyStatus.Confirmed, TransferredAtUtc = DateTime.UtcNow.AddMinutes(-5) });
+        var huU = Guid.NewGuid();
+        var huS = Guid.NewGuid();
+        p745SeedDb.HandlingUnits.AddRange(
+            new HandlingUnit { Id = huU, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-745-U", UnitType = HandlingUnitType.ShippingCarton },
+            new HandlingUnit { Id = huS, ClientId = client1Id, FacilityId = facilityId, LpnCode = "PG-745-S", UnitType = HandlingUnitType.ShippingCarton });
+        p745SeedDb.Packages.AddRange(
+            new Package { Id = r01PkgUnsignedId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = r01OrdId, ShipmentId = r01ShpId, HandlingUnitId = huU, PackageNumber = "PG-745-PKG-U", CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-PG-745-U", Status = PackageStatus.Loaded, GrossWeightKg = 2m, LengthCm = 10, WidthCm = 10, HeightCm = 10 },
+            new Package { Id = r01PkgSignedId, ClientId = client1Id, FacilityId = facilityId, OutboundOrderId = r01OrdId, ShipmentId = r01ShpId, HandlingUnitId = huS, PackageNumber = "PG-745-PKG-S", CarrierCode = "SIM-FEDEX", TrackingNumber = "TRK-PG-745-S", Status = PackageStatus.Loaded, GrossWeightKg = 2m, LengthCm = 10, WidthCm = 10, HeightCm = 10 });
+        await p745SeedDb.SaveChangesAsync();
+    }
+
+    SetDriverClaims(cDriverAId);
+    // P745-R01: Name-only submission (even with spoofed isSigned:true) persists IsSigned = false
+    Guid pgUnsignedPodId;
+    using (var rNameOnly = await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{r01PkgUnsignedId}/pod", new { recipientName = "Alice PG", isSigned = true, idempotencyKey = "pg-r02-key-u" }))
+    {
+        if (rNameOnly.StatusCode != HttpStatusCode.OK)
+            throw new InvalidOperationException($"P745-R01 PostgreSQL unsigned POD failed: {rNameOnly.StatusCode}");
+        var uJson = JsonDocument.Parse(await rNameOnly.Content.ReadAsStringAsync()).RootElement;
+        if (uJson.GetProperty("isSigned").GetBoolean())
+            throw new InvalidOperationException("P745-R01 PostgreSQL recipient-only POD erroneously persisted isSigned=true.");
+        pgUnsignedPodId = uJson.GetProperty("proofOfDeliveryId").GetGuid();
+    }
+
+    // P745-R02: Identical replay -> 200 isDuplicate=true; Conflicting recipient or added signature -> 409 Conflict
+    using (var rReplayU = await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{r01PkgUnsignedId}/pod", new { recipientName = "Alice PG", idempotencyKey = "pg-r02-key-u" }))
+    {
+        var repJson = JsonDocument.Parse(await rReplayU.Content.ReadAsStringAsync()).RootElement;
+        if (rReplayU.StatusCode != HttpStatusCode.OK || !repJson.GetProperty("isDuplicate").GetBoolean() || repJson.GetProperty("proofOfDeliveryId").GetGuid() != pgUnsignedPodId)
+            throw new InvalidOperationException("P745-R02 PostgreSQL identical replay failed.");
+    }
+    if ((await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{r01PkgUnsignedId}/pod", new { recipientName = "Bob Impostor", idempotencyKey = "pg-r02-key-u" })).StatusCode != HttpStatusCode.Conflict ||
+        (await p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{r01PkgUnsignedId}/pod", new { recipientName = "Alice PG", signatureBase64 = pgSupPngB64, signatureContentType = "image/png", idempotencyKey = "pg-r02-key-u" })).StatusCode != HttpStatusCode.Conflict)
+        throw new InvalidOperationException("P745-R02 PostgreSQL conflicting replay did not return 409 Conflict.");
+
+    // Concurrent PostgreSQL POD race with conflicting payloads on same IdempotencyKey -> 1x 200 OK, 1x 409 Conflict, 1 POD row
+    var pgPodRace = await Task.WhenAll(
+        p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{r01PkgSignedId}/pod", new { recipientName = "Signed Driver A", signatureBase64 = pgSupPngB64, signatureContentType = "image/png", idempotencyKey = "pg-r02-race-key" }),
+        p74Client.PostAsJsonAsync($"/api/v1/outbound/dispatch/packages/{r01PkgSignedId}/pod", new { recipientName = "Tampered Name B", signatureBase64 = pgSupPngB64, signatureContentType = "image/png", idempotencyKey = "pg-r02-race-key" }));
+    var pgPodRaceStatuses = pgPodRace.Select(r => r.StatusCode).ToArray();
+    foreach (var r in pgPodRace) r.Dispose();
+    if (pgPodRaceStatuses.Count(s => s == HttpStatusCode.OK) != 1 || pgPodRaceStatuses.Count(s => s == HttpStatusCode.Conflict) != 1)
+        throw new InvalidOperationException($"P745-R02 PostgreSQL concurrent conflicting POD race expected 1x 200 & 1x 409, got: {string.Join(",", pgPodRaceStatuses)}");
+
+    TestAuthHandler.CustomClaims = null;
+    await using (var r01Db = CreateDb(operationalConn, user))
+    {
+        var podU = await r01Db.ProofOfDeliveries.SingleAsync(p => p.PackageId == r01PkgUnsignedId);
+        var podS = await r01Db.ProofOfDeliveries.SingleAsync(p => p.PackageId == r01PkgSignedId);
+        if (podU.IsSigned || podU.SignatureSha256 != null || podU.RecipientName != "Alice PG" || !podS.IsSigned || podS.SignatureSha256 == null)
+            throw new InvalidOperationException("P745-R01/R02 PostgreSQL persisted POD evidence integrity invariant failed.");
+    }
+
+    Console.WriteLine("PASS PostgreSQL P745-R01 & P745-R02 POD Signed Artifact Derivation & Idempotency Fingerprint 409 Conflict verified cleanly.");
+
     if (Directory.Exists(pgPodStorageDir))
     {
         try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }

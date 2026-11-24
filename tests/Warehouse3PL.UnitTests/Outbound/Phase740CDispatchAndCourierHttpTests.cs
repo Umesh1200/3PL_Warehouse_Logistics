@@ -1194,6 +1194,146 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
         }
     }
 
+    [Fact]
+    public async Task P745R01_R02_PodSignedDerivation_And_IdempotencyPayloadConflict_ReturnExpectedOutcomes()
+    {
+        var driverAToken = await LoginAsync("drivera@740c.test");
+        var clientToken = await LoginAsync("clienta@740c.test");
+
+        // P745-R01: Recipient-only submission (even with spoofed isSigned:true & no signature file) persists IsSigned = false
+        Guid unsignedPodId;
+        using (var rNameOnly = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Alice Unsigned",
+                deliveryLocationDescription = "Front Desk",
+                isSigned = true,
+                idempotencyKey = "p745-idemp-unsigned"
+            })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rNameOnly.StatusCode);
+            var res = await rNameOnly.Content.ReadFromJsonAsync<SubmitProofOfDeliveryResult>(JsonOptions);
+            Assert.NotNull(res);
+            Assert.False(res!.IsSigned);
+            Assert.False(res.IsDuplicate);
+            Assert.Null(res.SignatureSha256);
+            unsignedPodId = res.ProofOfDeliveryId;
+        }
+
+        using (var rGetPod1 = await _http.SendAsync(BearerRequest(HttpMethod.Get,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", clientToken)))
+        {
+            Assert.Equal(HttpStatusCode.OK, rGetPod1.StatusCode);
+            var dto1 = await rGetPod1.Content.ReadFromJsonAsync<ProofOfDeliveryDto>(JsonOptions);
+            Assert.NotNull(dto1);
+            Assert.False(dto1!.IsSigned);
+            Assert.Null(dto1.SignatureSha256);
+        }
+
+        // P745-R02: Identical replay on Pkg1 returns 200 idempotently with same POD ID & Alice Unsigned
+        using (var rReplayOk = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Alice Unsigned",
+                deliveryLocationDescription = "Front Desk",
+                idempotencyKey = "p745-idemp-unsigned"
+            })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rReplayOk.StatusCode);
+            var replay = await rReplayOk.Content.ReadFromJsonAsync<SubmitProofOfDeliveryResult>(JsonOptions);
+            Assert.True(replay!.IsDuplicate);
+            Assert.Equal(unsignedPodId, replay.ProofOfDeliveryId);
+            Assert.Equal("Alice Unsigned", replay.RecipientName);
+        }
+
+        // P745-R02: Retrying same key with changed recipient OR added signature -> 409 Conflict, zero mutation
+        using (var rConflictRecipient = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Bob Changed",
+                deliveryLocationDescription = "Front Desk",
+                idempotencyKey = "p745-idemp-unsigned"
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rConflictRecipient.StatusCode);
+
+        using (var rConflictSig = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Alice Unsigned",
+                deliveryLocationDescription = "Front Desk",
+                signatureBase64 = Convert.ToBase64String(CreateValidPngBytes()),
+                signatureContentType = "image/png",
+                idempotencyKey = "p745-idemp-unsigned"
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rConflictSig.StatusCode);
+
+        // Cross-package reuse of already-consumed IdempotencyKey -> 409 Conflict
+        using (var rCrossPkgKey = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg2DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Alice Unsigned",
+                deliveryLocationDescription = "Front Desk",
+                idempotencyKey = "p745-idemp-unsigned"
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rCrossPkgKey.StatusCode);
+
+        // P745-R01 + R02 on Pkg2: Genuine signature + photo upload persists IsSigned = true, rejects altered photo on same key with 409
+        var png1 = CreateValidPngBytes();
+        var jpg1 = CreateValidJpgBytes();
+        var jpg2 = new byte[] { 0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x02, 0xFF, 0xD9 };
+
+        Guid signedPodId;
+        using (var rSigned = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg2DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Charlie Signed",
+                signatureBase64 = Convert.ToBase64String(png1),
+                signatureContentType = "image/png",
+                photoBase64 = Convert.ToBase64String(jpg1),
+                photoContentType = "image/jpeg",
+                idempotencyKey = "p745-idemp-signed"
+            })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rSigned.StatusCode);
+            var signedRes = await rSigned.Content.ReadFromJsonAsync<SubmitProofOfDeliveryResult>(JsonOptions);
+            Assert.True(signedRes!.IsSigned);
+            Assert.NotNull(signedRes.SignatureSha256);
+            Assert.NotNull(signedRes.PhotoSha256);
+            signedPodId = signedRes.ProofOfDeliveryId;
+        }
+
+        // Identical binary replay returns 200 idempotently
+        using (var rSignedReplay = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg2DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Charlie Signed",
+                signatureBase64 = Convert.ToBase64String(png1),
+                signatureContentType = "image/png",
+                photoBase64 = Convert.ToBase64String(jpg1),
+                photoContentType = "image/jpeg",
+                idempotencyKey = "p745-idemp-signed"
+            })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rSignedReplay.StatusCode);
+            var rep = await rSignedReplay.Content.ReadFromJsonAsync<SubmitProofOfDeliveryResult>(JsonOptions);
+            Assert.True(rep!.IsDuplicate);
+            Assert.Equal(signedPodId, rep.ProofOfDeliveryId);
+        }
+
+        // Different photo bytes under same key -> 409 Conflict
+        using (var rDiffPhoto = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg2DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Charlie Signed",
+                signatureBase64 = Convert.ToBase64String(png1),
+                signatureContentType = "image/png",
+                photoBase64 = Convert.ToBase64String(jpg2),
+                photoContentType = "image/jpeg",
+                idempotencyKey = "p745-idemp-signed"
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rDiffPhoto.StatusCode);
+    }
+
     private sealed class RaceDbBarrierInterceptor : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
     {
         private (TaskCompletionSource<bool> Entered, TaskCompletionSource<bool> Release)? _podConfirmPause;
