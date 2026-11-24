@@ -76,7 +76,27 @@ public class SubmitProofOfDeliveryRequest
 
     public PodEvidenceSource EvidenceSource { get; set; } = PodEvidenceSource.DriverHandheld;
 
-    public DateTime DeliveredAtUtc { get; set; } = DateTime.UtcNow;
+    private DateTime _deliveredAtUtc = DateTime.UtcNow;
+    private bool _hasExplicitDeliveredAtUtc;
+
+    public DateTime DeliveredAtUtc
+    {
+        get => _deliveredAtUtc;
+        set
+        {
+            _deliveredAtUtc = value.Kind == DateTimeKind.Unspecified
+                ? DateTime.SpecifyKind(value, DateTimeKind.Utc)
+                : value.ToUniversalTime();
+            _hasExplicitDeliveredAtUtc = true;
+        }
+    }
+
+    [JsonIgnore]
+    public bool HasExplicitDeliveredAtUtc
+    {
+        get => _hasExplicitDeliveredAtUtc;
+        set => _hasExplicitDeliveredAtUtc = value;
+    }
 
     // Source-specific audit fields
     public string? VerificationReason { get; set; }
@@ -102,8 +122,11 @@ public class SubmitProofOfDeliveryResult
     public string? DeliveryLocationDescription { get; set; }
     public bool IsSigned { get; set; }
     public PodEvidenceSource EvidenceSource { get; set; }
+    public string? VerificationReason { get; set; }
+    public string? ConsigneeAcknowledgmentText { get; set; }
     public DateTime CapturedAtUtc { get; set; }
     public DateTime DeliveredAtUtc { get; set; }
+    public bool HasExplicitDeliveredAt { get; set; }
     public bool IsStorageFinalized { get; set; }
     public string? SignatureSha256 { get; set; }
     public string? PhotoSha256 { get; set; }
@@ -144,8 +167,11 @@ public class ProofOfDeliveryDto
     public string? CarrierEventId { get; set; }
     public string? IdempotencyKey { get; set; }
     public PodEvidenceSource EvidenceSource { get; set; }
+    public string? VerificationReason { get; set; }
+    public string? ConsigneeAcknowledgmentText { get; set; }
     public DateTime CapturedAtUtc { get; set; }
     public DateTime DeliveredAtUtc { get; set; }
+    public bool HasExplicitDeliveredAt { get; set; }
     public bool IsSuperseded { get; set; }
     public Guid? SupersededByPodId { get; set; }
     public string? SupersededReason { get; set; }

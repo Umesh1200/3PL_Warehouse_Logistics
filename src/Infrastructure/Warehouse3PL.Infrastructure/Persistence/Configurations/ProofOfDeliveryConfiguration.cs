@@ -109,12 +109,25 @@ public class ProofOfDeliveryConfiguration : IEntityTypeConfiguration<ProofOfDeli
             .HasMaxLength(30)
             .IsRequired();
 
+        builder.Property(p => p.VerificationReason)
+            .HasColumnName("verification_reason")
+            .HasMaxLength(500);
+
+        builder.Property(p => p.ConsigneeAcknowledgmentText)
+            .HasColumnName("consignee_acknowledgment_text")
+            .HasMaxLength(1000);
+
         builder.Property(p => p.CapturedAtUtc)
             .HasColumnName("captured_at_utc")
             .IsRequired();
 
         builder.Property(p => p.DeliveredAtUtc)
             .HasColumnName("delivered_at_utc")
+            .IsRequired();
+
+        builder.Property(p => p.HasExplicitDeliveredAt)
+            .HasColumnName("has_explicit_delivered_at")
+            .HasDefaultValue(false)
             .IsRequired();
 
         // Supersession / amendment auditing
@@ -153,6 +166,11 @@ public class ProofOfDeliveryConfiguration : IEntityTypeConfiguration<ProofOfDeli
 
         builder.HasIndex(p => new { p.ClientId, p.PackageId, p.IdempotencyKey })
             .HasDatabaseName("ix_proof_of_deliveries_client_package_idempotency");
+
+        builder.HasIndex(p => new { p.FacilityId, p.IdempotencyKey })
+            .IsUnique()
+            .HasFilter("idempotency_key IS NOT NULL")
+            .HasDatabaseName("ix_proof_of_deliveries_facility_idempotency");
 
         builder.HasIndex(p => new { p.ClientId, p.CarrierConfirmationNumber })
             .HasDatabaseName("ix_proof_of_deliveries_client_carrier_conf");

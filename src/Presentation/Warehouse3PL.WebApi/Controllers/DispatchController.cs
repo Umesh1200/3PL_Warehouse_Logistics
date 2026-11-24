@@ -1,3 +1,4 @@
+using System.Globalization;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
@@ -541,7 +542,7 @@ public class DispatchController : BaseApiController
         var sigStream = DecodeBoundedBase64(apiRequest.SignatureBase64, nameof(apiRequest.SignatureBase64), streams);
         var photoStream = DecodeBoundedBase64(apiRequest.PhotoBase64, nameof(apiRequest.PhotoBase64), streams);
 
-        return new SubmitProofOfDeliveryRequest
+        var request = new SubmitProofOfDeliveryRequest
         {
             PackageId = packageId,
             RecipientName = apiRequest.RecipientName,
@@ -557,10 +558,16 @@ public class DispatchController : BaseApiController
             CarrierEventId = apiRequest.CarrierEventId,
             IdempotencyKey = apiRequest.IdempotencyKey,
             EvidenceSource = apiRequest.EvidenceSource,
-            DeliveredAtUtc = apiRequest.DeliveredAtUtc ?? DateTime.UtcNow,
             VerificationReason = apiRequest.VerificationReason,
             ConsigneeAcknowledgmentText = apiRequest.ConsigneeAcknowledgmentText
         };
+
+        if (apiRequest.DeliveredAtUtc.HasValue)
+        {
+            request.DeliveredAtUtc = apiRequest.DeliveredAtUtc.Value;
+        }
+
+        return request;
     }
 
     private static async Task<SubmitProofOfDeliveryRequest> FromFormPodRequestAsync(
@@ -577,15 +584,27 @@ public class DispatchController : BaseApiController
 
         decimal? lat = decimal.TryParse(form["latitude"], out var parsedLat) ? parsedLat : null;
         decimal? lng = decimal.TryParse(form["longitude"], out var parsedLng) ? parsedLng : null;
-        DateTime deliveredAt = DateTime.TryParse(form["deliveredAtUtc"], out var parsedDeliveredAt)
-            ? parsedDeliveredAt.ToUniversalTime()
-            : DateTime.UtcNow;
+        var rawDeliveredAt = form["deliveredAtUtc"].ToString();
+        DateTime? parsedDeliveredAt = null;
+        if (!string.IsNullOrWhiteSpace(rawDeliveredAt))
+        {
+            if (!DateTime.TryParse(
+                    rawDeliveredAt,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.AdjustToUniversal | DateTimeStyles.AssumeUniversal,
+                    out var dt))
+            {
+                throw new ValidationException("deliveredAtUtc", $"Invalid delivery timestamp '{rawDeliveredAt}'.");
+            }
+
+            parsedDeliveredAt = dt;
+        }
 
         var source = Enum.TryParse<PodEvidenceSource>(form["evidenceSource"], ignoreCase: true, out var parsedSource)
             ? parsedSource
             : PodEvidenceSource.DriverHandheld;
 
-        return new SubmitProofOfDeliveryRequest
+        var request = new SubmitProofOfDeliveryRequest
         {
             PackageId = packageId,
             RecipientName = NullIfEmpty(form["recipientName"]),
@@ -601,10 +620,16 @@ public class DispatchController : BaseApiController
             CarrierEventId = NullIfEmpty(form["carrierEventId"]),
             IdempotencyKey = NullIfEmpty(form["idempotencyKey"]),
             EvidenceSource = source,
-            DeliveredAtUtc = deliveredAt,
             VerificationReason = NullIfEmpty(form["verificationReason"]),
             ConsigneeAcknowledgmentText = NullIfEmpty(form["consigneeAcknowledgmentText"])
         };
+
+        if (parsedDeliveredAt.HasValue)
+        {
+            request.DeliveredAtUtc = parsedDeliveredAt.Value;
+        }
+
+        return request;
     }
 
     private static async Task<MemoryStream?> CopyBoundedFormFileAsync(

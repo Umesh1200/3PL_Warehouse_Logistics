@@ -52,8 +52,13 @@ public class ProofOfDelivery : AuditableEntity<Guid>, ITenantEntity
 
     public PodEvidenceSource EvidenceSource { get; set; } = PodEvidenceSource.CarrierApi;
 
+    // Source-specific operational audit fields
+    public string? VerificationReason { get; set; }
+    public string? ConsigneeAcknowledgmentText { get; set; }
+
     public DateTime CapturedAtUtc { get; set; } = DateTime.UtcNow;
     public DateTime DeliveredAtUtc { get; set; }
+    public bool HasExplicitDeliveredAt { get; set; }
 
     // Supersession and audited amendment support
     public bool IsSuperseded { get; set; } = false;
@@ -100,6 +105,16 @@ public class ProofOfDelivery : AuditableEntity<Guid>, ITenantEntity
         if (DeliveredAtUtc > DateTime.UtcNow.AddHours(2))
         {
             throw new ValidationException(nameof(DeliveredAtUtc), "Delivery timestamp cannot be in the future.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(VerificationReason) && VerificationReason.Trim().Length > 500)
+        {
+            throw new ValidationException(nameof(VerificationReason), "Verification reason cannot exceed 500 characters.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(ConsigneeAcknowledgmentText) && ConsigneeAcknowledgmentText.Trim().Length > 1000)
+        {
+            throw new ValidationException(nameof(ConsigneeAcknowledgmentText), "Consignee acknowledgment text cannot exceed 1000 characters.");
         }
 
         if (EvidenceSource == PodEvidenceSource.DriverHandheld)

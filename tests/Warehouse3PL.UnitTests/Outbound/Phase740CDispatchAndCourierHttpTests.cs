@@ -1334,6 +1334,221 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
             Assert.Equal(HttpStatusCode.Conflict, rDiffPhoto.StatusCode);
     }
 
+    [Fact]
+    public async Task P745R02_CanonicalCaseIdempotency_Timestamps_AuditFields_And_HistoricalKeyPolicy()
+    {
+        var supAToken = await LoginAsync("supa@740c.test");
+        var driverAToken = await LoginAsync("drivera@740c.test");
+
+        // 1. Canonical case-insensitive key & omitted vs explicit deliveredAtUtc on Pkg1
+        Guid pkg1PodId;
+        using (var rInitialOmittedTs = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Case Replay Alice",
+                idempotencyKey = "p745-case-alpha"
+            })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rInitialOmittedTs.StatusCode);
+            var created = await rInitialOmittedTs.Content.ReadFromJsonAsync<SubmitProofOfDeliveryResult>(JsonOptions);
+            Assert.False(created!.HasExplicitDeliveredAt);
+            pkg1PodId = created.ProofOfDeliveryId;
+        }
+
+        // Case-variant replay omitting deliveredAtUtc -> 200 OK (IsDuplicate = true)
+        using (var rCaseReplay = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Case Replay Alice",
+                idempotencyKey = "  P745-CASE-ALPHA  "
+            })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rCaseReplay.StatusCode);
+            var replay = await rCaseReplay.Content.ReadFromJsonAsync<SubmitProofOfDeliveryResult>(JsonOptions);
+            Assert.True(replay!.IsDuplicate);
+            Assert.Equal(pkg1PodId, replay.ProofOfDeliveryId);
+        }
+
+        // Same case-variant key retrying with explicit deliveredAtUtc when original omitted it -> 409 Conflict
+        using (var rOmittedVsExplicit = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Case Replay Alice",
+                deliveredAtUtc = DateTime.UtcNow.AddMinutes(-2),
+                idempotencyKey = "P745-Case-Alpha"
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rOmittedVsExplicit.StatusCode);
+
+        // Case-variant reuse on different package (Pkg2) -> 409 Conflict
+        using (var rCrossPkgCase = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg2DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Case Replay Alice",
+                idempotencyKey = "P745-CASE-ALPHA"
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rCrossPkgCase.StatusCode);
+
+        // 2. ManualVerification: verificationReason + explicit deliveredAtUtc bound to idempotency key on Pkg2
+        var explicitDeliveryTs = new DateTime(2026, 11, 24, 9, 30, 0, DateTimeKind.Utc);
+        Guid pkg2PodId;
+        using (var rManualInit = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg2DispatchedId}/pod", supAToken, new
+            {
+                evidenceSource = PodEvidenceSource.ManualVerification,
+                verificationReason = "Carrier dock manifest #881",
+                recipientName = "Dock Clerk Dan",
+                deliveredAtUtc = explicitDeliveryTs,
+                idempotencyKey = "p745-manual-audit"
+            })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rManualInit.StatusCode);
+            var mRes = await rManualInit.Content.ReadFromJsonAsync<SubmitProofOfDeliveryResult>(JsonOptions);
+            Assert.True(mRes!.HasExplicitDeliveredAt);
+            Assert.Equal("Carrier dock manifest #881", mRes.VerificationReason);
+            pkg2PodId = mRes.ProofOfDeliveryId;
+        }
+
+        // Identical explicit timestamp + verificationReason with uppercase key -> 200 OK
+        using (var rManualReplay = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg2DispatchedId}/pod", supAToken, new
+            {
+                evidenceSource = PodEvidenceSource.ManualVerification,
+                verificationReason = "Carrier dock manifest #881",
+                recipientName = "Dock Clerk Dan",
+                deliveredAtUtc = explicitDeliveryTs,
+                idempotencyKey = "P745-MANUAL-AUDIT"
+            })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rManualReplay.StatusCode);
+            var replay = await rManualReplay.Content.ReadFromJsonAsync<SubmitProofOfDeliveryResult>(JsonOptions);
+            Assert.True(replay!.IsDuplicate);
+            Assert.Equal(pkg2PodId, replay.ProofOfDeliveryId);
+        }
+
+        // Changed verificationReason -> 409 Conflict
+        using (var rDiffReason = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg2DispatchedId}/pod", supAToken, new
+            {
+                evidenceSource = PodEvidenceSource.ManualVerification,
+                verificationReason = "Altered audit justification #999",
+                recipientName = "Dock Clerk Dan",
+                deliveredAtUtc = explicitDeliveryTs,
+                idempotencyKey = "P745-MANUAL-AUDIT"
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rDiffReason.StatusCode);
+
+        // Changed explicit deliveredAtUtc -> 409 Conflict; omitted deliveredAtUtc when original was explicit -> 409 Conflict
+        using (var rDiffTs = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg2DispatchedId}/pod", supAToken, new
+            {
+                evidenceSource = PodEvidenceSource.ManualVerification,
+                verificationReason = "Carrier dock manifest #881",
+                recipientName = "Dock Clerk Dan",
+                deliveredAtUtc = explicitDeliveryTs.AddMinutes(-15),
+                idempotencyKey = "P745-MANUAL-AUDIT"
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rDiffTs.StatusCode);
+
+        using (var rExplicitToOmitted = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg2DispatchedId}/pod", supAToken, new
+            {
+                evidenceSource = PodEvidenceSource.ManualVerification,
+                verificationReason = "Carrier dock manifest #881",
+                recipientName = "Dock Clerk Dan",
+                idempotencyKey = "P745-MANUAL-AUDIT"
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rExplicitToOmitted.StatusCode);
+
+        // 3. Historical key policy across supersession: keys are permanently consumed in the facility
+        // Superseding pkg1PodId with the already-consumed historical/other key must fail with 409 Conflict
+        using (var rSupReuseOwnKey = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/pod/{pkg1PodId}/supersede", supAToken, new
+            {
+                reason = "Attempt to reuse original key",
+                replacementSubmission = new
+                {
+                    evidenceSource = PodEvidenceSource.ManualVerification,
+                    verificationReason = "Audit check",
+                    recipientName = "New Name",
+                    idempotencyKey = "p745-case-alpha"
+                }
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rSupReuseOwnKey.StatusCode);
+
+        Guid supWinningPodId;
+        using (var rSupOk = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/pod/{pkg1PodId}/supersede", supAToken, new
+            {
+                reason = "Corrected signed manifest",
+                replacementSubmission = new
+                {
+                    evidenceSource = PodEvidenceSource.ManualVerification,
+                    verificationReason = "Paper manifest verified",
+                    recipientName = "Corrected Alice",
+                    deliveredAtUtc = explicitDeliveryTs,
+                    idempotencyKey = "p745-sup-key-1"
+                }
+            })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rSupOk.StatusCode);
+            var supRes = await rSupOk.Content.ReadFromJsonAsync<SubmitProofOfDeliveryResult>(JsonOptions);
+            supWinningPodId = supRes!.ProofOfDeliveryId;
+        }
+
+        // Retrying the exact supersession idempotently returns 200 OK; changing verificationReason returns 409 Conflict
+        using (var rSupReplay = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/pod/{pkg1PodId}/supersede", supAToken, new
+            {
+                reason = "Corrected signed manifest",
+                replacementSubmission = new
+                {
+                    evidenceSource = PodEvidenceSource.ManualVerification,
+                    verificationReason = "Paper manifest verified",
+                    recipientName = "Corrected Alice",
+                    deliveredAtUtc = explicitDeliveryTs,
+                    idempotencyKey = "P745-SUP-KEY-1"
+                }
+            })))
+        {
+            Assert.Equal(HttpStatusCode.OK, rSupReplay.StatusCode);
+            var replay = await rSupReplay.Content.ReadFromJsonAsync<SubmitProofOfDeliveryResult>(JsonOptions);
+            Assert.True(replay!.IsDuplicate);
+            Assert.Equal(supWinningPodId, replay.ProofOfDeliveryId);
+        }
+
+        using (var rSupConflict = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/pod/{pkg1PodId}/supersede", supAToken, new
+            {
+                reason = "Corrected signed manifest",
+                replacementSubmission = new
+                {
+                    evidenceSource = PodEvidenceSource.ManualVerification,
+                    verificationReason = "Tampered paper manifest",
+                    recipientName = "Corrected Alice",
+                    deliveredAtUtc = explicitDeliveryTs,
+                    idempotencyKey = "P745-SUP-KEY-1"
+                }
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rSupConflict.StatusCode);
+
+        // Historical key 'p745-case-alpha' from the now-superseded pkg1PodId cannot be reused on Pkg1 or Pkg2 -> 409 Conflict
+        using (var rHistSamePkg = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg1DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Case Replay Alice",
+                idempotencyKey = "P745-CASE-ALPHA"
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rHistSamePkg.StatusCode);
+
+        using (var rHistOtherPkg = await _http.SendAsync(BearerRequest(HttpMethod.Post,
+            $"/api/v1/outbound/dispatch/packages/{Pkg2DispatchedId}/pod", driverAToken, new
+            {
+                recipientName = "Different Pkg",
+                idempotencyKey = "P745-CASE-ALPHA"
+            })))
+            Assert.Equal(HttpStatusCode.Conflict, rHistOtherPkg.StatusCode);
+    }
+
     private sealed class RaceDbBarrierInterceptor : Microsoft.EntityFrameworkCore.Diagnostics.SaveChangesInterceptor
     {
         private (TaskCompletionSource<bool> Entered, TaskCompletionSource<bool> Release)? _podConfirmPause;

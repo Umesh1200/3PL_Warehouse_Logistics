@@ -343,6 +343,53 @@ public class ProofOfDeliverySubmissionTests : IDisposable
         var savedPod = await context.ProofOfDeliveries.FirstOrDefaultAsync(p => p.Id == result.ProofOfDeliveryId);
         Assert.NotNull(savedPod);
         Assert.Equal(PodEvidenceSource.ConsigneePortal, savedPod.EvidenceSource);
+        Assert.Equal("Shipment received intact at loading bay", savedPod.ConsigneeAcknowledgmentText);
+    }
+
+    [Fact]
+    public async Task SubmitProofOfDelivery_ConsigneePortal_IdempotencyConflictOnChangedAcknowledgment_ThrowsConcurrencyException()
+    {
+        var fix = await SeedTestEnvironmentAsync();
+        var (_, _, pkg) = await CreateDispatchedPackageAsync(fix);
+
+        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Client }, fix.DbName);
+        var tenantProvider = new TestTenantProvider { TenantId = fix.ClientId, BypassTenantFilter = true };
+        var userContext = new TestCurrentUserContext { UserType = UserType.Client, TenantId = fix.ClientId };
+        var service = new ProofOfDeliveryService(context, _storageService, tenantProvider, userContext, NullLogger<ProofOfDeliveryService>.Instance);
+
+        var ackTime = new DateTime(2026, 11, 24, 8, 45, 0, DateTimeKind.Utc);
+        var first = await service.SubmitProofOfDeliveryAsync(new SubmitProofOfDeliveryRequest
+        {
+            PackageId = pkg.Id,
+            EvidenceSource = PodEvidenceSource.ConsigneePortal,
+            RecipientName = "Receiving Officer Bob",
+            ConsigneeAcknowledgmentText = "Bay 4 signed intact",
+            DeliveredAtUtc = ackTime,
+            IdempotencyKey = "portal-ack-1"
+        });
+        Assert.False(first.IsDuplicate);
+
+        var replay = await service.SubmitProofOfDeliveryAsync(new SubmitProofOfDeliveryRequest
+        {
+            PackageId = pkg.Id,
+            EvidenceSource = PodEvidenceSource.ConsigneePortal,
+            RecipientName = "Receiving Officer Bob",
+            ConsigneeAcknowledgmentText = "Bay 4 signed intact",
+            DeliveredAtUtc = ackTime,
+            IdempotencyKey = "PORTAL-ACK-1"
+        });
+        Assert.True(replay.IsDuplicate);
+        Assert.Equal(first.ProofOfDeliveryId, replay.ProofOfDeliveryId);
+
+        await Assert.ThrowsAsync<ConcurrencyException>(() => service.SubmitProofOfDeliveryAsync(new SubmitProofOfDeliveryRequest
+        {
+            PackageId = pkg.Id,
+            EvidenceSource = PodEvidenceSource.ConsigneePortal,
+            RecipientName = "Receiving Officer Bob",
+            ConsigneeAcknowledgmentText = "Damaged carton noted on arrival",
+            DeliveredAtUtc = ackTime,
+            IdempotencyKey = "PORTAL-ACK-1"
+        }));
     }
 
     [Fact]

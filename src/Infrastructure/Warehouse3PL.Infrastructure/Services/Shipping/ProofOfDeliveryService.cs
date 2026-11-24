@@ -82,17 +82,13 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             request.ReplacementSubmission.IsInteractiveSubmission);
 
         var existingPodSnapshot = await _context.ProofOfDeliveries
+            .Include(p => p.Package)
             .AsNoTracking()
             .FirstOrDefaultAsync(p => p.Id == request.ExistingPodId, cancellationToken);
 
         if (existingPodSnapshot == null)
         {
             throw new EntityNotFoundException(nameof(ProofOfDelivery), request.ExistingPodId);
-        }
-
-        if (existingPodSnapshot.IsSuperseded)
-        {
-            throw new InvalidDomainStateException($"Proof of Delivery '{existingPodSnapshot.Id}' has already been superseded.");
         }
 
         // Validate that replacement belongs to the same package
@@ -104,6 +100,42 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
         }
 
         request.ReplacementSubmission.PackageId = existingPodSnapshot.PackageId;
+
+        if (existingPodSnapshot.IsSuperseded)
+        {
+            var canonicalSupIdempKey = NormalizeIdempotencyKey(request.ReplacementSubmission.IdempotencyKey);
+            if (canonicalSupIdempKey != null)
+            {
+                ValidateSourceSpecificRules(request.ReplacementSubmission);
+                ValidateEvidenceContentTypes(request.ReplacementSubmission);
+                var supSigSha = await ComputeStreamSha256Async(request.ReplacementSubmission.SignatureStream, cancellationToken);
+                var supPhotoSha = await ComputeStreamSha256Async(request.ReplacementSubmission.PhotoStream, cancellationToken);
+
+                var idempPod = await FindFacilityPodByIdempotencyKeyAsync(
+                    existingPodSnapshot.FacilityId,
+                    canonicalSupIdempKey,
+                    includePackage: true,
+                    cancellationToken);
+
+                if (idempPod != null)
+                {
+                    if (IsMatchingSupersededDuplicate(existingPodSnapshot, idempPod, request.Reason, request.ReplacementSubmission, supSigSha, supPhotoSha))
+                    {
+                        return await BuildSubmissionResultAsync(
+                            idempPod,
+                            idempPod.Package,
+                            isDuplicate: true,
+                            "Duplicate POD supersession ignored (Idempotent).",
+                            cancellationToken);
+                    }
+
+                    throw new ConcurrencyException(
+                        $"Proof of Delivery idempotency key '{canonicalSupIdempKey}' has already been consumed in this facility.");
+                }
+            }
+
+            throw new InvalidDomainStateException($"Proof of Delivery '{existingPodSnapshot.Id}' has already been superseded.");
+        }
 
         // Atomically supersede historical POD + insert replacement POD inside package/shipment lock & transaction
         var result = await ExecuteSubmissionInternalAsync(
@@ -174,36 +206,33 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
         // 3. MIME Type & File Signature Sanitization
         ValidateEvidenceContentTypes(request);
 
-        var normalizedIdempKey = string.IsNullOrWhiteSpace(request.IdempotencyKey)
-            ? null
-            : request.IdempotencyKey.Trim();
+        var canonicalIdempKey = NormalizeIdempotencyKey(request.IdempotencyKey);
         var incomingSigSha256 = await ComputeStreamSha256Async(request.SignatureStream, cancellationToken);
         var incomingPhotoSha256 = await ComputeStreamSha256Async(request.PhotoStream, cancellationToken);
 
-        // 4. Check for Existing Active POD or Cross-Package Idempotency Key Reuse (Duplicate -> 200 vs Conflict -> 409)
+        // 4. Check for Facility-Scoped Idempotency Key Reuse (Active or Historical) & Existing Active POD Collision
+        if (canonicalIdempKey != null)
+        {
+            var existingIdempPod = await FindFacilityPodByIdempotencyKeyAsync(
+                package.FacilityId,
+                canonicalIdempKey,
+                includePackage: false,
+                cancellationToken);
+
+            if (existingIdempPod != null)
+            {
+                EnsureIdempotencyKeyReusableForSubmission(existingIdempPod, package.Id, canonicalIdempKey, isSupersession);
+            }
+        }
+
         if (!isSupersession)
         {
-            if (normalizedIdempKey != null)
-            {
-                var crossPkgConflict = await _context.ProofOfDeliveries
-                    .AsNoTracking()
-                    .AnyAsync(p => p.FacilityId == package.FacilityId &&
-                                   !p.IsSuperseded &&
-                                   p.PackageId != package.Id &&
-                                   p.IdempotencyKey == normalizedIdempKey, cancellationToken);
-                if (crossPkgConflict)
-                {
-                    throw new ConcurrencyException(
-                        $"Proof of Delivery idempotency key '{normalizedIdempKey}' has already been consumed by a different package in this facility.");
-                }
-            }
-
             var activePod = await _context.ProofOfDeliveries
                 .FirstOrDefaultAsync(p => p.PackageId == package.Id && !p.IsSuperseded, cancellationToken);
 
             if (activePod != null)
             {
-                if (EvaluateExistingPodCollision(activePod, request, normalizedIdempKey, incomingSigSha256, incomingPhotoSha256))
+                if (EvaluateExistingPodCollision(activePod, request, canonicalIdempKey, incomingSigSha256, incomingPhotoSha256))
                 {
                     _logger.LogInformation("Idempotent duplicate POD detected for package '{Pkg}'. Returning existing POD '{PodId}'.",
                         package.PackageNumber, activePod.Id);
@@ -278,10 +307,13 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             Longitude = request.Longitude,
             CarrierConfirmationNumber = request.CarrierConfirmationNumber?.Trim(),
             CarrierEventId = request.CarrierEventId?.Trim(),
-            IdempotencyKey = normalizedIdempKey,
+            IdempotencyKey = canonicalIdempKey,
             EvidenceSource = request.EvidenceSource,
+            VerificationReason = request.VerificationReason?.Trim(),
+            ConsigneeAcknowledgmentText = request.ConsigneeAcknowledgmentText?.Trim(),
             CapturedAtUtc = DateTime.UtcNow,
-            DeliveredAtUtc = request.DeliveredAtUtc
+            DeliveredAtUtc = NormalizeUtc(request.DeliveredAtUtc),
+            HasExplicitDeliveredAt = request.HasExplicitDeliveredAtUtc
         };
 
         ProofOfDelivery? racedDuplicatePod = null;
@@ -296,8 +328,8 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
                     await request.BeforeCommitCustodyValidationAsync(cancellationToken);
                 }
 
-                await using var podIdempLock = normalizedIdempKey != null
-                    ? await _context.AcquireScopedIdempotencyLockAsync("POD", package.FacilityId, normalizedIdempKey, cancellationToken)
+                await using var podIdempLock = canonicalIdempKey != null
+                    ? await _context.AcquireScopedIdempotencyLockAsync("POD", package.FacilityId, canonicalIdempKey, cancellationToken)
                     : null;
 
                 if (isSupersession)
@@ -314,8 +346,43 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
 
                     if (lockedExistingPod.IsSuperseded)
                     {
+                        if (canonicalIdempKey != null)
+                        {
+                            var racedSupIdempPod = await FindFacilityPodByIdempotencyKeyAsync(
+                                package.FacilityId,
+                                canonicalIdempKey,
+                                includePackage: false,
+                                cancellationToken);
+
+                            if (racedSupIdempPod != null)
+                            {
+                                if (IsMatchingSupersededDuplicate(lockedExistingPod, racedSupIdempPod, supersedeRequest!.Reason, request, incomingSigSha256, incomingPhotoSha256))
+                                {
+                                    racedDuplicatePod = racedSupIdempPod;
+                                    return false;
+                                }
+
+                                throw new ConcurrencyException(
+                                    $"Proof of Delivery idempotency key '{canonicalIdempKey}' has already been consumed in this facility.");
+                            }
+                        }
+
                         throw new InvalidDomainStateException(
                             $"Proof of Delivery '{lockedExistingPod.Id}' has already been superseded.");
+                    }
+
+                    if (canonicalIdempKey != null)
+                    {
+                        var consumedPod = await FindFacilityPodByIdempotencyKeyAsync(
+                            package.FacilityId,
+                            canonicalIdempKey,
+                            includePackage: false,
+                            cancellationToken);
+                        if (consumedPod != null)
+                        {
+                            throw new ConcurrencyException(
+                                $"Proof of Delivery idempotency key '{canonicalIdempKey}' has already been consumed in this facility.");
+                        }
                     }
 
                     var otherActivePod = await _context.ProofOfDeliveries
@@ -368,18 +435,16 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
                 }
                 else
                 {
-                    if (normalizedIdempKey != null)
+                    if (canonicalIdempKey != null)
                     {
-                        var crossPkgRace = await _context.ProofOfDeliveries
-                            .AsNoTracking()
-                            .AnyAsync(p => p.FacilityId == package.FacilityId &&
-                                           !p.IsSuperseded &&
-                                           p.PackageId != package.Id &&
-                                           p.IdempotencyKey == normalizedIdempKey, cancellationToken);
-                        if (crossPkgRace)
+                        var racedIdempPod = await FindFacilityPodByIdempotencyKeyAsync(
+                            package.FacilityId,
+                            canonicalIdempKey,
+                            includePackage: false,
+                            cancellationToken);
+                        if (racedIdempPod != null)
                         {
-                            throw new ConcurrencyException(
-                                $"Proof of Delivery idempotency key '{normalizedIdempKey}' has already been consumed by a different package in this facility.");
+                            EnsureIdempotencyKeyReusableForSubmission(racedIdempPod, package.Id, canonicalIdempKey, isSupersession: false);
                         }
                     }
 
@@ -388,7 +453,7 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
 
                     if (racedActivePod != null)
                     {
-                        if (EvaluateExistingPodCollision(racedActivePod, request, normalizedIdempKey, incomingSigSha256, incomingPhotoSha256))
+                        if (EvaluateExistingPodCollision(racedActivePod, request, canonicalIdempKey, incomingSigSha256, incomingPhotoSha256))
                         {
                             racedDuplicatePod = racedActivePod;
                             return false;
@@ -675,8 +740,11 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             DeliveryLocationDescription = pod.DeliveryLocationDescription,
             IsSigned = pod.IsSigned,
             EvidenceSource = pod.EvidenceSource,
+            VerificationReason = pod.VerificationReason,
+            ConsigneeAcknowledgmentText = pod.ConsigneeAcknowledgmentText,
             CapturedAtUtc = pod.CapturedAtUtc,
             DeliveredAtUtc = pod.DeliveredAtUtc,
+            HasExplicitDeliveredAt = pod.HasExplicitDeliveredAt,
             IsStorageFinalized = pod.IsStorageFinalized,
             SignatureSha256 = pod.SignatureSha256,
             PhotoSha256 = pod.PhotoSha256,
@@ -710,16 +778,88 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
         return Convert.ToHexStringLower(hashBytes);
     }
 
+    private Task<ProofOfDelivery?> FindFacilityPodByIdempotencyKeyAsync(
+        Guid facilityId,
+        string canonicalIdempKey,
+        bool includePackage,
+        CancellationToken cancellationToken)
+    {
+        IQueryable<ProofOfDelivery> query = _context.ProofOfDeliveries.AsNoTracking();
+        if (includePackage)
+        {
+            query = query.Include(p => p.Package);
+        }
+
+        return query.FirstOrDefaultAsync(
+            p => p.FacilityId == facilityId &&
+                 p.IdempotencyKey != null &&
+                 p.IdempotencyKey.ToUpper() == canonicalIdempKey,
+            cancellationToken);
+    }
+
+    private static void EnsureIdempotencyKeyReusableForSubmission(
+        ProofOfDelivery existingIdempPod,
+        Guid targetPackageId,
+        string canonicalIdempKey,
+        bool isSupersession)
+    {
+        if (isSupersession)
+        {
+            throw new ConcurrencyException(
+                $"Proof of Delivery idempotency key '{canonicalIdempKey}' has already been consumed in this facility.");
+        }
+
+        if (existingIdempPod.PackageId != targetPackageId)
+        {
+            throw new ConcurrencyException(
+                $"Proof of Delivery idempotency key '{canonicalIdempKey}' has already been consumed by a different package in this facility.");
+        }
+
+        if (existingIdempPod.IsSuperseded)
+        {
+            throw new ConcurrencyException(
+                $"Proof of Delivery idempotency key '{canonicalIdempKey}' has already been consumed by a historical Proof of Delivery in this facility.");
+        }
+    }
+
+    private static bool IsMatchingSupersededDuplicate(
+        ProofOfDelivery supersededOriginalPod,
+        ProofOfDelivery candidateReplacementPod,
+        string supersessionReason,
+        SubmitProofOfDeliveryRequest replacementRequest,
+        string? incomingSigSha256,
+        string? incomingPhotoSha256) =>
+        supersededOriginalPod.SupersededByPodId == candidateReplacementPod.Id &&
+        TextEq(supersededOriginalPod.SupersededReason, supersessionReason) &&
+        HasMatchingEvidencePayload(candidateReplacementPod, replacementRequest, incomingSigSha256, incomingPhotoSha256);
+
+    private static string? NormalizeIdempotencyKey(string? idempotencyKey) =>
+        string.IsNullOrWhiteSpace(idempotencyKey)
+            ? null
+            : idempotencyKey.Trim().ToUpperInvariant();
+
+    private static DateTime NormalizeUtc(DateTime value) => value.Kind switch
+    {
+        DateTimeKind.Utc => value,
+        DateTimeKind.Local => value.ToUniversalTime(),
+        _ => DateTime.SpecifyKind(value, DateTimeKind.Utc)
+    };
+
+    private static bool TextEq(string? a, string? b) =>
+        string.Equals(a?.Trim() ?? string.Empty, b?.Trim() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
+
+    private static bool TimestampsMatch(DateTime existingUtc, DateTime incomingUtc) =>
+        Math.Abs((NormalizeUtc(existingUtc) - NormalizeUtc(incomingUtc)).Ticks) < TimeSpan.TicksPerMicrosecond;
+
     private static bool EvaluateExistingPodCollision(
         ProofOfDelivery activePod,
         SubmitProofOfDeliveryRequest request,
-        string? normalizedIdempKey,
+        string? canonicalIdempKey,
         string? incomingSigSha256,
         string? incomingPhotoSha256)
     {
-        bool idempMatches = normalizedIdempKey != null &&
-            !string.IsNullOrWhiteSpace(activePod.IdempotencyKey) &&
-            string.Equals(activePod.IdempotencyKey.Trim(), normalizedIdempKey, StringComparison.OrdinalIgnoreCase);
+        bool idempMatches = canonicalIdempKey != null &&
+            string.Equals(NormalizeIdempotencyKey(activePod.IdempotencyKey), canonicalIdempKey, StringComparison.Ordinal);
 
         bool carrierRefMatches = activePod.EvidenceSource == request.EvidenceSource &&
             ((!string.IsNullOrWhiteSpace(activePod.CarrierConfirmationNumber) &&
@@ -756,10 +896,10 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
         string? incomingSigSha256,
         string? incomingPhotoSha256)
     {
-        static bool TextEq(string? a, string? b) =>
-            string.Equals(a?.Trim() ?? string.Empty, b?.Trim() ?? string.Empty, StringComparison.OrdinalIgnoreCase);
-
         bool incomingSigned = incomingSigSha256 != null;
+
+        bool deliveredAtMatches = existingPod.HasExplicitDeliveredAt == incoming.HasExplicitDeliveredAtUtc &&
+            (!incoming.HasExplicitDeliveredAtUtc || TimestampsMatch(existingPod.DeliveredAtUtc, incoming.DeliveredAtUtc));
 
         return existingPod.EvidenceSource == incoming.EvidenceSource &&
             existingPod.IsSigned == incomingSigned &&
@@ -770,7 +910,10 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             existingPod.Latitude == incoming.Latitude &&
             existingPod.Longitude == incoming.Longitude &&
             TextEq(existingPod.CarrierConfirmationNumber, incoming.CarrierConfirmationNumber) &&
-            TextEq(existingPod.CarrierEventId, incoming.CarrierEventId);
+            TextEq(existingPod.CarrierEventId, incoming.CarrierEventId) &&
+            TextEq(existingPod.VerificationReason, incoming.VerificationReason) &&
+            TextEq(existingPod.ConsigneeAcknowledgmentText, incoming.ConsigneeAcknowledgmentText) &&
+            deliveredAtMatches;
     }
 
     private async Task<ProofOfDeliveryDto> MapToDtoAsync(
@@ -820,8 +963,11 @@ public class ProofOfDeliveryService : IProofOfDeliveryService
             CarrierEventId = pod.CarrierEventId,
             IdempotencyKey = pod.IdempotencyKey,
             EvidenceSource = pod.EvidenceSource,
+            VerificationReason = pod.VerificationReason,
+            ConsigneeAcknowledgmentText = pod.ConsigneeAcknowledgmentText,
             CapturedAtUtc = pod.CapturedAtUtc,
             DeliveredAtUtc = pod.DeliveredAtUtc,
+            HasExplicitDeliveredAt = pod.HasExplicitDeliveredAt,
             IsSuperseded = pod.IsSuperseded,
             SupersededByPodId = pod.SupersededByPodId,
             SupersededReason = pod.SupersededReason,

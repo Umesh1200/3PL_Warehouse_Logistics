@@ -13516,6 +13516,11 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("client_id");
 
+                    b.Property<string>("ConsigneeAcknowledgmentText")
+                        .HasMaxLength(1000)
+                        .HasColumnType("character varying(1000)")
+                        .HasColumnName("consignee_acknowledgment_text");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -13542,6 +13547,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("FacilityId")
                         .HasColumnType("uuid")
                         .HasColumnName("facility_id");
+
+                    b.Property<bool>("HasExplicitDeliveredAt")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("has_explicit_delivered_at");
 
                     b.Property<string>("IdempotencyKey")
                         .HasMaxLength(100)
@@ -13646,11 +13657,13 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("updated_by");
 
+                    b.Property<string>("VerificationReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("verification_reason");
+
                     b.HasKey("Id")
                         .HasName("pk_proof_of_deliveries");
-
-                    b.HasIndex("FacilityId")
-                        .HasDatabaseName("ix_proof_of_deliveries_facility_id");
 
                     b.HasIndex("PackageId")
                         .IsUnique()
@@ -13665,6 +13678,11 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("ClientId", "TrackingNumber")
                         .HasDatabaseName("ix_proof_of_deliveries_client_tracking");
+
+                    b.HasIndex("FacilityId", "IdempotencyKey")
+                        .IsUnique()
+                        .HasDatabaseName("ix_proof_of_deliveries_facility_idempotency")
+                        .HasFilter("idempotency_key IS NOT NULL");
 
                     b.HasIndex("ClientId", "PackageId", "IdempotencyKey")
                         .HasDatabaseName("ix_proof_of_deliveries_client_package_idempotency");
