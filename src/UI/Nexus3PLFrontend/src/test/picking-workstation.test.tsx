@@ -380,11 +380,27 @@ describe('Phase 7.4.2: RF Directed Pick & Short-Pick Workstation', () => {
       expect(screen.queryByTestId('rf-claim-gate')).toBeNull();
     });
 
-    // Open Short-Pick Modal & report DamagedStock
+    // Open Short-Pick Modal: scan fields start EMPTY (no fallback substitution from expected task values)
     fireEvent.click(screen.getByTestId('open-short-pick-btn'));
-    fireEvent.change(await screen.findByTestId('short-pick-qty-input'), { target: { value: '3' } });
+    const locInput = (await screen.findByTestId('short-pick-location-input')) as HTMLInputElement;
+    const itemInput = screen.getByTestId('short-pick-item-input') as HTMLInputElement;
+    const toteInput = screen.getByTestId('short-pick-tote-input') as HTMLInputElement;
+    expect(locInput.value).toBe('');
+    expect(itemInput.value).toBe('');
+    expect(toteInput.value).toBe('');
+
+    // Positive short-pick without fresh physical barcode scans must fail client-side before API call
+    fireEvent.change(screen.getByTestId('short-pick-qty-input'), { target: { value: '3' } });
     fireEvent.change(screen.getByTestId('short-pick-reason-select'), { target: { value: ShortPickReason.DamagedStock } });
     fireEvent.change(screen.getByTestId('short-pick-notes-input'), { target: { value: 'Crushed carton' } });
+    fireEvent.click(screen.getByTestId('submit-short-pick-btn'));
+    expect((await screen.findByTestId('short-pick-error')).textContent).toMatch(/source bin barcode scan is required/i);
+    expect(shortPickBody).toBeNull();
+
+    // Enter genuine physical scans and submit
+    fireEvent.change(locInput, { target: { value: 'A-04-02' } });
+    fireEvent.change(itemInput, { target: { value: 'SKU-MOTOR-742' } });
+    fireEvent.change(toteInput, { target: { value: 'TOTE-742' } });
     fireEvent.click(screen.getByTestId('submit-short-pick-btn'));
 
     await waitFor(() => {
@@ -394,7 +410,74 @@ describe('Phase 7.4.2: RF Directed Pick & Short-Pick Workstation', () => {
 
     expect(shortPickBody?.reason).toBe(ShortPickReason.DamagedStock);
     expect(shortPickBody?.quantityPicked).toBe(3);
+    expect(shortPickBody?.scannedLocationBarcode).toBe('A-04-02');
+    expect(shortPickBody?.scannedItemBarcode).toBe('SKU-MOTOR-742');
+    expect(shortPickBody?.scannedToteLpn).toBe('TOTE-742');
     expect(shortPickBody?.idempotencyKey).toBeTruthy();
+  });
+
+  it('preserves only genuinely entered RF scans in ShortPickModal and allows zero-quantity short pick without scans', async () => {
+    const assignedTask = {
+      ...samplePendingTask,
+      status: PickTaskStatus.Assigned,
+      assignedUserId: 'picker-zero',
+    };
+    let zeroShortBody: any = null;
+
+    mockBackend({
+      user: {
+        userId: 'picker-zero',
+        email: 'pickerz@nexus.local',
+        userType: UserType.Staff,
+        roles: ['WarehouseOperator'],
+        permissions: ['outbound:pick'],
+      },
+      nextTask: assignedTask,
+      onFetch: async (url, init) => {
+        if (url === '/api/v1/outbound/pick-tasks/pt-101/short-pick' && init?.method === 'POST') {
+          zeroShortBody = JSON.parse(String(init.body));
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              isSuccess: true,
+              pickTaskId: 'pt-101',
+              taskStatus: PickTaskStatus.ShortPicked,
+              quantityPicked: 0,
+              discrepancyQuantity: 10,
+              pickExceptionId: 'exc-zero',
+              generatedCycleCountId: 'cc-zero',
+              locationLockApplied: true,
+              message: 'Zero short-pick recorded.',
+            }),
+          } as Response;
+        }
+        return undefined;
+      },
+    });
+
+    renderWithShell(<PickingWorkstationPage />);
+    const mainLoc = (await screen.findByTestId('rf-scan-location')) as HTMLInputElement;
+    // Pre-scan ONLY location; leave item and tote unscanned
+    fireEvent.change(mainLoc, { target: { value: 'A-04-02' } });
+    fireEvent.click(screen.getByTestId('open-short-pick-btn'));
+
+    expect(((await screen.findByTestId('short-pick-location-input')) as HTMLInputElement).value).toBe('A-04-02');
+    expect((screen.getByTestId('short-pick-item-input') as HTMLInputElement).value).toBe('');
+    expect((screen.getByTestId('short-pick-tote-input') as HTMLInputElement).value).toBe('');
+
+    // Zero quantity submits cleanly without requiring item/tote scans (clear location too so none required)
+    fireEvent.change(screen.getByTestId('short-pick-location-input'), { target: { value: '' } });
+    fireEvent.change(screen.getByTestId('short-pick-qty-input'), { target: { value: '0' } });
+    fireEvent.click(screen.getByTestId('submit-short-pick-btn'));
+
+    await waitFor(() => {
+      expect(screen.getByTestId('picking-feedback-banner').textContent).toMatch(/Short-pick recorded \(10 unit\(s\) short\)/i);
+    });
+    expect(zeroShortBody?.quantityPicked).toBe(0);
+    expect(zeroShortBody?.scannedLocationBarcode).toBeUndefined();
+    expect(zeroShortBody?.scannedItemBarcode).toBeUndefined();
+    expect(zeroShortBody?.scannedToteLpn).toBeUndefined();
   });
 
   it('rejects ClientAdmin and Driver identities cleanly from shell navigation and direct route even with legacy claims', async () => {

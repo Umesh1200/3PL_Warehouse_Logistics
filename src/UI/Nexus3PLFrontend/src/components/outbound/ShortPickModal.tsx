@@ -44,9 +44,9 @@ export const ShortPickModal: React.FC<ShortPickModalProps> = ({
     setQuantityPicked('0');
     setReason(ShortPickReason.BinEmpty);
     setNotes('');
-    setScannedLocationBarcode(initialLocationBarcode || task.sourceLocationCode || '');
-    setScannedItemBarcode(initialItemBarcode || task.sku || '');
-    setScannedToteLpn(initialToteLpn || task.targetToteBarcode || '');
+    setScannedLocationBarcode(initialLocationBarcode);
+    setScannedItemBarcode(initialItemBarcode);
+    setScannedToteLpn(initialToteLpn);
     setError(null);
     idempotencyKeyRef.current = null;
   }, [isOpen, task?.id, initialLocationBarcode, initialItemBarcode, initialToteLpn]);
@@ -54,12 +54,14 @@ export const ShortPickModal: React.FC<ShortPickModalProps> = ({
   if (!task) return null;
 
   const remainingToPick = Math.max(0, task.quantityToPick - task.quantityPicked);
+  const parsedQty = quantityPicked.trim() === '' ? Number.NaN : Number(quantityPicked);
+  const isPositiveShortPick = Number.isFinite(parsedQty) && parsedQty > 0;
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (inFlightRef.current || isSubmitting) return;
 
-    const qty = Number(quantityPicked);
+    const qty = quantityPicked.trim() === '' ? Number.NaN : Number(quantityPicked);
     if (!Number.isFinite(qty) || qty < 0) {
       setError('Picked quantity must be zero or a positive number.');
       return;
@@ -70,9 +72,19 @@ export const ShortPickModal: React.FC<ShortPickModalProps> = ({
       );
       return;
     }
-    if (qty > 0 && !scannedToteLpn.trim()) {
-      setError('Target tote / cart LPN barcode is required when reporting partial picked units.');
-      return;
+    if (qty > 0) {
+      if (!scannedLocationBarcode.trim()) {
+        setError('Source bin barcode scan is required when reporting partial picked units.');
+        return;
+      }
+      if (!scannedItemBarcode.trim()) {
+        setError('Item / SKU barcode scan is required when reporting partial picked units.');
+        return;
+      }
+      if (!scannedToteLpn.trim()) {
+        setError('Target tote / cart LPN barcode scan is required when reporting partial picked units.');
+        return;
+      }
     }
 
     if (!idempotencyKeyRef.current) {
@@ -135,7 +147,10 @@ export const ShortPickModal: React.FC<ShortPickModalProps> = ({
               min={0}
               max={remainingToPick}
               value={quantityPicked}
-              onChange={(e) => setQuantityPicked(e.target.value)}
+              onChange={(e) => {
+                setQuantityPicked(e.target.value);
+                if (error) setError(null);
+              }}
               data-testid="short-pick-qty-input"
               required
             />
@@ -160,33 +175,48 @@ export const ShortPickModal: React.FC<ShortPickModalProps> = ({
 
         <div className="outbound-form-grid">
           <div className="form-field">
-            <label htmlFor="short-pick-loc">Bin Barcode (Verification)</label>
+            <label htmlFor="short-pick-loc">Bin Barcode {isPositiveShortPick ? '*' : '(Optional for 0 qty)'}</label>
             <input
               id="short-pick-loc"
               type="text"
+              placeholder={`Expected: ${task.sourceLocationCode}`}
               value={scannedLocationBarcode}
-              onChange={(e) => setScannedLocationBarcode(e.target.value)}
+              onChange={(e) => {
+                setScannedLocationBarcode(e.target.value);
+                if (error) setError(null);
+              }}
               autoComplete="off"
+              data-testid="short-pick-location-input"
             />
           </div>
           <div className="form-field">
-            <label htmlFor="short-pick-item">Item / SKU Barcode</label>
+            <label htmlFor="short-pick-item">Item / SKU Barcode {isPositiveShortPick ? '*' : '(Optional for 0 qty)'}</label>
             <input
               id="short-pick-item"
               type="text"
+              placeholder={`Expected: ${task.sku}`}
               value={scannedItemBarcode}
-              onChange={(e) => setScannedItemBarcode(e.target.value)}
+              onChange={(e) => {
+                setScannedItemBarcode(e.target.value);
+                if (error) setError(null);
+              }}
               autoComplete="off"
+              data-testid="short-pick-item-input"
             />
           </div>
           <div className="form-field">
-            <label htmlFor="short-pick-tote">Target Tote LPN {Number(quantityPicked) > 0 ? '*' : '(Optional)'}</label>
+            <label htmlFor="short-pick-tote">Target Tote LPN {isPositiveShortPick ? '*' : '(Optional for 0 qty)'}</label>
             <input
               id="short-pick-tote"
               type="text"
+              placeholder={task.targetToteBarcode ? `Expected: ${task.targetToteBarcode}` : 'Scan tote / cart LPN'}
               value={scannedToteLpn}
-              onChange={(e) => setScannedToteLpn(e.target.value)}
+              onChange={(e) => {
+                setScannedToteLpn(e.target.value);
+                if (error) setError(null);
+              }}
               autoComplete="off"
+              data-testid="short-pick-tote-input"
             />
           </div>
         </div>

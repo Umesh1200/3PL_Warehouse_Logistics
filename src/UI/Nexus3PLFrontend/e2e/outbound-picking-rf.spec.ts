@@ -17,6 +17,7 @@ test.describe('Phase 7.4.2: RF Directed Pick & Short-Pick Workstation E2E', () =
   }, testInfo) => {
     const queueListCalls: string[] = [];
     const confirmCalls: any[] = [];
+    const shortPickCalls: any[] = [];
     let nextCallCount = 0;
     let claimAttempts = 0;
     let currentTaskIdx = 0;
@@ -186,6 +187,7 @@ test.describe('Phase 7.4.2: RF Directed Pick & Short-Pick Workstation E2E', () =
 
       if (path.endsWith('/short-pick') && method === 'POST') {
         const body = JSON.parse(route.request().postData() || '{}');
+        shortPickCalls.push(body);
         const shortId = path.split('/').slice(-2, -1)[0];
         currentTaskIdx = 2;
         return route.fulfill({
@@ -282,15 +284,26 @@ test.describe('Phase 7.4.2: RF Directed Pick & Short-Pick Workstation E2E', () =
     expect(confirmCalls).toHaveLength(1);
     expect(confirmCalls[0].idempotencyKey).toBeTruthy();
 
-    // Task 2 loaded -> Claim -> Open Short-Pick Modal -> Submit DamagedStock exception
+    // Task 2 loaded -> Claim -> Open Short-Pick Modal -> Enforce Fresh Physical Scans for Positive Qty -> Submit
     await expect(page.getByText('SKU-VALVE-742')).toBeVisible();
     await page.click('[data-testid="claim-pick-task-btn"]');
     await expect(page.getByTestId('open-short-pick-btn')).toBeEnabled();
     await page.click('[data-testid="open-short-pick-btn"]');
     await expect(page.getByTestId('short-pick-form')).toBeVisible();
+    await expect(page.getByTestId('short-pick-location-input')).toHaveValue('');
+    await expect(page.getByTestId('short-pick-item-input')).toHaveValue('');
+    await expect(page.getByTestId('short-pick-tote-input')).toHaveValue('');
+
     await page.fill('[data-testid="short-pick-qty-input"]', '2');
     await page.selectOption('[data-testid="short-pick-reason-select"]', 'DamagedStock');
     await page.fill('[data-testid="short-pick-notes-input"]', '3 crushed valves in bin');
+    await page.click('[data-testid="submit-short-pick-btn"]');
+    await expect(page.getByTestId('short-pick-error')).toBeVisible();
+    expect(shortPickCalls).toHaveLength(0);
+
+    await page.fill('[data-testid="short-pick-location-input"]', 'B-02-08');
+    await page.fill('[data-testid="short-pick-item-input"]', 'SKU-VALVE-742');
+    await page.fill('[data-testid="short-pick-tote-input"]', 'TOTE-742');
     await page.screenshot({
       path: testInfo.outputPath('phase742-short-pick-modal-1440.png'),
       fullPage: true,
@@ -299,6 +312,10 @@ test.describe('Phase 7.4.2: RF Directed Pick & Short-Pick Workstation E2E', () =
     await page.click('[data-testid="submit-short-pick-btn"]');
 
     await expect(page.getByTestId('picking-feedback-banner')).toContainText('Short-pick recorded (3 unit(s) short)');
+    expect(shortPickCalls).toHaveLength(1);
+    expect(shortPickCalls[0].scannedLocationBarcode).toBe('B-02-08');
+    expect(shortPickCalls[0].scannedItemBarcode).toBe('SKU-VALVE-742');
+    expect(shortPickCalls[0].scannedToteLpn).toBe('TOTE-742');
     await expect(page.getByTestId('rf-empty-state')).toBeVisible();
 
     // Pick-only operator must NEVER call supervisor queue listing

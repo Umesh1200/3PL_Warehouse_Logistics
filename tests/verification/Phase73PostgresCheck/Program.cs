@@ -2596,6 +2596,7 @@ try
             throw new InvalidOperationException($"Expected 200 OK from /pick-tasks/eligible-operators, got {eligibleOpsResp.StatusCode}");
     }
     if ((await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/pick-tasks/eligible-operators?facilityId={p74FacB}", bSupId, facilityId, Permissions.Outbound.TasksManage))).StatusCode != HttpStatusCode.Forbidden ||
+        (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/pick-tasks/eligible-operators?facilityId={p74FacB}", bSupId, facilityId, $"{Permissions.Outbound.TasksManage},{Permissions.Analytics.MultiFacilityView}"))).StatusCode != HttpStatusCode.Forbidden ||
         (await p74Client.SendAsync(StaffReq(HttpMethod.Get, $"/api/v1/outbound/pick-tasks/eligible-operators?facilityId={facilityId}", bOpAId, facilityId, Permissions.Outbound.Pick))).StatusCode != HttpStatusCode.Forbidden)
         throw new InvalidOperationException("Phase 7.4.2 eligible-operators boundary failed on PostgreSQL.");
 
@@ -2644,7 +2645,32 @@ try
         await p5Db.SaveChangesAsync();
     }
 
-    // 7.5a Positive-quantity short-pick (2m picked + 3m discrepancy) executes cleanly via HTTP in one atomic transaction
+    // 7.5a P742-R01 Negative Scan Enforcement on positive-quantity short-pick (missing/mismatched scans -> 400, zero inventory movement)
+    foreach (var badShortPayload in new object[]
+    {
+        new { quantityPicked = 2m, reason = (int)ShortPickReason.BinEmpty, notes = "missing loc", scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-P5" },
+        new { quantityPicked = 2m, reason = (int)ShortPickReason.BinEmpty, notes = "missing item", scannedLocationBarcode = "PG-P5-OK", scannedToteLpn = "PG-TOTE-P5" },
+        new { quantityPicked = 2m, reason = (int)ShortPickReason.BinEmpty, notes = "missing tote", scannedLocationBarcode = "PG-P5-OK", scannedItemBarcode = itemSku },
+        new { quantityPicked = 2m, reason = (int)ShortPickReason.BinEmpty, notes = "wrong loc", scannedLocationBarcode = "PG-WRONG-BIN", scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-P5" },
+        new { quantityPicked = 2m, reason = (int)ShortPickReason.BinEmpty, notes = "wrong item", scannedLocationBarcode = "PG-P5-OK", scannedItemBarcode = "PG-WRONG-SKU", scannedToteLpn = "PG-TOTE-P5" }
+    })
+    {
+        using var badShortResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{p5TaskOkId}/short-pick", bOpAId, facilityId, Permissions.Outbound.Pick, badShortPayload));
+        if (badShortResp.StatusCode != HttpStatusCode.BadRequest)
+            throw new InvalidOperationException($"P742-R01: expected 400 BadRequest for invalid positive short-pick scans, got {badShortResp.StatusCode}");
+    }
+
+    await using (var p5CheckPre = CreateDb(operationalConn, user))
+    {
+        var sPre = await p5CheckPre.StockOnHand.SingleAsync(x => x.Id == p5StockId);
+        var taskPre = await p5CheckPre.PickTasks.SingleAsync(t => t.Id == p5TaskOkId);
+        if (sPre.QtyAllocated != 15m || taskPre.Status != PickTaskStatus.Assigned ||
+            await p5CheckPre.InventoryTransactions.AnyAsync(t => t.ReferenceId == p5TaskOkId) ||
+            await p5CheckPre.PickExceptions.AnyAsync(e => e.PickTaskId == p5TaskOkId))
+            throw new InvalidOperationException("P742-R01: rejected invalid positive short-pick mutated PostgreSQL stock, task, ledger, or exception state!");
+    }
+
+    // Positive-quantity short-pick (2m picked + 3m discrepancy) executes cleanly via HTTP in one atomic transaction
     using (var okShortResp = await p74Client.SendAsync(StaffReq(HttpMethod.Post, $"/api/v1/outbound/pick-tasks/{p5TaskOkId}/short-pick", bOpAId, facilityId, Permissions.Outbound.Pick,
         new { quantityPicked = 2m, reason = (int)ShortPickReason.BinEmpty, notes = "PG partial pick 2/5", scannedLocationBarcode = "PG-P5-OK", scannedItemBarcode = itemSku, scannedToteLpn = "PG-TOTE-P5" })))
     {

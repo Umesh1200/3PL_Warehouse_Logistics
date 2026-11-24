@@ -51,7 +51,7 @@ public class GetEligiblePickOperatorsQueryHandler
         var scope = await _outboundAuth.ResolveOutboundQueryScopeAsync(
             requestedClientId: null,
             requestedFacilityId: request.FacilityId == Guid.Empty ? null : request.FacilityId,
-            allowCrossFacilityRead: true,
+            allowCrossFacilityRead: false,
             allowClient: false,
             ct: cancellationToken);
 

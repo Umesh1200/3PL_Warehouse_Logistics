@@ -103,7 +103,7 @@ export const PickingWorkstationPage: React.FC = () => {
     setScannedLocationBarcode('');
     setScannedItemBarcode('');
     setScannedLotNumber('');
-    setScannedToteLpn(task?.targetToteBarcode || '');
+    setScannedToteLpn('');
     if (task) {
       const remaining = Math.max(0, task.quantityToPick - task.quantityPicked);
       setPickQuantity(String(remaining > 0 ? remaining : task.quantityToPick));
@@ -730,7 +730,7 @@ export const PickingWorkstationPage: React.FC = () => {
                       id="rf-scan-tote"
                       type="text"
                       className="rf-scan-input code-font"
-                      placeholder={nextTask.targetToteBarcode || 'TOTE-001'}
+                      placeholder={nextTask.targetToteBarcode ? `Expected: ${nextTask.targetToteBarcode}` : 'Scan tote / cart LPN'}
                       value={scannedToteLpn}
                       onChange={(e) => setScannedToteLpn(e.target.value)}
                       disabled={!canExecuteOnTask || isConfirming}

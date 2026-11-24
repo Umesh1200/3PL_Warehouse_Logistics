@@ -170,9 +170,21 @@ public class PickExecutionService : IPickExecutionService
 
             var discrepancyQty = task.QuantityToPick - pickedQty;
 
-            // 1. If partial quantity was found, physically pick it inside the SAME outer transaction without committing early
+            // 1. If partial quantity was found, enforce full RF physical barcode scans and pick inside SAME outer transaction
             if (pickedQty > 0)
             {
+                if (string.IsNullOrWhiteSpace(request.ScannedLocationBarcode))
+                {
+                    throw new ValidationException(nameof(request.ScannedLocationBarcode),
+                        "Source bin barcode scan is required when confirming partial picked quantity on short pick.");
+                }
+
+                if (string.IsNullOrWhiteSpace(request.ScannedItemBarcode))
+                {
+                    throw new ValidationException(nameof(request.ScannedItemBarcode),
+                        "Item / SKU barcode scan is required when confirming partial picked quantity on short pick.");
+                }
+
                 if (string.IsNullOrWhiteSpace(request.ScannedToteLpn))
                 {
                     throw new ValidationException(nameof(request.ScannedToteLpn),
@@ -184,8 +196,8 @@ public class PickExecutionService : IPickExecutionService
                     new ConfirmPickRequest
                     {
                         PickTaskId = task.Id,
-                        ScannedLocationBarcode = request.ScannedLocationBarcode ?? task.SourceLocation.Barcode,
-                        ScannedItemBarcode = request.ScannedItemBarcode ?? task.Item.Sku,
+                        ScannedLocationBarcode = request.ScannedLocationBarcode,
+                        ScannedItemBarcode = request.ScannedItemBarcode,
                         ScannedToteLpn = request.ScannedToteLpn,
                         Quantity = pickedQty,
                         UserId = request.UserId,
