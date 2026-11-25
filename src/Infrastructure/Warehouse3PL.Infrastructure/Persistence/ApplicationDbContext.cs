@@ -31,6 +31,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryBillingLocks = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryComplianceLocks = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryLegalEntityLocks = new();
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryFxRateLocks = new(StringComparer.Ordinal);
 
     public ApplicationDbContext(
         DbContextOptions<ApplicationDbContext> options,
@@ -228,11 +229,15 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<CrossDockTask> CrossDockTasks => Set<CrossDockTask>();
     public DbSet<CrossDockException> CrossDockExceptions => Set<CrossDockException>();
 
-    // Global Localization Reference & Statutory Compliance Policies (MDM-1.1)
+    // Global Localization Reference & Statutory Compliance Policies (MDM-1.1 / MDM-1.3)
     public DbSet<CountryProfile> CountryProfiles => Set<CountryProfile>();
     public DbSet<AdministrativeDivision> AdministrativeDivisions => Set<AdministrativeDivision>();
     public DbSet<TimeZoneProfile> TimeZoneProfiles => Set<TimeZoneProfile>();
     public DbSet<CountryCompliancePolicy> CountryCompliancePolicies => Set<CountryCompliancePolicy>();
+    public DbSet<CurrencyMaster> Currencies => Set<CurrencyMaster>();
+    public DbSet<FxRateRecord> FxRateRecords => Set<FxRateRecord>();
+    public DbSet<UomDefinition> UomDefinitions => Set<UomDefinition>();
+    public DbSet<UomConversion> UomConversions => Set<UomConversion>();
 
     public async Task BeginTransactionAsync(CancellationToken cancellationToken = default)
     {
@@ -874,6 +879,91 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             {
                 await AcquireLegalEntityLocksAsync();
                 var result = await action();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
+    }
+
+    public async Task<TResult> ExecuteWithFxRateLockAsync<TResult>(
+        string baseCurrencyCode,
+        string quoteCurrencyCode,
+        Domain.Enums.FxRateSourceAuthority sourceAuthority,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedBase = (baseCurrencyCode ?? string.Empty).Trim().ToUpperInvariant();
+        var normalizedQuote = (quoteCurrencyCode ?? string.Empty).Trim().ToUpperInvariant();
+        var lockKey = $"FXRATE:{normalizedBase}:{normalizedQuote}:{sourceAuthority}";
+
+        if (!Database.IsRelational())
+        {
+            var gate = InMemoryFxRateLocks.GetOrAdd(lockKey, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                return await action();
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        async Task AcquireFxLocksAsync()
+        {
+            if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0::bigint))",
+                    cancellationToken);
+
+                var authorityName = sourceAuthority.ToString();
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM fx_rates WHERE base_currency_code = {normalizedBase} AND quote_currency_code = {normalizedQuote} AND source_authority = {authorityName} AND approval_status = 'VerifiedApproved' AND is_active = true FOR UPDATE",
+                    cancellationToken);
+            }
+        }
+
+        async Task<TResult> RunLockedActionAsync()
+        {
+            try
+            {
+                await AcquireFxLocksAsync();
+                return await action();
+            }
+            catch (DbUpdateException dbEx) when (dbEx.InnerException is Npgsql.PostgresException pgEx &&
+                                                 (pgEx.SqlState == "23P01" || pgEx.SqlState == "23505"))
+            {
+                throw new Domain.Exceptions.ConcurrencyException(
+                    "FX_RATE_CONFLICT",
+                    $"Concurrent modification or active window overlap prevented for '{normalizedBase}/{normalizedQuote}' ({sourceAuthority}, {pgEx.SqlState}).");
+            }
+        }
+
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            return await RunLockedActionAsync();
+        }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt)
+            {
+                ClearChangeTracker();
+            }
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                var result = await RunLockedActionAsync();
                 await CommitTransactionAsync(cancellationToken);
                 return result;
             }

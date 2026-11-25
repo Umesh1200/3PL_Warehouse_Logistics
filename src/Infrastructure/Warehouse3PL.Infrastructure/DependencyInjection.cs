@@ -39,6 +39,8 @@ public static class DependencyInjection
         services.AddScoped<ITenantProvider, TenantProvider>();
         services.AddSingleton<ITimeZoneOffsetResolver, TimeZoneOffsetResolver>();
         services.AddScoped<ICountryComplianceEvaluator, CountryComplianceEvaluator>();
+        services.AddScoped<IUomConversionService, UomConversionService>();
+        services.AddScoped<IFxConversionService, FxConversionService>();
         services.AddScoped<IPutawayLocationSelector, PutawayLocationSelector>();
         services.AddScoped<IPutawayRecommendationService, PutawayLocationSelector>();
         services.AddScoped<ICrossDockEngine, CrossDockEngine>();
@@ -92,7 +94,9 @@ public static class DependencyInjection
         services.AddScoped<Warehouse3PL.Infrastructure.Services.Analytics.TransportationAnalyticsAuthorization>();
         services.AddScoped<IClaimsReadinessService, Warehouse3PL.Infrastructure.Services.Analytics.ClaimsReadinessService>();
         services.AddScoped<ICarrierScorecardService, Warehouse3PL.Infrastructure.Services.Analytics.CarrierScorecardService>();
-        services.AddSingleton<IFxRateProvider, Warehouse3PL.Infrastructure.Services.Analytics.FxRateProvider>();
+        services.AddSingleton<IFxRateProvider>(sp =>
+            new Warehouse3PL.Infrastructure.Services.Analytics.FxRateProvider(
+                sp.GetService<IServiceScopeFactory>()));
         services.AddScoped<IFreightReconciliationService, Warehouse3PL.Infrastructure.Services.Analytics.FreightReconciliationService>();
         services.AddScoped<Warehouse3PL.Infrastructure.Services.Analytics.MonitoringService>();
         services.AddScoped<IMonitoringService>(sp => sp.GetRequiredService<Warehouse3PL.Infrastructure.Services.Analytics.MonitoringService>());

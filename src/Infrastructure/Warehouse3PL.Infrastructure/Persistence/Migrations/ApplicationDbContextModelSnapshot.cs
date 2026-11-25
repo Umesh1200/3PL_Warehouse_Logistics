@@ -16147,6 +16147,246 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.CurrencyMaster", b =>
+                {
+                    b.Property<string>("CurrencyCode")
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("currency_code");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<int>("MinorUnits")
+                        .HasColumnType("integer")
+                        .HasColumnName("minor_units");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("NumericCode")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("numeric_code");
+
+                    b.Property<int>("SeedVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("seed_version");
+
+                    b.Property<string>("Symbol")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("symbol");
+
+                    b.Property<bool>("SymbolBeforeAmount")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("symbol_before_amount");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("CurrencyCode")
+                        .HasName("pk_currencies");
+
+                    b.HasIndex("NumericCode")
+                        .IsUnique()
+                        .HasDatabaseName("ix_currencies_numeric_code");
+
+                    b.ToTable("currencies", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_currencies_minor_units", "minor_units BETWEEN 0 AND 4");
+                        });
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.FxRateRecord", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("fx_rate_id");
+
+                    b.Property<string>("ApprovalStatus")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("approval_status");
+
+                    b.Property<DateTime?>("ApprovedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("approved_at_utc");
+
+                    b.Property<Guid?>("ApprovedByUserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("approved_by_user_id");
+
+                    b.Property<string>("BaseCurrencyCode")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("base_currency_code");
+
+                    b.Property<string>("BenchmarkSeriesId")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)")
+                        .HasColumnName("benchmark_series_id");
+
+                    b.Property<string>("BulletinVersion")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)")
+                        .HasColumnName("bulletin_version");
+
+                    b.Property<decimal>("BuyRate")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)")
+                        .HasColumnName("buy_rate");
+
+                    b.Property<long>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime>("EffectiveFromUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("effective_from_utc");
+
+                    b.Property<DateTime?>("EffectiveToUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("effective_to_utc");
+
+                    b.Property<string>("IntegrityHash")
+                        .HasMaxLength(128)
+                        .HasColumnType("character varying(128)")
+                        .HasColumnName("integrity_hash");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_active");
+
+                    b.Property<decimal>("MidRate")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)")
+                        .HasColumnName("mid_rate");
+
+                    b.Property<DateTime>("PublishedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("published_at_utc");
+
+                    b.Property<string>("QuoteCurrencyCode")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("quote_currency_code");
+
+                    b.Property<string>("RateDirection")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("rate_direction");
+
+                    b.Property<decimal>("SellRate")
+                        .HasPrecision(18, 6)
+                        .HasColumnType("numeric(18,6)")
+                        .HasColumnName("sell_rate");
+
+                    b.Property<string>("SourceAuthority")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("source_authority");
+
+                    b.Property<DateTime?>("SupersededAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("superseded_at_utc");
+
+                    b.Property<Guid?>("SupersededByRateId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("superseded_by_rate_id");
+
+                    b.Property<int>("UnitMultiplier")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("unit_multiplier");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.Property<string>("VerificationNotes")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("verification_notes");
+
+                    b.Property<string>("VoidReason")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("void_reason");
+
+                    b.Property<DateTime?>("VoidedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("voided_at_utc");
+
+                    b.Property<Guid?>("VoidedByUserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("voided_by_user_id");
+
+                    b.HasKey("Id")
+                        .HasName("pk_fx_rates");
+
+                    b.HasIndex("QuoteCurrencyCode")
+                        .HasDatabaseName("ix_fx_rates_quote_currency_code");
+
+                    b.HasIndex("SupersededByRateId")
+                        .HasDatabaseName("ix_fx_rates_superseded_by_rate_id");
+
+                    b.HasIndex("BaseCurrencyCode", "QuoteCurrencyCode", "SourceAuthority", "ApprovalStatus", "IsActive")
+                        .HasDatabaseName("ix_fx_rates_base_currency_code_quote_currency_code_source_auth");
+
+                    b.ToTable("fx_rates", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_fx_rates_distinct_currencies", "base_currency_code <> quote_currency_code");
+
+                            t.HasCheckConstraint("ck_fx_rates_positive_rates", "buy_rate > 0 AND sell_rate > 0 AND mid_rate > 0 AND buy_rate <= sell_rate");
+
+                            t.HasCheckConstraint("ck_fx_rates_unit_multiplier_positive", "unit_multiplier > 0");
+
+                            t.HasCheckConstraint("ck_fx_rates_window", "effective_to_utc IS NULL OR effective_to_utc > effective_from_utc");
+                        });
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.TimeZoneProfile", b =>
                 {
                     b.Property<string>("TimeZoneId")
@@ -16190,6 +16430,129 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasDatabaseName("ix_time_zone_profiles_country_code");
 
                     b.ToTable("time_zone_profiles", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.UomConversion", b =>
+                {
+                    b.Property<string>("FromUomCode")
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasColumnName("from_uom_code");
+
+                    b.Property<string>("ToUomCode")
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasColumnName("to_uom_code");
+
+                    b.Property<decimal>("ConversionFactor")
+                        .HasPrecision(18, 10)
+                        .HasColumnType("numeric(18,10)")
+                        .HasColumnName("conversion_factor");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Dimension")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)")
+                        .HasColumnName("dimension");
+
+                    b.Property<decimal>("InverseFactor")
+                        .HasPrecision(18, 10)
+                        .HasColumnType("numeric(18,10)")
+                        .HasColumnName("inverse_factor");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("IsExact")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_exact");
+
+                    b.HasKey("FromUomCode", "ToUomCode")
+                        .HasName("pk_uom_conversions");
+
+                    b.HasIndex("ToUomCode")
+                        .HasDatabaseName("ix_uom_conversions_to_uom_code");
+
+                    b.ToTable("uom_conversions", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_uom_conversions_distinct_uoms", "from_uom_code <> to_uom_code");
+
+                            t.HasCheckConstraint("ck_uom_conversions_positive_factors", "conversion_factor > 0 AND inverse_factor > 0");
+                        });
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.UomDefinition", b =>
+                {
+                    b.Property<string>("UomCode")
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasColumnName("uom_code");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("Dimension")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)")
+                        .HasColumnName("dimension");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("IsCanonicalBase")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_canonical_base");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)")
+                        .HasColumnName("name");
+
+                    b.Property<int>("RoundingPrecision")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(4)
+                        .HasColumnName("rounding_precision");
+
+                    b.Property<string>("SystemOfMeasure")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)")
+                        .HasColumnName("system_of_measure");
+
+                    b.Property<string>("UneceRec20Code")
+                        .IsRequired()
+                        .HasMaxLength(10)
+                        .HasColumnType("character varying(10)")
+                        .HasColumnName("unece_rec20_code");
+
+                    b.HasKey("UomCode")
+                        .HasName("pk_uom_definitions");
+
+                    b.HasIndex("Dimension")
+                        .HasDatabaseName("ix_uom_definitions_dimension");
+
+                    b.ToTable("uom_definitions", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_uom_definitions_precision", "rounding_precision BETWEEN 0 AND 8");
+                        });
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.Client", b =>
@@ -20229,6 +20592,56 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("SupersededByPolicy");
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.FxRateRecord", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.CurrencyMaster", "BaseCurrency")
+                        .WithMany()
+                        .HasForeignKey("BaseCurrencyCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_fx_rates_currencies_base_currency_code");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.CurrencyMaster", "QuoteCurrency")
+                        .WithMany()
+                        .HasForeignKey("QuoteCurrencyCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_fx_rates_currencies_quote_currency_code");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.FxRateRecord", "SupersededByRate")
+                        .WithMany()
+                        .HasForeignKey("SupersededByRateId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_fx_rates_fx_rates_superseded_by_rate_id");
+
+                    b.Navigation("BaseCurrency");
+
+                    b.Navigation("QuoteCurrency");
+
+                    b.Navigation("SupersededByRate");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.UomConversion", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.UomDefinition", "FromUom")
+                        .WithMany("ConversionsFrom")
+                        .HasForeignKey("FromUomCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_uom_conversions_uom_definitions_from_uom_code");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.UomDefinition", "ToUom")
+                        .WithMany("ConversionsTo")
+                        .HasForeignKey("ToUomCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_uom_conversions_uom_definitions_to_uom_code");
+
+                    b.Navigation("FromUom");
+
+                    b.Navigation("ToUom");
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.ClientContact", b =>
                 {
                     b.HasOne("Warehouse3PL.Domain.Entities.Security.Client", "Client")
@@ -20617,6 +21030,13 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("CompliancePolicies");
 
                     b.Navigation("Divisions");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.UomDefinition", b =>
+                {
+                    b.Navigation("ConversionsFrom");
+
+                    b.Navigation("ConversionsTo");
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.Client", b =>

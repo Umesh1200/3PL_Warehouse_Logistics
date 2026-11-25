@@ -3,7 +3,10 @@ using System.Reflection;
 using System.Security.Cryptography;
 using System.Text;
 using System.Xml.Linq;
+using Microsoft.EntityFrameworkCore;
+using Microsoft.Extensions.DependencyInjection;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.ValueObjects;
 
 namespace Warehouse3PL.Infrastructure.Services.Analytics;
@@ -49,6 +52,26 @@ public class FxRateProvider : IFxRateProvider
 
     private static readonly Dictionary<string, BulletinProvenanceMetadata> BulletinRegistry = new(StringComparer.OrdinalIgnoreCase);
     private static readonly IReadOnlyList<PublishedFixing> PublishedFixingSchedule;
+
+    private readonly IServiceScopeFactory? _scopeFactory;
+    private readonly IApplicationDbContext? _directDb;
+
+    public FxRateProvider()
+    {
+    }
+
+    [ActivatorUtilitiesConstructor]
+    public FxRateProvider(IServiceScopeFactory? scopeFactory)
+    {
+        _scopeFactory = scopeFactory;
+    }
+
+    private FxRateProvider(IApplicationDbContext directDb)
+    {
+        _directDb = directDb;
+    }
+
+    public static FxRateProvider ForDbContext(IApplicationDbContext directDb) => new(directDb);
 
     static FxRateProvider()
     {
@@ -428,6 +451,16 @@ public class FxRateProvider : IFxRateProvider
             return 1.0m;
         }
 
+        // MDM-1.3: Consult database-authoritative effective-dated FxRateRecord rows first
+        // (honoring UnitMultiplier such as NRB 100 INR -> NPR and PublishedAtUtc cutoffs)
+        // before falling back to verified embedded central bank historical bulletins.
+        if (TryResolveDatabaseRate(
+                src, tgt, utcDate, utcAsOf,
+                out var dbRate, out rateSource, out rateVersion, out benchmarkSeriesId, out integrityHash, out publishedAtUtc))
+        {
+            return dbRate;
+        }
+
         var currencyFixings = PublishedFixingSchedule
             .Where(p => p.SourceCurrency == src && p.TargetCurrency == tgt)
             .ToList();
@@ -472,6 +505,79 @@ public class FxRateProvider : IFxRateProvider
 
         throw new InvalidOperationException(
             $"Unsupported currency conversion from '{sourceCurrency}' to '{targetCurrency}' for effective date {utcDate:yyyy-MM-dd}. No authoritative exchange rate is configured.");
+    }
+
+    private bool TryResolveDatabaseRate(
+        string src,
+        string tgt,
+        DateTime utcDate,
+        DateTime utcAsOf,
+        out decimal unitRate,
+        out string rateSource,
+        out string rateVersion,
+        out string benchmarkSeriesId,
+        out string integrityHash,
+        out DateTime publishedAtUtc)
+    {
+        unitRate = 0m;
+        rateSource = string.Empty;
+        rateVersion = string.Empty;
+        benchmarkSeriesId = string.Empty;
+        integrityHash = string.Empty;
+        publishedAtUtc = default;
+
+        IApplicationDbContext? db = _directDb;
+        IServiceScope? scope = null;
+        if (db == null && _scopeFactory != null)
+        {
+            scope = _scopeFactory.CreateScope();
+            db = scope.ServiceProvider.GetService<IApplicationDbContext>();
+        }
+
+        if (db == null)
+        {
+            scope?.Dispose();
+            return false;
+        }
+
+        try
+        {
+            var match = db.FxRateRecords
+                .AsNoTracking()
+                .Where(r => r.BaseCurrencyCode == src &&
+                            r.QuoteCurrencyCode == tgt &&
+                            r.ApprovalStatus == FxRateApprovalStatus.VerifiedApproved &&
+                            r.IsActive &&
+                            r.EffectiveFromUtc <= utcDate &&
+                            (r.EffectiveToUtc == null || r.EffectiveToUtc > utcDate))
+                .OrderByDescending(r => r.EffectiveFromUtc)
+                .ThenByDescending(r => r.PublishedAtUtc)
+                .ThenByDescending(r => r.ApprovedAtUtc)
+                .FirstOrDefault();
+
+            if (match == null)
+            {
+                return false;
+            }
+
+            if (utcAsOf < match.PublishedAtUtc)
+            {
+                throw new InvalidOperationException(
+                    $"Exchange rate bulletin '{match.BulletinVersion}' for {src}/{tgt} was published at {match.PublishedAtUtc:yyyy-MM-dd HH:mm:ss} UTC, which is after the requested valuation time {utcAsOf:yyyy-MM-dd HH:mm:ss} UTC. Future fixings cannot be used before publication.");
+            }
+
+            unitRate = match.ComputeUnitRate(FxRateType.Mid);
+            rateSource = match.SourceAuthority.ToString();
+            rateVersion = match.BulletinVersion;
+            benchmarkSeriesId = match.BenchmarkSeriesId ?? $"{src}/{tgt}";
+            integrityHash = match.IntegrityHash ?? "DB-VERIFIED";
+            publishedAtUtc = match.PublishedAtUtc;
+            return true;
+        }
+        finally
+        {
+            scope?.Dispose();
+        }
     }
 
     public bool VerifyBulletinIntegrity(string bulletinVersion, out string computedHash)

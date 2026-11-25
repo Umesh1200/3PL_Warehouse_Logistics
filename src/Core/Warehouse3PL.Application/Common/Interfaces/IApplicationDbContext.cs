@@ -185,11 +185,15 @@ public interface IApplicationDbContext
     DbSet<CrossDockTask> CrossDockTasks { get; }
     DbSet<CrossDockException> CrossDockExceptions { get; }
 
-    // Global Localization Reference & Statutory Compliance Policies (MDM-1.1)
+    // Global Localization Reference & Statutory Compliance Policies (MDM-1.1 / MDM-1.3)
     DbSet<CountryProfile> CountryProfiles { get; }
     DbSet<AdministrativeDivision> AdministrativeDivisions { get; }
     DbSet<TimeZoneProfile> TimeZoneProfiles { get; }
     DbSet<CountryCompliancePolicy> CountryCompliancePolicies { get; }
+    DbSet<CurrencyMaster> Currencies { get; }
+    DbSet<FxRateRecord> FxRateRecords { get; }
+    DbSet<UomDefinition> UomDefinitions { get; }
+    DbSet<UomConversion> UomConversions { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
     Task BeginTransactionAsync(CancellationToken cancellationToken = default);
@@ -221,6 +225,12 @@ public interface IApplicationDbContext
         Func<Task<TResult>> action,
         CancellationToken cancellationToken = default,
         Guid? lockFacilityId = null);
+    Task<TResult> ExecuteWithFxRateLockAsync<TResult>(
+        string baseCurrencyCode,
+        string quoteCurrencyCode,
+        Domain.Enums.FxRateSourceAuthority sourceAuthority,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default);
     bool IsRelationalDatabase { get; }
     void ClearChangeTracker();
     bool AllowExplicitAuditTimestamps { get; set; }

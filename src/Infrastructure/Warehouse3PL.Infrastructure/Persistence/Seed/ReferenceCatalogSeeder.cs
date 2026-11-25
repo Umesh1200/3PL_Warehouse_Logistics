@@ -22,6 +22,20 @@ public static class ReferenceCatalogSeeder
         await SeedTimeZonesAsync(db, cancellationToken);
         await SeedAdministrativeDivisionsAsync(db, cancellationToken);
         await SeedDraftCompliancePoliciesAsync(db, cancellationToken);
+
+        bool hasMdm13Schema = !db.Database.IsRelational();
+        if (!hasMdm13Schema)
+        {
+            var applied = await db.Database.GetAppliedMigrationsAsync(cancellationToken);
+            hasMdm13Schema = applied.Any(m => m.Contains("MDM1_3", StringComparison.OrdinalIgnoreCase));
+        }
+
+        if (hasMdm13Schema)
+        {
+            await SeedCurrenciesAsync(db, cancellationToken);
+            await SeedUomDefinitionsAsync(db, cancellationToken);
+            await SeedUomConversionsAsync(db, cancellationToken);
+        }
     }
 
     public static Guid CreateDeterministicGuid(string key)
@@ -344,6 +358,131 @@ public static class ReferenceCatalogSeeder
             if (!versionSet.Contains(key))
             {
                 db.CountryCompliancePolicies.Add(draft);
+            }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private static async Task SeedCurrenciesAsync(ApplicationDbContext db, CancellationToken cancellationToken)
+    {
+        var desired = new[]
+        {
+            CurrencyMaster.Create("USD", "840", "US Dollar", "$", 2, symbolBeforeAmount: true),
+            CurrencyMaster.Create("NPR", "524", "Nepalese Rupee", "रू", 2, symbolBeforeAmount: true),
+            CurrencyMaster.Create("INR", "356", "Indian Rupee", "₹", 2, symbolBeforeAmount: true),
+            CurrencyMaster.Create("EUR", "978", "Euro", "€", 2, symbolBeforeAmount: true),
+            CurrencyMaster.Create("GBP", "826", "Pound Sterling", "£", 2, symbolBeforeAmount: true),
+            CurrencyMaster.Create("CAD", "124", "Canadian Dollar", "CA$", 2, symbolBeforeAmount: true),
+            CurrencyMaster.Create("AUD", "036", "Australian Dollar", "A$", 2, symbolBeforeAmount: true),
+            CurrencyMaster.Create("JPY", "392", "Japanese Yen", "¥", 0, symbolBeforeAmount: true),
+            CurrencyMaster.Create("KWD", "414", "Kuwaiti Dinar", "KWD", 3, symbolBeforeAmount: true),
+            CurrencyMaster.Create("SGD", "702", "Singapore Dollar", "S$", 2, symbolBeforeAmount: true),
+            CurrencyMaster.Create("CNY", "156", "Yuan Renminbi", "CN¥", 2, symbolBeforeAmount: true),
+            CurrencyMaster.Create("AED", "784", "UAE Dirham", "AED", 2, symbolBeforeAmount: true)
+        };
+
+        var existingCodes = (await db.Currencies
+            .AsNoTracking()
+            .Select(c => c.CurrencyCode)
+            .ToListAsync(cancellationToken))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var currency in desired)
+        {
+            if (!existingCodes.Contains(currency.CurrencyCode))
+            {
+                db.Currencies.Add(currency);
+            }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private static async Task SeedUomDefinitionsAsync(ApplicationDbContext db, CancellationToken cancellationToken)
+    {
+        var desired = new[]
+        {
+            // Mass (canonical base: KG matching canonical WeightKg)
+            new UomDefinition { UomCode = "KG", UneceRec20Code = "KGM", Name = "Kilogram", Dimension = UomDimension.Mass, SystemOfMeasure = UomSystemOfMeasure.SI, IsCanonicalBase = true, RoundingPrecision = 4, IsActive = true },
+            new UomDefinition { UomCode = "G", UneceRec20Code = "GRM", Name = "Gram", Dimension = UomDimension.Mass, SystemOfMeasure = UomSystemOfMeasure.SI, IsCanonicalBase = false, RoundingPrecision = 4, IsActive = true },
+            new UomDefinition { UomCode = "LB", UneceRec20Code = "LBR", Name = "Pound", Dimension = UomDimension.Mass, SystemOfMeasure = UomSystemOfMeasure.Imperial, IsCanonicalBase = false, RoundingPrecision = 4, IsActive = true },
+            new UomDefinition { UomCode = "OZ", UneceRec20Code = "ONZ", Name = "Ounce", Dimension = UomDimension.Mass, SystemOfMeasure = UomSystemOfMeasure.Imperial, IsCanonicalBase = false, RoundingPrecision = 4, IsActive = true },
+
+            // Length (canonical base: CM matching canonical LengthCm/WidthCm/HeightCm)
+            new UomDefinition { UomCode = "CM", UneceRec20Code = "CMT", Name = "Centimetre", Dimension = UomDimension.Length, SystemOfMeasure = UomSystemOfMeasure.SI, IsCanonicalBase = true, RoundingPrecision = 4, IsActive = true },
+            new UomDefinition { UomCode = "M", UneceRec20Code = "MTR", Name = "Metre", Dimension = UomDimension.Length, SystemOfMeasure = UomSystemOfMeasure.SI, IsCanonicalBase = false, RoundingPrecision = 4, IsActive = true },
+            new UomDefinition { UomCode = "IN", UneceRec20Code = "INH", Name = "Inch", Dimension = UomDimension.Length, SystemOfMeasure = UomSystemOfMeasure.Imperial, IsCanonicalBase = false, RoundingPrecision = 4, IsActive = true },
+            new UomDefinition { UomCode = "FT", UneceRec20Code = "FOT", Name = "Foot", Dimension = UomDimension.Length, SystemOfMeasure = UomSystemOfMeasure.Imperial, IsCanonicalBase = false, RoundingPrecision = 4, IsActive = true },
+
+            // Volume (canonical base: CM3 matching canonical VolumeCm3)
+            new UomDefinition { UomCode = "CM3", UneceRec20Code = "CMQ", Name = "Cubic Centimetre", Dimension = UomDimension.Volume, SystemOfMeasure = UomSystemOfMeasure.SI, IsCanonicalBase = true, RoundingPrecision = 4, IsActive = true },
+            new UomDefinition { UomCode = "M3", UneceRec20Code = "MTQ", Name = "Cubic Metre", Dimension = UomDimension.Volume, SystemOfMeasure = UomSystemOfMeasure.SI, IsCanonicalBase = false, RoundingPrecision = 6, IsActive = true },
+            new UomDefinition { UomCode = "FT3", UneceRec20Code = "FTQ", Name = "Cubic Foot", Dimension = UomDimension.Volume, SystemOfMeasure = UomSystemOfMeasure.Imperial, IsCanonicalBase = false, RoundingPrecision = 6, IsActive = true },
+            new UomDefinition { UomCode = "IN3", UneceRec20Code = "INQ", Name = "Cubic Inch", Dimension = UomDimension.Volume, SystemOfMeasure = UomSystemOfMeasure.Imperial, IsCanonicalBase = false, RoundingPrecision = 4, IsActive = true },
+
+            // Packaging / Count (canonical base: EA; packaging ratios depend on Item PackagingUnit)
+            new UomDefinition { UomCode = "EA", UneceRec20Code = "EA", Name = "Each", Dimension = UomDimension.Count, SystemOfMeasure = UomSystemOfMeasure.Packaging, IsCanonicalBase = true, RoundingPrecision = 0, IsActive = true },
+            new UomDefinition { UomCode = "CS", UneceRec20Code = "CS", Name = "Case", Dimension = UomDimension.Count, SystemOfMeasure = UomSystemOfMeasure.Packaging, IsCanonicalBase = false, RoundingPrecision = 0, IsActive = true },
+            new UomDefinition { UomCode = "PLT", UneceRec20Code = "PF", Name = "Pallet", Dimension = UomDimension.Count, SystemOfMeasure = UomSystemOfMeasure.Packaging, IsCanonicalBase = false, RoundingPrecision = 0, IsActive = true }
+        };
+
+        var existingCodes = (await db.UomDefinitions
+            .AsNoTracking()
+            .Select(d => d.UomCode)
+            .ToListAsync(cancellationToken))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var def in desired)
+        {
+            if (!existingCodes.Contains(def.UomCode))
+            {
+                db.UomDefinitions.Add(def);
+            }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private static async Task SeedUomConversionsAsync(ApplicationDbContext db, CancellationToken cancellationToken)
+    {
+        var desired = new[]
+        {
+            // Mass
+            new UomConversion { FromUomCode = "KG", ToUomCode = "G", Dimension = UomDimension.Mass, ConversionFactor = 1000m, InverseFactor = 0.001m, IsExact = true, IsActive = true },
+            new UomConversion { FromUomCode = "LB", ToUomCode = "KG", Dimension = UomDimension.Mass, ConversionFactor = 0.45359237m, InverseFactor = 2.2046226218m, IsExact = true, IsActive = true },
+            new UomConversion { FromUomCode = "OZ", ToUomCode = "LB", Dimension = UomDimension.Mass, ConversionFactor = 0.0625m, InverseFactor = 16m, IsExact = true, IsActive = true },
+            new UomConversion { FromUomCode = "OZ", ToUomCode = "KG", Dimension = UomDimension.Mass, ConversionFactor = 0.0283495231m, InverseFactor = 35.2739619496m, IsExact = false, IsActive = true },
+            new UomConversion { FromUomCode = "OZ", ToUomCode = "G", Dimension = UomDimension.Mass, ConversionFactor = 28.349523125m, InverseFactor = 0.0352739619m, IsExact = true, IsActive = true },
+
+            // Length
+            new UomConversion { FromUomCode = "M", ToUomCode = "CM", Dimension = UomDimension.Length, ConversionFactor = 100m, InverseFactor = 0.01m, IsExact = true, IsActive = true },
+            new UomConversion { FromUomCode = "IN", ToUomCode = "CM", Dimension = UomDimension.Length, ConversionFactor = 2.54m, InverseFactor = 0.3937007874m, IsExact = true, IsActive = true },
+            new UomConversion { FromUomCode = "FT", ToUomCode = "CM", Dimension = UomDimension.Length, ConversionFactor = 30.48m, InverseFactor = 0.0328083990m, IsExact = true, IsActive = true },
+            new UomConversion { FromUomCode = "FT", ToUomCode = "IN", Dimension = UomDimension.Length, ConversionFactor = 12m, InverseFactor = 0.0833333333m, IsExact = true, IsActive = true },
+            new UomConversion { FromUomCode = "FT", ToUomCode = "M", Dimension = UomDimension.Length, ConversionFactor = 0.3048m, InverseFactor = 3.2808398950m, IsExact = true, IsActive = true },
+
+            // Volume
+            new UomConversion { FromUomCode = "M3", ToUomCode = "CM3", Dimension = UomDimension.Volume, ConversionFactor = 1000000m, InverseFactor = 0.000001m, IsExact = true, IsActive = true },
+            new UomConversion { FromUomCode = "IN3", ToUomCode = "CM3", Dimension = UomDimension.Volume, ConversionFactor = 16.387064m, InverseFactor = 0.0610237441m, IsExact = true, IsActive = true },
+            new UomConversion { FromUomCode = "FT3", ToUomCode = "CM3", Dimension = UomDimension.Volume, ConversionFactor = 28316.846592m, InverseFactor = 0.0000353147m, IsExact = true, IsActive = true },
+            new UomConversion { FromUomCode = "FT3", ToUomCode = "IN3", Dimension = UomDimension.Volume, ConversionFactor = 1728m, InverseFactor = 0.0005787037m, IsExact = true, IsActive = true },
+            new UomConversion { FromUomCode = "FT3", ToUomCode = "M3", Dimension = UomDimension.Volume, ConversionFactor = 0.0283168466m, InverseFactor = 35.3146667215m, IsExact = false, IsActive = true }
+        };
+
+        var existingPairs = (await db.UomConversions
+            .AsNoTracking()
+            .Select(c => new { c.FromUomCode, c.ToUomCode })
+            .ToListAsync(cancellationToken))
+            .Select(c => $"{c.FromUomCode}|{c.ToUomCode}")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var conv in desired)
+        {
+            var key = $"{conv.FromUomCode}|{conv.ToUomCode}";
+            if (!existingPairs.Contains(key))
+            {
+                db.UomConversions.Add(conv);
             }
         }
 
