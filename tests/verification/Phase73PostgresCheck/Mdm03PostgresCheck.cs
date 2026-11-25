@@ -24,8 +24,8 @@ internal static class Mdm03PostgresCheck
         var clientAPeriods = Enumerable.Range(0, 8).Select(_ => Guid.NewGuid()).ToArray();
         var clientBPeriods = Enumerable.Range(0, 2).Select(_ => Guid.NewGuid()).ToArray();
 
-        static DateTime PeriodStart(int year, int monthOffset) =>
-            new DateTime(year, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddDays(monthOffset * 20);
+        static DateTime PeriodStart(int year, int slot) =>
+            new DateTime(year, 1, 1, 0, 0, 0, DateTimeKind.Utc).AddDays(slot * 10);
 
         await using (var seedDb = createDb(null))
         {
@@ -46,8 +46,8 @@ internal static class Mdm03PostgresCheck
 
             void SeedPeriod(Guid pid, Guid cid, string code, int idx, decimal amount)
             {
-                var start = new DateTime(fiscalYear, 1, 1, 0, 0, 0, DateTimeKind.Utc);
-                var end = new DateTime(fiscalYear, 12, 31, 23, 59, 59, DateTimeKind.Utc);
+                var start = PeriodStart(fiscalYear, idx);
+                var end = start.AddDays(5);
                 var p = BillingPeriod.Create(cid, code, $"Period {code}", start, end);
                 p.Id = pid;
                 seedDb.BillingPeriods.Add(p);
@@ -55,7 +55,7 @@ internal static class Mdm03PostgresCheck
                 var act = BillableActivity.Create(
                     cid, facId, BillableActivityType.PickUnit,
                     "PickTask", Guid.NewGuid(), "PK-" + code,
-                    10m, "UNIT", PeriodStart(fiscalYear, idx),
+                    10m, "UNIT", start.AddDays(1),
                     "KEY-" + code + "-" + Guid.NewGuid().ToString("N")[..6],
                     "Rated activity " + code, pid);
                 act.Rate(amount / 10m, amount, "USD");
