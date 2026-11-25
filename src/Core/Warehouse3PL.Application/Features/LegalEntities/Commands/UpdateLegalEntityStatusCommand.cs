@@ -31,29 +31,32 @@ public sealed class UpdateLegalEntityStatusCommandHandler
             cancellationToken,
             Permissions.Global.ManageLegalEntities);
 
-        var entity = await _db.LegalEntities
-            .FirstOrDefaultAsync(le => le.Id == request.Id, cancellationToken)
-            ?? throw new EntityNotFoundException(nameof(LegalEntity), request.Id);
-
-        if (!request.IsActive)
+        return await _db.ExecuteWithLegalEntityLocksAsync([request.Id], async () =>
         {
-            bool referencedByActiveFacility = await _db.Facilities
-                .AsNoTracking()
-                .AnyAsync(f => !f.IsDeleted && f.IsActive && f.DefaultLegalEntityId == entity.Id, cancellationToken);
+            var entity = await _db.LegalEntities
+                .FirstOrDefaultAsync(le => le.Id == request.Id, cancellationToken)
+                ?? throw new EntityNotFoundException(nameof(LegalEntity), request.Id);
 
-            if (referencedByActiveFacility)
+            if (!request.IsActive)
             {
-                throw new ConcurrencyException(
-                    "LEGAL_ENTITY_IN_USE_BY_ACTIVE_FACILITY",
-                    $"Cannot deactivate LegalEntity '{entity.LegalCode}' while it is bound as DefaultLegalEntityId on one or more active facilities.");
+                bool referencedByActiveFacility = await _db.Facilities
+                    .AsNoTracking()
+                    .AnyAsync(f => !f.IsDeleted && f.IsActive && f.DefaultLegalEntityId == entity.Id, cancellationToken);
+
+                if (referencedByActiveFacility)
+                {
+                    throw new ConcurrencyException(
+                        "LEGAL_ENTITY_IN_USE_BY_ACTIVE_FACILITY",
+                        $"Cannot deactivate LegalEntity '{entity.LegalCode}' while it is bound as DefaultLegalEntityId on one or more active facilities.");
+                }
             }
-        }
 
-        entity.SetActiveStatus(request.IsActive);
-        entity.UpdatedBy = staffUserId;
-        await _db.SaveChangesAsync(cancellationToken);
+            entity.SetActiveStatus(request.IsActive);
+            entity.UpdatedBy = staffUserId;
+            await _db.SaveChangesAsync(cancellationToken);
 
-        return entity.ToDto();
+            return entity.ToDto();
+        }, cancellationToken);
     }
 }
 
@@ -76,25 +79,28 @@ public sealed class DeleteLegalEntityCommandHandler : IRequestHandler<DeleteLega
             cancellationToken,
             Permissions.Global.ManageLegalEntities);
 
-        var entity = await _db.LegalEntities
-            .FirstOrDefaultAsync(le => le.Id == request.Id, cancellationToken)
-            ?? throw new EntityNotFoundException(nameof(LegalEntity), request.Id);
-
-        bool referencedByAnyFacility = await _db.Facilities
-            .AsNoTracking()
-            .AnyAsync(f => !f.IsDeleted && f.DefaultLegalEntityId == entity.Id, cancellationToken);
-
-        if (referencedByAnyFacility)
+        return await _db.ExecuteWithLegalEntityLocksAsync([request.Id], async () =>
         {
-            throw new ConcurrencyException(
-                "LEGAL_ENTITY_REFERENCED_BY_FACILITY",
-                $"Cannot delete LegalEntity '{entity.LegalCode}' because one or more facilities reference it.");
-        }
+            var entity = await _db.LegalEntities
+                .FirstOrDefaultAsync(le => le.Id == request.Id, cancellationToken)
+                ?? throw new EntityNotFoundException(nameof(LegalEntity), request.Id);
 
-        entity.UpdatedBy = staffUserId;
-        _db.LegalEntities.Remove(entity); // converted to soft-delete via AuditableEntityInterceptor
-        await _db.SaveChangesAsync(cancellationToken);
+            bool referencedByAnyFacility = await _db.Facilities
+                .AsNoTracking()
+                .AnyAsync(f => !f.IsDeleted && f.DefaultLegalEntityId == entity.Id, cancellationToken);
 
-        return Unit.Value;
+            if (referencedByAnyFacility)
+            {
+                throw new ConcurrencyException(
+                    "LEGAL_ENTITY_REFERENCED_BY_FACILITY",
+                    $"Cannot delete LegalEntity '{entity.LegalCode}' because one or more facilities reference it.");
+            }
+
+            entity.UpdatedBy = staffUserId;
+            _db.LegalEntities.Remove(entity); // converted to soft-delete via AuditableEntityInterceptor
+            await _db.SaveChangesAsync(cancellationToken);
+
+            return Unit.Value;
+        }, cancellationToken);
     }
 }

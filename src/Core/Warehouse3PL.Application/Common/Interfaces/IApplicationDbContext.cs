@@ -216,6 +216,11 @@ public interface IApplicationDbContext
         string policyCode,
         Func<Task<TResult>> action,
         CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithLegalEntityLocksAsync<TResult>(
+        IReadOnlyCollection<Guid> legalEntityIds,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default,
+        Guid? lockFacilityId = null);
     bool IsRelationalDatabase { get; }
     void ClearChangeTracker();
     bool AllowExplicitAuditTimestamps { get; set; }

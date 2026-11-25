@@ -27,23 +27,31 @@ internal static class FacilityReferenceValidationHelper
                 $"CountryCode '{countryCode}' is not a valid active CountryProfile (MDM-1.1).");
 
         var normalizedTz = (timezone ?? string.Empty).Trim();
-        bool registeredActiveTz = await db.TimeZoneProfiles
+        var tzProfile = await db.TimeZoneProfiles
             .AsNoTracking()
-            .AnyAsync(tz => tz.TimeZoneId == normalizedTz && tz.IsActive, cancellationToken);
+            .FirstOrDefaultAsync(tz => tz.TimeZoneId == normalizedTz && tz.IsActive, cancellationToken);
 
-        if (!registeredActiveTz || !timeZoneResolver.TryValidateTimeZoneId(normalizedTz))
+        if (tzProfile == null || !timeZoneResolver.TryValidateTimeZoneId(normalizedTz))
         {
             throw new DomainException(
                 "FACILITY_INVALID_TIMEZONE",
                 $"Timezone '{timezone}' is not a registered active IANA TimeZoneProfile.");
         }
 
+        if (!string.IsNullOrWhiteSpace(tzProfile.CountryCode) &&
+            !string.Equals(tzProfile.CountryCode.Trim(), normalizedCountry, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new DomainException(
+                $"Timezone '{normalizedTz}' belongs to country '{tzProfile.CountryCode}' and cannot be bound to Facility country '{normalizedCountry}'.",
+                "FACILITY_TIMEZONE_COUNTRY_MISMATCH");
+        }
+
         if (!string.IsNullOrWhiteSpace(postalCode) &&
             !countryProfile.IsSyntacticallyValidPostalCode(postalCode, out _))
         {
             throw new DomainException(
-                "FACILITY_INVALID_POSTAL_CODE",
-                $"PostalCode '{postalCode}' does not match syntactic postal format for '{normalizedCountry}'.");
+                $"PostalCode '{postalCode}' does not match syntactic postal format for '{normalizedCountry}'.",
+                "FACILITY_INVALID_POSTAL_CODE");
         }
 
         string? normalizedCurrency = null;
@@ -56,7 +64,7 @@ internal static class FacilityReferenceValidationHelper
             }
             catch (ArgumentException ex)
             {
-                throw new DomainException("FACILITY_INVALID_CURRENCY", ex.Message);
+                throw new DomainException(ex.Message, "FACILITY_INVALID_CURRENCY");
             }
         }
 
@@ -64,21 +72,28 @@ internal static class FacilityReferenceValidationHelper
         {
             if (defaultLegalEntityId.Value == Guid.Empty)
             {
-                throw new DomainException("FACILITY_INVALID_LEGAL_ENTITY", "DefaultLegalEntityId cannot be empty.");
+                throw new DomainException("DefaultLegalEntityId cannot be empty.", "FACILITY_INVALID_LEGAL_ENTITY");
             }
 
             var legalEntity = await db.LegalEntities
                 .AsNoTracking()
                 .FirstOrDefaultAsync(le => le.Id == defaultLegalEntityId.Value && !le.IsDeleted, cancellationToken)
                 ?? throw new DomainException(
-                    "FACILITY_UNKNOWN_LEGAL_ENTITY",
-                    $"LegalEntity '{defaultLegalEntityId.Value}' does not exist.");
+                    $"LegalEntity '{defaultLegalEntityId.Value}' does not exist.",
+                    "FACILITY_UNKNOWN_LEGAL_ENTITY");
 
             if (!legalEntity.IsActive)
             {
                 throw new DomainException(
-                    "FACILITY_INACTIVE_LEGAL_ENTITY",
-                    $"Cannot bind Facility to inactive LegalEntity '{legalEntity.LegalCode}'.");
+                    $"Cannot bind Facility to inactive LegalEntity '{legalEntity.LegalCode}'.",
+                    "FACILITY_INACTIVE_LEGAL_ENTITY");
+            }
+
+            if (!string.Equals(legalEntity.CountryCode.Trim(), normalizedCountry, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new DomainException(
+                    $"Facility country '{normalizedCountry}' must match issuing LegalEntity '{legalEntity.LegalCode}' country '{legalEntity.CountryCode}'.",
+                    "FACILITY_LEGAL_ENTITY_COUNTRY_MISMATCH");
             }
         }
 

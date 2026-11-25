@@ -61,52 +61,59 @@ public sealed class CreateFacilityCommandHandler : IRequestHandler<CreateFacilit
         var staffUserId = await _auth.RequireVerifiedFacilityManagerAsync(null, cancellationToken);
 
         var normalizedFacilityCode = request.FacilityCode.Trim().ToUpperInvariant();
-        bool duplicateCode = await _db.Facilities
-            .AsNoTracking()
-            .AnyAsync(f => !f.IsDeleted && f.FacilityCode == normalizedFacilityCode, cancellationToken);
+        Guid[] lockIds = request.DefaultLegalEntityId.HasValue && request.DefaultLegalEntityId.Value != Guid.Empty
+            ? [request.DefaultLegalEntityId.Value]
+            : [];
 
-        if (duplicateCode)
+        return await _db.ExecuteWithLegalEntityLocksAsync(lockIds, async () =>
         {
-            throw new ConcurrencyException(
-                "FACILITY_DUPLICATE_CODE",
-                $"Facility '{normalizedFacilityCode}' already exists.");
-        }
+            bool duplicateCode = await _db.Facilities
+                .AsNoTracking()
+                .AnyAsync(f => !f.IsDeleted && f.FacilityCode == normalizedFacilityCode, cancellationToken);
 
-        var (normalizedCountry, normalizedTz, normalizedCurrency) =
-            await FacilityReferenceValidationHelper.ValidateGeographicAndLegalReferencesAsync(
-                _db,
-                _timeZoneResolver,
-                request.CountryCode,
-                request.Timezone,
-                request.PostalCode,
-                request.DefaultCurrencyCode,
-                request.DefaultLegalEntityId,
-                cancellationToken);
+            if (duplicateCode)
+            {
+                throw new ConcurrencyException(
+                    "FACILITY_DUPLICATE_CODE",
+                    $"Facility '{normalizedFacilityCode}' already exists.");
+            }
 
-        var facility = new Facility
-        {
-            FacilityCode = normalizedFacilityCode,
-            Name = request.Name.Trim(),
-            AddressLine1 = string.IsNullOrWhiteSpace(request.AddressLine1) ? null : request.AddressLine1.Trim(),
-            AddressLine2 = string.IsNullOrWhiteSpace(request.AddressLine2) ? null : request.AddressLine2.Trim(),
-            City = string.IsNullOrWhiteSpace(request.City) ? null : request.City.Trim(),
-            StateOrProvince = string.IsNullOrWhiteSpace(request.StateOrProvince) ? null : request.StateOrProvince.Trim(),
-            PostalCode = string.IsNullOrWhiteSpace(request.PostalCode) ? null : request.PostalCode.Trim(),
-            CountryCode = normalizedCountry,
-            Timezone = normalizedTz,
-            DefaultLegalEntityId = request.DefaultLegalEntityId,
-            DefaultCurrencyCode = normalizedCurrency,
-            ContactEmail = string.IsNullOrWhiteSpace(request.ContactEmail) ? null : request.ContactEmail.Trim(),
-            ContactPhone = string.IsNullOrWhiteSpace(request.ContactPhone) ? null : request.ContactPhone.Trim(),
-            TotalAreaSqM = request.TotalAreaSqM,
-            DockDoorCount = request.DockDoorCount,
-            IsActive = true,
-            CreatedBy = staffUserId
-        };
+            var (normalizedCountry, normalizedTz, normalizedCurrency) =
+                await FacilityReferenceValidationHelper.ValidateGeographicAndLegalReferencesAsync(
+                    _db,
+                    _timeZoneResolver,
+                    request.CountryCode,
+                    request.Timezone,
+                    request.PostalCode,
+                    request.DefaultCurrencyCode,
+                    request.DefaultLegalEntityId,
+                    cancellationToken);
 
-        _db.Facilities.Add(facility);
-        await _db.SaveChangesAsync(cancellationToken);
+            var facility = new Facility
+            {
+                FacilityCode = normalizedFacilityCode,
+                Name = request.Name.Trim(),
+                AddressLine1 = string.IsNullOrWhiteSpace(request.AddressLine1) ? null : request.AddressLine1.Trim(),
+                AddressLine2 = string.IsNullOrWhiteSpace(request.AddressLine2) ? null : request.AddressLine2.Trim(),
+                City = string.IsNullOrWhiteSpace(request.City) ? null : request.City.Trim(),
+                StateOrProvince = string.IsNullOrWhiteSpace(request.StateOrProvince) ? null : request.StateOrProvince.Trim(),
+                PostalCode = string.IsNullOrWhiteSpace(request.PostalCode) ? null : request.PostalCode.Trim(),
+                CountryCode = normalizedCountry,
+                Timezone = normalizedTz,
+                DefaultLegalEntityId = request.DefaultLegalEntityId,
+                DefaultCurrencyCode = normalizedCurrency,
+                ContactEmail = string.IsNullOrWhiteSpace(request.ContactEmail) ? null : request.ContactEmail.Trim(),
+                ContactPhone = string.IsNullOrWhiteSpace(request.ContactPhone) ? null : request.ContactPhone.Trim(),
+                TotalAreaSqM = request.TotalAreaSqM,
+                DockDoorCount = request.DockDoorCount,
+                IsActive = true,
+                CreatedBy = staffUserId
+            };
 
-        return FacilityProjections.ToDto(facility);
+            _db.Facilities.Add(facility);
+            await _db.SaveChangesAsync(cancellationToken);
+
+            return FacilityProjections.ToDto(facility);
+        }, cancellationToken);
     }
 }

@@ -62,52 +62,61 @@ public sealed class UpdateLegalEntityCommandHandler : IRequestHandler<UpdateLega
             cancellationToken,
             Permissions.Global.ManageLegalEntities);
 
-        var entity = await _db.LegalEntities
-            .FirstOrDefaultAsync(le => le.Id == request.Id, cancellationToken)
-            ?? throw new EntityNotFoundException(nameof(LegalEntity), request.Id);
-
-        if (request.ExpectedConfigRevision.HasValue &&
-            entity.ConfigRevision != request.ExpectedConfigRevision.Value)
-        {
-            throw new ConcurrencyException(
-                "LEGAL_ENTITY_STALE_REVISION",
-                $"LegalEntity '{entity.LegalCode}' was modified concurrently (expected revision {request.ExpectedConfigRevision.Value}, actual {entity.ConfigRevision}).");
-        }
-
-        if (!string.IsNullOrWhiteSpace(request.LegalCode) &&
-            !string.Equals(request.LegalCode.Trim(), entity.LegalCode, StringComparison.OrdinalIgnoreCase))
-        {
-            throw new DomainException(
-                "LEGAL_ENTITY_IMMUTABLE_CODE",
-                $"LegalCode '{entity.LegalCode}' is immutable and cannot be changed to '{request.LegalCode}'.");
-        }
-
         var normalizedCountry = request.CountryCode.Trim().ToUpperInvariant();
-        var country = await _db.CountryProfiles
-            .AsNoTracking()
-            .FirstOrDefaultAsync(c => c.CountryCode == normalizedCountry && c.IsActive, cancellationToken)
-            ?? throw new DomainException(
-                "LEGAL_ENTITY_UNKNOWN_COUNTRY",
-                $"CountryCode '{normalizedCountry}' is not an active registered CountryProfile.");
 
-        if (!string.IsNullOrWhiteSpace(request.RegisteredPostalCode) &&
-            !country.IsSyntacticallyValidPostalCode(request.RegisteredPostalCode, out _))
+        return await _db.ExecuteWithLegalEntityLocksAsync([request.Id], async () =>
         {
-            throw new DomainException(
-                "LEGAL_ENTITY_INVALID_POSTAL_CODE",
-                $"RegisteredPostalCode '{request.RegisteredPostalCode}' does not match syntactic postal format for '{normalizedCountry}'.");
-        }
+            var entity = await _db.LegalEntities
+                .FirstOrDefaultAsync(le => le.Id == request.Id, cancellationToken)
+                ?? throw new EntityNotFoundException(nameof(LegalEntity), request.Id);
 
-        if (entity.IsCbmsMandated && !request.IsCbmsMandated)
-        {
-            var boundFacilityIds = await _db.Facilities
+            if (request.ExpectedConfigRevision.HasValue &&
+                entity.ConfigRevision != request.ExpectedConfigRevision.Value)
+            {
+                throw new ConcurrencyException(
+                    "LEGAL_ENTITY_STALE_REVISION",
+                    $"LegalEntity '{entity.LegalCode}' was modified concurrently (expected revision {request.ExpectedConfigRevision.Value}, actual {entity.ConfigRevision}).");
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.LegalCode) &&
+                !string.Equals(request.LegalCode.Trim(), entity.LegalCode, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new DomainException(
+                    "LEGAL_ENTITY_IMMUTABLE_CODE",
+                    $"LegalCode '{entity.LegalCode}' is immutable and cannot be changed to '{request.LegalCode}'.");
+            }
+
+            var country = await _db.CountryProfiles
+                .AsNoTracking()
+                .FirstOrDefaultAsync(c => c.CountryCode == normalizedCountry && c.IsActive, cancellationToken)
+                ?? throw new DomainException(
+                    "LEGAL_ENTITY_UNKNOWN_COUNTRY",
+                    $"CountryCode '{normalizedCountry}' is not an active registered CountryProfile.");
+
+            if (!string.IsNullOrWhiteSpace(request.RegisteredPostalCode) &&
+                !country.IsSyntacticallyValidPostalCode(request.RegisteredPostalCode, out _))
+            {
+                throw new DomainException(
+                    "LEGAL_ENTITY_INVALID_POSTAL_CODE",
+                    $"RegisteredPostalCode '{request.RegisteredPostalCode}' does not match syntactic postal format for '{normalizedCountry}'.");
+            }
+
+            var boundFacilities = await _db.Facilities
                 .AsNoTracking()
                 .Where(f => !f.IsDeleted && f.DefaultLegalEntityId == entity.Id)
-                .Select(f => f.Id)
+                .Select(f => new { f.Id, f.CountryCode })
                 .ToListAsync(cancellationToken);
 
-            if (boundFacilityIds.Count > 0)
+            if (boundFacilities.Any(f => !string.Equals(f.CountryCode.Trim(), normalizedCountry, StringComparison.OrdinalIgnoreCase)))
             {
+                throw new DomainException(
+                    $"Cannot change LegalEntity '{entity.LegalCode}' country to '{normalizedCountry}' while one or more bound facilities belong to another country.",
+                    "LEGAL_ENTITY_COUNTRY_CHANGE_BLOCKED_BY_BOUND_FACILITY");
+            }
+
+            if (entity.IsCbmsMandated && !request.IsCbmsMandated && boundFacilities.Count > 0)
+            {
+                var boundFacilityIds = boundFacilities.Select(f => f.Id).ToList();
                 bool hasIssuedInvoices = await _db.Invoices
                     .AsNoTracking()
                     .IgnoreQueryFilters()
@@ -124,26 +133,26 @@ public sealed class UpdateLegalEntityCommandHandler : IRequestHandler<UpdateLega
                         $"Cannot disable IsCbmsMandated on LegalEntity '{entity.LegalCode}' because bound facilities have issued historical invoices.");
                 }
             }
-        }
 
-        entity.UpdateDetails(
-            request.LegalName,
-            request.RegistrationNumber,
-            normalizedCountry,
-            request.TaxIdentifierType,
-            request.TaxRegistrationNumber,
-            request.RegisteredAddressLine1,
-            request.RegisteredAddressLine2,
-            request.RegisteredCity,
-            request.RegisteredStateOrProvince,
-            request.RegisteredPostalCode,
-            request.IsCbmsMandated,
-            request.IroSoftwarePermitRef,
-            request.DefaultCurrencyCode);
+            entity.UpdateDetails(
+                request.LegalName,
+                request.RegistrationNumber,
+                normalizedCountry,
+                request.TaxIdentifierType,
+                request.TaxRegistrationNumber,
+                request.RegisteredAddressLine1,
+                request.RegisteredAddressLine2,
+                request.RegisteredCity,
+                request.RegisteredStateOrProvince,
+                request.RegisteredPostalCode,
+                request.IsCbmsMandated,
+                request.IroSoftwarePermitRef,
+                request.DefaultCurrencyCode);
 
-        entity.UpdatedBy = staffUserId;
-        await _db.SaveChangesAsync(cancellationToken);
+            entity.UpdatedBy = staffUserId;
+            await _db.SaveChangesAsync(cancellationToken);
 
-        return entity.ToDto();
+            return entity.ToDto();
+        }, cancellationToken);
     }
 }

@@ -78,24 +78,16 @@ public sealed class CompliancePlatformAuthorization
                     $"Active Staff user lacks required database-verified permission '{Permissions.Facilities.Manage}'.");
             }
 
-            bool isCrossFacility = dbPermissions.Contains(Permissions.Analytics.MultiFacilityView) ||
-                                   dbPermissions.Contains("Analytics:CrossFacility");
-
-            if (!isCrossFacility)
+            if (!targetFacilityId.HasValue)
             {
-                if (!targetFacilityId.HasValue)
-                {
-                    if (dbUser.AssignedFacilityId.HasValue)
-                    {
-                        throw new ForbiddenException(
-                            "Facility-bound Staff cannot create new platform facilities without multi-facility permission.");
-                    }
-                }
-                else if (!dbUser.AssignedFacilityId.HasValue || dbUser.AssignedFacilityId.Value != targetFacilityId.Value)
-                {
-                    throw new ForbiddenException(
-                        $"Staff member is not authorized to mutate facility '{targetFacilityId.Value}'.");
-                }
+                throw new ForbiddenException(
+                    "Creating new warehouse facilities requires verified platform SuperAdmin authority.");
+            }
+
+            if (!dbUser.AssignedFacilityId.HasValue || dbUser.AssignedFacilityId.Value != targetFacilityId.Value)
+            {
+                throw new ForbiddenException(
+                    $"Staff member is not authorized to mutate facility '{targetFacilityId.Value}'.");
             }
         }
 

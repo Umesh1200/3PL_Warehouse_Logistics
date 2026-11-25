@@ -30,6 +30,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryPackIdempotencyLocks = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryBillingLocks = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryComplianceLocks = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryLegalEntityLocks = new();
 
     public ApplicationDbContext(
         DbContextOptions<ApplicationDbContext> options,
@@ -782,6 +783,97 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             try
             {
                 var result = await RunLockedActionAsync();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
+    }
+
+    public async Task<TResult> ExecuteWithLegalEntityLocksAsync<TResult>(
+        IReadOnlyCollection<Guid> legalEntityIds,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default,
+        Guid? lockFacilityId = null)
+    {
+        var sortedIds = legalEntityIds
+            .Where(id => id != Guid.Empty)
+            .Distinct()
+            .OrderBy(id => id)
+            .ToList();
+
+        if (!Database.IsRelational())
+        {
+            var gates = new List<SemaphoreSlim>(sortedIds.Count);
+            try
+            {
+                foreach (var legalEntityId in sortedIds)
+                {
+                    var gate = InMemoryLegalEntityLocks.GetOrAdd(legalEntityId, _ => new SemaphoreSlim(1, 1));
+                    await gate.WaitAsync(cancellationToken);
+                    gates.Add(gate);
+                }
+
+                return await action();
+            }
+            finally
+            {
+                for (int i = gates.Count - 1; i >= 0; i--)
+                {
+                    gates[i].Release();
+                }
+            }
+        }
+
+        async Task AcquireLegalEntityLocksAsync()
+        {
+            foreach (var legalEntityId in sortedIds)
+            {
+                if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    var lockKey = $"LEGALENTITY:{legalEntityId:N}";
+                    await Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0::bigint))",
+                        cancellationToken);
+                }
+
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM legal_entities WHERE legal_entity_id = {legalEntityId} FOR UPDATE",
+                    cancellationToken);
+            }
+
+            if (lockFacilityId.HasValue && lockFacilityId.Value != Guid.Empty)
+            {
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM facilities WHERE facility_id = {lockFacilityId.Value} FOR UPDATE",
+                    cancellationToken);
+            }
+        }
+
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            await AcquireLegalEntityLocksAsync();
+            return await action();
+        }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt)
+            {
+                ClearChangeTracker();
+            }
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await AcquireLegalEntityLocksAsync();
+                var result = await action();
                 await CommitTransactionAsync(cancellationToken);
                 return result;
             }

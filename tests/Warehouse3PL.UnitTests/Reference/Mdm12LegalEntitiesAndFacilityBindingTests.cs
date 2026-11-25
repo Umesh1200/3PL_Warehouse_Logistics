@@ -59,6 +59,8 @@ public sealed class Mdm12LegalEntitiesAndFacilityBindingTests
         var plainStaffId = Guid.NewGuid();
         var viewStaffId = Guid.NewGuid();
         var facOnlyManageStaffId = Guid.NewGuid();
+        var multiReadAssignedStaffId = Guid.NewGuid();
+        var multiReadUnassignedStaffId = Guid.NewGuid();
         var globalAdminStaffId = Guid.NewGuid();
 
         await using var host = await BuildJwtAppAsync(async db =>
@@ -96,26 +98,35 @@ public sealed class Mdm12LegalEntitiesAndFacilityBindingTests
             facMgrRole.RolePermissions.Add(new RolePermission { Role = facMgrRole, PermissionKey = Permissions.Facilities.View, AccessLevel = AccessLevel.Read });
             facMgrRole.RolePermissions.Add(new RolePermission { Role = facMgrRole, PermissionKey = Permissions.Facilities.Manage, AccessLevel = AccessLevel.Admin });
 
+            var multiReadFacMgrRole = new Role { RoleName = "MultiReadSingleWriteMgr", Description = "Cross-facility read + assigned manage", IsSystemRole = false };
+            multiReadFacMgrRole.RolePermissions.Add(new RolePermission { Role = multiReadFacMgrRole, PermissionKey = Permissions.Facilities.View, AccessLevel = AccessLevel.Read });
+            multiReadFacMgrRole.RolePermissions.Add(new RolePermission { Role = multiReadFacMgrRole, PermissionKey = Permissions.Facilities.Manage, AccessLevel = AccessLevel.Admin });
+            multiReadFacMgrRole.RolePermissions.Add(new RolePermission { Role = multiReadFacMgrRole, PermissionKey = Permissions.Analytics.MultiFacilityView, AccessLevel = AccessLevel.Read });
+
             var superAdminRole = new Role { RoleName = SystemRoles.SuperAdmin, Description = "SuperAdmin", IsSystemRole = true };
             foreach (var p in Permissions.GetAllPermissions())
             {
                 superAdminRole.RolePermissions.Add(new RolePermission { Role = superAdminRole, PermissionKey = p, AccessLevel = AccessLevel.Admin });
             }
 
-            db.Roles.AddRange(opRole, leViewRole, facMgrRole, superAdminRole);
+            db.Roles.AddRange(opRole, leViewRole, facMgrRole, multiReadFacMgrRole, superAdminRole);
 
             var uClient = new User { Id = clientUserId, Email = "c@mdm12.test", FirstName = "C", LastName = "U", UserType = UserType.Client, ClientId = clientId, Status = UserStatus.Active, PasswordHash = "x" };
             var uDriver = new User { Id = driverUserId, Email = "d@mdm12.test", FirstName = "D", LastName = "U", UserType = UserType.Driver, Status = UserStatus.Active, PasswordHash = "x" };
             var uPlain = new User { Id = plainStaffId, Email = "p@mdm12.test", FirstName = "P", LastName = "S", UserType = UserType.Staff, AssignedFacilityId = legacyFacId, Status = UserStatus.Active, PasswordHash = "x" };
             var uLeView = new User { Id = viewStaffId, Email = "v@mdm12.test", FirstName = "V", LastName = "S", UserType = UserType.Staff, AssignedFacilityId = legacyFacId, Status = UserStatus.Active, PasswordHash = "x" };
             var uFacMgr = new User { Id = facOnlyManageStaffId, Email = "fm@mdm12.test", FirstName = "F", LastName = "M", UserType = UserType.Staff, AssignedFacilityId = legacyFacId, Status = UserStatus.Active, PasswordHash = "x" };
+            var uMultiReadAssigned = new User { Id = multiReadAssignedStaffId, Email = "mra@mdm12.test", FirstName = "M", LastName = "A", UserType = UserType.Staff, AssignedFacilityId = legacyFacId, Status = UserStatus.Active, PasswordHash = "x" };
+            var uMultiReadUnassigned = new User { Id = multiReadUnassignedStaffId, Email = "mru@mdm12.test", FirstName = "M", LastName = "U", UserType = UserType.Staff, AssignedFacilityId = null, Status = UserStatus.Active, PasswordHash = "x" };
             var uAdmin = new User { Id = globalAdminStaffId, Email = "sa@mdm12.test", FirstName = "S", LastName = "A", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" };
 
-            db.Users.AddRange(uClient, uDriver, uPlain, uLeView, uFacMgr, uAdmin);
+            db.Users.AddRange(uClient, uDriver, uPlain, uLeView, uFacMgr, uMultiReadAssigned, uMultiReadUnassigned, uAdmin);
             db.UserRoles.AddRange(
                 new UserRole { User = uPlain, Role = opRole },
                 new UserRole { User = uLeView, Role = leViewRole },
                 new UserRole { User = uFacMgr, Role = facMgrRole },
+                new UserRole { User = uMultiReadAssigned, Role = multiReadFacMgrRole },
+                new UserRole { User = uMultiReadUnassigned, Role = multiReadFacMgrRole },
                 new UserRole { User = uAdmin, Role = superAdminRole });
 
             await db.SaveChangesAsync();
@@ -137,6 +148,8 @@ public sealed class Mdm12LegalEntitiesAndFacilityBindingTests
         var jwtPlainSpoof = JwtFor(plainStaffId, UserType.Staff, null, legacyFacId, [SystemRoles.WarehouseOperator], [Permissions.Global.ViewLegalEntities, Permissions.Global.ManageLegalEntities]);
         var jwtLeViewer = JwtFor(viewStaffId, UserType.Staff, null, legacyFacId, ["LegalViewer"], [Permissions.Global.ViewLegalEntities, Permissions.Facilities.View]);
         var jwtFacMgr = JwtFor(facOnlyManageStaffId, UserType.Staff, null, legacyFacId, ["SingleFacilityMgr"], [Permissions.Facilities.View, Permissions.Facilities.Manage]);
+        var jwtMultiReadAssigned = JwtFor(multiReadAssignedStaffId, UserType.Staff, null, legacyFacId, ["MultiReadSingleWriteMgr"], [Permissions.Facilities.View, Permissions.Facilities.Manage, Permissions.Analytics.MultiFacilityView, "Analytics:CrossFacility"]);
+        var jwtMultiReadUnassigned = JwtFor(multiReadUnassignedStaffId, UserType.Staff, null, null, ["MultiReadSingleWriteMgr"], [Permissions.Facilities.View, Permissions.Facilities.Manage, Permissions.Analytics.MultiFacilityView, "Analytics:CrossFacility"]);
         var jwtAdmin = JwtFor(globalAdminStaffId, UserType.Staff, null, null, [SystemRoles.SuperAdmin], Permissions.GetAllPermissions().ToArray());
 
         // 1. Auth checks: anonymous -> 401; spoofed Client/Driver/Staff -> 401/403
@@ -146,11 +159,22 @@ public sealed class Mdm12LegalEntitiesAndFacilityBindingTests
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/legal-entities", jwtDriverSpoof))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/legal-entities", jwtPlainSpoof))).StatusCode);
 
-        // Single-facility Staff cannot create brand new global Facility (403)
+        // Single-facility Staff cannot create brand new global Facility (403);
+        // MDM12-R01: analytics:multi-facility:view / Analytics:CrossFacility MUST NOT elevate write scope either!
         Assert.Equal(HttpStatusCode.Forbidden,
             (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/facilities", jwtFacMgr, new
             {
                 facilityCode = "FAC-UNAUTH", name = "No", countryCode = "US", timezone = "America/Chicago"
+            }))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/facilities", jwtMultiReadAssigned, new
+            {
+                facilityCode = "FAC-MRA-UNAUTH", name = "No Create", countryCode = "US", timezone = "America/Chicago"
+            }))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/facilities", jwtMultiReadUnassigned, new
+            {
+                facilityCode = "FAC-MRU-UNAUTH", name = "No Unassigned Create", countryCode = "US", timezone = "America/Chicago"
             }))).StatusCode);
 
         // 2. LegalEntity validation errors (invalid NP PAN, invalid currency, unknown country, bad postal)
@@ -270,14 +294,101 @@ public sealed class Mdm12LegalEntitiesAndFacilityBindingTests
         Assert.Equal("USA", legacyRead!.CountryCode);
         Assert.Null(legacyRead.DefaultLegalEntityId);
 
-        // Single-facility Staff cannot update another facility (403), CAN update own assigned facility when compliant
+        // Single-facility Staff cannot update another facility (403); analytics:multi-facility:view grants read (200) NOT cross-facility write (403)!
         Assert.Equal(HttpStatusCode.Forbidden,
             (await http.SendAsync(Authed(HttpMethod.Put, $"/api/v1/facilities/{brgFac.Id}", jwtFacMgr, new
             {
                 name = "Unauthorized Touch", countryCode = "NP", timezone = "Asia/Kathmandu", isActive = true
             }))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK,
+            (await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/facilities/{brgFac.Id}", jwtMultiReadAssigned))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await http.SendAsync(Authed(HttpMethod.Put, $"/api/v1/facilities/{brgFac.Id}", jwtMultiReadAssigned, new
+            {
+                name = "Cross Fac Escalation Attempt", countryCode = "NP", timezone = "Asia/Kathmandu", isActive = true
+            }))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden,
+            (await http.SendAsync(Authed(HttpMethod.Put, $"/api/v1/facilities/{brgFac.Id}", jwtMultiReadUnassigned, new
+            {
+                name = "Unassigned Staff Write Attempt", countryCode = "NP", timezone = "Asia/Kathmandu", isActive = true
+            }))).StatusCode);
 
-        // Unbind Birgunj facility -> then LegalEntity can be deactivated cleanly, and cannot bind new facility to inactive LegalEntity!
+        // Assigned Staff WITH facilities:manage CAN update their own assigned facility cleanly
+        Assert.Equal(HttpStatusCode.OK,
+            (await http.SendAsync(Authed(HttpMethod.Put, $"/api/v1/facilities/{legacyFacId}", jwtFacMgr, new
+            {
+                name = "Legacy US Hub (Updated)", addressLine1 = "100 Legacy Way", city = "Chicago",
+                stateOrProvince = "IL", postalCode = "60601", countryCode = "US", timezone = "America/Chicago",
+                dockDoorCount = 4, isActive = true
+            }))).StatusCode);
+
+        // MDM12-R02: Cross-validation of Facility country <-> TimeZoneProfile.CountryCode (neutral UTC allowed) & LegalEntity.CountryCode
+        var createUsLe = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/legal-entities", jwtAdmin, new
+        {
+            legalCode = "LE-US-MAIN", legalName = "Nexus 3PL USA Inc", countryCode = "US",
+            taxIdentifierType = TaxIdentifierType.EIN, taxRegistrationNumber = "12-3456789",
+            registeredAddressLine1 = "200 Midwest Blvd", registeredCity = "Chicago",
+            registeredStateOrProvince = "IL", registeredPostalCode = "60601",
+            isCbmsMandated = false, defaultCurrencyCode = "USD"
+        }));
+        Assert.Equal(HttpStatusCode.Created, createUsLe.StatusCode);
+        var usLe = (await createUsLe.Content.ReadFromJsonAsync<LegalEntityDto>(JsonOptions))!;
+
+        // NP facility + US timezone -> 422
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/facilities", jwtAdmin, new
+            {
+                facilityCode = "FAC-NP-BADTZ", name = "Bad TZ Country", countryCode = "NP", timezone = "America/Chicago"
+            }))).StatusCode);
+
+        // NP facility + US LegalEntity -> 422
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/facilities", jwtAdmin, new
+            {
+                facilityCode = "FAC-NP-BADLE", name = "Bad LE Country", countryCode = "NP", timezone = "Asia/Kathmandu",
+                defaultLegalEntityId = usLe.Id, defaultCurrencyCode = "NPR"
+            }))).StatusCode);
+
+        // Country-neutral UTC timezone allowed with NP facility + NP LegalEntity -> 201
+        var createUtcFac = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/facilities", jwtAdmin, new
+        {
+            facilityCode = "FAC-NP-UTC", name = "Nepal UTC Transit Hub", countryCode = "NP", timezone = "UTC",
+            defaultLegalEntityId = npLe.Id, defaultCurrencyCode = "NPR"
+        }));
+        Assert.Equal(HttpStatusCode.Created, createUtcFac.StatusCode);
+        var utcFac = (await createUtcFac.Content.ReadFromJsonAsync<FacilityDto>(JsonOptions))!;
+
+        // PUT updating bound NP facility to mismatched timezone or mismatched US LegalEntity -> 422
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Put, $"/api/v1/facilities/{brgFac.Id}", jwtAdmin, new
+            {
+                name = brgFac.Name, countryCode = "NP", timezone = "America/Chicago",
+                defaultLegalEntityId = npLe.Id, defaultCurrencyCode = "NPR", dockDoorCount = 10, isActive = true
+            }))).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Put, $"/api/v1/facilities/{brgFac.Id}", jwtAdmin, new
+            {
+                name = brgFac.Name, countryCode = "NP", timezone = "Asia/Kathmandu",
+                defaultLegalEntityId = usLe.Id, defaultCurrencyCode = "NPR", dockDoorCount = 10, isActive = true
+            }))).StatusCode);
+
+        // PUT changing LegalEntity CountryCode while active NP facilities are bound -> 422
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Put, $"/api/v1/legal-entities/{npLe.Id}", jwtAdmin, new
+            {
+                legalCode = npLe.LegalCode, legalName = npLe.LegalName, countryCode = "US",
+                taxIdentifierType = TaxIdentifierType.EIN, taxRegistrationNumber = "98-7654321",
+                registeredAddressLine1 = "100 Main", registeredCity = "Chicago", registeredPostalCode = "60601",
+                isCbmsMandated = true, defaultCurrencyCode = "USD"
+            }))).StatusCode);
+
+        // Unbind both NP facilities -> then LegalEntity can be deactivated cleanly, and cannot bind new facility to inactive LegalEntity!
+        Assert.Equal(HttpStatusCode.OK,
+            (await http.SendAsync(Authed(HttpMethod.Put, $"/api/v1/facilities/{utcFac.Id}", jwtAdmin, new
+            {
+                name = utcFac.Name, countryCode = "NP", timezone = "UTC",
+                defaultLegalEntityId = (Guid?)null, defaultCurrencyCode = "NPR", dockDoorCount = 4, isActive = true
+            }))).StatusCode);
         Assert.Equal(HttpStatusCode.OK,
             (await http.SendAsync(Authed(HttpMethod.Put, $"/api/v1/facilities/{brgFac.Id}", jwtAdmin, new
             {

@@ -62,31 +62,59 @@ public sealed class UpdateFacilityCommandHandler : IRequestHandler<UpdateFacilit
     {
         var staffUserId = await _auth.RequireVerifiedFacilityManagerAsync(request.Id, cancellationToken);
 
-        var facility = await _db.Facilities
-            .FirstOrDefaultAsync(f => f.Id == request.Id && !f.IsDeleted, cancellationToken)
+        var preRead = await _db.Facilities
+            .AsNoTracking()
+            .Where(f => f.Id == request.Id && !f.IsDeleted)
+            .Select(f => new { f.DefaultLegalEntityId })
+            .FirstOrDefaultAsync(cancellationToken)
             ?? throw new EntityNotFoundException(nameof(Facility), request.Id);
 
-        if (!string.IsNullOrWhiteSpace(request.FacilityCode) &&
-            !string.Equals(request.FacilityCode.Trim(), facility.FacilityCode, StringComparison.OrdinalIgnoreCase))
+        var initialLockIds = new List<Guid>(2);
+        if (preRead.DefaultLegalEntityId.HasValue && preRead.DefaultLegalEntityId.Value != Guid.Empty)
         {
-            throw new DomainException(
-                "FACILITY_IMMUTABLE_CODE",
-                $"FacilityCode '{facility.FacilityCode}' is immutable and cannot be changed to '{request.FacilityCode}'.");
+            initialLockIds.Add(preRead.DefaultLegalEntityId.Value);
+        }
+        if (request.DefaultLegalEntityId.HasValue && request.DefaultLegalEntityId.Value != Guid.Empty)
+        {
+            initialLockIds.Add(request.DefaultLegalEntityId.Value);
         }
 
-        var (normalizedCountry, normalizedTz, normalizedCurrency) =
-            await FacilityReferenceValidationHelper.ValidateGeographicAndLegalReferencesAsync(
-                _db,
-                _timeZoneResolver,
-                request.CountryCode,
-                request.Timezone,
-                request.PostalCode,
-                request.DefaultCurrencyCode,
-                request.DefaultLegalEntityId,
-                cancellationToken);
+        var lockedIdSet = initialLockIds.ToHashSet();
 
-        return await _db.ExecuteInTransactionAsync(async () =>
+        return await _db.ExecuteWithLegalEntityLocksAsync(initialLockIds, async () =>
         {
+            var facility = await _db.Facilities
+                .FirstOrDefaultAsync(f => f.Id == request.Id && !f.IsDeleted, cancellationToken)
+                ?? throw new EntityNotFoundException(nameof(Facility), request.Id);
+
+            if (facility.DefaultLegalEntityId.HasValue &&
+                facility.DefaultLegalEntityId.Value != Guid.Empty &&
+                !lockedIdSet.Contains(facility.DefaultLegalEntityId.Value))
+            {
+                throw new ConcurrencyException(
+                    "FACILITY_CONCURRENT_MODIFICATION",
+                    $"Facility '{facility.FacilityCode}' legal entity binding changed concurrently; retry the update.");
+            }
+
+            if (!string.IsNullOrWhiteSpace(request.FacilityCode) &&
+                !string.Equals(request.FacilityCode.Trim(), facility.FacilityCode, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new DomainException(
+                    "FACILITY_IMMUTABLE_CODE",
+                    $"FacilityCode '{facility.FacilityCode}' is immutable and cannot be changed to '{request.FacilityCode}'.");
+            }
+
+            var (normalizedCountry, normalizedTz, normalizedCurrency) =
+                await FacilityReferenceValidationHelper.ValidateGeographicAndLegalReferencesAsync(
+                    _db,
+                    _timeZoneResolver,
+                    request.CountryCode,
+                    request.Timezone,
+                    request.PostalCode,
+                    request.DefaultCurrencyCode,
+                    request.DefaultLegalEntityId,
+                    cancellationToken);
+
             facility.Name = request.Name.Trim();
             facility.AddressLine1 = string.IsNullOrWhiteSpace(request.AddressLine1) ? null : request.AddressLine1.Trim();
             facility.AddressLine2 = string.IsNullOrWhiteSpace(request.AddressLine2) ? null : request.AddressLine2.Trim();
@@ -106,6 +134,6 @@ public sealed class UpdateFacilityCommandHandler : IRequestHandler<UpdateFacilit
 
             await _db.SaveChangesAsync(cancellationToken);
             return FacilityProjections.ToDto(facility);
-        }, cancellationToken);
+        }, cancellationToken, lockFacilityId: request.Id);
     }
 }
