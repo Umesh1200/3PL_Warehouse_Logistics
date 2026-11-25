@@ -32,6 +32,14 @@ public interface IObjectStorageService
         CancellationToken cancellationToken = default);
 
     /// <summary>
+    /// Downloads a readable stream ONLY from finalized authoritative storage (never falls back to staged temp objects).
+    /// Returns null if no finalized object exists.
+    /// </summary>
+    Task<Stream?> DownloadFinalizedAsync(
+        string objectKey,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
     /// Generates a time-limited pre-signed download URL with cryptographically signed token.
     /// Clamps expiry to [1, 60] minutes, defaulting to 15 minutes. Never exposes public endpoints.
     /// </summary>
@@ -66,6 +74,13 @@ public interface IObjectStorageService
     /// Retrieves metadata for an object in storage.
     /// </summary>
     Task<ObjectStorageMetadata?> GetMetadataAsync(
+        string objectKey,
+        CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Retrieves metadata ONLY from finalized authoritative storage (never falls back to staged temp metadata).
+    /// </summary>
+    Task<ObjectStorageMetadata?> GetFinalizedMetadataAsync(
         string objectKey,
         CancellationToken cancellationToken = default);
 

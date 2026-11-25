@@ -1704,6 +1704,8 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
             => inner.FinalizeObjectAsync(tempObjectKey, finalObjectKey, cancellationToken);
         public Task<Stream?> DownloadAsync(string objectKey, CancellationToken cancellationToken = default)
             => inner.DownloadAsync(objectKey, cancellationToken);
+        public Task<Stream?> DownloadFinalizedAsync(string objectKey, CancellationToken cancellationToken = default)
+            => inner.DownloadFinalizedAsync(objectKey, cancellationToken);
         public Task<PreSignedUrlResult> GeneratePreSignedDownloadUrlAsync(string objectKey, TimeSpan? expiry = null, CancellationToken cancellationToken = default)
             => inner.GeneratePreSignedDownloadUrlAsync(objectKey, expiry, cancellationToken);
         public bool ValidatePreSignedToken(string objectKey, string token, DateTime utcNow)
@@ -1714,6 +1716,8 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
             => inner.ExistsAsync(objectKey, cancellationToken);
         public Task<ObjectStorageMetadata?> GetMetadataAsync(string objectKey, CancellationToken cancellationToken = default)
             => inner.GetMetadataAsync(objectKey, cancellationToken);
+        public Task<ObjectStorageMetadata?> GetFinalizedMetadataAsync(string objectKey, CancellationToken cancellationToken = default)
+            => inner.GetFinalizedMetadataAsync(objectKey, cancellationToken);
         public Task<int> CleanupOrphanedTempObjectsAsync(TimeSpan olderThan, CancellationToken cancellationToken = default)
             => inner.CleanupOrphanedTempObjectsAsync(olderThan, cancellationToken);
     }

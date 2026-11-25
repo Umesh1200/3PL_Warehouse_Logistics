@@ -225,7 +225,15 @@ public class PrivateObjectStorageService : IObjectStorageService
 
     public Task<Stream?> DownloadAsync(
         string objectKey,
-        CancellationToken cancellationToken = default)
+        CancellationToken cancellationToken = default) =>
+        DownloadInternalAsync(objectKey, allowTempFallback: true);
+
+    public Task<Stream?> DownloadFinalizedAsync(
+        string objectKey,
+        CancellationToken cancellationToken = default) =>
+        DownloadInternalAsync(objectKey, allowTempFallback: false);
+
+    private Task<Stream?> DownloadInternalAsync(string objectKey, bool allowTempFallback)
     {
         if (string.IsNullOrWhiteSpace(objectKey))
         {
@@ -241,12 +249,14 @@ public class PrivateObjectStorageService : IObjectStorageService
             return Task.FromResult<Stream?>(stream);
         }
 
-        // Also check temp if still staged
-        var tempPath = GetTempFilePath(normalizedKey);
-        if (File.Exists(tempPath))
+        if (allowTempFallback)
         {
-            Stream stream = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read);
-            return Task.FromResult<Stream?>(stream);
+            var tempPath = GetTempFilePath(normalizedKey);
+            if (File.Exists(tempPath))
+            {
+                Stream stream = new FileStream(tempPath, FileMode.Open, FileAccess.Read, FileShare.Read);
+                return Task.FromResult<Stream?>(stream);
+            }
         }
 
         return Task.FromResult<Stream?>(null);
@@ -436,7 +446,16 @@ public class PrivateObjectStorageService : IObjectStorageService
         return Task.FromResult(File.Exists(finalPath) || File.Exists(tempPath));
     }
 
-    public async Task<ObjectStorageMetadata?> GetMetadataAsync(string objectKey, CancellationToken cancellationToken = default)
+    public Task<ObjectStorageMetadata?> GetMetadataAsync(string objectKey, CancellationToken cancellationToken = default) =>
+        GetMetadataInternalAsync(objectKey, allowTempFallback: true, cancellationToken);
+
+    public Task<ObjectStorageMetadata?> GetFinalizedMetadataAsync(string objectKey, CancellationToken cancellationToken = default) =>
+        GetMetadataInternalAsync(objectKey, allowTempFallback: false, cancellationToken);
+
+    private async Task<ObjectStorageMetadata?> GetMetadataInternalAsync(
+        string objectKey,
+        bool allowTempFallback,
+        CancellationToken cancellationToken)
     {
         if (string.IsNullOrWhiteSpace(objectKey))
         {
@@ -452,14 +471,17 @@ public class PrivateObjectStorageService : IObjectStorageService
             return JsonSerializer.Deserialize<ObjectStorageMetadata>(json);
         }
 
-        var tempMetaPath = GetTempFilePath(normalizedKey) + ".meta.json";
-        if (File.Exists(tempMetaPath))
+        if (allowTempFallback)
         {
-            var json = await File.ReadAllTextAsync(tempMetaPath, cancellationToken);
-            return JsonSerializer.Deserialize<ObjectStorageMetadata>(json);
+            var tempMetaPath = GetTempFilePath(normalizedKey) + ".meta.json";
+            if (File.Exists(tempMetaPath))
+            {
+                var json = await File.ReadAllTextAsync(tempMetaPath, cancellationToken);
+                return JsonSerializer.Deserialize<ObjectStorageMetadata>(json);
+            }
         }
 
-        // If file exists but meta doesn't
+        // If finalized file exists without sidecar metadata
         var finalPath = GetFinalFilePath(normalizedKey);
         if (File.Exists(finalPath))
         {

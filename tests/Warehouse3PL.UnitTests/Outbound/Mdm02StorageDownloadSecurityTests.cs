@@ -219,6 +219,8 @@ public sealed class Mdm02StorageDownloadSecurityTests : IDisposable
         var pngBytes = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 1, 2, 3, 4 };
         var pdfBytes = Encoding.ASCII.GetBytes("%PDF-1.4\n%test-return-label");
         var svgBytes = Encoding.UTF8.GetBytes("<svg xmlns=\"http://www.w3.org/2000/svg\"></svg>");
+        var pngSha = Convert.ToHexString(SHA256.HashData(pngBytes)).ToLowerInvariant();
+        var svgSha = Convert.ToHexString(SHA256.HashData(svgBytes)).ToLowerInvariant();
 
         var podKeyA = $"tenants/{clientA}/pod/{Guid.NewGuid()}/signature_active.png";
         var podSupersededSvgKey = $"tenants/{clientA}/pod/{Guid.NewGuid()}/signature_old.svg";
@@ -276,6 +278,21 @@ public sealed class Mdm02StorageDownloadSecurityTests : IDisposable
                 AssignedDriverUserId = driverAssignedId,
                 CustodyStatus = ShipmentCustodyStatus.Confirmed
             });
+            db.ShipmentCustodyTransfers.Add(new ShipmentCustodyTransfer
+            {
+                ClientId = clientA,
+                FacilityId = facA,
+                ShipmentId = shpAId,
+                CarrierCode = "SIM-FEDEX",
+                DriverName = "Assigned Driver",
+                DriverSignatureAcknowledgment = "SIG-DRIVER-M2",
+                TotalPackagesConfirmed = 1,
+                TotalWeightKg = 2m,
+                AuthorizedByUserId = staffFacAId,
+                AssignedDriverUserId = driverAssignedId,
+                CustodyStatus = ShipmentCustodyStatus.Confirmed,
+                TransferredAtUtc = clock.UtcNow.AddMinutes(-30)
+            });
             db.Packages.Add(new Package
             {
                 Id = pkgAId,
@@ -303,7 +320,7 @@ public sealed class Mdm02StorageDownloadSecurityTests : IDisposable
                 IsSigned = true,
                 SignatureObjectKey = podKeyA,
                 SignatureContentType = "image/png",
-                SignatureSha256 = "sha",
+                SignatureSha256 = pngSha,
                 IdempotencyKey = "IDEMP-M2-NEW",
                 EvidenceSource = PodEvidenceSource.DriverHandheld,
                 DeliveredAtUtc = clock.UtcNow,
@@ -323,7 +340,7 @@ public sealed class Mdm02StorageDownloadSecurityTests : IDisposable
                 IsSigned = true,
                 SignatureObjectKey = podSupersededSvgKey,
                 SignatureContentType = "image/svg+xml",
-                SignatureSha256 = "sha-old",
+                SignatureSha256 = svgSha,
                 IdempotencyKey = "IDEMP-M2-OLD",
                 EvidenceSource = PodEvidenceSource.DriverHandheld,
                 DeliveredAtUtc = clock.UtcNow.AddMinutes(-10),
@@ -456,6 +473,284 @@ public sealed class Mdm02StorageDownloadSecurityTests : IDisposable
 
         // 6. Verify rejected-access security audit logs emitted
         Assert.Contains(auditLogSpy.Messages, m => m.Contains("SECURITY_AUDIT StorageDownloadRejected"));
+    }
+
+    [Fact]
+    public async Task StorageDownload_EnforcesPodPermissionParity_CustodyChain_FinalizedOnly_AndHashIntegrity()
+    {
+        var clientA = Guid.NewGuid();
+        var facA = Guid.NewGuid();
+        var facB = Guid.NewGuid();
+        var superAdminId = Guid.NewGuid();
+        var staffDispatchAId = Guid.NewGuid();
+        var staffInboundOnlyAId = Guid.NewGuid();
+        var staffManageShipNoViewAId = Guid.NewGuid();
+        var staffAnalyticsOnlyId = Guid.NewGuid();
+        var staffLegacyAnalyticsCrossBId = Guid.NewGuid();
+        var staffMultiFacDispatchBId = Guid.NewGuid();
+        var clientAUserId = Guid.NewGuid();
+        var driverConfirmedId = Guid.NewGuid();
+        var driverOtherId = Guid.NewGuid();
+
+        var clock = new ControllableClock(DateTime.UtcNow);
+        var auditLogSpy = new SpyLoggerProvider();
+
+        var builder = WebApplication.CreateBuilder(new WebApplicationOptions { EnvironmentName = Environments.Production });
+        builder.Host.UseDefaultServiceProvider(o => o.ValidateOnBuild = false);
+        builder.Logging.ClearProviders();
+        builder.Logging.AddProvider(auditLogSpy);
+        builder.WebHost.UseTestServer();
+
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ObjectStorage:BaseDirectory"] = _storageDir,
+            ["ObjectStorage:SigningSecretKey"] = StorageSecret
+        });
+
+        builder.Services.AddOptions<ObjectStorageOptions>()
+            .Bind(builder.Configuration.GetSection(ObjectStorageOptions.SectionName))
+            .ValidateOnStart();
+        builder.Services.AddSingleton<IObjectStorageService, PrivateObjectStorageService>();
+        builder.Services.Configure<JwtOptions>(o =>
+        {
+            o.SecretKey = JwtSecret;
+            o.Issuer = JwtIssuer;
+            o.Audience = JwtAudience;
+            o.ExpiryMinutes = 60;
+        });
+
+        builder.Services.AddControllers()
+            .AddApplicationPart(typeof(StorageController).Assembly)
+            .AddJsonOptions(o => o.JsonSerializerOptions.Converters.Add(new System.Text.Json.Serialization.JsonStringEnumConverter()));
+        builder.Services.AddApplicationServices();
+        builder.Services.AddSingleton<IPasswordHasher, PasswordHasher>();
+        builder.Services.AddSingleton<ITokenService, JwtTokenService>();
+        builder.Services.AddSingleton<IDateTimeProvider>(clock);
+        builder.Services.AddAuthentication(JwtBearerDefaults.AuthenticationScheme)
+            .AddJwtBearer(options =>
+            {
+                options.TokenValidationParameters = new TokenValidationParameters
+                {
+                    ValidateIssuer = true,
+                    ValidateAudience = true,
+                    ValidateLifetime = true,
+                    ValidateIssuerSigningKey = true,
+                    ValidIssuer = JwtIssuer,
+                    ValidAudience = JwtAudience,
+                    IssuerSigningKey = new SymmetricSecurityKey(Encoding.UTF8.GetBytes(JwtSecret)),
+                    ClockSkew = TimeSpan.Zero
+                };
+            });
+        builder.Services.AddAuthorization();
+        builder.Services.AddSingleton<IAuthorizationPolicyProvider, PermissionPolicyProvider>();
+        builder.Services.AddScoped<IAuthorizationHandler, PermissionAuthorizationHandler>();
+        builder.Services.AddHttpContextAccessor();
+        builder.Services.AddScoped<ICurrentUserContext, CurrentUserContext>();
+        builder.Services.AddScoped<ITenantProvider, TenantProvider>();
+        builder.Services.AddScoped<AuditableEntityInterceptor>();
+
+        var dbName = $"mdm02-r01-r02-{Guid.NewGuid():N}";
+        builder.Services.AddDbContext<ApplicationDbContext>((sp, opts) =>
+            opts.UseInMemoryDatabase(dbName).AddInterceptors(sp.GetRequiredService<AuditableEntityInterceptor>()));
+        builder.Services.AddScoped<IApplicationDbContext>(sp => sp.GetRequiredService<ApplicationDbContext>());
+
+        await using var app = builder.Build();
+        app.UseMiddleware<ExceptionHandlingMiddleware>();
+        app.UseRouting();
+        app.UseAuthentication();
+        app.UseAuthenticatedTenantResolution();
+        app.UseAuthorization();
+        app.MapControllers();
+        await app.StartAsync();
+        using var http = app.GetTestClient();
+
+        var storage = app.Services.GetRequiredService<IObjectStorageService>();
+        var validPng = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 10, 20, 30, 40 };
+        var altPng = new byte[] { 0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 99, 88, 77, 66 };
+        var validPngSha = Convert.ToHexString(SHA256.HashData(validPng)).ToLowerInvariant();
+
+        var deliveredKey = $"tenants/{clientA}/pod/{Guid.NewGuid()}/delivered_sig.png";
+        var supersededKey = $"tenants/{clientA}/pod/{Guid.NewGuid()}/superseded_sig.png";
+        var pendingCustodyKey = $"tenants/{clientA}/pod/{Guid.NewGuid()}/pending_custody.png";
+        var revokedCustodyKey = $"tenants/{clientA}/pod/{Guid.NewGuid()}/revoked_custody.png";
+        var missingTransferKey = $"tenants/{clientA}/pod/{Guid.NewGuid()}/missing_xfer.png";
+        var reassignedTransferKey = $"tenants/{clientA}/pod/{Guid.NewGuid()}/reassigned_xfer.png";
+        var stagedOnlyKey = $"tenants/{clientA}/pod/{Guid.NewGuid()}/staged_only.png";
+        var unfinalizedKey = $"tenants/{clientA}/pod/{Guid.NewGuid()}/unfinalized_flag.png";
+        var hashMismatchKey = $"tenants/{clientA}/pod/{Guid.NewGuid()}/hash_mismatch.png";
+
+        // Explicitly populate finalized blobs for valid & flag/tamper cases cleanly
+        foreach (var k in new[] { deliveredKey, supersededKey, pendingCustodyKey, revokedCustodyKey, missingTransferKey, reassignedTransferKey, unfinalizedKey })
+        {
+            var tk = "t_" + Guid.NewGuid().ToString("N") + ".png";
+            await storage.UploadStagedAsync(tk, new MemoryStream(validPng), "image/png");
+            await storage.FinalizeObjectAsync(tk, k);
+        }
+        // Staged-only file: present in temp/ under stagedOnlyKey, missing from final/
+        await storage.UploadStagedAsync(stagedOnlyKey, new MemoryStream(validPng), "image/png");
+        Assert.NotNull(await storage.DownloadAsync(stagedOnlyKey));
+        Assert.Null(await storage.DownloadFinalizedAsync(stagedOnlyKey));
+        Assert.Null(await storage.GetFinalizedMetadataAsync(stagedOnlyKey));
+
+        // Tampered finalized blob: final file bytes differ from authoritative DB SignatureSha256
+        var tamperTmp = "t_" + Guid.NewGuid().ToString("N") + ".png";
+        await storage.UploadStagedAsync(tamperTmp, new MemoryStream(altPng), "image/png");
+        await storage.FinalizeObjectAsync(tamperTmp, hashMismatchKey);
+
+        var ordId = Guid.NewGuid();
+        var shpDeliveredId = Guid.NewGuid();
+        var shpPendingId = Guid.NewGuid();
+        var shpRevokedId = Guid.NewGuid();
+        var shpMissingXferId = Guid.NewGuid();
+        var shpReassignedXferId = Guid.NewGuid();
+
+        Guid NewPkg(ApplicationDbContext db, Guid shpId, string code, TrackingMilestoneStatus track)
+        {
+            var huId = Guid.NewGuid();
+            var pkgId = Guid.NewGuid();
+            db.HandlingUnits.Add(new HandlingUnit { Id = huId, ClientId = clientA, FacilityId = facA, LpnCode = "HU-" + code, UnitType = HandlingUnitType.ShippingCarton });
+            db.Packages.Add(new Package
+            {
+                Id = pkgId, ClientId = clientA, FacilityId = facA, OutboundOrderId = ordId, ShipmentId = shpId,
+                HandlingUnitId = huId, PackageNumber = "PKG-" + code, TrackingNumber = "TRK-" + code,
+                CarrierCode = "SIM-FEDEX", Status = PackageStatus.Loaded, CurrentTrackingStatus = track
+            });
+            return pkgId;
+        }
+
+        using (var scope = app.Services.CreateScope())
+        {
+            var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            db.Clients.Add(new Client { Id = clientA, CompanyName = "Client Alpha", AccountCode = "CA", Status = ClientStatus.Active });
+            db.Facilities.AddRange(
+                new Facility { Id = facA, FacilityCode = "FA", Name = "Fac A", AddressLine1 = "1 A", City = "Chicago", CountryCode = "US", IsActive = true },
+                new Facility { Id = facB, FacilityCode = "FB", Name = "Fac B", AddressLine1 = "2 B", City = "Dallas", CountryCode = "US", IsActive = true });
+            db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientA, FacilityId = facA, Status = FacilityAccessStatus.Active });
+            db.OutboundOrders.Add(new OutboundOrder { Id = ordId, ClientId = clientA, FacilityId = facA, OrderNumber = "ORD-M2R", CustomerName = "Cust R", Status = OutboundOrderStatus.Completed });
+
+            db.Shipments.AddRange(
+                new Shipment { Id = shpDeliveredId, ClientId = clientA, FacilityId = facA, ShipmentNumber = "SHP-DEL", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, AssignedDriverUserId = driverConfirmedId, CustodyStatus = ShipmentCustodyStatus.Confirmed },
+                new Shipment { Id = shpPendingId, ClientId = clientA, FacilityId = facA, ShipmentNumber = "SHP-PND", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, AssignedDriverUserId = driverConfirmedId, CustodyStatus = ShipmentCustodyStatus.PendingHandover },
+                new Shipment { Id = shpRevokedId, ClientId = clientA, FacilityId = facA, ShipmentNumber = "SHP-REV", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, AssignedDriverUserId = driverConfirmedId, CustodyStatus = ShipmentCustodyStatus.Revoked },
+                new Shipment { Id = shpMissingXferId, ClientId = clientA, FacilityId = facA, ShipmentNumber = "SHP-MXF", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, AssignedDriverUserId = driverConfirmedId, CustodyStatus = ShipmentCustodyStatus.Confirmed },
+                new Shipment { Id = shpReassignedXferId, ClientId = clientA, FacilityId = facA, ShipmentNumber = "SHP-RXF", CarrierCode = "SIM-FEDEX", Status = ShipmentStatus.Dispatched, AssignedDriverUserId = driverConfirmedId, CustodyStatus = ShipmentCustodyStatus.Confirmed });
+
+            db.ShipmentCustodyTransfers.AddRange(
+                new ShipmentCustodyTransfer { ClientId = clientA, FacilityId = facA, ShipmentId = shpDeliveredId, CarrierCode = "SIM-FEDEX", DriverName = "Driver OK", DriverSignatureAcknowledgment = "SIG-DEL-OK", TotalPackagesConfirmed = 1, TotalWeightKg = 1m, AuthorizedByUserId = staffDispatchAId, AssignedDriverUserId = driverConfirmedId, CustodyStatus = ShipmentCustodyStatus.Confirmed, TransferredAtUtc = clock.UtcNow.AddMinutes(-20) },
+                new ShipmentCustodyTransfer { ClientId = clientA, FacilityId = facA, ShipmentId = shpReassignedXferId, CarrierCode = "SIM-FEDEX", DriverName = "Old Driver", DriverSignatureAcknowledgment = "SIG-OLD", TotalPackagesConfirmed = 1, TotalWeightKg = 1m, AuthorizedByUserId = staffDispatchAId, AssignedDriverUserId = driverConfirmedId, CustodyStatus = ShipmentCustodyStatus.Confirmed, TransferredAtUtc = clock.UtcNow.AddMinutes(-20) },
+                new ShipmentCustodyTransfer { ClientId = clientA, FacilityId = facA, ShipmentId = shpReassignedXferId, CarrierCode = "SIM-FEDEX", DriverName = "Reassigned", DriverSignatureAcknowledgment = "SUPERVISOR_CUSTODY_REASSIGNMENT:audit", TotalPackagesConfirmed = 1, TotalWeightKg = 1m, AuthorizedByUserId = staffDispatchAId, AssignedDriverUserId = driverConfirmedId, CustodyStatus = ShipmentCustodyStatus.Confirmed, TransferredAtUtc = clock.UtcNow.AddMinutes(-5) });
+
+            var pDel = NewPkg(db, shpDeliveredId, "DEL", TrackingMilestoneStatus.Delivered);
+            var pPnd = NewPkg(db, shpPendingId, "PND", TrackingMilestoneStatus.Delivered);
+            var pRev = NewPkg(db, shpRevokedId, "REV", TrackingMilestoneStatus.Delivered);
+            var pMxf = NewPkg(db, shpMissingXferId, "MXF", TrackingMilestoneStatus.Delivered);
+            var pRxf = NewPkg(db, shpReassignedXferId, "RXF", TrackingMilestoneStatus.Delivered);
+            var pStg = NewPkg(db, shpDeliveredId, "STG", TrackingMilestoneStatus.Delivered);
+            var pUnf = NewPkg(db, shpDeliveredId, "UNF", TrackingMilestoneStatus.Delivered);
+            var pHsh = NewPkg(db, shpDeliveredId, "HSH", TrackingMilestoneStatus.Delivered);
+
+            var activeDeliveredPod = new ProofOfDelivery { ClientId = clientA, FacilityId = facA, PackageId = pDel, ShipmentId = shpDeliveredId, TrackingNumber = "TRK-DEL", CarrierCode = "SIM-FEDEX", RecipientName = "R1", IsSigned = true, SignatureObjectKey = deliveredKey, SignatureSha256 = validPngSha, IdempotencyKey = "M2R-DEL", EvidenceSource = PodEvidenceSource.DriverHandheld, DeliveredAtUtc = clock.UtcNow, IsStorageFinalized = true };
+            var supersededHistoricalPod = new ProofOfDelivery { ClientId = clientA, FacilityId = facA, PackageId = pDel, ShipmentId = shpDeliveredId, TrackingNumber = "TRK-DEL", CarrierCode = "SIM-FEDEX", RecipientName = "R0", IsSigned = true, SignatureObjectKey = supersededKey, SignatureSha256 = validPngSha, IdempotencyKey = "M2R-SUP", EvidenceSource = PodEvidenceSource.DriverHandheld, DeliveredAtUtc = clock.UtcNow.AddMinutes(-15), IsStorageFinalized = true };
+            supersededHistoricalPod.Supersede(activeDeliveredPod.Id, "Updated evidence", clock.UtcNow);
+
+            db.ProofOfDeliveries.AddRange(
+                supersededHistoricalPod,
+                activeDeliveredPod,
+                new ProofOfDelivery { ClientId = clientA, FacilityId = facA, PackageId = pPnd, ShipmentId = shpPendingId, TrackingNumber = "TRK-PND", CarrierCode = "SIM-FEDEX", RecipientName = "R2", IsSigned = true, SignatureObjectKey = pendingCustodyKey, SignatureSha256 = validPngSha, IdempotencyKey = "M2R-PND", EvidenceSource = PodEvidenceSource.DriverHandheld, DeliveredAtUtc = clock.UtcNow, IsStorageFinalized = true },
+                new ProofOfDelivery { ClientId = clientA, FacilityId = facA, PackageId = pRev, ShipmentId = shpRevokedId, TrackingNumber = "TRK-REV", CarrierCode = "SIM-FEDEX", RecipientName = "R3", IsSigned = true, SignatureObjectKey = revokedCustodyKey, SignatureSha256 = validPngSha, IdempotencyKey = "M2R-REV", EvidenceSource = PodEvidenceSource.DriverHandheld, DeliveredAtUtc = clock.UtcNow, IsStorageFinalized = true },
+                new ProofOfDelivery { ClientId = clientA, FacilityId = facA, PackageId = pMxf, ShipmentId = shpMissingXferId, TrackingNumber = "TRK-MXF", CarrierCode = "SIM-FEDEX", RecipientName = "R4", IsSigned = true, SignatureObjectKey = missingTransferKey, SignatureSha256 = validPngSha, IdempotencyKey = "M2R-MXF", EvidenceSource = PodEvidenceSource.DriverHandheld, DeliveredAtUtc = clock.UtcNow, IsStorageFinalized = true },
+                new ProofOfDelivery { ClientId = clientA, FacilityId = facA, PackageId = pRxf, ShipmentId = shpReassignedXferId, TrackingNumber = "TRK-RXF", CarrierCode = "SIM-FEDEX", RecipientName = "R5", IsSigned = true, SignatureObjectKey = reassignedTransferKey, SignatureSha256 = validPngSha, IdempotencyKey = "M2R-RXF", EvidenceSource = PodEvidenceSource.DriverHandheld, DeliveredAtUtc = clock.UtcNow, IsStorageFinalized = true },
+                new ProofOfDelivery { ClientId = clientA, FacilityId = facA, PackageId = pStg, ShipmentId = shpDeliveredId, TrackingNumber = "TRK-STG", CarrierCode = "SIM-FEDEX", RecipientName = "R6", IsSigned = true, SignatureObjectKey = stagedOnlyKey, SignatureSha256 = validPngSha, IdempotencyKey = "M2R-STG", EvidenceSource = PodEvidenceSource.DriverHandheld, DeliveredAtUtc = clock.UtcNow, IsStorageFinalized = true },
+                new ProofOfDelivery { ClientId = clientA, FacilityId = facA, PackageId = pUnf, ShipmentId = shpDeliveredId, TrackingNumber = "TRK-UNF", CarrierCode = "SIM-FEDEX", RecipientName = "R7", IsSigned = true, SignatureObjectKey = unfinalizedKey, SignatureSha256 = validPngSha, IdempotencyKey = "M2R-UNF", EvidenceSource = PodEvidenceSource.DriverHandheld, DeliveredAtUtc = clock.UtcNow, IsStorageFinalized = false },
+                new ProofOfDelivery { ClientId = clientA, FacilityId = facA, PackageId = pHsh, ShipmentId = shpDeliveredId, TrackingNumber = "TRK-HSH", CarrierCode = "SIM-FEDEX", RecipientName = "R8", IsSigned = true, SignatureObjectKey = hashMismatchKey, SignatureSha256 = validPngSha, IdempotencyKey = "M2R-HSH", EvidenceSource = PodEvidenceSource.DriverHandheld, DeliveredAtUtc = clock.UtcNow, IsStorageFinalized = true });
+
+            await db.SaveChangesAsync();
+        }
+
+        string IssueJwt(Guid uid, UserType userType, Guid? tenantId, Guid? facId, IEnumerable<string> roles, IEnumerable<string> perms)
+        {
+            using var scope = app.Services.CreateScope();
+            var tokens = scope.ServiceProvider.GetRequiredService<ITokenService>();
+            var user = new User { Id = uid, Email = $"{uid:N}@test.local", FirstName = "T", LastName = "U", UserType = userType, ClientId = tenantId, AssignedFacilityId = facId };
+            return tokens.GenerateTokens(user, roles, perms).AccessToken;
+        }
+
+        HttpRequestMessage Req(string url, string jwt)
+        {
+            var r = new HttpRequestMessage(HttpMethod.Get, url);
+            r.Headers.Authorization = new AuthenticationHeaderValue("Bearer", jwt);
+            return r;
+        }
+
+        var jwtSuper = IssueJwt(superAdminId, UserType.Staff, null, null, [SystemRoles.SuperAdmin], Permissions.GetAllPermissions());
+        var jwtStaffDispatchA = IssueJwt(staffDispatchAId, UserType.Staff, null, facA, ["Dispatcher"], [Permissions.Dispatch.View]);
+        var jwtStaffInboundOnly = IssueJwt(staffInboundOnlyAId, UserType.Staff, null, facA, ["Receiver"], [Permissions.Inbound.View, Permissions.Inbound.Receive]);
+        var jwtStaffNoDispatchView = IssueJwt(staffManageShipNoViewAId, UserType.Staff, null, facA, ["OutboundLead"], [Permissions.Outbound.View, Permissions.Outbound.Ship, Permissions.Dispatch.ManageRuns]);
+        var jwtStaffAnalyticsOnly = IssueJwt(staffAnalyticsOnlyId, UserType.Staff, null, facB, ["Analyst"], [Permissions.Analytics.MultiFacilityView, Permissions.Analytics.ControlTowerView, Permissions.Analytics.TransportationView, "Analytics:CrossFacility"]);
+        var jwtStaffLegacyAnalyticsCrossB = IssueJwt(staffLegacyAnalyticsCrossBId, UserType.Staff, null, facB, ["Dispatcher"], [Permissions.Dispatch.View, "Analytics:CrossFacility"]);
+        var jwtStaffMultiFacDispatchB = IssueJwt(staffMultiFacDispatchBId, UserType.Staff, null, facB, ["OpsLead"], [Permissions.Dispatch.View, Permissions.Analytics.MultiFacilityView]);
+        var jwtClientA = IssueJwt(clientAUserId, UserType.Client, clientA, facA, [SystemRoles.ClientAdmin], [Permissions.Dispatch.View]);
+        var jwtDriverConfirmed = IssueJwt(driverConfirmedId, UserType.Driver, null, facA, [SystemRoles.Driver], [Permissions.Dispatch.ExecuteDelivery]);
+        var jwtDriverOther = IssueJwt(driverOtherId, UserType.Driver, null, facA, [SystemRoles.Driver], [Permissions.Dispatch.ExecuteDelivery]);
+
+        var uDel = (await storage.GeneratePreSignedDownloadUrlAsync(deliveredKey, TimeSpan.FromMinutes(15))).DownloadUrl;
+        var uSup = (await storage.GeneratePreSignedDownloadUrlAsync(supersededKey, TimeSpan.FromMinutes(15))).DownloadUrl;
+        var uPnd = (await storage.GeneratePreSignedDownloadUrlAsync(pendingCustodyKey, TimeSpan.FromMinutes(15))).DownloadUrl;
+        var uRev = (await storage.GeneratePreSignedDownloadUrlAsync(revokedCustodyKey, TimeSpan.FromMinutes(15))).DownloadUrl;
+        var uMxf = (await storage.GeneratePreSignedDownloadUrlAsync(missingTransferKey, TimeSpan.FromMinutes(15))).DownloadUrl;
+        var uRxf = (await storage.GeneratePreSignedDownloadUrlAsync(reassignedTransferKey, TimeSpan.FromMinutes(15))).DownloadUrl;
+        var uStg = (await storage.GeneratePreSignedDownloadUrlAsync(stagedOnlyKey, TimeSpan.FromMinutes(15))).DownloadUrl;
+        var uUnf = (await storage.GeneratePreSignedDownloadUrlAsync(unfinalizedKey, TimeSpan.FromMinutes(15))).DownloadUrl;
+        var uHsh = (await storage.GeneratePreSignedDownloadUrlAsync(hashMismatchKey, TimeSpan.FromMinutes(15))).DownloadUrl;
+
+        // MDM02-R01: Staff permission alignment + post-delivery + historical eligibility
+        Assert.Equal(HttpStatusCode.OK, (await http.SendAsync(Req(uDel, jwtStaffDispatchA))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await http.SendAsync(Req(uDel, jwtStaffMultiFacDispatchB))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await http.SendAsync(Req(uDel, jwtClientA))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await http.SendAsync(Req(uDel, jwtDriverConfirmed))).StatusCode); // post-delivery preserved for confirmed custody
+        Assert.Equal(HttpStatusCode.OK, (await http.SendAsync(Req(uSup, jwtStaffDispatchA))).StatusCode);
+        Assert.Equal(HttpStatusCode.OK, (await http.SendAsync(Req(uSup, jwtClientA))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Req(uSup, jwtDriverConfirmed))).StatusCode); // superseded historical POD denied to driver
+
+        foreach (var forbiddenJwt in new[] { jwtStaffInboundOnly, jwtStaffNoDispatchView, jwtStaffAnalyticsOnly, jwtStaffLegacyAnalyticsCrossB, jwtDriverOther })
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Req(uDel, forbiddenJwt))).StatusCode);
+        }
+
+        // MDM02-R01: Driver rejected on PendingHandover, Revoked, missing ShipmentCustodyTransfer, and supervisor reassignment history
+        foreach (var badCustodyUrl in new[] { uPnd, uRev, uMxf, uRxf })
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Req(badCustodyUrl, jwtDriverConfirmed))).StatusCode);
+        }
+
+        // MDM02-R02: Staged-only file (final missing, temp present) -> fails closed (404) without returning staged bytes
+        using (var stgResp = await http.SendAsync(Req(uStg, jwtClientA)))
+        {
+            Assert.Equal(HttpStatusCode.NotFound, stgResp.StatusCode);
+            var stgBytes = await stgResp.Content.ReadAsByteArrayAsync();
+            Assert.DoesNotContain(validPng, new[] { stgBytes });
+            Assert.False(stgBytes.Length >= 8 && stgBytes[0] == 0x89 && stgBytes[1] == 0x50);
+        }
+
+        // MDM02-R02: Unfinalized DB flag -> fails closed (403) without file content
+        using (var unfResp = await http.SendAsync(Req(uUnf, jwtSuper)))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, unfResp.StatusCode);
+            var unfBytes = await unfResp.Content.ReadAsByteArrayAsync();
+            Assert.False(unfBytes.Length >= 8 && unfBytes[0] == 0x89 && unfBytes[1] == 0x50);
+        }
+
+        // MDM02-R02: Finalized file bytes differ from authoritative DB SignatureSha256 -> fails closed (403) without returning file content
+        using (var hshResp = await http.SendAsync(Req(uHsh, jwtSuper)))
+        {
+            Assert.Equal(HttpStatusCode.Forbidden, hshResp.StatusCode);
+            var hshBytes = await hshResp.Content.ReadAsByteArrayAsync();
+            Assert.False(hshBytes.Length >= 8 && hshBytes[0] == 0x89 && hshBytes[1] == 0x50);
+        }
+
+        Assert.Contains(auditLogSpy.Messages, m => m.Contains("Reason=EvidenceStorageNotFinalized"));
+        Assert.Contains(auditLogSpy.Messages, m => m.Contains("Reason=EvidenceHashMismatch"));
+        Assert.Contains(auditLogSpy.Messages, m => m.Contains("Reason=PodOwnershipDenied"));
     }
 
     #endregion

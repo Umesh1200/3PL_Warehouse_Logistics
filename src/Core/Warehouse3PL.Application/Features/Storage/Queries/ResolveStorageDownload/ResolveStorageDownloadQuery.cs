@@ -96,18 +96,56 @@ public sealed class ResolveStorageDownloadQueryHandler
             throw new ForbiddenException(GenericDeniedMessage);
         }
 
-        bool isAuthorized = await IsCallerAuthorizedForEvidenceAsync(normalizedKey, tenantSegment, cancellationToken);
-        if (!isAuthorized)
+        var resolution = await ResolveAuthorizedEvidenceAsync(normalizedKey, tenantSegment, cancellationToken);
+        if (!resolution.IsAuthorized)
         {
             throw new ForbiddenException(GenericDeniedMessage);
         }
 
-        var metadata = await _storageService.GetMetadataAsync(normalizedKey, cancellationToken);
-        var stream = await _storageService.DownloadAsync(normalizedKey, cancellationToken);
-        if (stream == null)
+        if (!resolution.IsFinalized)
+        {
+            AuditRejected("EvidenceStorageNotFinalized", normalizedKey);
+            throw new ForbiddenException(GenericDeniedMessage);
+        }
+
+        var metadata = await _storageService.GetFinalizedMetadataAsync(normalizedKey, cancellationToken);
+        var finalizedStream = await _storageService.DownloadFinalizedAsync(normalizedKey, cancellationToken);
+        if (finalizedStream == null)
         {
             AuditRejected("AuthorizedRecordMissingBlob", normalizedKey);
             throw new EntityNotFoundException("StorageObject", "Requested storage object was not found.");
+        }
+
+        Stream responseStream;
+        if (!string.IsNullOrWhiteSpace(resolution.ExpectedSha256))
+        {
+            var buffered = new MemoryStream();
+            try
+            {
+                await using (finalizedStream)
+                {
+                    await finalizedStream.CopyToAsync(buffered, cancellationToken);
+                }
+
+                if (!VerifyContentSha256(buffered, resolution.ExpectedSha256))
+                {
+                    await buffered.DisposeAsync();
+                    AuditRejected("EvidenceHashMismatch", normalizedKey);
+                    throw new ForbiddenException(GenericDeniedMessage);
+                }
+
+                buffered.Position = 0;
+                responseStream = buffered;
+            }
+            catch
+            {
+                await buffered.DisposeAsync();
+                throw;
+            }
+        }
+        else
+        {
+            responseStream = finalizedStream;
         }
 
         string safeContentType = ResolveSafeContentType(metadata?.ContentType);
@@ -117,15 +155,21 @@ public sealed class ResolveStorageDownloadQueryHandler
             "SECURITY_AUDIT StorageDownloadGranted UserId={UserId} UserType={UserType} TenantId={TenantId} KeyHash={KeyHash}",
             _currentUser.UserId, _currentUser.UserType, _currentUser.TenantId, HashKey(normalizedKey));
 
-        return new AuthorizedStorageDownloadResult(normalizedKey, safeContentType, safeFileName, stream);
+        return new AuthorizedStorageDownloadResult(normalizedKey, safeContentType, safeFileName, responseStream);
     }
 
-    private async Task<bool> IsCallerAuthorizedForEvidenceAsync(
+    private sealed record EvidenceResolution(bool IsAuthorized, bool IsFinalized, string? ExpectedSha256);
+
+    private async Task<EvidenceResolution> ResolveAuthorizedEvidenceAsync(
         string normalizedKey,
         string? keyTenantSegment,
         CancellationToken cancellationToken)
     {
-        // 1. Check ProofOfDelivery evidence (includes superseded historical PODs so historical evidence remains accessible to authorized owners)
+        // 1. Check ProofOfDelivery evidence.
+        // Historical evidence-read eligibility:
+        // - Active and superseded historical PODs (and delivered packages) remain readable for Staff (Permissions.Dispatch.View)
+        //   and Client owners (tenant + Permissions.Dispatch.View + active ClientFacilityAccess).
+        // - Drivers may read ONLY non-superseded PODs on shipments where they actively hold confirmed custody.
         var pod = await _context.ProofOfDeliveries
             .AsNoTracking()
             .IgnoreQueryFilters()
@@ -139,16 +183,20 @@ public sealed class ResolveStorageDownloadQueryHandler
             if (!MatchesKeyTenantPrefix(keyTenantSegment, pod.ClientId))
             {
                 AuditRejected("KeyTenantPrefixMismatch", normalizedKey);
-                return false;
+                return new EvidenceResolution(false, false, null);
             }
 
-            if (await IsAuthorizedForPodAsync(pod.ClientId, pod.FacilityId, pod.Shipment?.AssignedDriverUserId, pod.Shipment?.CustodyStatus, cancellationToken))
+            if (!await IsAuthorizedForPodAsync(pod, cancellationToken))
             {
-                return true;
+                AuditRejected("PodOwnershipDenied", normalizedKey);
+                return new EvidenceResolution(false, false, null);
             }
 
-            AuditRejected("PodOwnershipDenied", normalizedKey);
-            return false;
+            string? expectedSha256 = string.Equals(normalizedKey, pod.SignatureObjectKey, StringComparison.OrdinalIgnoreCase)
+                ? pod.SignatureSha256
+                : pod.PhotoSha256;
+
+            return new EvidenceResolution(true, pod.IsStorageFinalized, expectedSha256);
         }
 
         // 2. Check ReturnShipment labels
@@ -164,7 +212,7 @@ public sealed class ResolveStorageDownloadQueryHandler
             if (!MatchesKeyTenantPrefix(keyTenantSegment, returnShipment.ClientId))
             {
                 AuditRejected("KeyTenantPrefixMismatch", normalizedKey);
-                return false;
+                return new EvidenceResolution(false, false, null);
             }
 
             if (await IsAuthorizedForReturnShipmentAsync(
@@ -173,23 +221,20 @@ public sealed class ResolveStorageDownloadQueryHandler
                     returnShipment.DestinationFacilityId,
                     cancellationToken))
             {
-                return true;
+                return new EvidenceResolution(true, true, null);
             }
 
             AuditRejected("ReturnLabelOwnershipDenied", normalizedKey);
-            return false;
+            return new EvidenceResolution(false, false, null);
         }
 
         // Fail closed for unregistered/orphaned files on disk without revealing existence.
         AuditRejected("UnregisteredEvidenceKey", normalizedKey);
-        return false;
+        return new EvidenceResolution(false, false, null);
     }
 
     private async Task<bool> IsAuthorizedForPodAsync(
-        Guid evidenceClientId,
-        Guid evidenceFacilityId,
-        Guid? assignedDriverUserId,
-        ShipmentCustodyStatus? custodyStatus,
+        Domain.Entities.Outbound.ProofOfDelivery pod,
         CancellationToken cancellationToken)
     {
         if (_currentUser.IsSuperAdmin && _currentUser.UserType == UserType.Staff)
@@ -199,14 +244,8 @@ public sealed class ResolveStorageDownloadQueryHandler
 
         if (_currentUser.UserType == UserType.Staff)
         {
-            bool hasReadPermission =
-                _currentUser.HasPermission(Permissions.Dispatch.View) ||
-                _currentUser.HasPermission(Permissions.Dispatch.ManageRuns) ||
-                _currentUser.HasPermission(Permissions.Outbound.Ship) ||
-                _currentUser.HasPermission(Permissions.Outbound.View) ||
-                _currentUser.HasPermission(Permissions.Inbound.View);
-
-            if (!hasReadPermission)
+            // Aligned with GET /api/v1/outbound/dispatch/packages/{packageId}/pod (Permissions.Dispatch.View required).
+            if (!_currentUser.HasPermission(Permissions.Dispatch.View))
             {
                 return false;
             }
@@ -216,12 +255,12 @@ public sealed class ResolveStorageDownloadQueryHandler
                 return true;
             }
 
-            return _currentUser.FacilityId.HasValue && _currentUser.FacilityId.Value == evidenceFacilityId;
+            return _currentUser.FacilityId.HasValue && _currentUser.FacilityId.Value == pod.FacilityId;
         }
 
         if (_currentUser.UserType == UserType.Client)
         {
-            if (!_currentUser.TenantId.HasValue || _currentUser.TenantId.Value != evidenceClientId)
+            if (!_currentUser.TenantId.HasValue || _currentUser.TenantId.Value != pod.ClientId)
             {
                 return false;
             }
@@ -233,26 +272,70 @@ public sealed class ResolveStorageDownloadQueryHandler
 
             if (_currentUser.FacilityId.HasValue &&
                 _currentUser.FacilityId.Value != Guid.Empty &&
-                _currentUser.FacilityId.Value != evidenceFacilityId)
+                _currentUser.FacilityId.Value != pod.FacilityId)
             {
                 return false;
             }
 
             return await _context.ClientFacilityAccesses
                 .AsNoTracking()
-                .AnyAsync(a => a.ClientId == evidenceClientId &&
-                               a.FacilityId == evidenceFacilityId &&
+                .AnyAsync(a => a.ClientId == pod.ClientId &&
+                               a.FacilityId == pod.FacilityId &&
                                a.Status == FacilityAccessStatus.Active,
                     cancellationToken);
         }
 
         if (_currentUser.UserType == UserType.Driver)
         {
-            return _currentUser.HasPermission(Permissions.Dispatch.ExecuteDelivery) &&
-                   _currentUser.UserId.HasValue &&
-                   assignedDriverUserId.HasValue &&
-                   assignedDriverUserId.Value == _currentUser.UserId.Value &&
-                   custodyStatus != ShipmentCustodyStatus.Revoked;
+            if (pod.IsSuperseded ||
+                !_currentUser.HasPermission(Permissions.Dispatch.ExecuteDelivery) ||
+                !_currentUser.UserId.HasValue ||
+                _currentUser.UserId.Value == Guid.Empty)
+            {
+                return false;
+            }
+
+            var driverUserId = _currentUser.UserId.Value;
+            var shipment = pod.Shipment;
+            if (!pod.ShipmentId.HasValue ||
+                pod.ShipmentId.Value == Guid.Empty ||
+                shipment == null ||
+                shipment.IsDeleted ||
+                shipment.ClientId != pod.ClientId ||
+                shipment.FacilityId != pod.FacilityId ||
+                shipment.Status != ShipmentStatus.Dispatched ||
+                !shipment.AssignedDriverUserId.HasValue ||
+                shipment.AssignedDriverUserId.Value != driverUserId ||
+                shipment.CustodyStatus != ShipmentCustodyStatus.Confirmed)
+            {
+                return false;
+            }
+
+            // Enforce Phase 7.4 authoritative latest custody transfer chain verification.
+            var latestCustodyTransfer = await _context.ShipmentCustodyTransfers
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(t => t.ShipmentId == shipment.Id &&
+                            t.ClientId == shipment.ClientId &&
+                            t.FacilityId == shipment.FacilityId)
+                .OrderByDescending(t => t.TransferredAtUtc)
+                .ThenByDescending(t => t.Id)
+                .Select(t => new
+                {
+                    t.AssignedDriverUserId,
+                    t.CustodyStatus,
+                    t.DriverSignatureAcknowledgment
+                })
+                .FirstOrDefaultAsync(cancellationToken);
+
+            return latestCustodyTransfer != null &&
+                   latestCustodyTransfer.AssignedDriverUserId.HasValue &&
+                   latestCustodyTransfer.AssignedDriverUserId.Value == driverUserId &&
+                   latestCustodyTransfer.CustodyStatus == ShipmentCustodyStatus.Confirmed &&
+                   !string.IsNullOrWhiteSpace(latestCustodyTransfer.DriverSignatureAcknowledgment) &&
+                   !latestCustodyTransfer.DriverSignatureAcknowledgment.StartsWith(
+                       "SUPERVISOR_CUSTODY_REASSIGNMENT:",
+                       StringComparison.OrdinalIgnoreCase);
         }
 
         return false;
@@ -274,9 +357,7 @@ public sealed class ResolveStorageDownloadQueryHandler
             bool hasReadPermission =
                 _currentUser.HasPermission(Permissions.Dispatch.View) ||
                 _currentUser.HasPermission(Permissions.Outbound.Ship) ||
-                _currentUser.HasPermission(Permissions.Outbound.View) ||
-                _currentUser.HasPermission(Permissions.Inbound.View) ||
-                _currentUser.HasPermission(Permissions.Inbound.Receive);
+                _currentUser.HasPermission(Permissions.Outbound.View);
 
             if (!hasReadPermission)
             {
@@ -303,8 +384,7 @@ public sealed class ResolveStorageDownloadQueryHandler
             bool hasClientRead =
                 _currentUser.HasPermission(Permissions.Dispatch.View) ||
                 _currentUser.HasPermission(Permissions.Outbound.View) ||
-                _currentUser.HasPermission(Permissions.Outbound.OrdersView) ||
-                _currentUser.HasPermission(Permissions.Inbound.View);
+                _currentUser.HasPermission(Permissions.Outbound.OrdersView);
 
             if (!hasClientRead)
             {
@@ -331,9 +411,28 @@ public sealed class ResolveStorageDownloadQueryHandler
     }
 
     private bool HasCrossFacilityRead() =>
-        _currentUser.HasPermission(Permissions.Analytics.MultiFacilityView) ||
-        _currentUser.HasPermission("Analytics:CrossFacility") ||
-        _currentUser.HasPermission("Shipments:CrossFacility");
+        _currentUser.HasPermission(Permissions.Analytics.MultiFacilityView);
+
+    private static bool VerifyContentSha256(MemoryStream buffered, string expectedSha256Hex)
+    {
+        byte[] expectedBytes;
+        try
+        {
+            expectedBytes = Convert.FromHexString(expectedSha256Hex.Trim());
+        }
+        catch (FormatException)
+        {
+            return false;
+        }
+
+        if (expectedBytes.Length != SHA256.HashSizeInBytes)
+        {
+            return false;
+        }
+
+        byte[] actualBytes = SHA256.HashData(buffered.GetBuffer().AsSpan(0, (int)buffered.Length));
+        return CryptographicOperations.FixedTimeEquals(actualBytes, expectedBytes);
+    }
 
     private static bool MatchesKeyTenantPrefix(string? keyTenantSegment, Guid ownerClientId)
     {
