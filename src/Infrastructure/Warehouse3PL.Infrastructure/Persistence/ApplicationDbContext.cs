@@ -66,6 +66,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<RoleReconciliationAuditLog> RoleReconciliationAuditLogs => Set<RoleReconciliationAuditLog>();
     public DbSet<ClientFacilityAccess> ClientFacilityAccesses => Set<ClientFacilityAccess>();
     public DbSet<Facility> Facilities => Set<Facility>();
+    public DbSet<LegalEntity> LegalEntities => Set<LegalEntity>();
     public DbSet<WarehouseZone> WarehouseZones => Set<WarehouseZone>();
     public DbSet<Location> Locations => Set<Location>();
     public DbSet<LocationLock> LocationLocks => Set<LocationLock>();

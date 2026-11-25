@@ -26,51 +26,10 @@ public sealed class CompliancePlatformAuthorization
         CancellationToken cancellationToken,
         params string[] allowedPermissions)
     {
-        if (!_currentUser.IsAuthenticated ||
-            !_currentUser.UserId.HasValue ||
-            _currentUser.UserId.Value == Guid.Empty)
-        {
-            throw new UnauthorizedException("Authentication is required for statutory compliance operations.");
-        }
-
-        if (_currentUser.UserType != UserType.Staff || !_currentUser.IsStaff)
-        {
-            throw new ForbiddenException("Statutory compliance operations are strictly restricted to authenticated platform Staff.");
-        }
-
-        var userId = _currentUser.UserId.Value;
-
-        var dbUser = await _db.Users
-            .AsNoTracking()
-            .Where(u => u.Id == userId)
-            .Select(u => new
-            {
-                u.Id,
-                u.IsDeleted,
-                u.Status,
-                u.UserType,
-                Roles = u.UserRoles.Select(ur => new
-                {
-                    ur.Role.RoleName,
-                    Permissions = ur.Role.RolePermissions.Select(rp => rp.PermissionKey).ToList()
-                }).ToList()
-            })
-            .FirstOrDefaultAsync(cancellationToken);
-
-        if (dbUser == null || dbUser.IsDeleted || dbUser.Status != UserStatus.Active || dbUser.UserType != UserType.Staff)
-        {
-            throw new ForbiddenException("Caller is not an active database-verified Staff account.");
-        }
-
+        var dbUser = await LoadVerifiedStaffUserAsync(cancellationToken);
         var dbRoleNames = dbUser.Roles
             .Select(r => r.RoleName)
             .ToHashSet(StringComparer.OrdinalIgnoreCase);
-
-        // Reject if caller claims SuperAdmin without an authoritative SuperAdmin DB role assignment.
-        if (_currentUser.IsInRole(SystemRoles.SuperAdmin) && !dbRoleNames.Contains(SystemRoles.SuperAdmin))
-        {
-            throw new ForbiddenException("Claimed SuperAdmin role is not backed by an authoritative database role assignment.");
-        }
 
         bool isDbSuperAdmin = dbRoleNames.Contains(SystemRoles.SuperAdmin);
         var dbPermissions = dbUser.Roles
@@ -91,4 +50,112 @@ public sealed class CompliancePlatformAuthorization
 
         return dbUser.Id;
     }
+
+    /// <summary>
+    /// Verifies active DB Staff identity and facility management authority.
+    /// Non-SuperAdmin Staff without multi-facility scope are strictly restricted to their DB-assigned facility.
+    /// </summary>
+    public async Task<Guid> RequireVerifiedFacilityManagerAsync(
+        Guid? targetFacilityId,
+        CancellationToken cancellationToken)
+    {
+        var dbUser = await LoadVerifiedStaffUserAsync(cancellationToken);
+        var dbRoleNames = dbUser.Roles
+            .Select(r => r.RoleName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        bool isDbSuperAdmin = dbRoleNames.Contains(SystemRoles.SuperAdmin);
+        var dbPermissions = dbUser.Roles
+            .SelectMany(r => r.Permissions)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (!isDbSuperAdmin)
+        {
+            if (!dbPermissions.Contains(Permissions.Facilities.Manage) ||
+                !_currentUser.HasPermission(Permissions.Facilities.Manage))
+            {
+                throw new ForbiddenException(
+                    $"Active Staff user lacks required database-verified permission '{Permissions.Facilities.Manage}'.");
+            }
+
+            bool isCrossFacility = dbPermissions.Contains(Permissions.Analytics.MultiFacilityView) ||
+                                   dbPermissions.Contains("Analytics:CrossFacility");
+
+            if (!isCrossFacility)
+            {
+                if (!targetFacilityId.HasValue)
+                {
+                    if (dbUser.AssignedFacilityId.HasValue)
+                    {
+                        throw new ForbiddenException(
+                            "Facility-bound Staff cannot create new platform facilities without multi-facility permission.");
+                    }
+                }
+                else if (!dbUser.AssignedFacilityId.HasValue || dbUser.AssignedFacilityId.Value != targetFacilityId.Value)
+                {
+                    throw new ForbiddenException(
+                        $"Staff member is not authorized to mutate facility '{targetFacilityId.Value}'.");
+                }
+            }
+        }
+
+        return dbUser.Id;
+    }
+
+    private async Task<VerifiedStaffSnapshot> LoadVerifiedStaffUserAsync(CancellationToken cancellationToken)
+    {
+        if (!_currentUser.IsAuthenticated ||
+            !_currentUser.UserId.HasValue ||
+            _currentUser.UserId.Value == Guid.Empty)
+        {
+            throw new UnauthorizedException("Authentication is required for administrative platform operations.");
+        }
+
+        if (_currentUser.UserType != UserType.Staff || !_currentUser.IsStaff)
+        {
+            throw new ForbiddenException("Administrative platform operations are strictly restricted to authenticated platform Staff.");
+        }
+
+        var userId = _currentUser.UserId.Value;
+
+        var dbUser = await _db.Users
+            .AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => new VerifiedStaffSnapshot(
+                u.Id,
+                u.IsDeleted,
+                u.Status,
+                u.UserType,
+                u.AssignedFacilityId,
+                u.UserRoles.Select(ur => new VerifiedStaffRole(
+                    ur.Role.RoleName,
+                    ur.Role.RolePermissions.Select(rp => rp.PermissionKey).ToList())).ToList()))
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (dbUser == null || dbUser.IsDeleted || dbUser.Status != UserStatus.Active || dbUser.UserType != UserType.Staff)
+        {
+            throw new ForbiddenException("Caller is not an active database-verified Staff account.");
+        }
+
+        var dbRoleNames = dbUser.Roles
+            .Select(r => r.RoleName)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (_currentUser.IsInRole(SystemRoles.SuperAdmin) && !dbRoleNames.Contains(SystemRoles.SuperAdmin))
+        {
+            throw new ForbiddenException("Claimed SuperAdmin role is not backed by an authoritative database role assignment.");
+        }
+
+        return dbUser;
+    }
+
+    private sealed record VerifiedStaffRole(string RoleName, List<string> Permissions);
+
+    private sealed record VerifiedStaffSnapshot(
+        Guid Id,
+        bool IsDeleted,
+        UserStatus Status,
+        UserType UserType,
+        Guid? AssignedFacilityId,
+        List<VerifiedStaffRole> Roles);
 }

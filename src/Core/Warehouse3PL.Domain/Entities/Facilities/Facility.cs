@@ -19,6 +19,8 @@ public class Facility : AuditableEntity<Guid>, ISoftDeletable
     public string? PostalCode { get; set; }
     public string CountryCode { get; set; } = "USA";
     public string Timezone { get; set; } = "America/Chicago";
+    public Guid? DefaultLegalEntityId { get; set; }
+    public string? DefaultCurrencyCode { get; set; }
     
     // Contacts
     public string? ContactEmail { get; set; }
@@ -37,6 +39,7 @@ public class Facility : AuditableEntity<Guid>, ISoftDeletable
     public Guid? DeletedBy { get; set; }
 
     // Navigations
+    public LegalEntity? DefaultLegalEntity { get; set; }
     public ICollection<ClientFacilityAccess> ClientAccesses { get; set; } = [];
     public ICollection<WarehouseZone> Zones { get; set; } = [];
     public ICollection<Location> Locations { get; set; } = [];

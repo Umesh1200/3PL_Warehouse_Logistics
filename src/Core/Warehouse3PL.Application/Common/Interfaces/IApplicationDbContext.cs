@@ -24,6 +24,7 @@ public interface IApplicationDbContext
     DbSet<RoleReconciliationAuditLog> RoleReconciliationAuditLogs { get; }
     DbSet<ClientFacilityAccess> ClientFacilityAccesses { get; }
     DbSet<Facility> Facilities { get; }
+    DbSet<LegalEntity> LegalEntities { get; }
     DbSet<WarehouseZone> WarehouseZones { get; }
     DbSet<Location> Locations { get; }
     DbSet<LocationLock> LocationLocks { get; }

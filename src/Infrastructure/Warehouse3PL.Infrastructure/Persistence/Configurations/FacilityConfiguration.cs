@@ -80,6 +80,15 @@ public class FacilityConfiguration : IEntityTypeConfiguration<Facility>
             .HasMaxLength(50)
             .IsRequired();
 
+        builder.Property(f => f.DefaultLegalEntityId)
+            .HasColumnName("default_legal_entity_id");
+
+        builder.Property(f => f.DefaultCurrencyCode)
+            .HasColumnName("default_currency_code")
+            .HasMaxLength(3);
+
+        builder.HasIndex(f => f.DefaultLegalEntityId);
+
         builder.Property(f => f.IsActive)
             .HasColumnName("is_active")
             .HasDefaultValue(true);
@@ -96,6 +105,11 @@ public class FacilityConfiguration : IEntityTypeConfiguration<Facility>
         builder.Property(f => f.UpdatedBy).HasColumnName("updated_by");
 
         // Relationships
+        builder.HasOne(f => f.DefaultLegalEntity)
+            .WithMany(le => le.DefaultFacilities)
+            .HasForeignKey(f => f.DefaultLegalEntityId)
+            .OnDelete(DeleteBehavior.Restrict);
+
         builder.HasMany(f => f.ClientAccesses)
             .WithOne(cfa => cfa.Facility)
             .HasForeignKey(cfa => cfa.FacilityId)

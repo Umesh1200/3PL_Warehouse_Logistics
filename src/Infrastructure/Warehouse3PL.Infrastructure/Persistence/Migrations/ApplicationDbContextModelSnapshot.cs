@@ -8780,6 +8780,15 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("created_by");
 
+                    b.Property<string>("DefaultCurrencyCode")
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("default_currency_code");
+
+                    b.Property<Guid?>("DefaultLegalEntityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("default_legal_entity_id");
+
                     b.Property<DateTime?>("DeletedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("deleted_at");
@@ -8854,11 +8863,156 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.HasKey("Id")
                         .HasName("pk_facilities");
 
+                    b.HasIndex("DefaultLegalEntityId")
+                        .HasDatabaseName("ix_facilities_default_legal_entity_id");
+
                     b.HasIndex("FacilityCode")
                         .IsUnique()
                         .HasDatabaseName("ix_facilities_facility_code");
 
                     b.ToTable("facilities", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LegalEntity", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("legal_entity_id");
+
+                    b.Property<long>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
+                    b.Property<string>("CountryCode")
+                        .IsRequired()
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)")
+                        .HasColumnName("country_code");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<string>("DefaultCurrencyCode")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("default_currency_code");
+
+                    b.Property<DateTime?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<Guid?>("DeletedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deleted_by");
+
+                    b.Property<string>("IroSoftwarePermitRef")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("iro_software_permit_ref");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("IsCbmsMandated")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_cbms_mandated");
+
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_deleted");
+
+                    b.Property<string>("LegalCode")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("legal_code");
+
+                    b.Property<string>("LegalName")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("legal_name");
+
+                    b.Property<string>("RegisteredAddressLine1")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("registered_address_line1");
+
+                    b.Property<string>("RegisteredAddressLine2")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("registered_address_line2");
+
+                    b.Property<string>("RegisteredCity")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("registered_city");
+
+                    b.Property<string>("RegisteredPostalCode")
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("registered_postal_code");
+
+                    b.Property<string>("RegisteredStateOrProvince")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("registered_state_or_province");
+
+                    b.Property<string>("RegistrationNumber")
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)")
+                        .HasColumnName("registration_number");
+
+                    b.Property<string>("TaxIdentifierType")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)")
+                        .HasColumnName("tax_identifier_type");
+
+                    b.Property<string>("TaxRegistrationNumber")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("tax_registration_number");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_legal_entities");
+
+                    b.HasIndex("CountryCode")
+                        .HasDatabaseName("ix_legal_entities_country_code");
+
+                    b.HasIndex("LegalCode")
+                        .IsUnique()
+                        .HasDatabaseName("ix_legal_entities_legal_code")
+                        .HasFilter("is_deleted = false");
+
+                    b.ToTable("legal_entities", (string)null);
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.Location", b =>
@@ -17699,6 +17853,29 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("Facility");
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.Facility", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.LegalEntity", "DefaultLegalEntity")
+                        .WithMany("DefaultFacilities")
+                        .HasForeignKey("DefaultLegalEntityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_facilities_legal_entities_default_legal_entity_id");
+
+                    b.Navigation("DefaultLegalEntity");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LegalEntity", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.CountryProfile", "CountryProfile")
+                        .WithMany()
+                        .HasForeignKey("CountryCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_legal_entities_country_profiles_country_code");
+
+                    b.Navigation("CountryProfile");
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.Location", b =>
                 {
                     b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "Facility")
@@ -20259,6 +20436,11 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("Locations");
 
                     b.Navigation("Zones");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LegalEntity", b =>
+                {
+                    b.Navigation("DefaultFacilities");
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.Location", b =>

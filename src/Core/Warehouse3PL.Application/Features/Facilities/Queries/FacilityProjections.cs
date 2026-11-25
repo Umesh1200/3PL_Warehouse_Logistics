@@ -21,6 +21,8 @@ internal static class FacilityProjections
         PostalCode = f.PostalCode,
         CountryCode = f.CountryCode,
         Timezone = f.Timezone,
+        DefaultLegalEntityId = f.DefaultLegalEntityId,
+        DefaultCurrencyCode = f.DefaultCurrencyCode,
         ContactEmail = f.ContactEmail,
         ContactPhone = f.ContactPhone,
         TotalAreaSqM = f.TotalAreaSqM,
@@ -40,6 +42,8 @@ internal static class FacilityProjections
         PostalCode = f.PostalCode,
         CountryCode = f.CountryCode,
         Timezone = f.Timezone,
+        DefaultLegalEntityId = f.DefaultLegalEntityId,
+        DefaultCurrencyCode = f.DefaultCurrencyCode,
         ContactEmail = f.ContactEmail,
         ContactPhone = f.ContactPhone,
         TotalAreaSqM = f.TotalAreaSqM,
@@ -49,6 +53,27 @@ internal static class FacilityProjections
         ConfigurationJson = f.ConfigurationJson,
         CreatedAt = f.CreatedAt,
         UpdatedAt = f.UpdatedAt
+    };
+
+    public static FacilityDto ToDto(Facility f) => new()
+    {
+        Id = f.Id,
+        FacilityCode = f.FacilityCode,
+        Name = f.Name,
+        AddressLine1 = f.AddressLine1,
+        AddressLine2 = f.AddressLine2,
+        City = f.City,
+        StateOrProvince = f.StateOrProvince,
+        PostalCode = f.PostalCode,
+        CountryCode = f.CountryCode,
+        Timezone = f.Timezone,
+        DefaultLegalEntityId = f.DefaultLegalEntityId,
+        DefaultCurrencyCode = f.DefaultCurrencyCode,
+        ContactEmail = f.ContactEmail,
+        ContactPhone = f.ContactPhone,
+        TotalAreaSqM = f.TotalAreaSqM,
+        DockDoorCount = f.DockDoorCount,
+        IsActive = f.IsActive
     };
 
     public static bool IsCrossFacilityStaff(ICurrentUserContext currentUser) =>

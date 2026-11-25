@@ -167,6 +167,8 @@ public static class Permissions
         public const string ReferenceView = "global:reference:view";
         public const string ComplianceView = "global:compliance:view";
         public const string ComplianceManage = "global:compliance:manage";
+        public const string ViewLegalEntities = "global:legal-entities:view";
+        public const string ManageLegalEntities = "global:legal-entities:manage";
     }
 
     /// <summary>
@@ -201,6 +203,7 @@ public static class Permissions
         Analytics.SlottingView, Analytics.SlottingManage,
         Analytics.MonitoringView, Analytics.MonitoringManage, Analytics.DecisionLaborView, Analytics.DecisionTransportationView,
         Analytics.TransportationView, Analytics.TransportationClaimsView, Analytics.TransportationFinancialView,
-        Global.ReferenceView, Global.ComplianceView, Global.ComplianceManage
+        Global.ReferenceView, Global.ComplianceView, Global.ComplianceManage,
+        Global.ViewLegalEntities, Global.ManageLegalEntities
     ];
 }

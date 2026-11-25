@@ -16,6 +16,8 @@ public record FacilityDto
     public string? PostalCode { get; init; }
     public string CountryCode { get; init; } = string.Empty;
     public string Timezone { get; init; } = "UTC";
+    public Guid? DefaultLegalEntityId { get; init; }
+    public string? DefaultCurrencyCode { get; init; }
     public string? ContactEmail { get; init; }
     public string? ContactPhone { get; init; }
     public decimal? TotalAreaSqM { get; init; }
