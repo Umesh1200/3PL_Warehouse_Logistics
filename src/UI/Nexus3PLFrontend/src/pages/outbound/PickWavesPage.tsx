@@ -8,6 +8,7 @@ import {
   formatWaveTypeLabel,
 } from '../../components/outbound/OutboundStatusBadge';
 import { PickWaveGenerateModal } from '../../components/outbound/PickWaveGenerateModal';
+import { OutboundTableRegion } from '../../components/outbound/OutboundTableRegion';
 import { useAuth } from '../../context/AuthContext';
 import { useFacility } from '../../context/FacilityContext';
 import { useRouter } from '../../context/RouterContext';
@@ -285,7 +286,12 @@ export const PickWavesPage: React.FC = () => {
                 No pick waves found for {activeFacility?.name || 'this facility'}.
               </div>
             ) : (
-              <div className="outbound-table-wrap">
+              <OutboundTableRegion
+                ariaLabel="Pick waves table"
+                hintText="Swipe or scroll horizontally to view wave progress and actions →"
+                hintTestId="pick-waves-scroll-hint"
+                regionTestId="pick-waves-scroll-region"
+              >
                 <table className="outbound-table" data-testid="pick-waves-table">
                   <thead>
                     <tr>
@@ -356,7 +362,7 @@ export const PickWavesPage: React.FC = () => {
                     })}
                   </tbody>
                 </table>
-              </div>
+              </OutboundTableRegion>
             )}
 
             <div className="outbound-pagination">
@@ -483,7 +489,7 @@ export const PickWavesPage: React.FC = () => {
 
               <div>
                 <h3 style={{ marginBottom: 8 }}>Associated Orders ({selectedWave.waveOrders.length})</h3>
-                <div className="outbound-table-wrap">
+                <OutboundTableRegion ariaLabel="Wave associated orders table">
                   <table className="outbound-table">
                     <thead>
                       <tr>
@@ -508,12 +514,12 @@ export const PickWavesPage: React.FC = () => {
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </OutboundTableRegion>
               </div>
 
               <div>
                 <h3 style={{ marginBottom: 8 }}>Sequenced Pick Tasks ({selectedWave.tasks.length})</h3>
-                <div className="outbound-table-wrap">
+                <OutboundTableRegion ariaLabel="Wave pick tasks table">
                   <table className="outbound-table">
                     <thead>
                       <tr>
@@ -545,7 +551,7 @@ export const PickWavesPage: React.FC = () => {
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </OutboundTableRegion>
               </div>
             </div>
           )}

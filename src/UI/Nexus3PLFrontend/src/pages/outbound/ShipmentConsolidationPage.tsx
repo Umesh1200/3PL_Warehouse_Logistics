@@ -20,6 +20,7 @@ import {
 } from '../../components/outbound/OutboundStatusBadge';
 import { BillOfLadingModal } from '../../components/outbound/BillOfLadingModal';
 import { DriverCustodyHandoverModal } from '../../components/outbound/DriverCustodyHandoverModal';
+import { OutboundTableRegion } from '../../components/outbound/OutboundTableRegion';
 import { AppIcon } from '../../components/common/AppIcon';
 import '../../styles/outbound.css';
 
@@ -925,7 +926,13 @@ export const ShipmentConsolidationPage: React.FC = () => {
                       No unassigned Packed / LabelPrinted cartons available in {activeFacility.facilityCode}.
                     </div>
                   ) : (
-                    <div className="outbound-table-scroll">
+                    <OutboundTableRegion
+                      ariaLabel="Eligible labeled cartons table"
+                      hintText="Swipe or scroll horizontally to consolidate cartons →"
+                      scrollClassName="outbound-table-scroll"
+                      hintTestId="eligible-packages-scroll-hint"
+                      regionTestId="eligible-packages-scroll-region"
+                    >
                       <table className="data-table data-table-compact" data-testid="eligible-packages-table">
                         <thead>
                           <tr>
@@ -982,7 +989,7 @@ export const ShipmentConsolidationPage: React.FC = () => {
                           })}
                         </tbody>
                       </table>
-                    </div>
+                    </OutboundTableRegion>
                   )}
                 </div>
               )}

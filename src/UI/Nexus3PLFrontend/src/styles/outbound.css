@@ -100,9 +100,24 @@
   border-color: var(--status-success-border);
 }
 
+.outbound-table-region {
+  width: 100%;
+  max-width: 100%;
+  min-width: 0;
+}
+
 .outbound-table-wrap {
   width: 100%;
+  max-width: 100%;
   overflow-x: auto;
+  -webkit-overflow-scrolling: touch;
+}
+
+.outbound-table-wrap:focus-visible,
+.outbound-table-scroll:focus-visible {
+  outline: 2px solid var(--brand-primary);
+  outline-offset: 2px;
+  border-radius: var(--radius-xs);
 }
 
 .outbound-table {
@@ -431,8 +446,16 @@
 .table-scroll-hint {
   display: none;
   font-size: 12px;
+  line-height: 1.4;
+  font-weight: 550;
   color: var(--text-muted);
-  margin-bottom: 6px;
+  background: #f8fafc;
+  border: 1px solid var(--border-subtle);
+  border-radius: var(--radius-xs);
+  padding: 5px 10px;
+  margin-bottom: 8px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
 }
 
 .picking-mode-tabs {

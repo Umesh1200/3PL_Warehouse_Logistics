@@ -3,6 +3,7 @@ import { AppIcon } from '../../components/common/AppIcon';
 import { BulkOrderImportModal } from '../../components/outbound/BulkOrderImportModal';
 import { OrderCreateModal } from '../../components/outbound/OrderCreateModal';
 import { OrderDetailDrawer } from '../../components/outbound/OrderDetailDrawer';
+import { OutboundTableRegion } from '../../components/outbound/OutboundTableRegion';
 import {
   OrderStatusBadge,
   computeOrderAllocationProgress,
@@ -324,7 +325,12 @@ export const OutboundOrdersPage: React.FC = () => {
                 {activeFacility?.name || 'your authorized facilities'}.
               </div>
             ) : (
-              <div className="outbound-table-wrap">
+              <OutboundTableRegion
+                ariaLabel="Outbound orders table"
+                hintText="Swipe or scroll horizontally to view order status, progress, and actions →"
+                hintTestId="outbound-orders-scroll-hint"
+                regionTestId="outbound-orders-scroll-region"
+              >
                 <table className="outbound-table" data-testid="outbound-orders-table">
                   <thead>
                     <tr>
@@ -392,7 +398,7 @@ export const OutboundOrdersPage: React.FC = () => {
                     })}
                   </tbody>
                 </table>
-              </div>
+              </OutboundTableRegion>
             )}
 
             <div className="outbound-pagination">

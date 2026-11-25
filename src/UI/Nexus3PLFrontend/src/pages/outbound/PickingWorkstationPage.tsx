@@ -6,6 +6,7 @@ import {
   generateActionIdempotencyKey,
 } from '../../components/outbound/OutboundStatusBadge';
 import { ShortPickModal } from '../../components/outbound/ShortPickModal';
+import { OutboundTableRegion } from '../../components/outbound/OutboundTableRegion';
 import { useAuth } from '../../context/AuthContext';
 import { useFacility } from '../../context/FacilityContext';
 import { useRouter } from '../../context/RouterContext';
@@ -478,8 +479,12 @@ export const PickingWorkstationPage: React.FC = () => {
               </div>
             ) : (
               <>
-                <p className="table-scroll-hint">Swipe horizontally to view quantity and operator assignment columns</p>
-                <div className="outbound-table-wrap">
+                <OutboundTableRegion
+                  ariaLabel="Pick queue tasks table"
+                  hintText="Swipe or scroll horizontally to view quantity and operator assignment columns →"
+                  hintTestId="pick-queue-scroll-hint"
+                  regionTestId="pick-queue-scroll-region"
+                >
                   <table className="outbound-table">
                     <thead>
                       <tr>
@@ -548,7 +553,7 @@ export const PickingWorkstationPage: React.FC = () => {
                       })}
                     </tbody>
                   </table>
-                </div>
+                </OutboundTableRegion>
 
                 <div className="outbound-pagination">
                   <span className="cell-sub">

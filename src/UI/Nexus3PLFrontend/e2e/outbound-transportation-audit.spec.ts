@@ -1,8 +1,14 @@
 import { test, expect, Page } from '@playwright/test';
 import * as fs from 'fs';
 import * as path from 'path';
+import { fileURLToPath } from 'url';
 
-const AUDIT_REPO_DIR = 'C:/Code/3PL_Warehouse_Logistics/docs/audits/outbound-transportation';
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+const AUDIT_REPO_DIR = path.resolve(
+  __dirname,
+  '../../../../docs/audits/outbound-transportation'
+);
 
 if (!fs.existsSync(AUDIT_REPO_DIR)) {
   fs.mkdirSync(AUDIT_REPO_DIR, { recursive: true });
@@ -337,23 +343,73 @@ test.describe('Phase 7.4.6: Consolidated Outbound & Transportation Visual, A11y 
     await expect(page.getByTestId('allocation-result-panel')).toBeVisible();
     await assertDialogFocusTrapAndEscape(page, '[data-testid="order-detail-drawer"]');
 
+    // P746-N01: Ensure screenshot destination is portable and repository-relative
+    expect(path.isAbsolute(AUDIT_REPO_DIR)).toBe(true);
+    expect(AUDIT_REPO_DIR.replace(/\\/g, '/')).toMatch(/\/docs\/audits\/outbound-transportation$/);
+
+    // P746-N02: Desktop layout hides the mobile-only scroll hint cleanly
+    await expect(page.getByTestId('outbound-orders-scroll-hint')).toBeHidden();
     await shot(page, 'desktop-01-outbound-orders.png');
     await assertNoOverflow(page, 768, 1024);
     await shot(page, 'tablet-01-outbound-orders.png');
     await assertNoOverflow(page, 375, 812);
     await shot(page, 'mobile-01-outbound-orders.png');
     await assertNoOverflow(page, 320, 568);
+
+    // P746-N02: At 320px, OutboundOrdersPage exposes a visible, accessible, keyboard-focusable horizontal scroll hint without page overflow
+    const ordersHint = page.getByTestId('outbound-orders-scroll-hint');
+    const ordersRegion = page.getByTestId('outbound-orders-scroll-region');
+    await expect(ordersHint).toBeVisible();
+    await expect(ordersRegion).toHaveAttribute('role', 'region');
+    await expect(ordersRegion).toHaveAttribute('tabindex', '0');
+    await expect(ordersRegion).toHaveAttribute('aria-label', 'Outbound orders table');
+    const hintId = await ordersHint.getAttribute('id');
+    expect(hintId).toBeTruthy();
+    await expect(ordersRegion).toHaveAttribute('aria-describedby', hintId!);
+    const hintBox = await ordersHint.boundingBox();
+    expect(hintBox).not.toBeNull();
+    expect(hintBox!.width).toBeGreaterThan(0);
+    expect(hintBox!.x + hintBox!.width).toBeLessThanOrEqual(320);
+
+    await ordersRegion.focus();
+    await expect(ordersRegion).toBeFocused();
+    const regionScrollMetrics = await ordersRegion.evaluate((el) => {
+      const cs = window.getComputedStyle(el);
+      return {
+        scrollWidth: el.scrollWidth,
+        clientWidth: el.clientWidth,
+        outlineWidth: parseFloat(cs.outlineWidth) || 0,
+        boxShadow: cs.boxShadow,
+      };
+    });
+    expect(regionScrollMetrics.scrollWidth).toBeGreaterThan(regionScrollMetrics.clientWidth);
+    expect(regionScrollMetrics.outlineWidth > 0 || regionScrollMetrics.boxShadow !== 'none').toBe(true);
+    await page.keyboard.press('ArrowRight');
+    await expect.poll(() => ordersRegion.evaluate((el) => el.scrollLeft)).toBeGreaterThan(0);
+    await ordersRegion.evaluate((el) => {
+      el.scrollLeft = 0;
+    });
+
     await shot(page, 'mobile-320-01-outbound-orders.png');
 
-    // Pick Waves Desktop screenshot
+    // Pick Waves Desktop + 320px scroll hint verification
     await assertNoOverflow(page, 1440, 900);
     await page.goto('/app/outbound/waves');
     await page.getByTestId('inspect-wave-wave-audit-1').click();
     await expect(page.getByRole('heading', { name: 'Wave WAVE-20261124-01' })).toBeVisible();
+    await expect(page.getByTestId('pick-waves-scroll-hint')).toBeHidden();
     await shot(page, 'desktop-02-pick-waves.png');
     await assertNoOverflow(page, 768, 1024);
     await assertNoOverflow(page, 375, 812);
     await assertNoOverflow(page, 320, 568);
+    const wavesHint = page.getByTestId('pick-waves-scroll-hint');
+    const wavesRegion = page.getByTestId('pick-waves-scroll-region');
+    await expect(wavesHint).toBeVisible();
+    const wavesHintId = await wavesHint.getAttribute('id');
+    expect(wavesHintId).toBeTruthy();
+    await expect(wavesRegion).toHaveAttribute('role', 'region');
+    await expect(wavesRegion).toHaveAttribute('tabindex', '0');
+    await expect(wavesRegion).toHaveAttribute('aria-describedby', wavesHintId!);
 
     expect(consoleErrors).toEqual([]);
   });

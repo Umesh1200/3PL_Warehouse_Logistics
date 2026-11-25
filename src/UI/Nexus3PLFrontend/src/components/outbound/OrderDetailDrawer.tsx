@@ -17,6 +17,7 @@ import {
   formatOrderTypeLabel,
   generateActionIdempotencyKey,
 } from './OutboundStatusBadge';
+import { OutboundTableRegion } from './OutboundTableRegion';
 
 export interface OrderDetailDrawerProps {
   orderId: string | null;
@@ -493,7 +494,7 @@ export const OrderDetailDrawer: React.FC<OrderDetailDrawerProps> = ({
                   </button>
                 </div>
 
-                <div className="outbound-table-wrap">
+                <OutboundTableRegion ariaLabel="Outbound order lines table">
                   <table className="outbound-table">
                     <thead>
                       <tr>
@@ -530,7 +531,7 @@ export const OrderDetailDrawer: React.FC<OrderDetailDrawerProps> = ({
                       ))}
                     </tbody>
                   </table>
-                </div>
+                </OutboundTableRegion>
               </section>
 
               {availability && (
@@ -543,7 +544,7 @@ export const OrderDetailDrawer: React.FC<OrderDetailDrawerProps> = ({
                       {availability.overallFulfillmentPercent}% Fulfillable
                     </span>
                   </div>
-                  <div className="outbound-table-wrap">
+                  <OutboundTableRegion ariaLabel="Stock availability table">
                     <table className="outbound-table">
                       <thead>
                         <tr>
@@ -574,7 +575,7 @@ export const OrderDetailDrawer: React.FC<OrderDetailDrawerProps> = ({
                         ))}
                       </tbody>
                     </table>
-                  </div>
+                  </OutboundTableRegion>
                 </section>
               )}
 
@@ -678,7 +679,7 @@ export const OrderDetailDrawer: React.FC<OrderDetailDrawerProps> = ({
                   </div>
 
                   {allocationResult.lineSummaries.flatMap((ls) => ls.allocations).length > 0 && (
-                    <div className="outbound-table-wrap">
+                    <OutboundTableRegion ariaLabel="Allocation breakdown table">
                       <table className="outbound-table">
                         <thead>
                           <tr>
@@ -716,7 +717,7 @@ export const OrderDetailDrawer: React.FC<OrderDetailDrawerProps> = ({
                           )}
                         </tbody>
                       </table>
-                    </div>
+                    </OutboundTableRegion>
                   )}
 
                   {allocationResult.shortages.length > 0 && (

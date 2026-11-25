@@ -1213,4 +1213,38 @@ describe('Phase 7.4.1: Outbound Orders, Allocation & Pick Waves Frontend', () =>
       expect(screen.getByRole('alert').textContent).toMatch(/PickWaveType/i);
     });
   });
+
+  it('P746-N02: exposes accessible horizontal scroll hints and keyboard-focusable table regions on OutboundOrdersPage and PickWavesPage', async () => {
+    mockBackend({
+      user: {
+        userId: 'staff-a11y-1',
+        email: 'ops-a11y@nexus.local',
+        firstName: 'Ops',
+        lastName: 'Lead',
+        userType: UserType.Staff,
+        assignedFacilityId: FACILITY_A.id,
+        roles: ['OperationsManager'],
+        permissions: ['outbound:orders:view', 'outbound:waves:view'],
+      },
+    });
+
+    const { unmount } = renderWithShell(<OutboundOrdersPage />);
+    const ordersRegion = await screen.findByTestId('outbound-orders-scroll-region');
+    const ordersHint = screen.getByTestId('outbound-orders-scroll-hint');
+    expect(ordersRegion.getAttribute('role')).toBe('region');
+    expect(ordersRegion.getAttribute('tabindex')).toBe('0');
+    expect(ordersRegion.getAttribute('aria-label')).toBe('Outbound orders table');
+    expect(ordersHint.id).toBeTruthy();
+    expect(ordersRegion.getAttribute('aria-describedby')).toBe(ordersHint.id);
+    unmount();
+
+    renderWithShell(<PickWavesPage />, '/app/outbound/waves');
+    const wavesRegion = await screen.findByTestId('pick-waves-scroll-region');
+    const wavesHint = screen.getByTestId('pick-waves-scroll-hint');
+    expect(wavesRegion.getAttribute('role')).toBe('region');
+    expect(wavesRegion.getAttribute('tabindex')).toBe('0');
+    expect(wavesRegion.getAttribute('aria-label')).toBe('Pick waves table');
+    expect(wavesHint.id).toBeTruthy();
+    expect(wavesRegion.getAttribute('aria-describedby')).toBe(wavesHint.id);
+  });
 });
