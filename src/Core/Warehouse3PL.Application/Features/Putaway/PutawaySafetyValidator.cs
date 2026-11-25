@@ -2,21 +2,130 @@ using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Domain.Entities.Catalog;
 using Warehouse3PL.Domain.Entities.Facilities;
+using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
 
 namespace Warehouse3PL.Application.Features.Putaway;
 
 /// <summary>
-/// Enforces shared destination temperature compatibility and physical weight/volume capacity checks
-/// during both slotting selection and transactional putaway confirmation.
+/// Enforces shared putaway strategy precedence, destination temperature compatibility,
+/// and physical weight/volume capacity checks across slotting recommendation and confirmation.
 /// </summary>
-internal static class PutawaySafetyValidator
+public static class PutawaySafetyValidator
 {
     public static decimal ResolveItemVolumeCm3(Item item) =>
         item.VolumeCm3 > 0m
             ? item.VolumeCm3
             : item.LengthCm * item.WidthCm * item.HeightCm;
+
+    public static async Task<PutawayStrategyRule?> ResolveEffectiveRuleAsync(
+        IApplicationDbContext context,
+        Guid clientId,
+        Guid facilityId,
+        Item item,
+        CancellationToken cancellationToken)
+    {
+        var strategyRules = await context.PutawayStrategyRules
+            .AsNoTracking()
+            .Where(r => r.FacilityId == facilityId &&
+                        (r.ClientId == clientId || r.ClientId == Guid.Empty) &&
+                        r.IsActive &&
+                        !r.IsDeleted)
+            .OrderBy(r => r.Sequence)
+            .ThenBy(r => r.Id)
+            .ToListAsync(cancellationToken);
+
+        return ResolveEffectiveRule(strategyRules, clientId, item);
+    }
+
+    public static PutawayStrategyRule? ResolveEffectiveRule(
+        IEnumerable<PutawayStrategyRule> rules,
+        Guid clientId,
+        Item item)
+    {
+        return rules
+            .Where(r => r.TempClassRequirement == item.StorageTempClass &&
+                        (!r.TargetVelocity.HasValue || (int)r.TargetVelocity.Value == (int)item.AbcVelocity))
+            .OrderBy(r => r.ClientId == clientId ? 0 : 1)
+            .ThenBy(r => r.TargetVelocity.HasValue ? 0 : 1)
+            .ThenBy(r => r.Sequence)
+            .ThenBy(r => r.Id)
+            .FirstOrDefault();
+    }
+
+    public static bool IsZoneTemperatureCompatible(
+        WarehouseZone? zone,
+        Item item,
+        Location destination,
+        bool allowsAmbientDynamicOverflow,
+        out string? failureReason)
+    {
+        if (item.StorageTempClass == StorageTempClass.Frozen)
+        {
+            var isValidFreezer = zone != null &&
+                zone.TempMaxC.HasValue &&
+                zone.TempMaxC.Value <= -18m &&
+                (!zone.TempMinC.HasValue || zone.TempMinC.Value <= zone.TempMaxC.Value);
+
+            if (!isValidFreezer)
+            {
+                failureReason = $"Frozen SKU '{item.Sku}' (-18°C or below) cannot be put away into location '{destination.LocationCode}' (zone temp max: {zone?.TempMaxC?.ToString() ?? "unspecified"}°C).";
+                return false;
+            }
+
+            failureReason = null;
+            return true;
+        }
+
+        if (item.StorageTempClass == StorageTempClass.Refrigerated)
+        {
+            var isValidChilled = zone != null &&
+                zone.TempMaxC.HasValue &&
+                zone.TempMaxC.Value >= 2m &&
+                zone.TempMaxC.Value <= 8m &&
+                (!zone.TempMinC.HasValue || (zone.TempMinC.Value >= 2m && zone.TempMinC.Value <= zone.TempMaxC.Value));
+
+            if (!isValidChilled)
+            {
+                failureReason = $"Refrigerated SKU '{item.Sku}' (2°C to 8°C) cannot be put away into location '{destination.LocationCode}' (zone range: {zone?.TempMinC?.ToString() ?? "unspecified"}°C to {zone?.TempMaxC?.ToString() ?? "unspecified"}°C).";
+                return false;
+            }
+
+            failureReason = null;
+            return true;
+        }
+
+        if (item.StorageTempClass == StorageTempClass.TemperatureControlled)
+        {
+            var isValidControlled = zone != null &&
+                zone.TempMinC.HasValue &&
+                zone.TempMaxC.HasValue &&
+                zone.TempMinC.Value >= 15m &&
+                zone.TempMaxC.Value <= 25m &&
+                zone.TempMinC.Value <= zone.TempMaxC.Value;
+
+            if (!isValidControlled)
+            {
+                failureReason = $"Temperature-controlled SKU '{item.Sku}' (15°C to 25°C) cannot be put away into location '{destination.LocationCode}' (zone range: {zone?.TempMinC?.ToString() ?? "unspecified"}°C to {zone?.TempMaxC?.ToString() ?? "unspecified"}°C).";
+                return false;
+            }
+
+            failureReason = null;
+            return true;
+        }
+
+        var isColdOrChilledZone = zone != null &&
+            (zone.ZoneType == WarehouseZoneType.ColdStorage || (zone.TempMaxC.HasValue && zone.TempMaxC.Value <= 8m));
+        if (isColdOrChilledZone && !allowsAmbientDynamicOverflow)
+        {
+            failureReason = $"Ambient SKU '{item.Sku}' cannot be placed into cold storage location '{destination.LocationCode}' unless dynamic overflow is permitted by the effective putaway strategy.";
+            return false;
+        }
+
+        failureReason = null;
+        return true;
+    }
 
     public static async Task ValidateDestinationSafetyAndCapacityAsync(
         IApplicationDbContext context,
@@ -25,47 +134,12 @@ internal static class PutawaySafetyValidator
         decimal incomingQuantity,
         CancellationToken cancellationToken)
     {
-        var zone = destination.Zone;
-        if (item.StorageTempClass == StorageTempClass.Frozen)
-        {
-            var isFrozenZone = zone != null &&
-                (zone.ZoneType == WarehouseZoneType.ColdStorage || (zone.TempMaxC.HasValue && zone.TempMaxC.Value <= -15m));
-            if (!isFrozenZone)
-            {
-                throw new ValidationException(
-                    nameof(destination),
-                    $"Frozen SKU '{item.Sku}' cannot be put away into non-freezer location '{destination.LocationCode}'.");
-            }
-        }
-        else if (item.StorageTempClass == StorageTempClass.Refrigerated)
-        {
-            var isChilledZone = zone != null &&
-                (zone.ZoneType == WarehouseZoneType.ColdStorage || (zone.TempMaxC.HasValue && zone.TempMaxC.Value <= 8m));
-            if (!isChilledZone)
-            {
-                throw new ValidationException(
-                    nameof(destination),
-                    $"Refrigerated SKU '{item.Sku}' cannot be put away into non-chilled location '{destination.LocationCode}'.");
-            }
-        }
-        else if (zone != null && zone.ZoneType == WarehouseZoneType.ColdStorage)
-        {
-            var allowsOverflow = await context.PutawayStrategyRules
-                .AsNoTracking()
-                .AnyAsync(r => r.FacilityId == destination.FacilityId &&
-                               (r.ClientId == item.ClientId || r.ClientId == Guid.Empty) &&
-                               r.IsActive &&
-                               !r.IsDeleted &&
-                               r.TempClassRequirement == StorageTempClass.Ambient &&
-                               r.AllowDynamicOverflow,
-                    cancellationToken);
+        var effectiveRule = await ResolveEffectiveRuleAsync(context, item.ClientId, destination.FacilityId, item, cancellationToken);
+        var allowsDynamicOverflow = effectiveRule?.AllowDynamicOverflow == true;
 
-            if (!allowsOverflow)
-            {
-                throw new ValidationException(
-                    nameof(destination),
-                    $"Ambient SKU '{item.Sku}' cannot be placed into cold storage location '{destination.LocationCode}' unless dynamic overflow is permitted by putaway strategy.");
-            }
+        if (!IsZoneTemperatureCompatible(destination.Zone, item, destination, allowsDynamicOverflow, out var failureReason))
+        {
+            throw new ValidationException(nameof(destination), failureReason!);
         }
 
         if (!destination.MaxWeightKg.HasValue && !destination.MaxVolumeCm3.HasValue)

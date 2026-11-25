@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Features.Putaway;
 using Warehouse3PL.Domain.Entities.Catalog;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inventory;
@@ -69,7 +70,7 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
         }
 
         var incomingWeight = quantity * item.WeightKg;
-        var incomingVolume = quantity * ResolveItemVolumeCm3(item);
+        var incomingVolume = quantity * PutawaySafetyValidator.ResolveItemVolumeCm3(item);
 
         var excludedSet = excludedLocationIds != null
             ? new HashSet<Guid>(excludedLocationIds)
@@ -106,10 +107,9 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
             .ThenBy(r => r.Id)
             .ToListAsync(cancellationToken);
 
-        var effectiveRule = ResolveEffectiveRule(strategyRules, clientId, item);
+        var effectiveRule = PutawaySafetyValidator.ResolveEffectiveRule(strategyRules, clientId, item);
         bool preferConsolidation = effectiveRule?.PreferConsolidation ?? true;
-        bool allowsDynamicOverflow = strategyRules.Any(r =>
-            r.TempClassRequirement == item.StorageTempClass && r.AllowDynamicOverflow);
+        bool allowsDynamicOverflow = effectiveRule?.AllowDynamicOverflow == true;
 
         // 3. Query existing stock in candidate locations to evaluate capacity and SKU consolidation
         var candidateIds = candidateLocations.Select(c => c.Id).ToHashSet();
@@ -127,34 +127,10 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
 
         foreach (var loc in candidateLocations)
         {
-            // A. Strict Temperature Compatibility Check
-            var zone = loc.Zone;
-            if (item.StorageTempClass == StorageTempClass.Frozen)
+            // A. Strict Temperature Compatibility Check (shared single source of truth with confirmation)
+            if (!PutawaySafetyValidator.IsZoneTemperatureCompatible(loc.Zone, item, loc, allowsDynamicOverflow, out _))
             {
-                var isFrozenZone = zone != null &&
-                    (zone.ZoneType == WarehouseZoneType.ColdStorage || (zone.TempMaxC.HasValue && zone.TempMaxC.Value <= -15m));
-                if (!isFrozenZone)
-                {
-                    continue; // Strictly reject non-freezer locations
-                }
-            }
-            else if (item.StorageTempClass == StorageTempClass.Refrigerated)
-            {
-                var isChilledZone = zone != null &&
-                    (zone.ZoneType == WarehouseZoneType.ColdStorage || (zone.TempMaxC.HasValue && zone.TempMaxC.Value <= 8m));
-                if (!isChilledZone)
-                {
-                    continue; // Strictly reject ambient locations
-                }
-            }
-            else
-            {
-                // Ambient item: Prefer non-cold locations unless dynamic overflow allows cold room usage
-                var isColdStorage = zone != null && zone.ZoneType == WarehouseZoneType.ColdStorage;
-                if (isColdStorage && !allowsDynamicOverflow)
-                {
-                    continue; // Preserve cold space for refrigerated/frozen goods
-                }
+                continue;
             }
 
             // B. Physical & Volumetric Capacity Constraints
@@ -162,7 +138,7 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
             existingStockInBin ??= [];
 
             var currentWeight = existingStockInBin.Sum(s => s.TotalQuantity * s.Item.WeightKg);
-            var currentVolume = existingStockInBin.Sum(s => s.TotalQuantity * ResolveItemVolumeCm3(s.Item));
+            var currentVolume = existingStockInBin.Sum(s => s.TotalQuantity * PutawaySafetyValidator.ResolveItemVolumeCm3(s.Item));
 
             if (loc.MaxWeightKg.HasValue && (currentWeight + incomingWeight) > loc.MaxWeightKg.Value)
             {
@@ -280,34 +256,6 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
             .Take(10)
             .ToList();
     }
-
-    private static PutawayStrategyRule? ResolveEffectiveRule(
-        List<PutawayStrategyRule> rules,
-        Guid clientId,
-        Item item)
-    {
-        if (rules.Count == 0)
-        {
-            return null;
-        }
-
-        return rules
-            .OrderBy(r => r.ClientId == clientId ? 0 : 1)
-            .ThenBy(r => r.TempClassRequirement == item.StorageTempClass ? 0 : 1)
-            .ThenBy(r => r.TargetVelocity.HasValue && (int)r.TargetVelocity.Value == (int)item.AbcVelocity
-                ? 0
-                : !r.TargetVelocity.HasValue
-                    ? 1
-                    : 2)
-            .ThenBy(r => r.Sequence)
-            .ThenBy(r => r.Id)
-            .FirstOrDefault();
-    }
-
-    private static decimal ResolveItemVolumeCm3(Item item) =>
-        item.VolumeCm3 > 0m
-            ? item.VolumeCm3
-            : item.LengthCm * item.WidthCm * item.HeightCm;
 
     // IPutawayRecommendationService implementation for backwards compatibility
     public Task<List<PutawayRecommendation>> RecommendLocationsAsync(

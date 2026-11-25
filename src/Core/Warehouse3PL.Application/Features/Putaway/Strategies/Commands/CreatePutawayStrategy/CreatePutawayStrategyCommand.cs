@@ -1,11 +1,14 @@
 using FluentValidation;
 using MediatR;
+using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Domain.Constants;
+using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
+using ValidationException = Warehouse3PL.Domain.Exceptions.ValidationException;
 
 namespace Warehouse3PL.Application.Features.Putaway.Strategies.Commands.CreatePutawayStrategy;
 
@@ -51,6 +54,16 @@ public class CreatePutawayStrategyCommandHandler : IRequestHandler<CreatePutaway
             throw new UnauthorizedException("Authentication is required to manage putaway strategy rules.");
         }
 
+        if (!Enum.IsDefined(typeof(StorageTempClass), request.TempClassRequirement))
+        {
+            throw new ValidationException(nameof(request.TempClassRequirement), $"Invalid storage temperature class '{request.TempClassRequirement}'.");
+        }
+
+        if (request.TargetVelocity.HasValue && !Enum.IsDefined(typeof(VelocityClass), request.TargetVelocity.Value))
+        {
+            throw new ValidationException(nameof(request.TargetVelocity), $"Invalid target velocity class '{request.TargetVelocity.Value}'.");
+        }
+
         var isVerifiedSuperAdmin = _currentUser.IsSuperAdmin && _currentUser.UserType == UserType.Staff;
         if (!isVerifiedSuperAdmin)
         {
@@ -72,6 +85,39 @@ public class CreatePutawayStrategyCommandHandler : IRequestHandler<CreatePutaway
             if (_currentUser.RequestedFacilityId.HasValue && _currentUser.RequestedFacilityId.Value != _currentUser.FacilityId.Value)
             {
                 throw new ForbiddenException("Requested facility header does not match assigned facility.");
+            }
+        }
+
+        var facilityActive = await _context.Facilities
+            .AsNoTracking()
+            .AnyAsync(f => f.Id == request.FacilityId && !f.IsDeleted && f.IsActive, cancellationToken);
+        if (!facilityActive)
+        {
+            throw new EntityNotFoundException(nameof(Facility), request.FacilityId);
+        }
+
+        // Guid.Empty represents a global facility-wide default rule and requires verified platform SuperAdmin privilege.
+        if (request.ClientId == Guid.Empty)
+        {
+            if (!isVerifiedSuperAdmin)
+            {
+                throw new ForbiddenException("Only verified platform SuperAdmins can create global facility-wide putaway strategy rules.");
+            }
+        }
+        else
+        {
+            var hasActiveClientFacilityAccess = await _context.ClientFacilityAccesses
+                .AsNoTracking()
+                .AnyAsync(a => a.ClientId == request.ClientId &&
+                               a.FacilityId == request.FacilityId &&
+                               a.Status == FacilityAccessStatus.Active &&
+                               !a.Client.IsDeleted &&
+                               a.Client.Status == ClientStatus.Active,
+                    cancellationToken);
+
+            if (!hasActiveClientFacilityAccess)
+            {
+                throw new ForbiddenException($"Client '{request.ClientId}' does not have an active relationship with facility '{request.FacilityId}'.");
             }
         }
 

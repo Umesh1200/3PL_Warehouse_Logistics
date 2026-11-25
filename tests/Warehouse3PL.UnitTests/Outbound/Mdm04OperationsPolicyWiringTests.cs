@@ -419,11 +419,19 @@ public sealed class Mdm04OperationsPolicyWiringTests
         using (var scope = app.Services.CreateScope())
         {
             var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
-            db.Clients.Add(new Client { Id = clientA, CompanyName = "Auth Client", AccountCode = "ACL", Status = ClientStatus.Active });
+            var foreignClientB = Guid.NewGuid();
+            var suspendedClientC = Guid.NewGuid();
+            db.Clients.AddRange(
+                new Client { Id = clientA, CompanyName = "Auth Client", AccountCode = "ACL", Status = ClientStatus.Active },
+                new Client { Id = foreignClientB, CompanyName = "Foreign Client B", AccountCode = "FCB", Status = ClientStatus.Active },
+                new Client { Id = suspendedClientC, CompanyName = "Suspended Client C", AccountCode = "SCC", Status = ClientStatus.Active });
             db.Facilities.AddRange(
                 new Facility { Id = facA, FacilityCode = "FA", Name = "Hub A", AddressLine1 = "1 Main", City = "Chicago", CountryCode = "US", IsActive = true },
                 new Facility { Id = facB, FacilityCode = "FB", Name = "Hub B", AddressLine1 = "2 Main", City = "Dallas", CountryCode = "US", IsActive = true });
-            db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientA, FacilityId = facA, Status = FacilityAccessStatus.Active });
+            db.ClientFacilityAccesses.AddRange(
+                new ClientFacilityAccess { ClientId = clientA, FacilityId = facA, Status = FacilityAccessStatus.Active },
+                new ClientFacilityAccess { ClientId = foreignClientB, FacilityId = facB, Status = FacilityAccessStatus.Active },
+                new ClientFacilityAccess { ClientId = suspendedClientC, FacilityId = facA, Status = FacilityAccessStatus.Revoked });
             db.Locations.Add(new Location { Id = binId, FacilityId = facA, LocationCode = "BIN-A", LocationType = LocationType.Bin, IsPickable = true, IsActive = true });
             db.Items.Add(new Item { Id = itemId, ClientId = clientA, Sku = "SKU-AUTH", StorageTempClass = StorageTempClass.Ambient });
             db.StockOnHand.Add(new StockOnHand { ClientId = clientA, FacilityId = facA, ItemId = itemId, LocationId = binId, QtyAvailable = 50m });
@@ -483,6 +491,23 @@ public sealed class Mdm04OperationsPolicyWiringTests
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtDriver, createRulePayload))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffNoAlloc, createRulePayload))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesMultiFacB, createRulePayload))).StatusCode);
+
+        // MDM04-R03: Staff at Facility A cannot create rules for foreign client, inactive relationship, arbitrary client, or Guid.Empty global rule
+        Guid foreignClientIdFromDb;
+        Guid suspendedClientIdFromDb;
+        using (var lookupScope = app.Services.CreateScope())
+        {
+            var db = lookupScope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+            foreignClientIdFromDb = (await db.Clients.SingleAsync(c => c.AccountCode == "FCB")).Id;
+            suspendedClientIdFromDb = (await db.Clients.SingleAsync(c => c.AccountCode == "SCC")).Id;
+        }
+        Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesA, new { clientId = foreignClientIdFromDb, facilityId = facA, sequence = 2, ruleName = "Foreign Client", preferConsolidation = false }))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesA, new { clientId = suspendedClientIdFromDb, facilityId = facA, sequence = 3, ruleName = "Suspended Link", preferConsolidation = false }))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesA, new { clientId = Guid.NewGuid(), facilityId = facA, sequence = 4, ruleName = "Arbitrary Client", preferConsolidation = false }))).StatusCode);
+        Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesA, new { clientId = Guid.Empty, facilityId = facA, sequence = 5, ruleName = "Staff Global Blocked", preferConsolidation = false }))).StatusCode);
+
+        var jwtSuperAdmin = IssueJwt(Guid.NewGuid(), UserType.Staff, null, null, [SystemRoles.SuperAdmin], []);
+        Assert.Equal(HttpStatusCode.Created, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtSuperAdmin, new { clientId = Guid.Empty, facilityId = facA, sequence = 6, ruleName = "SuperAdmin Global", preferConsolidation = true }))).StatusCode);
 
         Assert.Equal(HttpStatusCode.Created, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesA, createRulePayload))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Get, $"/api/v1/putaway/strategies?facilityId={facB}&clientId={clientA}", jwtStaffRulesA))).StatusCode);
@@ -555,5 +580,251 @@ public sealed class Mdm04OperationsPolicyWiringTests
         Assert.All(stocks, s => Assert.True(s.QtyAvailable >= 0m));
         Assert.Equal(0m, stocks.Sum(s => s.QtyAvailable));
         Assert.Equal(75m, stocks.Sum(s => s.QtyAllocated));
+    }
+
+    [Fact]
+    public async Task PutawaySafety_StrictTemperatureCompatibility_EnforcedAcrossSelectorAndConfirmation()
+    {
+        var dbName = $"mdm04-temp-{Guid.NewGuid():N}";
+        var clientId = Guid.NewGuid();
+        var facId = Guid.NewGuid();
+        var stagingId = Guid.NewGuid();
+        var binBulkUnconfiguredId = Guid.NewGuid();
+        var binColdUnspecifiedId = Guid.NewGuid();
+        var binChill4CId = Guid.NewGuid();
+        var binChillBadMinId = Guid.NewGuid();
+        var binChillTooWarmId = Guid.NewGuid();
+        var binFreezerId = Guid.NewGuid();
+        var binControlled15To25Id = Guid.NewGuid();
+        var binControlledBadRangeId = Guid.NewGuid();
+
+        var frozenItemId = Guid.NewGuid();
+        var chilledItemId = Guid.NewGuid();
+        var controlledItemId = Guid.NewGuid();
+
+        var tenantProvider = new TestTenantProvider { TenantId = clientId, BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facId };
+
+        await using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
+        {
+            seed.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientId, FacilityId = facId, Status = FacilityAccessStatus.Active });
+
+            var zBulk = new WarehouseZone { Id = Guid.NewGuid(), FacilityId = facId, ZoneCode = "Z-BULK", ZoneType = WarehouseZoneType.BulkStorage };
+            var zColdNull = new WarehouseZone { Id = Guid.NewGuid(), FacilityId = facId, ZoneCode = "Z-CLD-NULL", ZoneType = WarehouseZoneType.ColdStorage };
+            var zChill4 = new WarehouseZone { Id = Guid.NewGuid(), FacilityId = facId, ZoneCode = "Z-CHILL-4", ZoneType = WarehouseZoneType.ColdStorage, TempMinC = 2m, TempMaxC = 4m };
+            var zChillBadMin = new WarehouseZone { Id = Guid.NewGuid(), FacilityId = facId, ZoneCode = "Z-CHILL-SUB0", ZoneType = WarehouseZoneType.ColdStorage, TempMinC = -5m, TempMaxC = 4m };
+            var zChillWarm = new WarehouseZone { Id = Guid.NewGuid(), FacilityId = facId, ZoneCode = "Z-CHILL-12", ZoneType = WarehouseZoneType.ColdStorage, TempMinC = 2m, TempMaxC = 12m };
+            var zFreezer = new WarehouseZone { Id = Guid.NewGuid(), FacilityId = facId, ZoneCode = "Z-FRZ-20", ZoneType = WarehouseZoneType.ColdStorage, TempMinC = -25m, TempMaxC = -20m };
+            var zCtrlOk = new WarehouseZone { Id = Guid.NewGuid(), FacilityId = facId, ZoneCode = "Z-CTRL-OK", ZoneType = WarehouseZoneType.BulkStorage, TempMinC = 15m, TempMaxC = 25m };
+            var zCtrlBad = new WarehouseZone { Id = Guid.NewGuid(), FacilityId = facId, ZoneCode = "Z-CTRL-HOT", ZoneType = WarehouseZoneType.BulkStorage, TempMinC = 18m, TempMaxC = 30m };
+            seed.WarehouseZones.AddRange(zBulk, zColdNull, zChill4, zChillBadMin, zChillWarm, zFreezer, zCtrlOk, zCtrlBad);
+
+            seed.Locations.AddRange(
+                new Location { Id = stagingId, FacilityId = facId, LocationCode = "STG", Barcode = "STG", LocationType = LocationType.StagingLane, IsReceiving = true },
+                new Location { Id = binBulkUnconfiguredId, FacilityId = facId, ZoneId = zBulk.Id, LocationCode = "B-BULK", Barcode = "B-BULK", LocationType = LocationType.Bin },
+                new Location { Id = binColdUnspecifiedId, FacilityId = facId, ZoneId = zColdNull.Id, LocationCode = "B-CLD-NULL", Barcode = "B-CLD-NULL", LocationType = LocationType.Bin },
+                new Location { Id = binChill4CId, FacilityId = facId, ZoneId = zChill4.Id, LocationCode = "B-CHILL-4", Barcode = "B-CHILL-4", LocationType = LocationType.Bin },
+                new Location { Id = binChillBadMinId, FacilityId = facId, ZoneId = zChillBadMin.Id, LocationCode = "B-CHILL-NEG", Barcode = "B-CHILL-NEG", LocationType = LocationType.Bin },
+                new Location { Id = binChillTooWarmId, FacilityId = facId, ZoneId = zChillWarm.Id, LocationCode = "B-CHILL-12", Barcode = "B-CHILL-12", LocationType = LocationType.Bin },
+                new Location { Id = binFreezerId, FacilityId = facId, ZoneId = zFreezer.Id, LocationCode = "B-FRZ-20", Barcode = "B-FRZ-20", LocationType = LocationType.Bin },
+                new Location { Id = binControlled15To25Id, FacilityId = facId, ZoneId = zCtrlOk.Id, LocationCode = "B-CTRL-OK", Barcode = "B-CTRL-OK", LocationType = LocationType.Bin },
+                new Location { Id = binControlledBadRangeId, FacilityId = facId, ZoneId = zCtrlBad.Id, LocationCode = "B-CTRL-BAD", Barcode = "B-CTRL-BAD", LocationType = LocationType.Bin });
+
+            seed.Items.AddRange(
+                new Item { Id = frozenItemId, ClientId = clientId, Sku = "SKU-FRZ", StorageTempClass = StorageTempClass.Frozen, WeightKg = 1m },
+                new Item { Id = chilledItemId, ClientId = clientId, Sku = "SKU-CHL", StorageTempClass = StorageTempClass.Refrigerated, WeightKg = 1m },
+                new Item { Id = controlledItemId, ClientId = clientId, Sku = "SKU-TC", StorageTempClass = StorageTempClass.TemperatureControlled, WeightKg = 1m });
+
+            seed.StockOnHand.AddRange(
+                new StockOnHand { ClientId = clientId, FacilityId = facId, ItemId = frozenItemId, LocationId = stagingId, QtyAvailable = 10m },
+                new StockOnHand { ClientId = clientId, FacilityId = facId, ItemId = chilledItemId, LocationId = stagingId, QtyAvailable = 10m },
+                new StockOnHand { ClientId = clientId, FacilityId = facId, ItemId = controlledItemId, LocationId = stagingId, QtyAvailable = 10m });
+
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
+        var selector = new PutawayLocationSelector(ctx, NullLogger<PutawayLocationSelector>.Instance);
+
+        // 1. Frozen: ONLY -20C freezer eligible (+4C and generic ColdStorage null TempMaxC rejected!)
+        var frozenRecs = await selector.EvaluateCandidateLocationsAsync(clientId, facId, frozenItemId, 2m);
+        Assert.Single(frozenRecs);
+        Assert.Equal(binFreezerId, frozenRecs[0].LocationId);
+
+        // 2. Refrigerated (2-8C): ONLY +2..4C chilled bin eligible (freezer -20C, sub-zero -5..4C, +12C warm, and null TempMaxC ColdStorage rejected!)
+        var chilledRecs = await selector.EvaluateCandidateLocationsAsync(clientId, facId, chilledItemId, 2m);
+        Assert.Single(chilledRecs);
+        Assert.Equal(binChill4CId, chilledRecs[0].LocationId);
+
+        // 3. TemperatureControlled (15-25C): ONLY 15..25C zone eligible (unconfigured Bulk, +4C Cold, 18..30C rejected!)
+        var tcRecs = await selector.EvaluateCandidateLocationsAsync(clientId, facId, controlledItemId, 2m);
+        Assert.Single(tcRecs);
+        Assert.Equal(binControlled15To25Id, tcRecs[0].LocationId);
+
+        // Confirmation rejections & valid confirmations via ConfirmPutawayTaskCommandHandler
+        async Task<Guid> AddTaskAsync(Guid item, Guid targetBin, string lpn)
+        {
+            var t = new PutawayTask { ClientId = clientId, FacilityId = facId, ItemId = item, SourceLocationId = stagingId, SuggestedLocationId = targetBin, LpnCode = lpn, Quantity = 2m, Status = PutawayTaskStatus.Pending };
+            ctx.PutawayTasks.Add(t);
+            await ctx.SaveChangesAsync();
+            return t.Id;
+        }
+
+        var handler = new ConfirmPutawayTaskCommandHandler(ctx, currentUser, new WarehouseOperationalAuthorization(ctx, currentUser));
+        var tFrzInChill = await AddTaskAsync(frozenItemId, binChill4CId, "L-FRZ-1");
+        var tFrzInNullCold = await AddTaskAsync(frozenItemId, binColdUnspecifiedId, "L-FRZ-2");
+        var tFrzOk = await AddTaskAsync(frozenItemId, binFreezerId, "L-FRZ-OK");
+        var tChlInFreezer = await AddTaskAsync(chilledItemId, binFreezerId, "L-CHL-1");
+        var tChlInWarm = await AddTaskAsync(chilledItemId, binChillTooWarmId, "L-CHL-2");
+        var tTcInBulk = await AddTaskAsync(controlledItemId, binBulkUnconfiguredId, "L-TC-1");
+        var tTcInCold = await AddTaskAsync(controlledItemId, binChill4CId, "L-TC-2");
+        var tTcOk = await AddTaskAsync(controlledItemId, binControlled15To25Id, "L-TC-OK");
+
+        await Assert.ThrowsAsync<ValidationException>(() => handler.Handle(new ConfirmPutawayTaskCommand { TaskId = tFrzInChill, ScannedLpn = "L-FRZ-1", ScannedLocationBarcode = "B-CHILL-4" }, CancellationToken.None));
+        await Assert.ThrowsAsync<ValidationException>(() => handler.Handle(new ConfirmPutawayTaskCommand { TaskId = tFrzInNullCold, ScannedLpn = "L-FRZ-2", ScannedLocationBarcode = "B-CLD-NULL" }, CancellationToken.None));
+        await Assert.ThrowsAsync<ValidationException>(() => handler.Handle(new ConfirmPutawayTaskCommand { TaskId = tChlInFreezer, ScannedLpn = "L-CHL-1", ScannedLocationBarcode = "B-FRZ-20" }, CancellationToken.None));
+        await Assert.ThrowsAsync<ValidationException>(() => handler.Handle(new ConfirmPutawayTaskCommand { TaskId = tChlInWarm, ScannedLpn = "L-CHL-2", ScannedLocationBarcode = "B-CHILL-12" }, CancellationToken.None));
+        await Assert.ThrowsAsync<ValidationException>(() => handler.Handle(new ConfirmPutawayTaskCommand { TaskId = tTcInBulk, ScannedLpn = "L-TC-1", ScannedLocationBarcode = "B-BULK" }, CancellationToken.None));
+        await Assert.ThrowsAsync<ValidationException>(() => handler.Handle(new ConfirmPutawayTaskCommand { TaskId = tTcInCold, ScannedLpn = "L-TC-2", ScannedLocationBarcode = "B-CHILL-4" }, CancellationToken.None));
+
+        Assert.Equal(PutawayTaskStatus.Completed, (await handler.Handle(new ConfirmPutawayTaskCommand { TaskId = tFrzOk, ScannedLpn = "L-FRZ-OK", ScannedLocationBarcode = "B-FRZ-20" }, CancellationToken.None)).Status);
+        Assert.Equal(PutawayTaskStatus.Completed, (await handler.Handle(new ConfirmPutawayTaskCommand { TaskId = tTcOk, ScannedLpn = "L-TC-OK", ScannedLocationBarcode = "B-CTRL-OK" }, CancellationToken.None)).Status);
+    }
+
+    [Fact]
+    public async Task PutawayRulePrecedence_ClientRestrictionBlocksGlobalOverflow_AndExcludesMismatchedTempClass()
+    {
+        var dbName = $"mdm04-rule-prec-{Guid.NewGuid():N}";
+        var clientId = Guid.NewGuid();
+        var facId = Guid.NewGuid();
+        var stagingId = Guid.NewGuid();
+        var dryBinId = Guid.NewGuid();
+        var coldBinId = Guid.NewGuid();
+        var itemId = Guid.NewGuid();
+
+        var tenantProvider = new TestTenantProvider { TenantId = clientId, BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facId };
+
+        await using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
+        {
+            seed.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientId, FacilityId = facId, Status = FacilityAccessStatus.Active });
+            var zDry = new WarehouseZone { Id = Guid.NewGuid(), FacilityId = facId, ZoneCode = "Z-DRY", ZoneType = WarehouseZoneType.BulkStorage };
+            var zCold = new WarehouseZone { Id = Guid.NewGuid(), FacilityId = facId, ZoneCode = "Z-CLD", ZoneType = WarehouseZoneType.ColdStorage, TempMinC = 2m, TempMaxC = 4m };
+            seed.WarehouseZones.AddRange(zDry, zCold);
+
+            seed.Locations.AddRange(
+                new Location { Id = stagingId, FacilityId = facId, LocationCode = "STG", Barcode = "STG", LocationType = LocationType.StagingLane, IsReceiving = true },
+                new Location { Id = dryBinId, FacilityId = facId, ZoneId = zDry.Id, LocationCode = "B-DRY", Barcode = "B-DRY", LocationType = LocationType.Bin },
+                new Location { Id = coldBinId, FacilityId = facId, ZoneId = zCold.Id, LocationCode = "B-CLD", Barcode = "B-CLD", LocationType = LocationType.Bin });
+
+            seed.Items.Add(new Item { Id = itemId, ClientId = clientId, Sku = "SKU-AMB", StorageTempClass = StorageTempClass.Ambient, AbcVelocity = AbcVelocity.A, WeightKg = 1m });
+            seed.StockOnHand.Add(new StockOnHand { ClientId = clientId, FacilityId = facId, ItemId = itemId, LocationId = stagingId, QtyAvailable = 10m });
+
+            // Mismatched Frozen rule allowing overflow MUST NOT apply to Ambient item
+            seed.PutawayStrategyRules.Add(new PutawayStrategyRule
+            {
+                ClientId = clientId,
+                FacilityId = facId,
+                Sequence = 1,
+                RuleName = "Frozen Overflow",
+                TempClassRequirement = StorageTempClass.Frozen,
+                PreferConsolidation = false,
+                AllowDynamicOverflow = true,
+                IsActive = true
+            });
+
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
+        var selector = new PutawayLocationSelector(ctx, NullLogger<PutawayLocationSelector>.Instance);
+        var handler = new ConfirmPutawayTaskCommandHandler(ctx, currentUser, new WarehouseOperationalAuthorization(ctx, currentUser));
+
+        // 1. Only Frozen overflow rule exists -> Ambient item must still reject ColdStorage
+        var recs1 = await selector.EvaluateCandidateLocationsAsync(clientId, facId, itemId, 2m);
+        Assert.DoesNotContain(recs1, r => r.LocationId == coldBinId);
+
+        // 2. Add global (Guid.Empty) Ambient rule allowing overflow (seq 1) AND client-specific Ambient rule prohibiting overflow (seq 10)
+        ctx.PutawayStrategyRules.AddRange(
+            new PutawayStrategyRule { ClientId = Guid.Empty, FacilityId = facId, Sequence = 1, RuleName = "Global Allow Overflow", TempClassRequirement = StorageTempClass.Ambient, PreferConsolidation = true, AllowDynamicOverflow = true, IsActive = true },
+            new PutawayStrategyRule { ClientId = clientId, FacilityId = facId, Sequence = 10, RuleName = "Client Deny Overflow", TempClassRequirement = StorageTempClass.Ambient, PreferConsolidation = true, AllowDynamicOverflow = false, IsActive = true });
+        await ctx.SaveChangesAsync();
+
+        var recs2 = await selector.EvaluateCandidateLocationsAsync(clientId, facId, itemId, 2m);
+        Assert.DoesNotContain(recs2, r => r.LocationId == coldBinId);
+
+        var tAmbientInCold = new PutawayTask { ClientId = clientId, FacilityId = facId, ItemId = itemId, SourceLocationId = stagingId, SuggestedLocationId = coldBinId, LpnCode = "L-AMB-CLD", Quantity = 2m, Status = PutawayTaskStatus.Pending };
+        ctx.PutawayTasks.Add(tAmbientInCold);
+        await ctx.SaveChangesAsync();
+
+        await Assert.ThrowsAsync<ValidationException>(() =>
+            handler.Handle(new ConfirmPutawayTaskCommand { TaskId = tAmbientInCold.Id, ScannedLpn = "L-AMB-CLD", ScannedLocationBarcode = "B-CLD" }, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task PreferFullHandlingUnits_ResidualDemandAware_AvoidsBreakingPartialPallet()
+    {
+        var dbName = $"mdm04-r04-hu-{Guid.NewGuid():N}";
+        var clientId = Guid.NewGuid();
+        var facId = Guid.NewGuid();
+        var itemId = Guid.NewGuid();
+        var binHuA = Guid.NewGuid();
+        var binHuB = Guid.NewGuid();
+        var binLoose = Guid.NewGuid();
+        var huA = Guid.NewGuid();
+        var huB = Guid.NewGuid();
+        var orderId = Guid.NewGuid();
+        var receivedAt = new DateTime(2026, 11, 10, 8, 0, 0, DateTimeKind.Utc);
+
+        var tenantProvider = new TestTenantProvider { TenantId = clientId, BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facId };
+
+        await using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
+        {
+            seed.Locations.AddRange(
+                new Location { Id = binHuA, FacilityId = facId, LocationCode = "BIN-HU-A", LocationType = LocationType.Bin, PickSequence = 10, IsPickable = true, IsActive = true },
+                new Location { Id = binHuB, FacilityId = facId, LocationCode = "BIN-HU-B", LocationType = LocationType.Bin, PickSequence = 1, IsPickable = true, IsActive = true },
+                new Location { Id = binLoose, FacilityId = facId, LocationCode = "BIN-LOOSE", LocationType = LocationType.Bin, PickSequence = 5, IsPickable = true, IsActive = true });
+
+            seed.Items.Add(new Item { Id = itemId, ClientId = clientId, Sku = "SKU-R04", StorageTempClass = StorageTempClass.Ambient });
+            seed.HandlingUnits.AddRange(
+                new HandlingUnit { Id = huA, ClientId = clientId, FacilityId = facId, LpnCode = "HU-A-80", UnitType = HandlingUnitType.Pallet },
+                new HandlingUnit { Id = huB, ClientId = clientId, FacilityId = facId, LpnCode = "HU-B-50", UnitType = HandlingUnitType.Pallet });
+
+            // Exact MDM04-R04 scenario: 100-unit order, equal FIFO tier -> HU-A (80), HU-B (50), Loose (30)
+            seed.StockOnHand.AddRange(
+                new StockOnHand { ClientId = clientId, FacilityId = facId, ItemId = itemId, LocationId = binHuA, HandlingUnitId = huA, LpnCode = "HU-A-80", QtyAvailable = 80m, ReceivedAtUtc = receivedAt },
+                new StockOnHand { ClientId = clientId, FacilityId = facId, ItemId = itemId, LocationId = binHuB, HandlingUnitId = huB, LpnCode = "HU-B-50", QtyAvailable = 50m, ReceivedAtUtc = receivedAt },
+                new StockOnHand { ClientId = clientId, FacilityId = facId, ItemId = itemId, LocationId = binLoose, QtyAvailable = 30m, ReceivedAtUtc = receivedAt });
+
+            seed.AllocationPolicies.Add(new AllocationPolicy
+            {
+                ClientId = clientId,
+                FacilityId = facId,
+                DefaultStrategy = AllocationStrategyType.FIFO,
+                PreferFullHandlingUnits = true,
+                AllowPartialAllocation = true,
+                IsActive = true
+            });
+
+            var order = new OutboundOrder { Id = orderId, ClientId = clientId, FacilityId = facId, OrderNumber = "ORD-R04", CustomerName = "R04", Status = OutboundOrderStatus.Released };
+            order.Lines.Add(new OutboundOrderLine { ItemId = itemId, LineNumber = 1, QuantityOrdered = 100m });
+            seed.OutboundOrders.Add(order);
+            await seed.SaveChangesAsync();
+        }
+
+        await using var ctx = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
+        var (_, exec) = CreateAllocationServices(ctx, tenantProvider);
+        var result = await exec.ExecuteOrderAllocationAsync(orderId, userId: currentUser.UserId);
+
+        Assert.Equal(100m, result.TotalQuantityAllocated);
+        var huAStock = await ctx.StockOnHand.SingleAsync(s => s.LocationId == binHuA);
+        var huBStock = await ctx.StockOnHand.SingleAsync(s => s.LocationId == binHuB);
+        var looseStock = await ctx.StockOnHand.SingleAsync(s => s.LocationId == binLoose);
+
+        Assert.Equal(80m, huAStock.QtyAllocated);
+        Assert.Equal(20m, looseStock.QtyAllocated);
+        Assert.Equal(50m, huBStock.QtyAvailable); // HU-B must remain completely unbroken
+        Assert.Equal(0m, huBStock.QtyAllocated);
     }
 }

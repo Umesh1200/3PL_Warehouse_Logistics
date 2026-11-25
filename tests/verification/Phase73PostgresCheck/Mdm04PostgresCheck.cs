@@ -44,9 +44,35 @@ internal static class Mdm04PostgresCheck
         var binEmptyId = Guid.NewGuid();
         var binTightCapId = Guid.NewGuid();
         var coldZoneId = Guid.NewGuid();
+        var coldNullZoneId = Guid.NewGuid();
+        var freezerZoneId = Guid.NewGuid();
+        var tempCtrlZoneId = Guid.NewGuid();
         var binColdId = Guid.NewGuid();
+        var binColdNullId = Guid.NewGuid();
+        var binFreezerId = Guid.NewGuid();
+        var binTempCtrlId = Guid.NewGuid();
+        var foreignClientBId = Guid.NewGuid();
+        var suspendedClientCId = Guid.NewGuid();
 
         var huId = Guid.NewGuid();
+        var r04HuAId = Guid.NewGuid();
+        var r04HuBId = Guid.NewGuid();
+        var itemFrozenId = Guid.NewGuid();
+        var itemChilledId = Guid.NewGuid();
+        var itemTempCtrlId = Guid.NewGuid();
+        var itemR04Id = Guid.NewGuid();
+        var binR04HuAId = Guid.NewGuid();
+        var binR04HuBId = Guid.NewGuid();
+        var binR04LooseId = Guid.NewGuid();
+        var ordR04Id = Guid.NewGuid();
+        var taskFrzInChillId = Guid.NewGuid();
+        var taskFrzInNullColdId = Guid.NewGuid();
+        var taskFrzOkId = Guid.NewGuid();
+        var taskChlInFreezerId = Guid.NewGuid();
+        var taskTcInBulkId = Guid.NewGuid();
+        var taskTcInColdId = Guid.NewGuid();
+        var taskTcOkId = Guid.NewGuid();
+        var taskAmbOverflowBlockedId = Guid.NewGuid();
         var ordHuId = Guid.NewGuid();
         var ordOverrideId = Guid.NewGuid();
         var concOrderIds = Enumerable.Range(0, 4).Select(_ => Guid.NewGuid()).ToArray();
@@ -68,21 +94,19 @@ internal static class Mdm04PostgresCheck
                 CountryCode = "US",
                 IsActive = true
             });
-            seedDb.ClientFacilityAccesses.Add(new ClientFacilityAccess
-            {
-                ClientId = client1Id,
-                FacilityId = facilityId,
-                Status = FacilityAccessStatus.Active
-            });
+            seedDb.Clients.AddRange(
+                new Warehouse3PL.Domain.Entities.Security.Client { Id = foreignClientBId, CompanyName = "M4PG Foreign Client B", AccountCode = "M4FB-" + Guid.NewGuid().ToString("N")[..4], Status = ClientStatus.Active },
+                new Warehouse3PL.Domain.Entities.Security.Client { Id = suspendedClientCId, CompanyName = "M4PG Suspended Client C", AccountCode = "M4SC-" + Guid.NewGuid().ToString("N")[..4], Status = ClientStatus.Active });
+            seedDb.ClientFacilityAccesses.AddRange(
+                new ClientFacilityAccess { ClientId = client1Id, FacilityId = facilityId, Status = FacilityAccessStatus.Active },
+                new ClientFacilityAccess { ClientId = foreignClientBId, FacilityId = foreignFacilityId, Status = FacilityAccessStatus.Active },
+                new ClientFacilityAccess { ClientId = suspendedClientCId, FacilityId = facilityId, Status = FacilityAccessStatus.Revoked });
 
-            seedDb.WarehouseZones.Add(new WarehouseZone
-            {
-                Id = coldZoneId,
-                FacilityId = facilityId,
-                ZoneCode = "M4PG-COLD-" + Guid.NewGuid().ToString("N")[..4],
-                ZoneType = WarehouseZoneType.ColdStorage,
-                TempMaxC = 4m
-            });
+            seedDb.WarehouseZones.AddRange(
+                new WarehouseZone { Id = coldZoneId, FacilityId = facilityId, ZoneCode = "M4PG-COLD-" + Guid.NewGuid().ToString("N")[..4], ZoneType = WarehouseZoneType.ColdStorage, TempMinC = 2m, TempMaxC = 4m },
+                new WarehouseZone { Id = coldNullZoneId, FacilityId = facilityId, ZoneCode = "M4PG-CNULL-" + Guid.NewGuid().ToString("N")[..4], ZoneType = WarehouseZoneType.ColdStorage },
+                new WarehouseZone { Id = freezerZoneId, FacilityId = facilityId, ZoneCode = "M4PG-FRZ-" + Guid.NewGuid().ToString("N")[..4], ZoneType = WarehouseZoneType.ColdStorage, TempMinC = -25m, TempMaxC = -20m },
+                new WarehouseZone { Id = tempCtrlZoneId, FacilityId = facilityId, ZoneCode = "M4PG-TC-" + Guid.NewGuid().ToString("N")[..4], ZoneType = WarehouseZoneType.BulkStorage, TempMinC = 15m, TempMaxC = 25m });
 
             seedDb.Locations.AddRange(
                 new Location { Id = binLooseId, FacilityId = facilityId, LocationCode = "M4-LOOSE-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-L", LocationType = LocationType.Bin, PickSequence = 1, IsPickable = true, IsActive = true },
@@ -93,20 +117,26 @@ internal static class Mdm04PostgresCheck
                 new Location { Id = binOccupiedId, FacilityId = facilityId, LocationCode = "M4-OCC-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-OCC", LocationType = LocationType.Bin, MaxWeightKg = 500m, IsActive = true },
                 new Location { Id = binEmptyId, FacilityId = facilityId, LocationCode = "M4-A-EMP-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-EMP", LocationType = LocationType.Bin, MaxWeightKg = 500m, IsActive = true },
                 new Location { Id = binTightCapId, FacilityId = facilityId, LocationCode = "M4-Z-CAP-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-CAP", LocationType = LocationType.Bin, MaxWeightKg = 100m, IsActive = true },
-                new Location { Id = binColdId, FacilityId = facilityId, ZoneId = coldZoneId, LocationCode = "M4-CLD-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-CLD", LocationType = LocationType.Bin, MaxWeightKg = 500m, IsActive = true });
+                new Location { Id = binColdId, FacilityId = facilityId, ZoneId = coldZoneId, LocationCode = "M4-CLD-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-CLD", LocationType = LocationType.Bin, MaxWeightKg = 500m, IsActive = true },
+                new Location { Id = binColdNullId, FacilityId = facilityId, ZoneId = coldNullZoneId, LocationCode = "M4-CNL-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-CNL", LocationType = LocationType.Bin, MaxWeightKg = 500m, IsActive = true },
+                new Location { Id = binFreezerId, FacilityId = facilityId, ZoneId = freezerZoneId, LocationCode = "M4-FRZ-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-FRZ", LocationType = LocationType.Bin, MaxWeightKg = 500m, IsActive = true },
+                new Location { Id = binTempCtrlId, FacilityId = facilityId, ZoneId = tempCtrlZoneId, LocationCode = "M4-TC-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-TC", LocationType = LocationType.Bin, MaxWeightKg = 500m, IsActive = true },
+                new Location { Id = binR04HuAId, FacilityId = facilityId, LocationCode = "M4-R04A-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-R04A", LocationType = LocationType.Bin, PickSequence = 10, IsPickable = true, IsActive = true },
+                new Location { Id = binR04HuBId, FacilityId = facilityId, LocationCode = "M4-R04B-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-R04B", LocationType = LocationType.Bin, PickSequence = 1, IsPickable = true, IsActive = true },
+                new Location { Id = binR04LooseId, FacilityId = facilityId, LocationCode = "M4-R04L-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-R04L", LocationType = LocationType.Bin, PickSequence = 5, IsPickable = true, IsActive = true });
 
             seedDb.Items.AddRange(
                 new Item { Id = itemAllocId, ClientId = client1Id, Sku = "M4PG-ALLOC-" + Guid.NewGuid().ToString("N")[..5], Description = "Alloc SKU", StorageTempClass = StorageTempClass.Ambient, WeightKg = 1m },
-                new Item { Id = itemPutawayId, ClientId = client1Id, Sku = "M4PG-PUT-" + Guid.NewGuid().ToString("N")[..5], Description = "Putaway SKU", StorageTempClass = StorageTempClass.Ambient, WeightKg = 2m, VolumeCm3 = 100m });
+                new Item { Id = itemPutawayId, ClientId = client1Id, Sku = "M4PG-PUT-" + Guid.NewGuid().ToString("N")[..5], Description = "Putaway SKU", StorageTempClass = StorageTempClass.Ambient, WeightKg = 2m, VolumeCm3 = 100m },
+                new Item { Id = itemFrozenId, ClientId = client1Id, Sku = "M4PG-FRZ-" + Guid.NewGuid().ToString("N")[..5], Description = "Frozen SKU", StorageTempClass = StorageTempClass.Frozen, WeightKg = 1m },
+                new Item { Id = itemChilledId, ClientId = client1Id, Sku = "M4PG-CHL-" + Guid.NewGuid().ToString("N")[..5], Description = "Chilled SKU", StorageTempClass = StorageTempClass.Refrigerated, WeightKg = 1m },
+                new Item { Id = itemTempCtrlId, ClientId = client1Id, Sku = "M4PG-TC-" + Guid.NewGuid().ToString("N")[..5], Description = "TempCtrl SKU", StorageTempClass = StorageTempClass.TemperatureControlled, WeightKg = 1m },
+                new Item { Id = itemR04Id, ClientId = client1Id, Sku = "M4PG-R04-" + Guid.NewGuid().ToString("N")[..5], Description = "R04 HU SKU", StorageTempClass = StorageTempClass.Ambient, WeightKg = 1m });
 
-            seedDb.HandlingUnits.Add(new HandlingUnit
-            {
-                Id = huId,
-                ClientId = client1Id,
-                FacilityId = facilityId,
-                LpnCode = "M4PG-LPN-40",
-                UnitType = HandlingUnitType.Pallet
-            });
+            seedDb.HandlingUnits.AddRange(
+                new HandlingUnit { Id = huId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "M4PG-LPN-40", UnitType = HandlingUnitType.Pallet },
+                new HandlingUnit { Id = r04HuAId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "M4PG-R04-80", UnitType = HandlingUnitType.Pallet },
+                new HandlingUnit { Id = r04HuBId, ClientId = client1Id, FacilityId = facilityId, LpnCode = "M4PG-R04-50", UnitType = HandlingUnitType.Pallet });
 
             var lotSoon = new InventoryLot { Id = Guid.NewGuid(), ClientId = client1Id, ItemId = itemAllocId, LotNumber = "M4-SOON-" + Guid.NewGuid().ToString("N")[..4], ExpirationDate = nowUtc.AddDays(10), QaStatus = LotQaStatus.Released };
             var lotFar = new InventoryLot { Id = Guid.NewGuid(), ClientId = client1Id, ItemId = itemAllocId, LotNumber = "M4-FAR-" + Guid.NewGuid().ToString("N")[..4], ExpirationDate = nowUtc.AddDays(90), QaStatus = LotQaStatus.Released };
@@ -124,7 +154,13 @@ internal static class Mdm04PostgresCheck
                 new StockOnHand { ClientId = client1Id, FacilityId = facilityId, ItemId = itemAllocId, LocationId = binOldExpId, LotId = lotFar.Id, QtyAvailable = 15m, ReceivedAtUtc = nowUtc.AddDays(-20) },
                 new StockOnHand { ClientId = client1Id, FacilityId = facilityId, ItemId = itemAllocId, LocationId = binSoonExpId, LotId = lotSoon.Id, QtyAvailable = 15m, ReceivedAtUtc = nowUtc.AddDays(-2) },
                 new StockOnHand { ClientId = client1Id, FacilityId = facilityId, ItemId = itemPutawayId, LocationId = binOccupiedId, QtyAvailable = 10m },
-                new StockOnHand { ClientId = client1Id, FacilityId = facilityId, ItemId = itemPutawayId, LocationId = stagingLocId, QtyAvailable = 60m }); // 60 * 2kg = 120kg > 100kg binTightCap!
+                new StockOnHand { ClientId = client1Id, FacilityId = facilityId, ItemId = itemPutawayId, LocationId = stagingLocId, QtyAvailable = 60m }, // 60 * 2kg = 120kg > 100kg binTightCap!
+                new StockOnHand { ClientId = client1Id, FacilityId = facilityId, ItemId = itemFrozenId, LocationId = stagingLocId, QtyAvailable = 10m },
+                new StockOnHand { ClientId = client1Id, FacilityId = facilityId, ItemId = itemChilledId, LocationId = stagingLocId, QtyAvailable = 10m },
+                new StockOnHand { ClientId = client1Id, FacilityId = facilityId, ItemId = itemTempCtrlId, LocationId = stagingLocId, QtyAvailable = 10m },
+                new StockOnHand { ClientId = client1Id, FacilityId = facilityId, ItemId = itemR04Id, LocationId = binR04HuAId, HandlingUnitId = r04HuAId, LpnCode = "M4PG-R04-80", QtyAvailable = 80m, ReceivedAtUtc = sameRecUtc },
+                new StockOnHand { ClientId = client1Id, FacilityId = facilityId, ItemId = itemR04Id, LocationId = binR04HuBId, HandlingUnitId = r04HuBId, LpnCode = "M4PG-R04-50", QtyAvailable = 50m, ReceivedAtUtc = sameRecUtc },
+                new StockOnHand { ClientId = client1Id, FacilityId = facilityId, ItemId = itemR04Id, LocationId = binR04LooseId, QtyAvailable = 30m, ReceivedAtUtc = sameRecUtc });
 
             // AllocationPolicy: PreferFullHandlingUnits = true, DefaultStrategy = FIFO
             seedDb.AllocationPolicies.Add(new AllocationPolicy
@@ -168,10 +204,22 @@ internal static class Mdm04PostgresCheck
                 seedDb.OutboundOrders.Add(co);
             }
 
-            // 2 competing PutawayTasks each moving 30 units (60kg) into 100kg-capped binTightCapId
+            // 2 competing PutawayTasks each moving 30 units (60kg) into 100kg-capped binTightCapId + R01/R02 safety validation tasks + R04 HU order
+            var ordR04 = new OutboundOrder { Id = ordR04Id, ClientId = client1Id, FacilityId = facilityId, OrderNumber = "M4PG-R04-" + Guid.NewGuid().ToString("N")[..4], CustomerName = "PG R04", Status = OutboundOrderStatus.Released };
+            ordR04.Lines.Add(new OutboundOrderLine { ItemId = itemR04Id, LineNumber = 1, QuantityOrdered = 100m });
+            seedDb.OutboundOrders.Add(ordR04);
+
             seedDb.PutawayTasks.AddRange(
                 new PutawayTask { Id = putawayTask1Id, ClientId = client1Id, FacilityId = facilityId, ItemId = itemPutawayId, SourceLocationId = stagingLocId, SuggestedLocationId = binTightCapId, LpnCode = "M4-LPN-1", Quantity = 30m, Status = PutawayTaskStatus.Pending },
-                new PutawayTask { Id = putawayTask2Id, ClientId = client1Id, FacilityId = facilityId, ItemId = itemPutawayId, SourceLocationId = stagingLocId, SuggestedLocationId = binTightCapId, LpnCode = "M4-LPN-2", Quantity = 30m, Status = PutawayTaskStatus.Pending });
+                new PutawayTask { Id = putawayTask2Id, ClientId = client1Id, FacilityId = facilityId, ItemId = itemPutawayId, SourceLocationId = stagingLocId, SuggestedLocationId = binTightCapId, LpnCode = "M4-LPN-2", Quantity = 30m, Status = PutawayTaskStatus.Pending },
+                new PutawayTask { Id = taskFrzInChillId, ClientId = client1Id, FacilityId = facilityId, ItemId = itemFrozenId, SourceLocationId = stagingLocId, SuggestedLocationId = binColdId, LpnCode = "M4-FRZ-C4", Quantity = 2m, Status = PutawayTaskStatus.Pending },
+                new PutawayTask { Id = taskFrzInNullColdId, ClientId = client1Id, FacilityId = facilityId, ItemId = itemFrozenId, SourceLocationId = stagingLocId, SuggestedLocationId = binColdNullId, LpnCode = "M4-FRZ-CNL", Quantity = 2m, Status = PutawayTaskStatus.Pending },
+                new PutawayTask { Id = taskFrzOkId, ClientId = client1Id, FacilityId = facilityId, ItemId = itemFrozenId, SourceLocationId = stagingLocId, SuggestedLocationId = binFreezerId, LpnCode = "M4-FRZ-OK", Quantity = 2m, Status = PutawayTaskStatus.Pending },
+                new PutawayTask { Id = taskChlInFreezerId, ClientId = client1Id, FacilityId = facilityId, ItemId = itemChilledId, SourceLocationId = stagingLocId, SuggestedLocationId = binFreezerId, LpnCode = "M4-CHL-FRZ", Quantity = 2m, Status = PutawayTaskStatus.Pending },
+                new PutawayTask { Id = taskTcInBulkId, ClientId = client1Id, FacilityId = facilityId, ItemId = itemTempCtrlId, SourceLocationId = stagingLocId, SuggestedLocationId = binEmptyId, LpnCode = "M4-TC-BLK", Quantity = 2m, Status = PutawayTaskStatus.Pending },
+                new PutawayTask { Id = taskTcInColdId, ClientId = client1Id, FacilityId = facilityId, ItemId = itemTempCtrlId, SourceLocationId = stagingLocId, SuggestedLocationId = binColdId, LpnCode = "M4-TC-CLD", Quantity = 2m, Status = PutawayTaskStatus.Pending },
+                new PutawayTask { Id = taskTcOkId, ClientId = client1Id, FacilityId = facilityId, ItemId = itemTempCtrlId, SourceLocationId = stagingLocId, SuggestedLocationId = binTempCtrlId, LpnCode = "M4-TC-OK", Quantity = 2m, Status = PutawayTaskStatus.Pending },
+                new PutawayTask { Id = taskAmbOverflowBlockedId, ClientId = client1Id, FacilityId = facilityId, ItemId = itemPutawayId, SourceLocationId = stagingLocId, SuggestedLocationId = binColdId, LpnCode = "M4-AMB-CLD", Quantity = 2m, Status = PutawayTaskStatus.Pending });
 
             await seedDb.SaveChangesAsync();
         }
@@ -203,6 +251,21 @@ internal static class Mdm04PostgresCheck
         if ((await client.SendAsync(staffReq(HttpMethod.Post, $"/api/v1/outbound/orders/{ordOverrideId}/allocate", staffId, facilityId, Permissions.Outbound.OrdersView, new { strategyOverride = "FEFO" }))).StatusCode != HttpStatusCode.Forbidden)
         {
             throw new InvalidOperationException("MDM-0.4 PostgreSQL permissionless Staff override expected 403.");
+        }
+
+        // MDM04-R03: Authorized Facility Staff denied 403 for foreign client, suspended relationship, arbitrary client, and Guid.Empty global rule; allowed 201 for active paired client
+        if ((await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = foreignClientBId, facilityId, sequence = 20, ruleName = "Foreign Client Blocked", preferConsolidation = false }))).StatusCode != HttpStatusCode.Forbidden ||
+            (await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = suspendedClientCId, facilityId, sequence = 21, ruleName = "Suspended Client Blocked", preferConsolidation = false }))).StatusCode != HttpStatusCode.Forbidden ||
+            (await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = Guid.NewGuid(), facilityId, sequence = 22, ruleName = "Arbitrary Client Blocked", preferConsolidation = false }))).StatusCode != HttpStatusCode.Forbidden ||
+            (await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = Guid.Empty, facilityId, sequence = 23, ruleName = "Global Staff Blocked", preferConsolidation = false }))).StatusCode != HttpStatusCode.Forbidden)
+        {
+            throw new InvalidOperationException("MDM-0.4 PostgreSQL MDM04-R03 invalid client/facility strategy pairing or Guid.Empty expected 403.");
+        }
+
+        using (var okRuleResp = await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = client1Id, facilityId, sequence = 24, ruleName = "Active Paired TempCtrl Rule", tempClassRequirement = StorageTempClass.TemperatureControlled, preferConsolidation = true, allowDynamicOverflow = false })))
+        {
+            if (okRuleResp.StatusCode != HttpStatusCode.Created)
+                throw new InvalidOperationException($"MDM-0.4 PostgreSQL authorized active client/facility strategy creation failed: {okRuleResp.StatusCode}");
         }
 
         // Authorized Staff allocates ordOverrideId with strategyOverride="FEFO" -> must consume binSoonExpId (15 units) with FEFO!
@@ -309,7 +372,99 @@ internal static class Mdm04PostgresCheck
             }
         }
 
-        Console.WriteLine("PASS PostgreSQL MDM-0.4 Policy Wiring (PreferFullHandlingUnits, StrategyOverride, PreferConsolidation), Authorization, Safety & Concurrent Stock/Capacity Conservation verified cleanly.");
+        // 5. MDM04-R01 & MDM04-R02 Live PostgreSQL Temperature Safety + Rule Precedence Verification
+        await using (var safetyDb = createDb())
+        {
+            var sel = new PutawayLocationSelector(safetyDb, NullLogger<PutawayLocationSelector>.Instance);
+            var frzRecs = await sel.EvaluateCandidateLocationsAsync(client1Id, facilityId, itemFrozenId, 2m);
+            if (frzRecs.Count != 1 || frzRecs[0].LocationId != binFreezerId)
+                throw new InvalidOperationException("MDM-0.4 PostgreSQL MDM04-R01 frozen selector admitted non-freezer or +4C/null ColdStorage bin.");
+
+            var chlRecs = await sel.EvaluateCandidateLocationsAsync(client1Id, facilityId, itemChilledId, 2m);
+            if (chlRecs.Count != 1 || chlRecs[0].LocationId != binColdId)
+                throw new InvalidOperationException("MDM-0.4 PostgreSQL MDM04-R01 refrigerated selector admitted freezer or unconfigured ColdStorage bin.");
+
+            var tcRecs = await sel.EvaluateCandidateLocationsAsync(client1Id, facilityId, itemTempCtrlId, 2m);
+            if (tcRecs.Count != 1 || tcRecs[0].LocationId != binTempCtrlId)
+                throw new InvalidOperationException("MDM-0.4 PostgreSQL MDM04-R01 temperature-controlled selector admitted unsuitable zone.");
+
+            // Deactivate baseline Ambient rule first, then verify:
+            // 1) Mismatched Frozen overflow rule must NOT allow Ambient cold overflow
+            // 2) Exact-velocity restrictive Ambient rule (Velocity B, Seq 5, AllowDynamicOverflow=false) beats wildcard Ambient rule (Seq 1, AllowDynamicOverflow=true)
+            var baseAmbientRule = await safetyDb.PutawayStrategyRules.SingleAsync(r => r.Id == putawayRuleId);
+            baseAmbientRule.IsActive = false;
+            safetyDb.PutawayStrategyRules.Add(new PutawayStrategyRule { ClientId = client1Id, FacilityId = facilityId, Sequence = 1, RuleName = "Mismatched Frozen Overflow", TempClassRequirement = StorageTempClass.Frozen, PreferConsolidation = false, AllowDynamicOverflow = true, IsActive = true });
+            await safetyDb.SaveChangesAsync();
+
+            var ambRecsNoAmbRule = await sel.EvaluateCandidateLocationsAsync(client1Id, facilityId, itemPutawayId, 2m);
+            if (ambRecsNoAmbRule.Any(r => r.LocationId == binColdId || r.LocationId == binColdNullId || r.LocationId == binFreezerId))
+                throw new InvalidOperationException("MDM-0.4 PostgreSQL MDM04-R02 mismatched Frozen rule allowed Ambient cold overflow.");
+
+            safetyDb.PutawayStrategyRules.AddRange(
+                new PutawayStrategyRule { ClientId = client1Id, FacilityId = facilityId, Sequence = 1, RuleName = "Ambient Wildcard Allow Overflow", TempClassRequirement = StorageTempClass.Ambient, TargetVelocity = null, PreferConsolidation = true, AllowDynamicOverflow = true, IsActive = true },
+                new PutawayStrategyRule { ClientId = client1Id, FacilityId = facilityId, Sequence = 5, RuleName = "Ambient Exact Velocity Block Overflow", TempClassRequirement = StorageTempClass.Ambient, TargetVelocity = VelocityClass.B, PreferConsolidation = true, AllowDynamicOverflow = false, IsActive = true });
+            await safetyDb.SaveChangesAsync();
+
+            var ambRecs = await sel.EvaluateCandidateLocationsAsync(client1Id, facilityId, itemPutawayId, 2m);
+            if (ambRecs.Any(r => r.LocationId == binColdId || r.LocationId == binColdNullId || r.LocationId == binFreezerId))
+                throw new InvalidOperationException("MDM-0.4 PostgreSQL MDM04-R02 rule precedence allowed unintended cold overflow for Ambient SKU.");
+        }
+
+        async Task<Exception?> ConfirmTaskAsync(Guid taskId, string lpn, string barcode)
+        {
+            return await AttemptAsync(async () =>
+            {
+                await using var db = createDb();
+                var idCtx = new Mdm04StaffIdentity(staffId, facilityId);
+                var h = new ConfirmPutawayTaskCommandHandler(db, idCtx, new WarehouseOperationalAuthorization(db, idCtx));
+                await h.Handle(new ConfirmPutawayTaskCommand { TaskId = taskId, ScannedLpn = lpn, ScannedLocationBarcode = barcode }, CancellationToken.None);
+            });
+        }
+
+        if (await ConfirmTaskAsync(taskFrzInChillId, "M4-FRZ-C4", "M4-CLD") is not ValidationException ||
+            await ConfirmTaskAsync(taskFrzInNullColdId, "M4-FRZ-CNL", "M4-CNL") is not ValidationException ||
+            await ConfirmTaskAsync(taskChlInFreezerId, "M4-CHL-FRZ", "M4-FRZ") is not ValidationException ||
+            await ConfirmTaskAsync(taskTcInBulkId, "M4-TC-BLK", "M4-EMP") is not ValidationException ||
+            await ConfirmTaskAsync(taskTcInColdId, "M4-TC-CLD", "M4-CLD") is not ValidationException ||
+            await ConfirmTaskAsync(taskAmbOverflowBlockedId, "M4-AMB-CLD", "M4-CLD") is not ValidationException)
+        {
+            throw new InvalidOperationException("MDM-0.4 PostgreSQL MDM04-R01/R02 incompatible putaway confirmation was not rejected with ValidationException.");
+        }
+
+        if (await ConfirmTaskAsync(taskFrzOkId, "M4-FRZ-OK", "M4-FRZ") != null ||
+            await ConfirmTaskAsync(taskTcOkId, "M4-TC-OK", "M4-TC") != null)
+        {
+            throw new InvalidOperationException("MDM-0.4 PostgreSQL valid freezer/temperature-controlled putaway confirmation failed.");
+        }
+
+        // 6. MDM04-R04 Live PostgreSQL Residual-Demand-Aware Full HU Allocation (100 demand -> HU-A 80 + Loose 20, HU-B 50 untouched)
+        await using (var r04Db = createDb())
+        {
+            var filter = new AllocationCandidateFilter();
+            var resolver = new AllocationStrategyResolver([
+                new FifoAllocationStrategy(r04Db, filter),
+                new FefoAllocationStrategy(r04Db, filter),
+                new ManualAllocationStrategy(r04Db, filter)
+            ]);
+            var engine = new AllocationEngine(r04Db, resolver, filter);
+            var exec = new AllocationExecutionService(r04Db, engine, filter, new VerificationTenant());
+            var r04Res = await exec.ExecuteOrderAllocationAsync(ordR04Id, userId: staffId);
+
+            var r04Stocks = await r04Db.StockOnHand.AsNoTracking()
+                .Where(s => s.ItemId == itemR04Id)
+                .ToListAsync();
+            var sHuA = r04Stocks.Single(s => s.LocationId == binR04HuAId);
+            var sHuB = r04Stocks.Single(s => s.LocationId == binR04HuBId);
+            var sLoose = r04Stocks.Single(s => s.LocationId == binR04LooseId);
+
+            if (r04Res.TotalQuantityAllocated != 100m || sHuA.QtyAllocated != 80m || sLoose.QtyAllocated != 20m || sHuB.QtyAvailable != 50m || sHuB.QtyAllocated != 0m)
+            {
+                throw new InvalidOperationException(
+                    $"MDM-0.4 PostgreSQL MDM04-R04 HU residual test failed: Total={r04Res.TotalQuantityAllocated}, HuA={sHuA.QtyAllocated}, Loose={sLoose.QtyAllocated}, HuB_Avail={sHuB.QtyAvailable}");
+            }
+        }
+
+        Console.WriteLine("PASS PostgreSQL MDM-0.4 Policy Wiring (PreferFullHandlingUnits R04, StrategyOverride, PreferConsolidation, Temperature Safety R01, Precedence R02, Client-Facility Isolation R03) & Concurrent Stock/Capacity Conservation verified cleanly.");
     }
 
     private static async Task<Exception?> AttemptAsync(Func<Task> action)

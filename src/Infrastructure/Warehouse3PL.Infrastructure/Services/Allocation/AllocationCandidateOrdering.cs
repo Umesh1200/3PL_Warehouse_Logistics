@@ -63,34 +63,58 @@ internal static class AllocationCandidateOrdering
                 .ToList();
         }
 
-        // Full handling units that fit completely within requested demand (intact LPN/HU picks) come first,
-        // largest intact HU first to minimize touches, followed by partial HUs, then loose bin stock.
-        return eligible
-            .OrderBy(primaryKeySelector)
-            .ThenBy(s => GetHandlingUnitRank(s, request.QuantityRequested))
-            .ThenByDescending(s => IsIntactFullHandlingUnit(s, request.QuantityRequested) ? s.QtyAvailable : 0m)
-            .ThenBy(s => s.Location?.PickSequence ?? int.MaxValue)
-            .ThenBy(s => s.QtyAvailable >= request.QuantityRequested ? 0 : 1)
-            .ThenBy(s => s.QtyAvailable)
-            .ThenBy(s => s.Id)
-            .ToList();
+        // Within each primary SLA tier, select candidates dynamically against remaining demand so intact HUs
+        // are prioritized first while avoiding unnecessary partial HU splits when loose stock can satisfy the remainder.
+        var ordered = new List<StockOnHand>();
+        var remainingDemand = Math.Max(0m, request.QuantityRequested);
+
+        foreach (var tier in eligible.OrderBy(primaryKeySelector).GroupBy(primaryKeySelector))
+        {
+            var pool = tier.ToList();
+            while (pool.Count > 0)
+            {
+                if (remainingDemand <= 0m)
+                {
+                    ordered.AddRange(pool
+                        .OrderBy(s => s.Location?.PickSequence ?? int.MaxValue)
+                        .ThenBy(s => s.QtyAvailable)
+                        .ThenBy(s => s.Id));
+                    break;
+                }
+
+                var next = pool
+                    .OrderBy(s => GetResidualHandlingUnitRank(s, remainingDemand))
+                    .ThenByDescending(s => IsIntactFullHandlingUnit(s, remainingDemand) ? s.QtyAvailable : 0m)
+                    .ThenBy(s => s.Location?.PickSequence ?? int.MaxValue)
+                    .ThenBy(s => s.QtyAvailable >= remainingDemand ? 0 : 1)
+                    .ThenBy(s => s.QtyAvailable)
+                    .ThenBy(s => s.Id)
+                    .First();
+
+                ordered.Add(next);
+                pool.Remove(next);
+                remainingDemand = Math.Max(0m, remainingDemand - next.QtyAvailable);
+            }
+        }
+
+        return ordered;
     }
 
     private static bool HasHandlingUnit(StockOnHand stock) =>
         stock.HandlingUnitId.HasValue || !string.IsNullOrWhiteSpace(stock.LpnCode);
 
-    private static bool IsIntactFullHandlingUnit(StockOnHand stock, decimal requestedQty) =>
-        HasHandlingUnit(stock) && stock.QtyAvailable > 0m && stock.QtyAvailable <= requestedQty;
+    private static bool IsIntactFullHandlingUnit(StockOnHand stock, decimal remainingDemand) =>
+        HasHandlingUnit(stock) && stock.QtyAvailable > 0m && stock.QtyAvailable <= remainingDemand;
 
-    private static int GetHandlingUnitRank(StockOnHand stock, decimal requestedQty)
+    private static int GetResidualHandlingUnitRank(StockOnHand stock, decimal remainingDemand)
     {
         if (!HasHandlingUnit(stock))
         {
-            return 2; // Loose bin stock
+            return 1; // Loose stock: preferred over breaking an oversized handling unit for residual demand
         }
 
-        return stock.QtyAvailable <= requestedQty
-            ? 0 // Full intact handling unit that avoids breaking container
-            : 1; // Handling unit that exceeds remaining demand (requires partial break)
+        return stock.QtyAvailable <= remainingDemand
+            ? 0 // Full intact handling unit that fits within remaining demand without breaking container
+            : 2; // Oversized handling unit requiring a partial pallet/LPN break
     }
 }
