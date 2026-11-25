@@ -12,6 +12,7 @@ using Warehouse3PL.Domain.Entities.Catalog;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Entities.Outbound;
+using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
 using Warehouse3PL.Infrastructure.Persistence;
@@ -24,12 +25,13 @@ internal static class Mdm04PostgresCheck
         Func<ApplicationDbContext> createDb,
         HttpClient client,
         Guid client1Id,
-        Guid facilityId,
+        Guid existingFacilityId,
         Guid foreignFacilityId,
         Func<HttpMethod, string, Guid, Guid?, string, object?, HttpRequestMessage> staffReq,
         Guid staffId,
         Action<List<Claim>?> setCustomClaims)
     {
+        var facilityId = Guid.NewGuid();
         var itemAllocId = Guid.NewGuid();
         var itemPutawayId = Guid.NewGuid();
         var binLooseId = Guid.NewGuid();
@@ -55,6 +57,23 @@ internal static class Mdm04PostgresCheck
 
         await using (var seedDb = createDb())
         {
+            seedDb.Facilities.Add(new Facility
+            {
+                Id = facilityId,
+                FacilityCode = "M4PG-" + Guid.NewGuid().ToString("N")[..5],
+                Name = "MDM04 PG Policy Hub",
+                AddressLine1 = "400 Policy Blvd",
+                City = "Chicago",
+                CountryCode = "US",
+                IsActive = true
+            });
+            seedDb.ClientFacilityAccesses.Add(new ClientFacilityAccess
+            {
+                ClientId = client1Id,
+                FacilityId = facilityId,
+                Status = FacilityAccessStatus.Active
+            });
+
             seedDb.WarehouseZones.Add(new WarehouseZone
             {
                 Id = coldZoneId,
@@ -71,8 +90,8 @@ internal static class Mdm04PostgresCheck
                 new Location { Id = binSoonExpId, FacilityId = facilityId, LocationCode = "M4-F10-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-10", LocationType = LocationType.Bin, PickSequence = 2, IsPickable = true, IsActive = true },
                 new Location { Id = stagingLocId, FacilityId = facilityId, LocationCode = "M4-STG-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-STG", LocationType = LocationType.StagingLane, IsReceiving = true, IsActive = true },
                 new Location { Id = binOccupiedId, FacilityId = facilityId, LocationCode = "M4-OCC-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-OCC", LocationType = LocationType.Bin, MaxWeightKg = 500m, IsActive = true },
-                new Location { Id = binEmptyId, FacilityId = facilityId, LocationCode = "M4-EMP-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-EMP", LocationType = LocationType.Bin, MaxWeightKg = 500m, IsActive = true },
-                new Location { Id = binTightCapId, FacilityId = facilityId, LocationCode = "M4-CAP-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-CAP", LocationType = LocationType.Bin, MaxWeightKg = 100m, IsActive = true },
+                new Location { Id = binEmptyId, FacilityId = facilityId, LocationCode = "M4-A-EMP-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-EMP", LocationType = LocationType.Bin, MaxWeightKg = 500m, IsActive = true },
+                new Location { Id = binTightCapId, FacilityId = facilityId, LocationCode = "M4-Z-CAP-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-CAP", LocationType = LocationType.Bin, MaxWeightKg = 100m, IsActive = true },
                 new Location { Id = binColdId, FacilityId = facilityId, ZoneId = coldZoneId, LocationCode = "M4-CLD-" + Guid.NewGuid().ToString("N")[..4], Barcode = "M4-CLD", LocationType = LocationType.Bin, MaxWeightKg = 500m, IsActive = true });
 
             seedDb.Items.AddRange(
