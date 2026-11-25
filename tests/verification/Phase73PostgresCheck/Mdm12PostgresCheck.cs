@@ -72,27 +72,22 @@ internal static class Mdm12PostgresCheck
         {
             var legacyFacId = Guid.NewGuid();
 
-            // 1. Apply migrations up to MDM-1.1, seed legacy Facility ("USA", null LegalEntity), then upgrade to MDM-1.2
+            // 1. Apply migrations up to MDM-1.1, seed legacy Facility via raw SQL ("USA", pre-MDM1.2 schema), then upgrade to MDM-1.2
             await using (var preMigDb = CreatePgDb(targetConn, null))
             {
                 var migrator = preMigDb.GetInfrastructure().GetRequiredService<IMigrator>();
                 await migrator.MigrateAsync("20261125102002_MDM1_1_GlobalReferencesAndCompliance");
                 await ReferenceCatalogSeeder.SeedAsync(preMigDb);
+            }
 
-                preMigDb.Facilities.Add(new Facility
-                {
-                    Id = legacyFacId,
-                    FacilityCode = "PG-LEGACY-ORD",
-                    Name = "Legacy Pre-MDM12 Hub",
-                    AddressLine1 = "500 Legacy Dr",
-                    City = "Chicago",
-                    StateOrProvince = "IL",
-                    PostalCode = "60601",
-                    CountryCode = "USA",
-                    Timezone = "America/Chicago",
-                    IsActive = true
-                });
-                await preMigDb.SaveChangesAsync();
+            await using (var preSqlConn = new NpgsqlConnection(targetConn))
+            {
+                await preSqlConn.OpenAsync();
+                await using var insLegacyCmd = new NpgsqlCommand($@"
+                    INSERT INTO facilities (facility_id, facility_code, name, address_line1, city, state_or_province, postal_code, country_code, timezone, dock_door_count, is_active, is_deleted, created_at)
+                    VALUES ('{legacyFacId}', 'PG-LEGACY-ORD', 'Legacy Pre-MDM12 Hub', '500 Legacy Dr', 'Chicago', 'IL', '60601', 'USA', 'America/Chicago', 4, true, false, NOW());",
+                    preSqlConn);
+                await insLegacyCmd.ExecuteNonQueryAsync();
             }
 
             await using (var postMigDb = CreatePgDb(targetConn, null))
