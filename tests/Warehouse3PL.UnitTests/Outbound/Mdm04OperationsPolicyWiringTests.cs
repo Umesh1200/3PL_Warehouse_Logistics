@@ -504,10 +504,16 @@ public sealed class Mdm04OperationsPolicyWiringTests
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesA, new { clientId = foreignClientIdFromDb, facilityId = facA, sequence = 2, ruleName = "Foreign Client", preferConsolidation = false }))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesA, new { clientId = suspendedClientIdFromDb, facilityId = facA, sequence = 3, ruleName = "Suspended Link", preferConsolidation = false }))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesA, new { clientId = Guid.NewGuid(), facilityId = facA, sequence = 4, ruleName = "Arbitrary Client", preferConsolidation = false }))).StatusCode);
-        Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesA, new { clientId = Guid.Empty, facilityId = facA, sequence = 5, ruleName = "Staff Global Blocked", preferConsolidation = false }))).StatusCode);
+
+        // MDM04-R05: Guid.Empty facility-wide rule creation is cleanly rejected (400 ValidationException) for all authorized callers until a schema-approved facility-default model exists
+        var staffGlobalResp = await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesA, new { clientId = Guid.Empty, facilityId = facA, sequence = 5, ruleName = "Staff Global Blocked", preferConsolidation = false }));
+        Assert.Equal(HttpStatusCode.BadRequest, staffGlobalResp.StatusCode);
 
         var jwtSuperAdmin = IssueJwt(Guid.NewGuid(), UserType.Staff, null, null, [SystemRoles.SuperAdmin], []);
-        Assert.Equal(HttpStatusCode.Created, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtSuperAdmin, new { clientId = Guid.Empty, facilityId = facA, sequence = 6, ruleName = "SuperAdmin Global", preferConsolidation = true }))).StatusCode);
+        var superAdminGlobalResp = await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtSuperAdmin, new { clientId = Guid.Empty, facilityId = facA, sequence = 6, ruleName = "SuperAdmin Global Rejected", preferConsolidation = true }));
+        Assert.Equal(HttpStatusCode.BadRequest, superAdminGlobalResp.StatusCode);
+        var superAdminBody = await superAdminGlobalResp.Content.ReadAsStringAsync();
+        Assert.Contains("Guid.Empty", superAdminBody);
 
         Assert.Equal(HttpStatusCode.Created, (await http.SendAsync(JsonReq(HttpMethod.Post, "/api/v1/putaway/strategies", jwtStaffRulesA, createRulePayload))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Get, $"/api/v1/putaway/strategies?facilityId={facB}&clientId={clientA}", jwtStaffRulesA))).StatusCode);

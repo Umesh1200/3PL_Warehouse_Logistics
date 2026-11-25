@@ -253,16 +253,31 @@ internal static class Mdm04PostgresCheck
             throw new InvalidOperationException("MDM-0.4 PostgreSQL permissionless Staff override expected 403.");
         }
 
-        // MDM04-R03: Authorized Facility Staff denied 403 for foreign client, suspended relationship, arbitrary client, and Guid.Empty global rule; allowed 201 for active paired client
+        // MDM04-R03 & MDM04-R05: Authorized Facility Staff denied 403 for foreign client, revoked relationship, and arbitrary client;
+        // Guid.Empty facility-wide rule creation rejected cleanly (400 BadRequest, zero DB exception) for both Staff and SuperAdmin; allowed 201 for active paired client
         if ((await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = foreignClientBId, facilityId, sequence = 20, ruleName = "Foreign Client Blocked", preferConsolidation = false }))).StatusCode != HttpStatusCode.Forbidden ||
             (await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = suspendedClientCId, facilityId, sequence = 21, ruleName = "Suspended Client Blocked", preferConsolidation = false }))).StatusCode != HttpStatusCode.Forbidden ||
-            (await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = Guid.NewGuid(), facilityId, sequence = 22, ruleName = "Arbitrary Client Blocked", preferConsolidation = false }))).StatusCode != HttpStatusCode.Forbidden ||
-            (await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = Guid.Empty, facilityId, sequence = 23, ruleName = "Global Staff Blocked", preferConsolidation = false }))).StatusCode != HttpStatusCode.Forbidden)
+            (await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = Guid.NewGuid(), facilityId, sequence = 22, ruleName = "Arbitrary Client Blocked", preferConsolidation = false }))).StatusCode != HttpStatusCode.Forbidden)
         {
-            throw new InvalidOperationException("MDM-0.4 PostgreSQL MDM04-R03 invalid client/facility strategy pairing or Guid.Empty expected 403.");
+            throw new InvalidOperationException("MDM-0.4 PostgreSQL MDM04-R03 invalid client/facility strategy pairing expected 403.");
         }
 
-        using (var okRuleResp = await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = client1Id, facilityId, sequence = 24, ruleName = "Active Paired TempCtrl Rule", tempClassRequirement = StorageTempClass.TemperatureControlled, preferConsolidation = true, allowDynamicOverflow = false })))
+        using (var staffGlobalResp = await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = Guid.Empty, facilityId, sequence = 23, ruleName = "Global Staff Rejected", preferConsolidation = false })))
+        using (var superAdminGlobalResp = await client.PostAsJsonAsync("/api/v1/putaway/strategies", new { clientId = Guid.Empty, facilityId, sequence = 24, ruleName = "Global SuperAdmin Rejected", preferConsolidation = false }))
+        {
+            if (staffGlobalResp.StatusCode != HttpStatusCode.BadRequest || superAdminGlobalResp.StatusCode != HttpStatusCode.BadRequest)
+            {
+                throw new InvalidOperationException($"MDM-0.4 PostgreSQL MDM04-R05 expected 400 BadRequest for Guid.Empty strategy creation, got Staff={staffGlobalResp.StatusCode}, SuperAdmin={superAdminGlobalResp.StatusCode}.");
+            }
+        }
+
+        await using (var r05VerifyDb = createDb())
+        {
+            if (await r05VerifyDb.PutawayStrategyRules.AsNoTracking().AnyAsync(r => r.ClientId == Guid.Empty))
+                throw new InvalidOperationException("MDM-0.4 PostgreSQL MDM04-R05 unexpected Guid.Empty PutawayStrategyRule persisted.");
+        }
+
+        using (var okRuleResp = await client.SendAsync(staffReq(HttpMethod.Post, "/api/v1/putaway/strategies", staffId, facilityId, Permissions.Inbound.PutawayRules, new { clientId = client1Id, facilityId, sequence = 25, ruleName = "Active Paired TempCtrl Rule", tempClassRequirement = StorageTempClass.TemperatureControlled, preferConsolidation = true, allowDynamicOverflow = false })))
         {
             if (okRuleResp.StatusCode != HttpStatusCode.Created)
                 throw new InvalidOperationException($"MDM-0.4 PostgreSQL authorized active client/facility strategy creation failed: {okRuleResp.StatusCode}");

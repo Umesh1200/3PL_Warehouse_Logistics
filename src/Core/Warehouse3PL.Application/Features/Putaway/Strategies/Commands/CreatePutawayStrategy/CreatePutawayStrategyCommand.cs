@@ -96,29 +96,28 @@ public class CreatePutawayStrategyCommandHandler : IRequestHandler<CreatePutaway
             throw new EntityNotFoundException(nameof(Facility), request.FacilityId);
         }
 
-        // Guid.Empty represents a global facility-wide default rule and requires verified platform SuperAdmin privilege.
+        // PutawayStrategyRule.ClientId currently carries a required FK to clients (`fk_putaway_strategy_rules_clients_client_id`).
+        // Facility-wide default-rule persistence (nullable ClientId or separate facility-default table) is a deferred MDM-2 schema dependency;
+        // reject Guid.Empty cleanly for all callers instead of hitting a PostgreSQL FK violation.
         if (request.ClientId == Guid.Empty)
         {
-            if (!isVerifiedSuperAdmin)
-            {
-                throw new ForbiddenException("Only verified platform SuperAdmins can create global facility-wide putaway strategy rules.");
-            }
+            throw new ValidationException(
+                nameof(request.ClientId),
+                "Facility-wide default putaway strategy rules (ClientId = Guid.Empty) are not supported by the current client-scoped schema; provide an active ClientId assigned to this facility.");
         }
-        else
-        {
-            var hasActiveClientFacilityAccess = await _context.ClientFacilityAccesses
-                .AsNoTracking()
-                .AnyAsync(a => a.ClientId == request.ClientId &&
-                               a.FacilityId == request.FacilityId &&
-                               a.Status == FacilityAccessStatus.Active &&
-                               !a.Client.IsDeleted &&
-                               a.Client.Status == ClientStatus.Active,
-                    cancellationToken);
 
-            if (!hasActiveClientFacilityAccess)
-            {
-                throw new ForbiddenException($"Client '{request.ClientId}' does not have an active relationship with facility '{request.FacilityId}'.");
-            }
+        var hasActiveClientFacilityAccess = await _context.ClientFacilityAccesses
+            .AsNoTracking()
+            .AnyAsync(a => a.ClientId == request.ClientId &&
+                           a.FacilityId == request.FacilityId &&
+                           a.Status == FacilityAccessStatus.Active &&
+                           !a.Client.IsDeleted &&
+                           a.Client.Status == ClientStatus.Active,
+                cancellationToken);
+
+        if (!hasActiveClientFacilityAccess)
+        {
+            throw new ForbiddenException($"Client '{request.ClientId}' does not have an active relationship with facility '{request.FacilityId}'.");
         }
 
         var rule = new PutawayStrategyRule
