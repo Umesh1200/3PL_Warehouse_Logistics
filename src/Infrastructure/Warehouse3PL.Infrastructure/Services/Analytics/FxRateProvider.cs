@@ -8,6 +8,7 @@ using Microsoft.Extensions.DependencyInjection;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.ValueObjects;
+using Warehouse3PL.Infrastructure.Services.Reference;
 
 namespace Warehouse3PL.Infrastructure.Services.Analytics;
 
@@ -422,6 +423,25 @@ public class FxRateProvider : IFxRateProvider
         out string integrityHash,
         out DateTime publishedAtUtc)
     {
+        return GetHistoricalExchangeRate(
+            sourceCurrency, targetCurrency, effectiveDateUtc, asOfUtc,
+            FxValuationMode.HistoricalAsKnown, preferredAuthority: null,
+            out rateSource, out rateVersion, out benchmarkSeriesId, out integrityHash, out publishedAtUtc);
+    }
+
+    public decimal GetHistoricalExchangeRate(
+        string sourceCurrency,
+        string targetCurrency,
+        DateTime effectiveDateUtc,
+        DateTime asOfUtc,
+        FxValuationMode valuationMode,
+        FxRateSourceAuthority? preferredAuthority,
+        out string rateSource,
+        out string rateVersion,
+        out string benchmarkSeriesId,
+        out string integrityHash,
+        out DateTime publishedAtUtc)
+    {
         Iso4217Currencies.Validate(sourceCurrency, nameof(sourceCurrency));
         Iso4217Currencies.Validate(targetCurrency, nameof(targetCurrency));
 
@@ -451,18 +471,25 @@ public class FxRateProvider : IFxRateProvider
             return 1.0m;
         }
 
-        // MDM-1.3: Consult database-authoritative effective-dated FxRateRecord rows first
-        // (honoring UnitMultiplier such as NRB 100 INR -> NPR and PublishedAtUtc cutoffs)
-        // before falling back to verified embedded central bank historical bulletins.
+        // MDM-1.3 R01/R02: Consult database-authoritative effective-dated FxRateRecord rows via shared FxDatabaseRateResolver
+        // so FxRateProvider and FxConversionService produce identical HistoricalAsKnown and Retrospective decisions.
         if (TryResolveDatabaseRate(
-                src, tgt, utcDate, utcAsOf,
+                src, tgt, utcDate, utcAsOf, valuationMode, preferredAuthority,
                 out var dbRate, out rateSource, out rateVersion, out benchmarkSeriesId, out integrityHash, out publishedAtUtc))
         {
             return dbRate;
         }
 
+        if (preferredAuthority.HasValue &&
+            preferredAuthority.Value is not (FxRateSourceAuthority.FRB or FxRateSourceAuthority.ECB or FxRateSourceAuthority.BOE))
+        {
+            throw new InvalidOperationException(
+                $"Unsupported currency conversion from '{sourceCurrency}' to '{targetCurrency}' for effective date {utcDate:yyyy-MM-dd} under authority '{preferredAuthority.Value}'.");
+        }
+
         var currencyFixings = PublishedFixingSchedule
-            .Where(p => p.SourceCurrency == src && p.TargetCurrency == tgt)
+            .Where(p => p.SourceCurrency == src && p.TargetCurrency == tgt &&
+                        (!preferredAuthority.HasValue || MatchesEmbeddedAuthority(p.CentralBankAuthority, preferredAuthority.Value)))
             .ToList();
 
         if (currencyFixings.Count == 0)
@@ -507,11 +534,21 @@ public class FxRateProvider : IFxRateProvider
             $"Unsupported currency conversion from '{sourceCurrency}' to '{targetCurrency}' for effective date {utcDate:yyyy-MM-dd}. No authoritative exchange rate is configured.");
     }
 
+    private static bool MatchesEmbeddedAuthority(string centralBankAuthority, FxRateSourceAuthority authority) => authority switch
+    {
+        FxRateSourceAuthority.FRB => centralBankAuthority.StartsWith("FederalReserveBoard", StringComparison.OrdinalIgnoreCase),
+        FxRateSourceAuthority.ECB => centralBankAuthority.StartsWith("EuropeanCentralBank", StringComparison.OrdinalIgnoreCase),
+        FxRateSourceAuthority.BOE => centralBankAuthority.StartsWith("BankOfEngland", StringComparison.OrdinalIgnoreCase),
+        _ => false
+    };
+
     private bool TryResolveDatabaseRate(
         string src,
         string tgt,
         DateTime utcDate,
         DateTime utcAsOf,
+        FxValuationMode valuationMode,
+        FxRateSourceAuthority? preferredAuthority,
         out decimal unitRate,
         out string rateSource,
         out string rateVersion,
@@ -542,28 +579,12 @@ public class FxRateProvider : IFxRateProvider
 
         try
         {
-            var match = db.FxRateRecords
-                .AsNoTracking()
-                .Where(r => r.BaseCurrencyCode == src &&
-                            r.QuoteCurrencyCode == tgt &&
-                            r.ApprovalStatus == FxRateApprovalStatus.VerifiedApproved &&
-                            r.IsActive &&
-                            r.EffectiveFromUtc <= utcDate &&
-                            (r.EffectiveToUtc == null || r.EffectiveToUtc > utcDate))
-                .OrderByDescending(r => r.EffectiveFromUtc)
-                .ThenByDescending(r => r.PublishedAtUtc)
-                .ThenByDescending(r => r.ApprovedAtUtc)
-                .FirstOrDefault();
+            var match = FxDatabaseRateResolver.ResolveSync(
+                db, src, tgt, utcDate, utcAsOf, valuationMode, preferredAuthority);
 
             if (match == null)
             {
                 return false;
-            }
-
-            if (utcAsOf < match.PublishedAtUtc)
-            {
-                throw new InvalidOperationException(
-                    $"Exchange rate bulletin '{match.BulletinVersion}' for {src}/{tgt} was published at {match.PublishedAtUtc:yyyy-MM-dd HH:mm:ss} UTC, which is after the requested valuation time {utcAsOf:yyyy-MM-dd HH:mm:ss} UTC. Future fixings cannot be used before publication.");
             }
 
             unitRate = match.ComputeUnitRate(FxRateType.Mid);

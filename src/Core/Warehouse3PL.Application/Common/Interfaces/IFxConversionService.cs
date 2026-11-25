@@ -18,5 +18,6 @@ public interface IFxConversionService
         FxRateType rateType = FxRateType.Mid,
         DateTime? asOfUtc = null,
         FxRateSourceAuthority? preferredAuthority = null,
+        FxValuationMode valuationMode = FxValuationMode.HistoricalAsKnown,
         CancellationToken cancellationToken = default);
 }

@@ -35,14 +35,16 @@ public sealed class FxRatesController : BaseApiController
         string BulletinVersion,
         DateTime PublishedAtUtc,
         string? BenchmarkSeriesId = null,
-        string? IntegrityHash = null);
+        string? IntegrityHash = null,
+        string? SourceArtifactPayload = null);
 
     public sealed record ApproveFxRateRequest(
         bool EvidenceVerified,
         string VerificationNotes,
         bool SupersedeOverlapping = false,
         Guid? ExpectedActiveRateId = null,
-        long? ExpectedConfigRevision = null);
+        long? ExpectedConfigRevision = null,
+        string? SourceArtifactPayload = null);
 
     public sealed record VoidFxRateRequest(
         string VoidReason,
@@ -55,7 +57,8 @@ public sealed class FxRatesController : BaseApiController
         DateTime EffectiveDateUtc,
         FxRateType RateType = FxRateType.Mid,
         DateTime? AsOfUtc = null,
-        FxRateSourceAuthority? PreferredAuthority = null);
+        FxRateSourceAuthority? PreferredAuthority = null,
+        FxValuationMode ValuationMode = FxValuationMode.HistoricalAsKnown);
 
     [HttpGet]
     [ProducesResponseType(typeof(IReadOnlyList<FxRateRecordDto>), StatusCodes.Status200OK)]
@@ -105,6 +108,7 @@ public sealed class FxRatesController : BaseApiController
             request.RateType,
             request.AsOfUtc,
             request.PreferredAuthority,
+            request.ValuationMode,
             cancellationToken);
 
         return Ok(result);
@@ -135,7 +139,8 @@ public sealed class FxRatesController : BaseApiController
                 request.BulletinVersion,
                 request.PublishedAtUtc,
                 request.BenchmarkSeriesId,
-                request.IntegrityHash),
+                request.IntegrityHash,
+                request.SourceArtifactPayload),
             cancellationToken);
 
         return CreatedAtAction(nameof(GetFxRateById), new { id = created.Id }, created);
@@ -161,7 +166,8 @@ public sealed class FxRatesController : BaseApiController
                 request.VerificationNotes,
                 request.SupersedeOverlapping,
                 request.ExpectedActiveRateId,
-                request.ExpectedConfigRevision),
+                request.ExpectedConfigRevision,
+                request.SourceArtifactPayload),
             cancellationToken);
 
         return Ok(approved);

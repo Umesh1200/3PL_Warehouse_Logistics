@@ -58,7 +58,9 @@ public sealed record FxConversionResultDto(
     string? IntegrityHash,
     DateTime EffectiveDateUtc,
     DateTime PublishedAtUtc,
-    bool ResolvedFromDatabase);
+    bool ResolvedFromDatabase,
+    FxValuationMode ValuationMode = FxValuationMode.HistoricalAsKnown,
+    DateTime? ApprovedAtUtc = null);
 
 public sealed record UomDefinitionDto(
     string UomCode,

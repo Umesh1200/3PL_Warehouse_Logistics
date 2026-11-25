@@ -44,6 +44,18 @@ public enum FxRateDirection
 }
 
 /// <summary>
+/// Temporal evaluation semantics for historical FX rate lookup:
+/// - <see cref="HistoricalAsKnown"/> reconstructs the approved, unsuperseded rate published and verified as of <c>AsOfUtc</c>.
+/// - <see cref="Retrospective"/> resolves the authoritative rate covering the effective date (including approved bulletins verified later)
+///   while still rejecting unapproved Draft and invalidated Voided entries.
+/// </summary>
+public enum FxValuationMode
+{
+    HistoricalAsKnown = 1,
+    Retrospective = 2
+}
+
+/// <summary>
 /// Physical measurement dimension governed by UN/ECE Rec 20 UOM catalogs.
 /// Cross-dimension conversions are strictly prohibited.
 /// </summary>

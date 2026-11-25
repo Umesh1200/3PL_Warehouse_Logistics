@@ -31,6 +31,7 @@ public sealed class FxConversionService : IFxConversionService
         FxRateType rateType = FxRateType.Mid,
         DateTime? asOfUtc = null,
         FxRateSourceAuthority? preferredAuthority = null,
+        FxValuationMode valuationMode = FxValuationMode.HistoricalAsKnown,
         CancellationToken cancellationToken = default)
     {
         var fromNorm = NormalizeCurrency(fromCurrencyCode, nameof(fromCurrencyCode));
@@ -81,48 +82,33 @@ public sealed class FxConversionService : IFxConversionService
                 IntegrityHash: "IDENTITY",
                 EffectiveDateUtc: evalDateUtc,
                 PublishedAtUtc: evalDateUtc,
-                ResolvedFromDatabase: false);
+                ResolvedFromDatabase: false,
+                ValuationMode: valuationMode,
+                ApprovedAtUtc: evalDateUtc);
         }
 
-        // 1. Database-authoritative effective-dated FxRateRecord takes precedence (supports NRB 100 INR -> NPR, USD -> NPR, etc.)
-        var dbCandidatesQuery = _db.FxRateRecords
-            .AsNoTracking()
-            .Where(r => r.BaseCurrencyCode == fromNorm &&
-                        r.QuoteCurrencyCode == toNorm &&
-                        r.ApprovalStatus == FxRateApprovalStatus.VerifiedApproved &&
-                        r.IsActive &&
-                        r.EffectiveFromUtc <= evalDateUtc &&
-                        (r.EffectiveToUtc == null || r.EffectiveToUtc > evalDateUtc));
+        // 1. Unified bitemporal database FX resolution via shared FxDatabaseRateResolver
+        var dbMatch = await FxDatabaseRateResolver.ResolveAsync(
+            _db,
+            fromNorm,
+            toNorm,
+            evalDateUtc,
+            evalAsOfUtc,
+            valuationMode,
+            preferredAuthority,
+            cancellationToken);
 
-        if (preferredAuthority.HasValue)
+        if (dbMatch != null)
         {
-            dbCandidatesQuery = dbCandidatesQuery.Where(r => r.SourceAuthority == preferredAuthority.Value);
-        }
-
-        var dbCandidate = await dbCandidatesQuery
-            .OrderByDescending(r => r.EffectiveFromUtc)
-            .ThenByDescending(r => r.PublishedAtUtc)
-            .ThenByDescending(r => r.ApprovedAtUtc)
-            .FirstOrDefaultAsync(cancellationToken);
-
-        if (dbCandidate != null)
-        {
-            if (dbCandidate.PublishedAtUtc > evalAsOfUtc)
-            {
-                throw new DomainException(
-                    $"FX bulletin '{dbCandidate.BulletinVersion}' ({fromNorm}/{toNorm}) was published at {dbCandidate.PublishedAtUtc:O}, after valuation timestamp {evalAsOfUtc:O}.",
-                    "FX_RATE_FUTURE_PUBLICATION");
-            }
-
             var quotedRate = rateType switch
             {
-                FxRateType.Buy => dbCandidate.BuyRate,
-                FxRateType.Sell => dbCandidate.SellRate,
-                _ => dbCandidate.MidRate
+                FxRateType.Buy => dbMatch.BuyRate,
+                FxRateType.Sell => dbMatch.SellRate,
+                _ => dbMatch.MidRate
             };
 
-            var effectiveUnitRate = dbCandidate.ComputeUnitRate(rateType);
-            var converted = targetCurrency.RoundAmount(amount * quotedRate / dbCandidate.UnitMultiplier);
+            var effectiveUnitRate = dbMatch.ComputeUnitRate(rateType);
+            var converted = targetCurrency.RoundAmount(amount * quotedRate / dbMatch.UnitMultiplier);
 
             return new FxConversionResultDto(
                 amount,
@@ -131,20 +117,24 @@ public sealed class FxConversionService : IFxConversionService
                 toNorm,
                 targetCurrency.MinorUnits,
                 rateType,
-                dbCandidate.UnitMultiplier,
+                dbMatch.UnitMultiplier,
                 quotedRate,
                 effectiveUnitRate,
-                dbCandidate.SourceAuthority.ToString(),
-                dbCandidate.BulletinVersion,
-                dbCandidate.BenchmarkSeriesId,
-                dbCandidate.IntegrityHash,
+                dbMatch.SourceAuthority.ToString(),
+                dbMatch.BulletinVersion,
+                dbMatch.BenchmarkSeriesId,
+                dbMatch.IntegrityHash,
                 evalDateUtc,
-                dbCandidate.PublishedAtUtc,
-                ResolvedFromDatabase: true);
+                dbMatch.PublishedAtUtc,
+                ResolvedFromDatabase: true,
+                ValuationMode: valuationMode,
+                ApprovedAtUtc: dbMatch.ApprovedAtUtc);
         }
 
-        // 2. Fallback strictly to verified historical central-bank bulletins for their exact published windows (if no authority override excludes them)
-        if (!preferredAuthority.HasValue && rateType == FxRateType.Mid)
+        // 2. Fallback strictly to verified historical central-bank bulletins for their exact published windows
+        if (rateType == FxRateType.Mid &&
+            (!preferredAuthority.HasValue ||
+             preferredAuthority.Value is FxRateSourceAuthority.FRB or FxRateSourceAuthority.ECB or FxRateSourceAuthority.BOE))
         {
             try
             {
@@ -153,6 +143,8 @@ public sealed class FxConversionService : IFxConversionService
                     toNorm,
                     evalDateUtc,
                     evalAsOfUtc,
+                    valuationMode,
+                    preferredAuthority,
                     out var rateSource,
                     out var rateVersion,
                     out var benchmarkSeriesId,
@@ -176,7 +168,9 @@ public sealed class FxConversionService : IFxConversionService
                     IntegrityHash: integrityHash,
                     EffectiveDateUtc: evalDateUtc,
                     PublishedAtUtc: publishedAtUtc,
-                    ResolvedFromDatabase: false);
+                    ResolvedFromDatabase: false,
+                    ValuationMode: valuationMode,
+                    ApprovedAtUtc: null);
             }
             catch (InvalidOperationException ex)
             {
@@ -185,7 +179,7 @@ public sealed class FxConversionService : IFxConversionService
         }
 
         throw new DomainException(
-            $"No verified active FX rate is available for '{fromNorm}/{toNorm}' effective {evalDateUtc:O} (RateType={rateType}).",
+            $"No verified active FX rate is available for '{fromNorm}/{toNorm}' effective {evalDateUtc:O} as-of {evalAsOfUtc:O} (Mode={valuationMode}, RateType={rateType}).",
             "FX_RATE_UNAVAILABLE");
     }
 

@@ -116,6 +116,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
         // 2. FX rate RBAC: Client/Driver/spoofed Staff denied 403
         var effStart = new DateTime(2026, 11, 20, 0, 0, 0, DateTimeKind.Utc);
         var pubAt = new DateTime(2026, 11, 19, 10, 0, 0, DateTimeKind.Utc);
+        var nrbPayload1 = "NRB-BULLETIN|2026-11-20|INR/NPR|100|160.00|160.15|160.075";
         var draftBody = new
         {
             baseCurrencyCode = "INR",
@@ -129,13 +130,46 @@ public sealed class Mdm13CurrencyFxAndUomTests
             sourceAuthority = FxRateSourceAuthority.NRB,
             bulletinVersion = "NRB-20261120",
             publishedAtUtc = pubAt,
-            benchmarkSeriesId = "NRB-FX-INR-NPR"
+            benchmarkSeriesId = "NRB-FX-INR-NPR",
+            sourceArtifactPayload = nrbPayload1
         };
 
         Assert.Equal(HttpStatusCode.Unauthorized, (await http.PostAsJsonAsync("/api/v1/fx-rates", draftBody)).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtClient, draftBody))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtDriver, draftBody))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtPlainSpoof, draftBody))).StatusCode);
+
+        // MDM13-R03: Official authority (NRB) without verifiable series/hash OR with placeholder/tampered digest MUST reject 422!
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
+            {
+                baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
+                effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
+                unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-NO-HASH",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-INR-NPR"
+            }))).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
+            {
+                baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
+                effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
+                unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-ZERO-HASH",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "PENDING",
+                integrityHash = "SHA256:0000000000000000000000000000000000000000000000000000000000000000"
+            }))).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
+            {
+                baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
+                effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
+                unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-MISMATCH",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-INR-NPR",
+                integrityHash = "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+                sourceArtifactPayload = nrbPayload1
+            }))).StatusCode);
 
         // 3. Draft FX creation starts inactive; conversion fails closed 422 before approval!
         var createNrb = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, draftBody));
@@ -151,16 +185,28 @@ public sealed class Mdm13CurrencyFxAndUomTests
                 effectiveDateUtc = effStart.AddHours(6), rateType = FxRateType.Mid
             }))).StatusCode);
 
-        // Approve without evidence -> 422; approve with evidence -> 200
+        // Approve without evidence or with short/placeholder verification notes -> 422; tampered approval payload -> 422
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
             (await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{nrbDraft.Id}/approve", jwtFin, new
             {
-                evidenceVerified = false, verificationNotes = "Missing attestation"
+                evidenceVerified = false, verificationNotes = "Missing attestation notes"
+            }))).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{nrbDraft.Id}/approve", jwtFin, new
+            {
+                evidenceVerified = true, verificationNotes = "TBD"
+            }))).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{nrbDraft.Id}/approve", jwtFin, new
+            {
+                evidenceVerified = true, verificationNotes = "Verified against NRB circular payload.", sourceArtifactPayload = "TAMPERED"
             }))).StatusCode);
 
         var approveNrb = await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{nrbDraft.Id}/approve", jwtFin, new
         {
-            evidenceVerified = true, verificationNotes = "Verified against NRB daily fixing circular."
+            evidenceVerified = true,
+            verificationNotes = "Verified against NRB daily fixing circular.",
+            sourceArtifactPayload = nrbPayload1
         }));
         Assert.Equal(HttpStatusCode.OK, approveNrb.StatusCode);
         var nrbApproved = (await approveNrb.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
@@ -172,8 +218,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
         var convMidResp = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
         {
             amount = 1000m, fromCurrencyCode = "INR", toCurrencyCode = "NPR",
-            effectiveDateUtc = effStart.AddHours(6), rateType = FxRateType.Mid,
-            asOfUtc = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc)
+            effectiveDateUtc = effStart.AddHours(6), rateType = FxRateType.Mid
         }));
         Assert.Equal(HttpStatusCode.OK, convMidResp.StatusCode);
         var convMid = (await convMidResp.Content.ReadFromJsonAsync<FxConversionResultDto>(JsonOptions))!;
@@ -184,26 +229,45 @@ public sealed class Mdm13CurrencyFxAndUomTests
         var convBuy = await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
         {
             amount = 1000m, fromCurrencyCode = "INR", toCurrencyCode = "NPR",
-            effectiveDateUtc = effStart.AddHours(6), rateType = FxRateType.Buy,
-            asOfUtc = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc)
+            effectiveDateUtc = effStart.AddHours(6), rateType = FxRateType.Buy
         }))).Content.ReadFromJsonAsync<FxConversionResultDto>(JsonOptions);
         Assert.Equal(1600.00m, convBuy!.ConvertedAmount);
 
         var convSell = await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
         {
             amount = 1000m, fromCurrencyCode = "INR", toCurrencyCode = "NPR",
-            effectiveDateUtc = effStart.AddHours(6), rateType = FxRateType.Sell,
-            asOfUtc = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc)
+            effectiveDateUtc = effStart.AddHours(6), rateType = FxRateType.Sell
         }))).Content.ReadFromJsonAsync<FxConversionResultDto>(JsonOptions);
         Assert.Equal(1601.50m, convSell!.ConvertedAmount);
 
-        // Valuation BEFORE PublishedAtUtc fails closed 422 (no look-ahead!)
+        // R01: HistoricalAsKnown BEFORE ApprovedAtUtc (even if after PublishedAtUtc) rejects 422, whereas Retrospective succeeds!
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
+            {
+                amount = 1000m, fromCurrencyCode = "INR", toCurrencyCode = "NPR",
+                effectiveDateUtc = effStart.AddHours(6),
+                asOfUtc = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc),
+                valuationMode = FxValuationMode.HistoricalAsKnown
+            }))).StatusCode);
+
+        var retroResp = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
+        {
+            amount = 1000m, fromCurrencyCode = "INR", toCurrencyCode = "NPR",
+            effectiveDateUtc = effStart.AddHours(6),
+            asOfUtc = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc),
+            valuationMode = FxValuationMode.Retrospective
+        }));
+        Assert.Equal(HttpStatusCode.OK, retroResp.StatusCode);
+        Assert.Equal(1600.75m, (await retroResp.Content.ReadFromJsonAsync<FxConversionResultDto>(JsonOptions))!.ConvertedAmount);
+
+        // Valuation BEFORE PublishedAtUtc fails closed 422 in BOTH modes (no look-ahead!)
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
             (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
             {
                 amount = 100m, fromCurrencyCode = "INR", toCurrencyCode = "NPR",
                 effectiveDateUtc = effStart.AddHours(6),
-                asOfUtc = pubAt.AddMinutes(-1)
+                asOfUtc = pubAt.AddMinutes(-1),
+                valuationMode = FxValuationMode.Retrospective
             }))).StatusCode);
 
         // 5. Fallback to verified historical ECB bulletin for exact bulletin date; missing/future dates fail closed 422
@@ -219,36 +283,65 @@ public sealed class Mdm13CurrencyFxAndUomTests
         Assert.False(ecbRes.ResolvedFromDatabase);
         Assert.Equal("ECB-20261104", ecbRes.BulletinVersion);
 
-        // 6. Retroactive PUT / DELETE prohibited -> 409 Conflict; overlapping POST without supersede -> 409; supersede -> 200; void -> 200 + fails conversion 422
+        // 6. Retroactive PUT / DELETE -> 409; R02 future-effective supersession rejected (422, keeps active rate intact); immediate supersede -> 200; void -> 422
         Assert.Equal(HttpStatusCode.Conflict, (await http.SendAsync(Authed(HttpMethod.Put, $"/api/v1/fx-rates/{nrbApproved.Id}", jwtFin, new { }))).StatusCode);
         Assert.Equal(HttpStatusCode.Conflict, (await http.SendAsync(Authed(HttpMethod.Delete, $"/api/v1/fx-rates/{nrbApproved.Id}", jwtFin))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Delete, $"/api/v1/fx-rates/{nrbApproved.Id}", jwtPlainSpoof))).StatusCode);
 
+        var futurePayload = "NRB-BULLETIN|FUTURE|INR/NPR|100|160.50|160.65|160.575";
+        var futureDraft = await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
+        {
+            baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
+            effectiveFromUtc = DateTime.UtcNow.AddDays(10), effectiveToUtc = (DateTime?)null,
+            unitMultiplier = 100, buyRate = 160.50m, sellRate = 160.65m, midRate = 160.575m,
+            sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-FUTURE-GAP",
+            publishedAtUtc = effStart.AddDays(1), benchmarkSeriesId = "NRB-FX-INR-NPR", sourceArtifactPayload = futurePayload
+        }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{futureDraft!.Id}/approve", jwtFin, new
+            {
+                evidenceVerified = true, verificationNotes = "Attempt future supersession gap", supersedeOverlapping = true
+            }))).StatusCode);
+        // Active nrbApproved remains untouched!
+        Assert.True((await (await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/fx-rates/{nrbApproved.Id}", jwtClient))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!.IsActive);
+
+        var nrbPayload2 = "NRB-BULLETIN|2026-11-21|INR/NPR|100|160.10|160.25|160.175";
         var draft2Resp = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
         {
             baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
             effectiveFromUtc = effStart.AddDays(1), effectiveToUtc = (DateTime?)null,
             unitMultiplier = 100, buyRate = 160.10m, sellRate = 160.25m, midRate = 160.175m,
             sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261121",
-            publishedAtUtc = effStart.AddDays(1)
+            publishedAtUtc = effStart.AddDays(1), benchmarkSeriesId = "NRB-FX-INR-NPR", sourceArtifactPayload = nrbPayload2
         }));
         var nrbDraft2 = (await draft2Resp.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
 
         Assert.Equal(HttpStatusCode.Conflict,
             (await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{nrbDraft2.Id}/approve", jwtFin, new
             {
-                evidenceVerified = true, verificationNotes = "Attempt overlap without supersede", supersedeOverlapping = false
+                evidenceVerified = true, verificationNotes = "Attempt overlap without supersede flag", supersedeOverlapping = false
             }))).StatusCode);
 
         var supResp = await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{nrbDraft2.Id}/approve", jwtFin, new
         {
-            evidenceVerified = true, verificationNotes = "Official NRB revision", supersedeOverlapping = true, expectedActiveRateId = nrbApproved.Id
+            evidenceVerified = true, verificationNotes = "Official NRB daily circular revision", supersedeOverlapping = true, expectedActiveRateId = nrbApproved.Id
         }));
         Assert.Equal(HttpStatusCode.OK, supResp.StatusCode);
 
         var prevAfterSup = await (await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/fx-rates/{nrbApproved.Id}", jwtClient))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions);
         Assert.Equal(FxRateApprovalStatus.Superseded, prevAfterSup!.ApprovalStatus);
         Assert.False(prevAfterSup.IsActive);
+
+        // R02 Historical Continuity: HistoricalAsKnown BEFORE v2 Supersession recovers v1 (1600.75) even though v1 is now Superseded!
+        var asKnownBeforeSup = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
+        {
+            amount = 1000m, fromCurrencyCode = "INR", toCurrencyCode = "NPR",
+            effectiveDateUtc = effStart.AddDays(2),
+            asOfUtc = prevAfterSup.SupersededAtUtc!.Value.AddMilliseconds(-1),
+            valuationMode = FxValuationMode.HistoricalAsKnown
+        }));
+        Assert.Equal(HttpStatusCode.OK, asKnownBeforeSup.StatusCode);
+        Assert.Equal(1600.75m, (await asKnownBeforeSup.Content.ReadFromJsonAsync<FxConversionResultDto>(JsonOptions))!.ConvertedAmount);
 
         Assert.Equal(HttpStatusCode.OK,
             (await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{nrbDraft2.Id}/void", jwtFin, new
@@ -263,7 +356,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
                 effectiveDateUtc = effStart.AddDays(2)
             }))).StatusCode);
 
-        // 7. Currency minor-unit rounding precision (JPY = 0 decimals, KWD = 3 decimals AwayFromZero)
+        // 7. Currency minor-unit rounding precision (JPY = 0 decimals AwayFromZero) with ManualApproved explicitly identified
         var jpyDraft = await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
         {
             baseCurrencyCode = "USD", quoteCurrencyCode = "JPY",
@@ -271,15 +364,20 @@ public sealed class Mdm13CurrencyFxAndUomTests
             unitMultiplier = 1, buyRate = 152.10m, sellRate = 152.90m, midRate = 152.50m,
             sourceAuthority = FxRateSourceAuthority.ManualApproved, bulletinVersion = "MAN-JPY-1", publishedAtUtc = pubAt
         }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions);
-        await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{jpyDraft!.Id}/approve", jwtFin, new { evidenceVerified = true, verificationNotes = "OK" }));
+        var jpyAppResp = await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{jpyDraft!.Id}/approve", jwtFin, new
+        {
+            evidenceVerified = true, verificationNotes = "Manual treasury desk JPY fixing approved."
+        }));
+        Assert.Equal(HttpStatusCode.OK, jpyAppResp.StatusCode);
 
         var jpyConv = await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
         {
             amount = 1.00m, fromCurrencyCode = "USD", toCurrencyCode = "JPY",
-            effectiveDateUtc = effStart.AddHours(1), asOfUtc = effStart.AddHours(1)
+            effectiveDateUtc = effStart.AddHours(1)
         }))).Content.ReadFromJsonAsync<FxConversionResultDto>(JsonOptions);
         Assert.Equal(153m, jpyConv!.ConvertedAmount); // 152.50 rounded to 0 decimals AwayFromZero = 153!
         Assert.Equal(0, jpyConv.TargetMinorUnits);
+        Assert.Equal("ManualApproved", jpyConv.SourceAuthority);
 
         // 8. UOM Catalog & Conversions (canonical preservation, inverse, 2-hop, cross-dimension fail closed)
         var uomDefsResp = await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/uom/definitions", jwtClient));
@@ -367,6 +465,93 @@ public sealed class Mdm13CurrencyFxAndUomTests
         Assert.Equal(30.4800m, canonLen.ConvertedQuantity);
 
         await Assert.ThrowsAsync<DomainException>(() => uomSvc.ConvertAsync(1m, "M3", "KG"));
+    }
+
+    [Fact]
+    public async Task HistoricalAsKnown_And_Retrospective_Preserve_Publication_Approval_And_Authority_Precedence_Across_Both_Interfaces()
+    {
+        var dbName = $"mdm13-bitemporal-{Guid.NewGuid():N}";
+        using var db = Warehouse3PL.UnitTests.Common.TestDbContextFactory.Create(
+            new Warehouse3PL.UnitTests.Common.TestTenantProvider { BypassTenantFilter = true },
+            new Warehouse3PL.UnitTests.Common.TestCurrentUserContext { UserType = UserType.Staff },
+            dbName);
+
+        await ReferenceCatalogSeeder.SeedAsync(db);
+
+        var approverId = Guid.NewGuid();
+        var nov18 = new DateTime(2026, 11, 18, 0, 0, 0, DateTimeKind.Utc);
+        var nov19 = new DateTime(2026, 11, 19, 0, 0, 0, DateTimeKind.Utc);
+        var nov20 = new DateTime(2026, 11, 20, 0, 0, 0, DateTimeKind.Utc);
+        var nov21 = new DateTime(2026, 11, 21, 12, 0, 0, DateTimeKind.Utc);
+        var nov23 = new DateTime(2026, 11, 23, 0, 0, 0, DateTimeKind.Utc);
+        var nov25 = new DateTime(2026, 11, 25, 0, 0, 0, DateTimeKind.Utc);
+
+        // Authority A (ManualApproved): effective Nov 19, published Nov 19, approved Nov 19 -> 135.50
+        var authA = FxRateRecord.CreateDraft(
+            "USD", "NPR", nov19, null, 1, 135.20m, 135.80m, 135.50m,
+            FxRateSourceAuthority.ManualApproved, "MAN-NOV19", nov19);
+        authA.Approve(approverId, nov19, "Manual FX rate verified on Nov 19.");
+
+        // Authority B (NRB): effective Nov 20, published Nov 23 (future relative to Nov 21!), approved Nov 23 -> 136.20
+        var authB = FxRateRecord.CreateDraft(
+            "USD", "NPR", nov20, null, 1, 135.90m, 136.50m, 136.20m,
+            FxRateSourceAuthority.NRB, "NRB-NOV23", nov23, "NRB-USD-NPR",
+            "SHA256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
+        authB.Approve(approverId, nov23, "NRB circular published and approved Nov 23.");
+
+        // Authority C (ECB, higher effective Nov 20, published Nov 18, BUT internal ApprovedAtUtc = Nov 25!)
+        var authC = FxRateRecord.CreateDraft(
+            "USD", "NPR", nov20, null, 1, 136.70m, 137.30m, 137.00m,
+            FxRateSourceAuthority.ECB, "ECB-LATE-APP", nov18, "ECB-USD-NPR",
+            "SHA256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
+        authC.Approve(approverId, nov25, "Late internal verification on Nov 25.");
+
+        db.FxRateRecords.AddRange(authA, authB, authC);
+        await db.SaveChangesAsync();
+
+        var fxProvider = FxRateProvider.ForDbContext(db);
+        var convSvc = new FxConversionService(db, fxProvider, new DateTimeProvider());
+
+        // 1) At AsOfUtc = Nov 21 (HistoricalAsKnown):
+        //    Auth B (Published Nov 23 > Nov 21) and Auth C (Approved Nov 25 > Nov 21) MUST BOTH be filtered out BEFORE selection,
+        //    so BOTH interfaces select Authority A (135.50)!
+        var asKnownConv = await convSvc.ConvertAmountAsync(
+            10m, "USD", "NPR", nov21, FxRateType.Mid, nov21, valuationMode: FxValuationMode.HistoricalAsKnown);
+        var asKnownProviderRate = fxProvider.GetHistoricalExchangeRate(
+            "USD", "NPR", nov21, nov21, FxValuationMode.HistoricalAsKnown, null,
+            out var pSrc, out var pVer, out _, out _, out _);
+
+        Assert.Equal(1355.00m, asKnownConv.ConvertedAmount);
+        Assert.Equal("ManualApproved", asKnownConv.SourceAuthority);
+        Assert.Equal(135.50m, asKnownProviderRate);
+        Assert.Equal(asKnownConv.SourceAuthority, pSrc);
+        Assert.Equal(asKnownConv.BulletinVersion, pVer);
+
+        // 2) At AsOfUtc = Nov 21 (Retrospective):
+        //    Auth C was published Nov 18 (<= Nov 21) and later verified -> Retrospective selects Auth C (137.00) identically in both interfaces!
+        var retroConv = await convSvc.ConvertAmountAsync(
+            10m, "USD", "NPR", nov21, FxRateType.Mid, nov21, valuationMode: FxValuationMode.Retrospective);
+        var retroProviderRate = fxProvider.GetHistoricalExchangeRate(
+            "USD", "NPR", nov21, nov21, FxValuationMode.Retrospective, null,
+            out var rSrc, out var rVer, out _, out _, out _);
+
+        Assert.Equal(1370.00m, retroConv.ConvertedAmount);
+        Assert.Equal("ECB", retroConv.SourceAuthority);
+        Assert.Equal(137.00m, retroProviderRate);
+        Assert.Equal(retroConv.SourceAuthority, rSrc);
+        Assert.Equal(retroConv.BulletinVersion, rVer);
+
+        // 3) At AsOfUtc = Nov 24 (after Nov 23, before Nov 25) HistoricalAsKnown sees NRB (136.20), whereas explicit ManualApproved sees Auth A (135.50)
+        var nov24 = new DateTime(2026, 11, 24, 12, 0, 0, DateTimeKind.Utc);
+        var nrbWinsConv = await convSvc.ConvertAmountAsync(
+            10m, "USD", "NPR", nov21, FxRateType.Mid, nov24, valuationMode: FxValuationMode.HistoricalAsKnown);
+        Assert.Equal(1362.00m, nrbWinsConv.ConvertedAmount);
+        Assert.Equal("NRB", nrbWinsConv.SourceAuthority);
+
+        var explicitManConv = await convSvc.ConvertAmountAsync(
+            10m, "USD", "NPR", nov21, FxRateType.Mid, nov24, preferredAuthority: FxRateSourceAuthority.ManualApproved, valuationMode: FxValuationMode.HistoricalAsKnown);
+        Assert.Equal(1355.00m, explicitManConv.ConvertedAmount);
+        Assert.Equal("ManualApproved", explicitManConv.SourceAuthority);
     }
 
     private static HttpRequestMessage Authed(HttpMethod method, string path, string jwt, object? body = null)

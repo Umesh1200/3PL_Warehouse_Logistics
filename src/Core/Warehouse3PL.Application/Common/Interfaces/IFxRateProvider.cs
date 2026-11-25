@@ -65,6 +65,23 @@ public interface IFxRateProvider
         out DateTime publishedAtUtc);
 
     /// <summary>
+    /// Resolves the authoritative exchange rate using explicit <see cref="Domain.Enums.FxValuationMode"/>
+    /// (HistoricalAsKnown vs Retrospective) and optional explicit source authority constraint.
+    /// </summary>
+    decimal GetHistoricalExchangeRate(
+        string sourceCurrency,
+        string targetCurrency,
+        DateTime effectiveDateUtc,
+        DateTime asOfUtc,
+        Domain.Enums.FxValuationMode valuationMode,
+        Domain.Enums.FxRateSourceAuthority? preferredAuthority,
+        out string rateSource,
+        out string rateVersion,
+        out string benchmarkSeriesId,
+        out string integrityHash,
+        out DateTime publishedAtUtc);
+
+    /// <summary>
     /// Mathematically verifies the cryptographic SHA-256 digest of an official central bank bulletin against an independently pinned trust anchor.
     /// </summary>
     bool VerifyBulletinIntegrity(string bulletinVersion, out string computedHash);

@@ -1,3 +1,6 @@
+using System.Security.Cryptography;
+using System.Text;
+using System.Text.RegularExpressions;
 using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
@@ -10,6 +13,125 @@ using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
 
 namespace Warehouse3PL.Application.Features.Reference.Commands;
+
+internal static class FxProvenanceValidationHelper
+{
+    private static readonly Regex CanonicalSha256Regex = new(
+        @"^SHA256:[0-9a-fA-F]{64}$",
+        RegexOptions.CultureInvariant,
+        TimeSpan.FromMilliseconds(100));
+
+    private static readonly string[] PlaceholderTokens =
+    [
+        "PENDING", "TBD", "TODO", "PLACEHOLDER", "DUMMY", "SAMPLE", "FAKE", "N/A", "NONE", "UNKNOWN"
+    ];
+
+    public static bool IsOfficialAuthority(FxRateSourceAuthority authority)
+        => authority != FxRateSourceAuthority.ManualApproved;
+
+    public static string ComputeCanonicalSha256(string payload)
+    {
+        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(payload));
+        return $"SHA256:{Convert.ToHexString(hash).ToLowerInvariant()}";
+    }
+
+    public static string? ResolveOrVerifyDraftIntegrityHash(
+        FxRateSourceAuthority authority,
+        string? integrityHash,
+        string? sourceArtifactPayload,
+        string? benchmarkSeriesId)
+    {
+        string? normalizedHash = string.IsNullOrWhiteSpace(integrityHash) ? null : integrityHash.Trim();
+
+        if (!string.IsNullOrWhiteSpace(sourceArtifactPayload))
+        {
+            var computed = ComputeCanonicalSha256(sourceArtifactPayload);
+            if (normalizedHash != null &&
+                !string.Equals(normalizedHash, computed, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new DomainException(
+                    $"Supplied IntegrityHash '{normalizedHash}' does not match cryptographic SHA-256 digest '{computed}' computed from SourceArtifactPayload.",
+                    "FX_RATE_PROVENANCE_HASH_MISMATCH");
+            }
+
+            normalizedHash = computed;
+        }
+
+        if (IsOfficialAuthority(authority))
+        {
+            ValidateOfficialSeriesAndHash(benchmarkSeriesId, normalizedHash);
+        }
+
+        return normalizedHash;
+    }
+
+    public static void ValidateApprovalProvenance(
+        FxRateRecord rate,
+        string verificationNotes,
+        string? sourceArtifactPayload)
+    {
+        if (IsPlaceholderText(verificationNotes) || verificationNotes.Trim().Length < 10)
+        {
+            throw new DomainException(
+                "VerificationNotes must provide substantive non-placeholder review details (minimum 10 characters).",
+                "FX_RATE_PLACEHOLDER_VERIFICATION_NOTES");
+        }
+
+        if (!IsOfficialAuthority(rate.SourceAuthority))
+        {
+            return;
+        }
+
+        if (!string.IsNullOrWhiteSpace(sourceArtifactPayload))
+        {
+            var computed = ComputeCanonicalSha256(sourceArtifactPayload);
+            if (!string.IsNullOrWhiteSpace(rate.IntegrityHash) &&
+                !string.Equals(rate.IntegrityHash, computed, StringComparison.OrdinalIgnoreCase))
+            {
+                throw new DomainException(
+                    $"Approval SourceArtifactPayload SHA-256 '{computed}' does not match draft IntegrityHash '{rate.IntegrityHash}'.",
+                    "FX_RATE_PROVENANCE_HASH_MISMATCH");
+            }
+        }
+
+        ValidateOfficialSeriesAndHash(rate.BenchmarkSeriesId, rate.IntegrityHash);
+    }
+
+    private static void ValidateOfficialSeriesAndHash(string? benchmarkSeriesId, string? integrityHash)
+    {
+        if (string.IsNullOrWhiteSpace(benchmarkSeriesId) || IsPlaceholderText(benchmarkSeriesId))
+        {
+            throw new DomainException(
+                "Official central-bank FX bulletins (NRB/FRB/ECB/BOE) require a valid non-placeholder BenchmarkSeriesId. Use ManualApproved for non-bulletin governance overrides.",
+                "FX_RATE_OFFICIAL_SERIES_REQUIRED");
+        }
+
+        if (string.IsNullOrWhiteSpace(integrityHash) || !CanonicalSha256Regex.IsMatch(integrityHash))
+        {
+            throw new DomainException(
+                "Official central-bank FX bulletins (NRB/FRB/ECB/BOE) require a verifiable SHA-256 IntegrityHash ('SHA256:<64 hex>') or SourceArtifactPayload. Use ManualApproved for non-bulletin governance overrides.",
+                "FX_RATE_OFFICIAL_INTEGRITY_HASH_REQUIRED");
+        }
+
+        var hexPart = integrityHash.Substring("SHA256:".Length);
+        if (hexPart.ToLowerInvariant().Distinct().Count() <= 4)
+        {
+            throw new DomainException(
+                "Official FX IntegrityHash failed entropy validation (placeholder or repeated-character digest rejected).",
+                "FX_RATE_PLACEHOLDER_INTEGRITY_HASH");
+        }
+    }
+
+    private static bool IsPlaceholderText(string value)
+    {
+        var trimmed = value.Trim();
+        return PlaceholderTokens.Any(token =>
+            string.Equals(trimmed, token, StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Contains($"[{token}]", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.Contains($"<{token}>", StringComparison.OrdinalIgnoreCase) ||
+            trimmed.StartsWith($"{token}:", StringComparison.OrdinalIgnoreCase));
+    }
+}
 
 public sealed record CreateFxRateDraftCommand(
     string BaseCurrencyCode,
@@ -24,7 +146,8 @@ public sealed record CreateFxRateDraftCommand(
     string BulletinVersion,
     DateTime PublishedAtUtc,
     string? BenchmarkSeriesId = null,
-    string? IntegrityHash = null) : IRequest<FxRateRecordDto>;
+    string? IntegrityHash = null,
+    string? SourceArtifactPayload = null) : IRequest<FxRateRecordDto>;
 
 public sealed class CreateFxRateDraftCommandValidator : AbstractValidator<CreateFxRateDraftCommand>
 {
@@ -83,6 +206,12 @@ public sealed class CreateFxRateDraftCommandHandler : IRequestHandler<CreateFxRa
                 "FX_RATE_UNKNOWN_QUOTE_CURRENCY");
         }
 
+        var verifiedIntegrityHash = FxProvenanceValidationHelper.ResolveOrVerifyDraftIntegrityHash(
+            request.SourceAuthority,
+            request.IntegrityHash,
+            request.SourceArtifactPayload,
+            request.BenchmarkSeriesId);
+
         var record = FxRateRecord.CreateDraft(
             baseCode,
             quoteCode,
@@ -96,7 +225,7 @@ public sealed class CreateFxRateDraftCommandHandler : IRequestHandler<CreateFxRa
             request.BulletinVersion,
             request.PublishedAtUtc,
             request.BenchmarkSeriesId,
-            request.IntegrityHash);
+            verifiedIntegrityHash);
 
         record.CreatedBy = staffUserId;
         _db.FxRateRecords.Add(record);
@@ -112,7 +241,8 @@ public sealed record ApproveFxRateCommand(
     string VerificationNotes,
     bool SupersedeOverlapping = false,
     Guid? ExpectedActiveRateId = null,
-    long? ExpectedConfigRevision = null) : IRequest<FxRateRecordDto>;
+    long? ExpectedConfigRevision = null,
+    string? SourceArtifactPayload = null) : IRequest<FxRateRecordDto>;
 
 public sealed class ApproveFxRateCommandValidator : AbstractValidator<ApproveFxRateCommand>
 {
@@ -185,6 +315,13 @@ public sealed class ApproveFxRateCommandHandler : IRequestHandler<ApproveFxRateC
                         "FX_RATE_VERIFICATION_REQUIRED");
                 }
 
+                // MDM13-R03: Validate authoritative central-bank provenance (series ID + SHA-256 digest + non-placeholder evidence)
+                // BEFORE checking/mutating overlapping active rates so invalid official bulletins always fail closed 422.
+                FxProvenanceValidationHelper.ValidateApprovalProvenance(
+                    rate,
+                    request.VerificationNotes,
+                    request.SourceArtifactPayload);
+
                 var now = _dateTime.UtcNow;
 
                 var activeRates = await _db.FxRateRecords
@@ -215,6 +352,30 @@ public sealed class ApproveFxRateCommandHandler : IRequestHandler<ApproveFxRateC
                         throw new ConcurrencyException(
                             "FX_RATE_OVERLAPPING_ACTIVE_WINDOW",
                             $"An active VerifiedApproved FX rate ('{overlappingActive[0].BulletinVersion}') already covers an overlapping window for '{rate.BaseCurrencyCode}/{rate.QuoteCurrencyCode}' under '{rate.SourceAuthority}'. Pass SupersedeOverlapping=true to intentionally supersede it.");
+                    }
+
+                    // MDM13-R02 Safe Cutover Continuity Guard (aligned with MDM11-R02):
+                    // Reject future-effective supersessions that would deactivate an existing active rate
+                    // and create an uncovered gap between now (or active start) and the replacement's EffectiveFromUtc.
+                    foreach (var active in overlappingActive)
+                    {
+                        var continuityAnchorStart = active.EffectiveFromUtc > now ? active.EffectiveFromUtc : now;
+                        if (rate.EffectiveFromUtc > continuityAnchorStart)
+                        {
+                            throw new DomainException(
+                                $"Cannot supersede active FX rate '{active.BulletinVersion}' (effective {active.EffectiveFromUtc:O}..) with future-effective '{rate.BulletinVersion}' starting {rate.EffectiveFromUtc:O}, because interval [{continuityAnchorStart:O}, {rate.EffectiveFromUtc:O}) would lose active coverage. Use disjoint contiguous effective windows or immediate effective cutover.",
+                                "FX_RATE_SUPERSESSION_COVERAGE_GAP");
+                        }
+
+                        var activeEnd = active.EffectiveToUtc ?? DateTime.MaxValue;
+                        if (activeEnd > now &&
+                            rate.EffectiveToUtc.HasValue &&
+                            rate.EffectiveToUtc.Value < activeEnd)
+                        {
+                            throw new DomainException(
+                                $"Cannot supersede active FX rate '{active.BulletinVersion}' with bounded '{rate.BulletinVersion}' ending {rate.EffectiveToUtc.Value:O} earlier than existing coverage end {activeEnd:O}, which would leave a trailing coverage gap.",
+                                "FX_RATE_SUPERSESSION_COVERAGE_GAP");
+                        }
                     }
 
                     // Deactivate superseded rows FIRST and flush so PostgreSQL's non-deferred EXCLUDE USING gist
