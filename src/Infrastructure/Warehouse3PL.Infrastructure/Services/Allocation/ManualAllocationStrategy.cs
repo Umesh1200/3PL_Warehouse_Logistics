@@ -39,6 +39,7 @@ public class ManualAllocationStrategy : IAllocationStrategy
                 .ThenInclude(l => l.Zone)
             .Include(s => s.Lot)
             .Include(s => s.Item)
+            .Include(s => s.HandlingUnit)
             .Where(s => s.ClientId == request.ClientId &&
                         s.FacilityId == request.FacilityId &&
                         s.ItemId == request.ItemId &&
@@ -65,14 +66,7 @@ public class ManualAllocationStrategy : IAllocationStrategy
             return Array.Empty<StockOnHand>();
         }
 
-        var sorted = eligibleCandidates
-            .OrderBy(s => s.Location?.PickSequence ?? int.MaxValue)
-            .ThenBy(s => s.QtyAvailable >= request.QuantityRequested ? 0 : 1)
-            .ThenBy(s => s.QtyAvailable)
-            .ThenBy(s => s.Id)
-            .ToList();
-
-        return sorted;
+        return AllocationCandidateOrdering.OrderManual(eligibleCandidates, request);
     }
 }
 

@@ -2,8 +2,10 @@ using FluentValidation;
 using MediatR;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Enums;
+using Warehouse3PL.Domain.Exceptions;
 
 namespace Warehouse3PL.Application.Features.Putaway.Strategies.Commands.CreatePutawayStrategy;
 
@@ -32,14 +34,47 @@ public class CreatePutawayStrategyCommandValidator : AbstractValidator<CreatePut
 public class CreatePutawayStrategyCommandHandler : IRequestHandler<CreatePutawayStrategyCommand, PutawayStrategyRuleDto>
 {
     private readonly IApplicationDbContext _context;
+    private readonly ICurrentUserContext _currentUser;
 
-    public CreatePutawayStrategyCommandHandler(IApplicationDbContext context)
+    public CreatePutawayStrategyCommandHandler(
+        IApplicationDbContext context,
+        ICurrentUserContext currentUser)
     {
         _context = context;
+        _currentUser = currentUser;
     }
 
     public async Task<PutawayStrategyRuleDto> Handle(CreatePutawayStrategyCommand request, CancellationToken cancellationToken)
     {
+        if (!_currentUser.IsAuthenticated)
+        {
+            throw new UnauthorizedException("Authentication is required to manage putaway strategy rules.");
+        }
+
+        var isVerifiedSuperAdmin = _currentUser.IsSuperAdmin && _currentUser.UserType == UserType.Staff;
+        if (!isVerifiedSuperAdmin)
+        {
+            if (_currentUser.UserType != UserType.Staff)
+            {
+                throw new ForbiddenException("Only authorized warehouse staff can configure putaway strategy rules.");
+            }
+
+            if (!_currentUser.HasPermission(Permissions.Inbound.PutawayRules))
+            {
+                throw new ForbiddenException("Permission 'inbound:putaway:rules' is required to configure putaway strategy rules.");
+            }
+
+            if (!_currentUser.FacilityId.HasValue || _currentUser.FacilityId.Value != request.FacilityId)
+            {
+                throw new ForbiddenException($"Staff member is not authorized to configure putaway strategy rules in facility '{request.FacilityId}'.");
+            }
+
+            if (_currentUser.RequestedFacilityId.HasValue && _currentUser.RequestedFacilityId.Value != _currentUser.FacilityId.Value)
+            {
+                throw new ForbiddenException("Requested facility header does not match assigned facility.");
+            }
+        }
+
         var rule = new PutawayStrategyRule
         {
             ClientId = request.ClientId,

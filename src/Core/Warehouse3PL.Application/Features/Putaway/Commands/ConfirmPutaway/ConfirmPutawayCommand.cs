@@ -104,6 +104,37 @@ public class ConfirmPutawayCommandHandler : IRequestHandler<ConfirmPutawayComman
                     $"Destination location '{destination.LocationCode}' is not a suitable active storage location.");
             }
 
+            var destinationWithZone = await _context.Locations
+                .AsNoTracking()
+                .Include(l => l.Zone)
+                .FirstAsync(l => l.Id == destination.Id, cancellationToken);
+
+            var sourceStockId = await _context.StockOnHand
+                .AsNoTracking()
+                .Where(s =>
+                    s.ClientId == task.ClientId &&
+                    s.FacilityId == task.FacilityId &&
+                    s.ItemId == task.ItemId &&
+                    s.LocationId == task.SourceLocationId &&
+                    s.LotId == task.LotId)
+                .Select(s => (Guid?)s.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            await using var putawayLocks = await _context.AcquirePutawayExecutionLocksAsync(
+                sourceStockId, destinationWithZone.Id, cancellationToken);
+
+            if (_context.IsRelationalDatabase && _context is DbContext efDb)
+            {
+                await efDb.Entry(task).ReloadAsync(cancellationToken);
+                if (task.Status == PutawayTaskStatus.Completed)
+                {
+                    throw new ValidationException(nameof(request.TaskId), "This putaway task has already been completed.");
+                }
+            }
+
+            await PutawaySafetyValidator.ValidateDestinationSafetyAndCapacityAsync(
+                _context, destinationWithZone, task.Item, putawayQty, cancellationToken);
+
             // 1. Decrement Stock from Receiving/Source Location
             var sourceStock = await _context.StockOnHand
                 .FirstOrDefaultAsync(s =>

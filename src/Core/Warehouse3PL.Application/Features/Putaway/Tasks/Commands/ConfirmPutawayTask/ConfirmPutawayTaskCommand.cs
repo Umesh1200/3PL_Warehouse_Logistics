@@ -165,6 +165,32 @@ public class ConfirmPutawayTaskCommandHandler : IRequestHandler<ConfirmPutawayTa
 
             var actualLocation = scannedLoc;
 
+            var sourceStockId = await _context.StockOnHand
+                .AsNoTracking()
+                .Where(s =>
+                    s.ClientId == task.ClientId &&
+                    s.FacilityId == task.FacilityId &&
+                    s.ItemId == task.ItemId &&
+                    s.LocationId == task.SourceLocationId &&
+                    s.LotId == task.LotId)
+                .Select(s => (Guid?)s.Id)
+                .FirstOrDefaultAsync(cancellationToken);
+
+            await using var putawayLocks = await _context.AcquirePutawayExecutionLocksAsync(
+                sourceStockId, actualLocation.Id, cancellationToken);
+
+            if (_context.IsRelationalDatabase && _context is DbContext efDb)
+            {
+                await efDb.Entry(task).ReloadAsync(cancellationToken);
+                if (task.Status == PutawayTaskStatus.Completed)
+                {
+                    throw new ValidationException(nameof(request.TaskId), "This putaway task has already been completed.");
+                }
+            }
+
+            await PutawaySafetyValidator.ValidateDestinationSafetyAndCapacityAsync(
+                _context, actualLocation, task.Item, task.Quantity, cancellationToken);
+
             // 3. Inventory Conservation: Verify and decrement stock from source staging location
             var sourceStock = await _context.StockOnHand
                 .FirstOrDefaultAsync(s =>

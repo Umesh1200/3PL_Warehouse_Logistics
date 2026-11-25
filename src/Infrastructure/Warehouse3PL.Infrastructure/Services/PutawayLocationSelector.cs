@@ -69,7 +69,7 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
         }
 
         var incomingWeight = quantity * item.WeightKg;
-        var incomingVolume = quantity * (item.VolumeCm3 > 0 ? item.VolumeCm3 : (item.LengthCm * item.WidthCm * item.HeightCm));
+        var incomingVolume = quantity * ResolveItemVolumeCm3(item);
 
         var excludedSet = excludedLocationIds != null
             ? new HashSet<Guid>(excludedLocationIds)
@@ -95,12 +95,21 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
             return [];
         }
 
-        // 2. Query configured strategy rules for this tenant/facility
+        // 2. Query configured active strategy rules for this tenant/facility
         var strategyRules = await _context.PutawayStrategyRules
             .AsNoTracking()
-            .Where(r => r.FacilityId == facilityId && (r.ClientId == clientId || r.ClientId == Guid.Empty) && r.IsActive)
+            .Where(r => r.FacilityId == facilityId &&
+                        (r.ClientId == clientId || r.ClientId == Guid.Empty) &&
+                        r.IsActive &&
+                        !r.IsDeleted)
             .OrderBy(r => r.Sequence)
+            .ThenBy(r => r.Id)
             .ToListAsync(cancellationToken);
+
+        var effectiveRule = ResolveEffectiveRule(strategyRules, clientId, item);
+        bool preferConsolidation = effectiveRule?.PreferConsolidation ?? true;
+        bool allowsDynamicOverflow = strategyRules.Any(r =>
+            r.TempClassRequirement == item.StorageTempClass && r.AllowDynamicOverflow);
 
         // 3. Query existing stock in candidate locations to evaluate capacity and SKU consolidation
         var candidateIds = candidateLocations.Select(c => c.Id).ToHashSet();
@@ -142,13 +151,9 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
             {
                 // Ambient item: Prefer non-cold locations unless dynamic overflow allows cold room usage
                 var isColdStorage = zone != null && zone.ZoneType == WarehouseZoneType.ColdStorage;
-                if (isColdStorage)
+                if (isColdStorage && !allowsDynamicOverflow)
                 {
-                    var allowsOverflow = strategyRules.Any(r => r.AllowDynamicOverflow);
-                    if (!allowsOverflow)
-                    {
-                        continue; // Preserve cold space for refrigerated/frozen goods
-                    }
+                    continue; // Preserve cold space for refrigerated/frozen goods
                 }
             }
 
@@ -157,7 +162,7 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
             existingStockInBin ??= [];
 
             var currentWeight = existingStockInBin.Sum(s => s.TotalQuantity * s.Item.WeightKg);
-            var currentVolume = existingStockInBin.Sum(s => s.TotalQuantity * s.Item.VolumeCm3);
+            var currentVolume = existingStockInBin.Sum(s => s.TotalQuantity * ResolveItemVolumeCm3(s.Item));
 
             if (loc.MaxWeightKg.HasValue && (currentWeight + incomingWeight) > loc.MaxWeightKg.Value)
             {
@@ -173,24 +178,45 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
             decimal score = 50m;
             var reasons = new List<string>();
 
-            // 1. Item-Location Affinity / Consolidation
-            var hasSameSku = existingStockInBin.Any(s => s.ItemId == itemId);
-            var hasSameLot = lotId.HasValue && existingStockInBin.Any(s => s.ItemId == itemId && s.LotId == lotId);
+            // 1. Item-Location Affinity / Consolidation governed by effective PutawayStrategyRule.PreferConsolidation
+            var hasSameSku = existingStockInBin.Any(s => s.ItemId == itemId && s.TotalQuantity > 0m);
+            var hasSameLot = lotId.HasValue && existingStockInBin.Any(s => s.ItemId == itemId && s.LotId == lotId && s.TotalQuantity > 0m);
+            var hasAnyStock = existingStockInBin.Any(s => s.TotalQuantity > 0m);
 
-            if (hasSameLot)
+            if (preferConsolidation)
             {
-                score += 120m;
-                reasons.Add("Consolidation with identical SKU and Lot");
+                if (hasSameLot)
+                {
+                    score += 120m;
+                    reasons.Add("Consolidation with identical SKU and Lot");
+                }
+                else if (hasSameSku)
+                {
+                    score += 100m;
+                    reasons.Add("Consolidation with existing SKU stock");
+                }
+                else if (!hasAnyStock)
+                {
+                    score += 20m;
+                    reasons.Add("Empty bin available");
+                }
             }
-            else if (hasSameSku)
+            else
             {
-                score += 100m;
-                reasons.Add("Consolidation with existing SKU stock");
-            }
-            else if (existingStockInBin.Count == 0)
-            {
-                score += 20m;
-                reasons.Add("Empty bin available");
+                if (!hasAnyStock)
+                {
+                    score += 100m;
+                    reasons.Add("Empty bin preferred (consolidation disabled by putaway strategy)");
+                }
+                else if (hasSameLot || hasSameSku)
+                {
+                    reasons.Add("Fallback occupied SKU bin available with remaining capacity");
+                }
+                else
+                {
+                    score -= 10m;
+                    reasons.Add("Mixed-SKU bin penalized (consolidation disabled)");
+                }
             }
 
             // 2. ABC Velocity Routing
@@ -228,13 +254,12 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
             }
 
             // 3. Custom Strategy Rule Adjustments
-            foreach (var rule in strategyRules)
+            if (effectiveRule != null &&
+                effectiveRule.TargetVelocity.HasValue &&
+                (int)effectiveRule.TargetVelocity.Value == (int)item.AbcVelocity)
             {
-                if (rule.TargetVelocity.HasValue && (int)rule.TargetVelocity.Value == (int)item.AbcVelocity)
-                {
-                    score += 15m;
-                    reasons.Add($"Matched strategy rule '{rule.RuleName}'");
-                }
+                score += 15m;
+                reasons.Add($"Matched strategy rule '{effectiveRule.RuleName}'");
             }
 
             var reasonSummary = reasons.Count > 0 ? string.Join("; ", reasons) : "Standard available capacity";
@@ -250,9 +275,39 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
 
         return recommendations
             .OrderByDescending(r => r.FitScore)
+            .ThenBy(r => r.LocationCode, StringComparer.Ordinal)
+            .ThenBy(r => r.LocationId)
             .Take(10)
             .ToList();
     }
+
+    private static PutawayStrategyRule? ResolveEffectiveRule(
+        List<PutawayStrategyRule> rules,
+        Guid clientId,
+        Item item)
+    {
+        if (rules.Count == 0)
+        {
+            return null;
+        }
+
+        return rules
+            .OrderBy(r => r.ClientId == clientId ? 0 : 1)
+            .ThenBy(r => r.TempClassRequirement == item.StorageTempClass ? 0 : 1)
+            .ThenBy(r => r.TargetVelocity.HasValue && (int)r.TargetVelocity.Value == (int)item.AbcVelocity
+                ? 0
+                : !r.TargetVelocity.HasValue
+                    ? 1
+                    : 2)
+            .ThenBy(r => r.Sequence)
+            .ThenBy(r => r.Id)
+            .FirstOrDefault();
+    }
+
+    private static decimal ResolveItemVolumeCm3(Item item) =>
+        item.VolumeCm3 > 0m
+            ? item.VolumeCm3
+            : item.LengthCm * item.WidthCm * item.HeightCm;
 
     // IPutawayRecommendationService implementation for backwards compatibility
     public Task<List<PutawayRecommendation>> RecommendLocationsAsync(

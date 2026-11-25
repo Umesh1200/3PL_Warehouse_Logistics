@@ -3,6 +3,7 @@ using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Application.Common.Security;
+using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -38,6 +39,16 @@ public class AllocateOutboundOrderCommandHandler : IRequestHandler<AllocateOutbo
         CancellationToken cancellationToken)
     {
         _outboundAuth.EnsureStaffOperationalIdentity(nameof(AllocateOutboundOrderCommand));
+
+        if (!_currentUser.IsSuperAdmin && !_currentUser.HasPermission(Permissions.Outbound.OrdersAllocate))
+        {
+            throw new ForbiddenException("Permission 'outbound:orders:allocate' is required to allocate outbound orders or apply allocation strategy overrides.");
+        }
+
+        if (request.StrategyOverride.HasValue && !Enum.IsDefined(typeof(AllocationStrategyType), request.StrategyOverride.Value))
+        {
+            throw new ValidationException(nameof(request.StrategyOverride), $"Invalid allocation strategy override '{request.StrategyOverride.Value}'.");
+        }
 
         var order = await _context.OutboundOrders
             .AsNoTracking()

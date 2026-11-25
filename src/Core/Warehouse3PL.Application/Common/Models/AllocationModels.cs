@@ -19,6 +19,7 @@ public class AllocationRequest
     public DateTime? MinExpiryDateUtc { get; set; }
 
     public AllocationPolicy? Policy { get; set; }
+    public AllocationStrategyType? StrategyOverride { get; set; }
 
     // Manual designation criteria
     public Guid? PreferredLocationId { get; set; }

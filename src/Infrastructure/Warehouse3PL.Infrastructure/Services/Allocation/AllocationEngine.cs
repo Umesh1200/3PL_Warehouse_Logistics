@@ -34,14 +34,19 @@ public class AllocationEngine : IAllocationEngine
         AllocationRequest request,
         CancellationToken cancellationToken = default)
     {
+        if (request.StrategyOverride.HasValue && !Enum.IsDefined(typeof(AllocationStrategyType), request.StrategyOverride.Value))
+        {
+            throw new ValidationException(nameof(request.StrategyOverride), $"Invalid allocation strategy override '{request.StrategyOverride.Value}'.");
+        }
+
         // 1. Resolve Policy if not provided
         var policy = request.Policy ?? await ResolvePolicyAsync(request.ClientId, request.FacilityId, request.ItemId, cancellationToken);
         request.Policy = policy;
 
-        // 2. Determine strategy (Manual if designation criteria set, otherwise policy default, fallback FIFO)
+        // 2. Determine strategy (Manual if designation criteria set, otherwise explicit validated override, otherwise policy default)
         var strategyType = request.PreferredLocationId.HasValue || request.PreferredLotId.HasValue
             ? AllocationStrategyType.Manual
-            : policy.DefaultStrategy;
+            : (request.StrategyOverride ?? policy.DefaultStrategy);
 
         var strategy = _strategyResolver.GetStrategy(strategyType);
 
@@ -80,6 +85,7 @@ public class AllocationEngine : IAllocationEngine
                 LocationCode = candidate.Location?.LocationCode ?? string.Empty,
                 LotId = candidate.LotId,
                 LotNumber = candidate.Lot?.LotNumber,
+                LpnCode = candidate.LpnCode ?? candidate.HandlingUnit?.LpnCode,
                 QuantityAllocated = toAllocate,
                 AvailableInBinBefore = available,
                 AvailableInBinRemaining = available - toAllocate,
@@ -146,6 +152,11 @@ public class AllocationEngine : IAllocationEngine
         AllocationStrategyType? strategyOverride = null,
         CancellationToken cancellationToken = default)
     {
+        if (strategyOverride.HasValue && !Enum.IsDefined(typeof(AllocationStrategyType), strategyOverride.Value))
+        {
+            throw new ValidationException(nameof(strategyOverride), $"Invalid allocation strategy override '{strategyOverride.Value}'.");
+        }
+
         var order = await _context.OutboundOrders
             .AsNoTracking()
             .Include(o => o.Lines)
@@ -185,10 +196,6 @@ public class AllocationEngine : IAllocationEngine
         foreach (var line in activeLines)
         {
             var policy = await ResolvePolicyAsync(order.ClientId, order.FacilityId, line.ItemId, cancellationToken);
-            if (strategyOverride.HasValue)
-            {
-                policy.DefaultStrategy = strategyOverride.Value;
-            }
 
             var request = new AllocationRequest
             {
@@ -200,7 +207,8 @@ public class AllocationEngine : IAllocationEngine
                 QuantityRequested = line.RemainingDemand,
                 RequiredLotNumber = line.RequiredLotNumber,
                 MinExpiryDateUtc = line.MinExpiryDateUtc,
-                Policy = policy
+                Policy = policy,
+                StrategyOverride = strategyOverride
             };
 
             var linePlan = await PlanLineAllocationAsync(request, cancellationToken);

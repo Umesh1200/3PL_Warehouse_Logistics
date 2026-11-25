@@ -335,6 +335,125 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         return NoOpAsyncDisposable.Instance;
     }
 
+    public async Task<IAsyncDisposable> AcquireStockAllocationLocksAsync(
+        IReadOnlyCollection<Guid> stockOnHandIds,
+        CancellationToken cancellationToken = default)
+    {
+        var sortedIds = stockOnHandIds
+            .Where(id => id != Guid.Empty)
+            .Distinct()
+            .OrderBy(id => id)
+            .ToList();
+
+        if (sortedIds.Count == 0)
+        {
+            return NoOpAsyncDisposable.Instance;
+        }
+
+        if (!Database.IsRelational())
+        {
+            var gates = new List<SemaphoreSlim>(sortedIds.Count);
+            try
+            {
+                foreach (var stockId in sortedIds)
+                {
+                    var gate = InMemoryBillingLocks.GetOrAdd($"STOCKALLOC:{stockId:N}", _ => new SemaphoreSlim(1, 1));
+                    await gate.WaitAsync(cancellationToken);
+                    gates.Add(gate);
+                }
+                return new MultiSemaphoreReleaser(gates);
+            }
+            catch
+            {
+                for (int i = gates.Count - 1; i >= 0; i--) gates[i].Release();
+                throw;
+            }
+        }
+
+        if (Database.CurrentTransaction != null)
+        {
+            foreach (var stockId in sortedIds)
+            {
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM stock_on_hand WHERE stock_id = {stockId} FOR UPDATE",
+                    cancellationToken);
+            }
+        }
+
+        return NoOpAsyncDisposable.Instance;
+    }
+
+    public async Task<IAsyncDisposable> AcquirePutawayExecutionLocksAsync(
+        Guid? sourceStockId,
+        Guid destinationLocationId,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Database.IsRelational())
+        {
+            var gates = new List<SemaphoreSlim>(2);
+            try
+            {
+                if (destinationLocationId != Guid.Empty)
+                {
+                    var locGate = InMemoryBillingLocks.GetOrAdd($"PUTAWAYLOC:{destinationLocationId:N}", _ => new SemaphoreSlim(1, 1));
+                    await locGate.WaitAsync(cancellationToken);
+                    gates.Add(locGate);
+                }
+
+                if (sourceStockId.HasValue && sourceStockId.Value != Guid.Empty)
+                {
+                    var stockGate = InMemoryBillingLocks.GetOrAdd($"PUTAWAYSOURCESTK:{sourceStockId.Value:N}", _ => new SemaphoreSlim(1, 1));
+                    await stockGate.WaitAsync(cancellationToken);
+                    gates.Add(stockGate);
+                }
+
+                return new MultiSemaphoreReleaser(gates);
+            }
+            catch
+            {
+                for (int i = gates.Count - 1; i >= 0; i--) gates[i].Release();
+                throw;
+            }
+        }
+
+        if (Database.CurrentTransaction != null)
+        {
+            if (destinationLocationId != Guid.Empty)
+            {
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM locations WHERE location_id = {destinationLocationId} FOR UPDATE",
+                    cancellationToken);
+            }
+
+            if (sourceStockId.HasValue && sourceStockId.Value != Guid.Empty)
+            {
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM stock_on_hand WHERE stock_id = {sourceStockId.Value} FOR UPDATE",
+                    cancellationToken);
+            }
+        }
+
+        return NoOpAsyncDisposable.Instance;
+    }
+
+    private sealed class MultiSemaphoreReleaser(List<SemaphoreSlim> semaphores) : IAsyncDisposable
+    {
+        private int _released;
+
+        public ValueTask DisposeAsync()
+        {
+            if (Interlocked.Exchange(ref _released, 1) == 0)
+            {
+                for (int i = semaphores.Count - 1; i >= 0; i--)
+                {
+                    semaphores[i].Release();
+                }
+            }
+
+            return ValueTask.CompletedTask;
+        }
+    }
+
     private sealed class SemaphoreReleaser(SemaphoreSlim semaphore) : IAsyncDisposable
     {
         private int _released;

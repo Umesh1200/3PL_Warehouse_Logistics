@@ -4804,6 +4804,16 @@ try
 
     await Mdm03PostgresCheck.RunAsync(interceptor => CreateDb(operationalConn, user, interceptor));
 
+    await Mdm04PostgresCheck.RunAsync(
+        () => CreateDb(operationalConn, user),
+        p74Client,
+        client1Id,
+        facilityId,
+        p74FacB,
+        StaffReq,
+        bSupId,
+        claims => TestAuthHandler.CustomClaims = claims);
+
     if (Directory.Exists(pgPodStorageDir))
     {
         try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }

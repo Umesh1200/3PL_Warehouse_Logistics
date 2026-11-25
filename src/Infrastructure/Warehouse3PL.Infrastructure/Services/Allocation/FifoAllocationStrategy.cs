@@ -40,6 +40,7 @@ public class FifoAllocationStrategy : IAllocationStrategy
                 .ThenInclude(l => l.Zone)
             .Include(s => s.Lot)
             .Include(s => s.Item)
+            .Include(s => s.HandlingUnit)
             .Where(s => s.ClientId == request.ClientId &&
                         s.FacilityId == request.FacilityId &&
                         s.ItemId == request.ItemId &&
@@ -56,20 +57,7 @@ public class FifoAllocationStrategy : IAllocationStrategy
             return Array.Empty<StockOnHand>();
         }
 
-        // 3. Multi-tiered deterministic FIFO ordering:
-        //    Tier 1: ReceivedAtUtc ASC (fallback to CreatedAt)
-        //    Tier 2: Location.PickSequence ASC
-        //    Tier 3: Bin-consolidation preference (Single-bin satisfaction first, then residual cleanout QtyAvailable ASC)
-        //    Tier 4: StockOnHand.Id ASC as stable final tie-breaker
-        var sortedCandidates = eligibleCandidates
-            .OrderBy(s => s.ReceivedAtUtc ?? s.CreatedAt)
-            .ThenBy(s => s.Location?.PickSequence ?? int.MaxValue)
-            .ThenBy(s => s.QtyAvailable >= request.QuantityRequested ? 0 : 1)
-            .ThenBy(s => s.QtyAvailable)
-            .ThenBy(s => s.Id)
-            .ToList();
-
-        return sortedCandidates;
+        return AllocationCandidateOrdering.OrderFifo(eligibleCandidates, request);
     }
 }
 

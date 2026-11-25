@@ -39,7 +39,12 @@ public class AllocationExecutionService : IAllocationExecutionService
         Guid? userId = null,
         CancellationToken cancellationToken = default)
     {
-        const int maxAttempts = 3;
+        if (strategyOverride.HasValue && !Enum.IsDefined(typeof(AllocationStrategyType), strategyOverride.Value))
+        {
+            throw new ValidationException(nameof(strategyOverride), $"Invalid allocation strategy override '{strategyOverride.Value}'.");
+        }
+
+        const int maxAttempts = 5;
 
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
@@ -119,64 +124,108 @@ public class AllocationExecutionService : IAllocationExecutionService
                         ItemId = line.ItemId,
                         QuantityRequested = line.RemainingDemand,
                         RequiredLotNumber = line.RequiredLotNumber,
-                        MinExpiryDateUtc = line.MinExpiryDateUtc
+                        MinExpiryDateUtc = line.MinExpiryDateUtc,
+                        StrategyOverride = strategyOverride
                     };
 
                     var linePlan = await _allocationEngine.PlanLineAllocationAsync(request, cancellationToken);
+                    var attemptedDepletion = false;
 
-                    foreach (var candidatePlan in linePlan.CandidateAllocations)
+                    async Task ReserveFromPlanAsync(LineAllocationPlan activePlan, AllocationRequest activeRequest)
                     {
-                        if (line.RemainingDemand <= 0) break;
+                        var candidateStockIds = activePlan.CandidateAllocations
+                            .Select(c => c.StockOnHandId)
+                            .ToList();
 
-                        // Revalidate candidate stock balance inside transaction
-                        var stock = await _context.StockOnHand
-                            .Include(s => s.Location)
-                                .ThenInclude(l => l.Locks)
-                            .Include(s => s.Location)
-                                .ThenInclude(l => l.Zone)
-                            .Include(s => s.Lot)
-                            .Include(s => s.Item)
-                            .FirstOrDefaultAsync(s => s.Id == candidatePlan.StockOnHandId, cancellationToken);
+                        await using var stockLocks = await _context.AcquireStockAllocationLocksAsync(candidateStockIds, cancellationToken);
 
-                        if (stock == null) continue;
+                        foreach (var candidatePlan in activePlan.CandidateAllocations)
+                        {
+                            if (line.RemainingDemand <= 0) break;
 
-                        var eligibility = _candidateFilter.Evaluate(stock, request);
-                        if (!eligibility.IsEligible) continue;
+                            // Revalidate candidate stock balance inside transaction after locking
+                            var stock = await _context.StockOnHand
+                                .Include(s => s.Location)
+                                    .ThenInclude(l => l.Locks)
+                                .Include(s => s.Location)
+                                    .ThenInclude(l => l.Zone)
+                                .Include(s => s.Lot)
+                                .Include(s => s.Item)
+                                .Include(s => s.HandlingUnit)
+                                .FirstOrDefaultAsync(s => s.Id == candidatePlan.StockOnHandId, cancellationToken);
 
-                        var availableNow = stock.QtyAvailable;
-                        if (availableNow <= 0) continue;
+                            if (stock == null)
+                            {
+                                attemptedDepletion = true;
+                                continue;
+                            }
 
-                        var qtyToReserve = Math.Min(line.RemainingDemand, Math.Min(candidatePlan.QuantityAllocated, availableNow));
-                        if (qtyToReserve <= 0) continue;
+                            var eligibility = _candidateFilter.Evaluate(stock, activeRequest);
+                            if (!eligibility.IsEligible) continue;
 
-                        // Atomic hard reservation mutation
-                        stock.QtyAvailable -= qtyToReserve;
-                        stock.QtyAllocated += qtyToReserve;
-                        stock.Version++;
+                            var availableNow = stock.QtyAvailable;
+                            if (availableNow < candidatePlan.QuantityAllocated)
+                            {
+                                attemptedDepletion = true;
+                            }
 
-                        var allocation = new InventoryAllocation
+                            if (availableNow <= 0) continue;
+
+                            var qtyToReserve = Math.Min(line.RemainingDemand, Math.Min(candidatePlan.QuantityAllocated, availableNow));
+                            if (qtyToReserve <= 0) continue;
+
+                            // Atomic hard reservation mutation
+                            stock.QtyAvailable -= qtyToReserve;
+                            stock.QtyAllocated += qtyToReserve;
+                            stock.Version++;
+
+                            var allocation = new InventoryAllocation
+                            {
+                                ClientId = order.ClientId,
+                                FacilityId = order.FacilityId,
+                                OutboundOrderId = order.Id,
+                                OutboundOrderLineId = line.Id,
+                                StockOnHandId = stock.Id,
+                                ItemId = line.ItemId,
+                                LocationId = stock.LocationId,
+                                LotId = stock.LotId,
+                                LpnCode = candidatePlan.LpnCode ?? stock.LpnCode ?? stock.HandlingUnit?.LpnCode,
+                                QuantityRequested = line.QuantityOrdered,
+                                QuantityAllocated = qtyToReserve,
+                                QuantityReleased = 0m,
+                                Status = AllocationStatus.Allocated,
+                                StrategyUsed = activePlan.StrategyUsed,
+                                AllocatedAtUtc = DateTime.UtcNow,
+                                AllocatedByUserId = userId
+                            };
+
+                            _context.InventoryAllocations.Add(allocation);
+                            line.Allocations.Add(allocation);
+                            line.Allocate(qtyToReserve);
+                        }
+                    }
+
+                    await ReserveFromPlanAsync(linePlan, request);
+
+                    // If concurrent contention depleted a planned bin mid-flight while remaining demand exists,
+                    // re-plan once with updated remaining demand to pick up fallback eligible stock cleanly.
+                    if (line.RemainingDemand > 0 && attemptedDepletion)
+                    {
+                        var fallbackRequest = new AllocationRequest
                         {
                             ClientId = order.ClientId,
                             FacilityId = order.FacilityId,
                             OutboundOrderId = order.Id,
                             OutboundOrderLineId = line.Id,
-                            StockOnHandId = stock.Id,
                             ItemId = line.ItemId,
-                            LocationId = stock.LocationId,
-                            LotId = stock.LotId,
-                            LpnCode = candidatePlan.LpnCode,
-                            QuantityRequested = line.QuantityOrdered,
-                            QuantityAllocated = qtyToReserve,
-                            QuantityReleased = 0m,
-                            Status = AllocationStatus.Allocated,
-                            StrategyUsed = linePlan.StrategyUsed,
-                            AllocatedAtUtc = DateTime.UtcNow,
-                            AllocatedByUserId = userId
+                            QuantityRequested = line.RemainingDemand,
+                            RequiredLotNumber = line.RequiredLotNumber,
+                            MinExpiryDateUtc = line.MinExpiryDateUtc,
+                            StrategyOverride = strategyOverride
                         };
 
-                        _context.InventoryAllocations.Add(allocation);
-                        line.Allocations.Add(allocation);
-                        line.Allocate(qtyToReserve);
+                        var fallbackPlan = await _allocationEngine.PlanLineAllocationAsync(fallbackRequest, cancellationToken);
+                        await ReserveFromPlanAsync(fallbackPlan, fallbackRequest);
                     }
 
                     // Record shortage if demand could not be completely satisfied
@@ -219,6 +268,7 @@ public class AllocationExecutionService : IAllocationExecutionService
             catch (DbUpdateConcurrencyException)
             {
                 await _context.RollbackTransactionAsync(cancellationToken);
+                _context.ClearChangeTracker();
 
                 if (attempt >= maxAttempts)
                 {
