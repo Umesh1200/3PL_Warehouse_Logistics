@@ -294,18 +294,38 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
 
     public async Task<TResult> ExecuteInTransactionAsync<TResult>(Func<Task<TResult>> action, CancellationToken cancellationToken = default)
     {
-        await BeginTransactionAsync(cancellationToken);
-        try
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
         {
-            var result = await action();
-            await CommitTransactionAsync(cancellationToken);
-            return result;
+            return await action();
         }
-        catch
+
+        if (!Database.IsRelational())
         {
-            await RollbackTransactionAsync(cancellationToken);
-            throw;
+            return await action();
         }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt)
+            {
+                ClearChangeTracker();
+            }
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                var result = await action();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
     }
 
     public Task<IAsyncDisposable> AcquirePackIdempotencyLockAsync(

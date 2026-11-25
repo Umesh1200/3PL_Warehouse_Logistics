@@ -85,25 +85,27 @@ public sealed class UpdateFacilityCommandHandler : IRequestHandler<UpdateFacilit
                 request.DefaultLegalEntityId,
                 cancellationToken);
 
-        facility.Name = request.Name.Trim();
-        facility.AddressLine1 = string.IsNullOrWhiteSpace(request.AddressLine1) ? null : request.AddressLine1.Trim();
-        facility.AddressLine2 = string.IsNullOrWhiteSpace(request.AddressLine2) ? null : request.AddressLine2.Trim();
-        facility.City = string.IsNullOrWhiteSpace(request.City) ? null : request.City.Trim();
-        facility.StateOrProvince = string.IsNullOrWhiteSpace(request.StateOrProvince) ? null : request.StateOrProvince.Trim();
-        facility.PostalCode = string.IsNullOrWhiteSpace(request.PostalCode) ? null : request.PostalCode.Trim();
-        facility.CountryCode = normalizedCountry;
-        facility.Timezone = normalizedTz;
-        facility.DefaultLegalEntityId = request.DefaultLegalEntityId;
-        facility.DefaultCurrencyCode = normalizedCurrency;
-        facility.ContactEmail = string.IsNullOrWhiteSpace(request.ContactEmail) ? null : request.ContactEmail.Trim();
-        facility.ContactPhone = string.IsNullOrWhiteSpace(request.ContactPhone) ? null : request.ContactPhone.Trim();
-        facility.TotalAreaSqM = request.TotalAreaSqM;
-        facility.DockDoorCount = request.DockDoorCount;
-        facility.IsActive = request.IsActive;
-        facility.UpdatedBy = staffUserId;
+        return await _db.ExecuteInTransactionAsync(async () =>
+        {
+            facility.Name = request.Name.Trim();
+            facility.AddressLine1 = string.IsNullOrWhiteSpace(request.AddressLine1) ? null : request.AddressLine1.Trim();
+            facility.AddressLine2 = string.IsNullOrWhiteSpace(request.AddressLine2) ? null : request.AddressLine2.Trim();
+            facility.City = string.IsNullOrWhiteSpace(request.City) ? null : request.City.Trim();
+            facility.StateOrProvince = string.IsNullOrWhiteSpace(request.StateOrProvince) ? null : request.StateOrProvince.Trim();
+            facility.PostalCode = string.IsNullOrWhiteSpace(request.PostalCode) ? null : request.PostalCode.Trim();
+            facility.CountryCode = normalizedCountry;
+            facility.Timezone = normalizedTz;
+            facility.DefaultLegalEntityId = request.DefaultLegalEntityId;
+            facility.DefaultCurrencyCode = normalizedCurrency;
+            facility.ContactEmail = string.IsNullOrWhiteSpace(request.ContactEmail) ? null : request.ContactEmail.Trim();
+            facility.ContactPhone = string.IsNullOrWhiteSpace(request.ContactPhone) ? null : request.ContactPhone.Trim();
+            facility.TotalAreaSqM = request.TotalAreaSqM;
+            facility.DockDoorCount = request.DockDoorCount;
+            facility.IsActive = request.IsActive;
+            facility.UpdatedBy = staffUserId;
 
-        await _db.SaveChangesAsync(cancellationToken);
-
-        return FacilityProjections.ToDto(facility);
+            await _db.SaveChangesAsync(cancellationToken);
+            return FacilityProjections.ToDto(facility);
+        }, cancellationToken);
     }
 }
