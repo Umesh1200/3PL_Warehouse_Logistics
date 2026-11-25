@@ -322,7 +322,155 @@ internal static class Mdm11PostgresCheck
                 throw new InvalidOperationException($"MDM-1.1 PostgreSQL concurrent supersession race expected [200, 409], got [{string.Join(", ", supRace)}]");
             }
 
-            Console.WriteLine("PASS PostgreSQL MDM-1.1 Migration, btree_gist Exclusion, Idempotent Seed, Concurrent Approval & Supersession Races, Rollback & JWT Security verified cleanly.");
+            // 6. MDM11-R02 & MDM11-R03 Live PostgreSQL Verification:
+            //    a) Reject malformed/null/contradictory predicate JSON & naive Unspecified UTC timestamps
+            var badPredResp = await http.SendAsync(Authed(
+                HttpMethod.Post,
+                "/api/v1/compliance-policies",
+                jwtMgr,
+                new
+                {
+                    countryCode = "NP",
+                    policyCode = "PG-BAD-PRED",
+                    title = "Bad Predicate",
+                    statutorySourceRef = "Ref",
+                    officialNoticeCitation = "Citation",
+                    applicabilityPredicateJson = """{"requiredBusinessClassifications":null,"requiresTaxpayerMandateFlag":true}""",
+                    enforcementMode = ComplianceEnforcementMode.MandatoryFailClosed,
+                    effectiveFromUtc = DateTime.UtcNow.AddDays(-1),
+                    effectiveToUtc = (DateTime?)null
+                }));
+            if (badPredResp.StatusCode != HttpStatusCode.UnprocessableEntity)
+                throw new InvalidOperationException($"Expected 422 for null predicate array on PG HTTP, got {badPredResp.StatusCode}");
+
+            var badUtcResp = await http.SendAsync(Authed(
+                HttpMethod.Post,
+                "/api/v1/compliance-policies",
+                jwtMgr,
+                new
+                {
+                    countryCode = "NP",
+                    policyCode = "PG-BAD-UTC",
+                    title = "Bad UTC",
+                    statutorySourceRef = "Ref",
+                    officialNoticeCitation = "Citation",
+                    applicabilityPredicateJson = """{"requiresTaxpayerMandateFlag":true}""",
+                    enforcementMode = ComplianceEnforcementMode.MandatoryFailClosed,
+                    effectiveFromUtc = "2026-06-01T00:00:00",
+                    effectiveToUtc = (string?)null
+                }));
+            if (badUtcResp.StatusCode != HttpStatusCode.BadRequest)
+                throw new InvalidOperationException($"Expected 400 for Unspecified DateTimeKind on PG HTTP, got {badUtcResp.StatusCode}");
+
+            //    b) Future-dated overlapping replacement rejected (coverage gap guard), disjoint future replacement allowed,
+            //       immediate replacement succeeds and historical as-of evaluation recovers Superseded v1!
+            var pgNow = DateTime.UtcNow;
+            var predJson = """{"requiresTaxpayerMandateFlag":true,"treatUnlistedValuesAsIndeterminate":true}""";
+
+            var cV1 = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/compliance-policies", jwtMgr, new
+            {
+                countryCode = "NP", policyCode = "PG-TEMPORAL", title = "Temporal v1",
+                statutorySourceRef = "Statute T1", officialNoticeCitation = "Notice T1",
+                applicabilityPredicateJson = predJson, enforcementMode = ComplianceEnforcementMode.MandatoryFailClosed,
+                effectiveFromUtc = pgNow.AddDays(-40), effectiveToUtc = (DateTime?)null
+            }));
+            var tV1 = (await cV1.Content.ReadFromJsonAsync<CountryCompliancePolicyDto>(JsonOptions))!;
+            if ((await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/compliance-policies/{tV1.Id}/approve", jwtMgr,
+                new { evidenceVerified = true, verificationEvidenceNotes = "PG temporal v1 baseline approval" }))).StatusCode != HttpStatusCode.OK)
+                throw new InvalidOperationException("Failed approving PG temporal v1.");
+
+            var cFutureOverlap = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/compliance-policies", jwtMgr, new
+            {
+                countryCode = "NP", policyCode = "PG-TEMPORAL", title = "Future Overlap v2",
+                statutorySourceRef = "Statute T2", officialNoticeCitation = "Notice T2",
+                applicabilityPredicateJson = predJson, enforcementMode = ComplianceEnforcementMode.MandatoryFailClosed,
+                effectiveFromUtc = pgNow.AddDays(30), effectiveToUtc = (DateTime?)null
+            }));
+            var tFutureOverlap = (await cFutureOverlap.Content.ReadFromJsonAsync<CountryCompliancePolicyDto>(JsonOptions))!;
+            var gapResp = await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/compliance-policies/{tFutureOverlap.Id}/approve", jwtMgr, new
+            {
+                evidenceVerified = true,
+                verificationEvidenceNotes = "Attempt overlapping future supersession",
+                supersedeOverlapping = true
+            }));
+            if (gapResp.StatusCode != HttpStatusCode.UnprocessableEntity)
+                throw new InvalidOperationException($"Expected 422 coverage gap rejection for future overlapping supersession, got {gapResp.StatusCode}");
+
+            // Immediate replacement v3 supersedes v1 atomically; historical evaluation at pgNow-20d recovers v1!
+            var cImmediateV3 = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/compliance-policies", jwtMgr, new
+            {
+                countryCode = "NP", policyCode = "PG-TEMPORAL", title = "Immediate Replacement v3",
+                statutorySourceRef = "Statute T3", officialNoticeCitation = "Notice T3",
+                applicabilityPredicateJson = predJson, enforcementMode = ComplianceEnforcementMode.AdvisoryWarning,
+                effectiveFromUtc = pgNow.AddSeconds(-2), effectiveToUtc = (DateTime?)null
+            }));
+            var tImmediateV3 = (await cImmediateV3.Content.ReadFromJsonAsync<CountryCompliancePolicyDto>(JsonOptions))!;
+            var immResp = await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/compliance-policies/{tImmediateV3.Id}/approve", jwtMgr, new
+            {
+                evidenceVerified = true,
+                verificationEvidenceNotes = "Immediate PG cutover verified.",
+                supersedeOverlapping = true,
+                expectedActivePolicyId = tV1.Id
+            }));
+            if (immResp.StatusCode != HttpStatusCode.OK)
+                throw new InvalidOperationException($"Immediate PG replacement failed with {immResp.StatusCode}");
+
+            // Disjoint future-dated schedule on a clean policy code: [now-40d, now+30d) + [now+30d, null) BOTH active simultaneously in PostgreSQL!
+            var cDisjoint1 = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/compliance-policies", jwtMgr, new
+            {
+                countryCode = "NP", policyCode = "PG-DISJOINT", title = "Disjoint v1",
+                statutorySourceRef = "Statute D1", officialNoticeCitation = "Notice D1",
+                applicabilityPredicateJson = predJson, enforcementMode = ComplianceEnforcementMode.MandatoryFailClosed,
+                effectiveFromUtc = pgNow.AddDays(-40), effectiveToUtc = pgNow.AddDays(30)
+            }));
+            var dV1 = (await cDisjoint1.Content.ReadFromJsonAsync<CountryCompliancePolicyDto>(JsonOptions))!;
+            var cDisjoint2 = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/compliance-policies", jwtMgr, new
+            {
+                countryCode = "NP", policyCode = "PG-DISJOINT", title = "Disjoint Future v2",
+                statutorySourceRef = "Statute D2", officialNoticeCitation = "Notice D2",
+                applicabilityPredicateJson = predJson, enforcementMode = ComplianceEnforcementMode.ConditionalRequired,
+                effectiveFromUtc = pgNow.AddDays(30), effectiveToUtc = (DateTime?)null
+            }));
+            var dV2 = (await cDisjoint2.Content.ReadFromJsonAsync<CountryCompliancePolicyDto>(JsonOptions))!;
+
+            if ((await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/compliance-policies/{dV1.Id}/approve", jwtMgr,
+                new { evidenceVerified = true, verificationEvidenceNotes = "Approve disjoint window v1" }))).StatusCode != HttpStatusCode.OK ||
+                (await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/compliance-policies/{dV2.Id}/approve", jwtMgr,
+                new { evidenceVerified = true, verificationEvidenceNotes = "Approve disjoint future window v2" }))).StatusCode != HttpStatusCode.OK)
+            {
+                throw new InvalidOperationException("Disjoint future-dated PostgreSQL approvals failed.");
+            }
+
+            await using (var evalDb = CreatePgDb(targetConn, null))
+            {
+                var pgEvaluator = new CountryComplianceEvaluator(evalDb, new DateTimeProvider());
+
+                var hist = await pgEvaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+                    "NP", "PG-TEMPORAL", pgNow.AddDays(-20), TaxpayerMandateFlag: true));
+                var curr = await pgEvaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+                    "NP", "PG-TEMPORAL", pgNow.AddMinutes(5), TaxpayerMandateFlag: true));
+                var unspec = await pgEvaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+                    "NP", "PG-TEMPORAL", new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Unspecified), TaxpayerMandateFlag: true));
+
+                if (hist.Status != ComplianceApplicabilityStatus.Required || hist.EvaluatedPolicyVersion != 1 ||
+                    curr.Status != ComplianceApplicabilityStatus.Required || curr.EvaluatedPolicyVersion != 3 ||
+                    unspec.Status != ComplianceApplicabilityStatus.Indeterminate)
+                {
+                    throw new InvalidOperationException($"PG temporal/UTC evaluation mismatch: hist={hist.EvaluatedPolicyVersion}, curr={curr.EvaluatedPolicyVersion}, unspec={unspec.Status}");
+                }
+
+                var djNow = await pgEvaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+                    "NP", "PG-DISJOINT", pgNow, TaxpayerMandateFlag: true));
+                var djFuture = await pgEvaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+                    "NP", "PG-DISJOINT", pgNow.AddDays(31), TaxpayerMandateFlag: true));
+
+                if (djNow.EvaluatedPolicyVersion != 1 || djFuture.EvaluatedPolicyVersion != 2)
+                {
+                    throw new InvalidOperationException($"PG disjoint future schedule evaluation mismatch: now={djNow.EvaluatedPolicyVersion}, future={djFuture.EvaluatedPolicyVersion}");
+                }
+            }
+
+            Console.WriteLine("PASS PostgreSQL MDM-1.1 Migration, btree_gist Exclusion, Idempotent Seed, Concurrent Approval & Supersession Races, Temporal Continuity, Rollback & JWT Security verified cleanly.");
         }
         finally
         {

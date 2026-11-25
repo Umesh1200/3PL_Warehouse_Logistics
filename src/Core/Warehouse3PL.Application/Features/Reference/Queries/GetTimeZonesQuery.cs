@@ -28,11 +28,22 @@ public sealed class GetTimeZonesQueryHandler : IRequestHandler<GetTimeZonesQuery
 
     public async Task<IReadOnlyList<TimeZoneProfileDto>> Handle(GetTimeZonesQuery request, CancellationToken cancellationToken)
     {
-        var evaluatedAtUtc = request.AtUtc.HasValue
-            ? (request.AtUtc.Value.Kind == DateTimeKind.Utc
-                ? request.AtUtc.Value
-                : DateTime.SpecifyKind(request.AtUtc.Value, DateTimeKind.Utc))
-            : _dateTime.UtcNow;
+        DateTime evaluatedAtUtc;
+        if (request.AtUtc.HasValue)
+        {
+            evaluatedAtUtc = request.AtUtc.Value.Kind switch
+            {
+                DateTimeKind.Utc => request.AtUtc.Value,
+                DateTimeKind.Local => request.AtUtc.Value.ToUniversalTime(),
+                _ => throw new Domain.Exceptions.DomainException(
+                    "TIMEZONE_UNSPECIFIED_TIMESTAMP_KIND",
+                    "Query parameter 'atUtc' must include a UTC ('Z') or numeric timezone offset; naive Unspecified timestamps are rejected.")
+            };
+        }
+        else
+        {
+            evaluatedAtUtc = _dateTime.UtcNow;
+        }
 
         var query = _db.TimeZoneProfiles.AsNoTracking();
         if (request.ActiveOnly)

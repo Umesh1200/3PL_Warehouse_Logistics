@@ -17,13 +17,19 @@ public class TimeZoneProfile
     public DateTime? UpdatedAt { get; set; }
 
     /// <summary>
-    /// Computes the exact UTC offset in minutes at the supplied UTC instant using system tzdb/ICU data.
+    /// Computes the exact UTC offset in minutes at the supplied UTC or timezone-aware instant using system tzdb/ICU data.
+    /// Rejects naive DateTimeKind.Unspecified values fail-closed.
     /// </summary>
     public int GetUtcOffsetMinutesAt(DateTime utcInstant)
     {
-        var utc = utcInstant.Kind == DateTimeKind.Utc
-            ? utcInstant
-            : DateTime.SpecifyKind(utcInstant, DateTimeKind.Utc);
+        var utc = utcInstant.Kind switch
+        {
+            DateTimeKind.Utc => utcInstant,
+            DateTimeKind.Local => utcInstant.ToUniversalTime(),
+            _ => throw new ArgumentException(
+                "Evaluation timestamp must specify DateTimeKind.Utc or DateTimeKind.Local.",
+                nameof(utcInstant))
+        };
         var tz = TimeZoneInfo.FindSystemTimeZoneById(TimeZoneId);
         return (int)tz.GetUtcOffset(utc).TotalMinutes;
     }

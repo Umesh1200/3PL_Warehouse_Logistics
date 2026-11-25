@@ -159,16 +159,120 @@ public sealed class Mdm11GlobalReferencesAndComplianceTests
     }
 
     [Fact]
-    public void ConfigResolutionState_PreservesSpecification21_WithoutOverloadingComplianceExemption()
+    public void ConfigResolutionState_And_ResolvedConfigurationResult_MatchSpecification21Contract()
     {
         var states = Enum.GetNames<ConfigResolutionState>();
         Assert.Equal(
             ["ExplicitValue", "Inherited", "ExplicitNull", "Disabled", "Prohibited"],
             states);
         Assert.DoesNotContain("NotApplicable", states);
+
+        var scopes = Enum.GetNames<ConfigScope>();
+        Assert.Contains("Global", scopes);
+        Assert.Contains("Country", scopes);
+        Assert.Contains("LegalEntity", scopes);
+        Assert.Contains("Facility", scopes);
+        Assert.Contains("Client", scopes);
+        Assert.Contains("ClientCategory", scopes);
+
+        var now = DateTimeOffset.UtcNow;
+        var resolved = new ResolvedConfigurationResult<int>(
+            EffectiveValue: 14,
+            ResolutionState: ConfigResolutionState.ExplicitValue,
+            SourceScope: ConfigScope.Country,
+            SourceEntityId: Guid.NewGuid(),
+            EffectiveVersion: 2,
+            EffectiveFromUtc: now.AddDays(-10),
+            EffectiveToUtc: now.AddDays(30),
+            ResolvedAtUtc: now,
+            AppliedConstraints: ["Floor:ColdChainMinDaysBeforeExpiry=14"],
+            StatutorySourceRef: "ird.gov.np / VAT Act Standard Rate",
+            ApprovalStatus: "VerifiedApproved");
+
+        Assert.Equal(14, resolved.EffectiveValue);
+        Assert.Equal(ConfigResolutionState.ExplicitValue, resolved.ResolutionState);
+        Assert.Equal(ConfigScope.Country, resolved.SourceScope);
+        Assert.Equal(2, resolved.EffectiveVersion);
+        Assert.Equal(now, resolved.ResolvedAtUtc);
+        Assert.Single(resolved.AppliedConstraints);
+        Assert.Equal("ird.gov.np / VAT Act Standard Rate", resolved.StatutorySourceRef);
+        Assert.Equal("VerifiedApproved", resolved.ApprovalStatus);
+
         Assert.Equal(
             ["Required", "NotRequired", "Indeterminate"],
             Enum.GetNames<ComplianceApplicabilityStatus>());
+    }
+
+    [Theory]
+    [InlineData("""{"requiredBusinessClassifications":null,"requiresTaxpayerMandateFlag":true}""")]
+    [InlineData("""{"requiredBusinessClassifications":["  "],"requiresTaxpayerMandateFlag":true}""")]
+    [InlineData("""{"requiredBusinessClassifications":["Wholesale"],"exemptBusinessClassifications":["wholesale"]}""")]
+    [InlineData("""{"requiredOrderCategories":["B2B"],"exemptOrderCategories":["b2b"]}""")]
+    [InlineData("""{"requiredCargoClasses":["Commercial"],"exemptCargoClasses":["commercial"]}""")]
+    [InlineData("""{"unsupportedField":true,"requiresTaxpayerMandateFlag":true}""")]
+    [InlineData("""[]""")]
+    [InlineData("""{}""")]
+    [InlineData("""{invalid-json""")]
+    public void TryParsePredicate_RejectsMalformedNullContradictoryAndUnsupportedSchemas(string badJson)
+    {
+        bool parsed = ReferenceMappings.TryParsePredicate(badJson, out var predicate, out var error);
+        Assert.False(parsed);
+        Assert.Null(predicate);
+        Assert.False(string.IsNullOrWhiteSpace(error));
+    }
+
+    [Fact]
+    public async Task Evaluator_RejectsUnspecifiedUtcKind_AndConvertsTimezoneAwareOffsetsAccurately()
+    {
+        var dbName = $"mdm11-utc-{Guid.NewGuid():N}";
+        using var db = TestDbContextFactory.Create(
+            new TestTenantProvider { BypassTenantFilter = true },
+            new TestCurrentUserContext { UserType = UserType.Staff },
+            dbName);
+
+        await ReferenceCatalogSeeder.SeedAsync(db);
+        var evaluator = new CountryComplianceEvaluator(db, new DateTimeProvider());
+
+        var cutoverUtc = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+        var pred1 = ReferenceMappings.SerializePredicate(new ComplianceApplicabilityPredicate
+        {
+            RequiresTaxpayerMandateFlag = true
+        });
+
+        var v1 = CountryCompliancePolicy.CreateDraft(
+            "NP", "UTC-BOUNDARY-TEST", 1, "Boundary v1", "Source 1", "Notice 1", pred1,
+            ComplianceEnforcementMode.ConditionalRequired,
+            new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc), cutoverUtc);
+        v1.Approve(Guid.NewGuid(), DateTime.UtcNow, "Approved v1 for boundary verification.");
+
+        var v2 = CountryCompliancePolicy.CreateDraft(
+            "NP", "UTC-BOUNDARY-TEST", 2, "Boundary v2", "Source 2", "Notice 2", pred1,
+            ComplianceEnforcementMode.MandatoryFailClosed,
+            cutoverUtc, null);
+        v2.Approve(Guid.NewGuid(), DateTime.UtcNow, "Approved v2 for boundary verification.");
+
+        db.CountryCompliancePolicies.AddRange(v1, v2);
+        await db.SaveChangesAsync();
+
+        // DateTimeKind.Unspecified MUST fail closed as Indeterminate (never silently treated as UTC)
+        var unspecifiedEval = await evaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+            "NP", "UTC-BOUNDARY-TEST",
+            new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Unspecified),
+            TaxpayerMandateFlag: true));
+        Assert.Equal(ComplianceApplicabilityStatus.Indeterminate, unspecifiedEval.Status);
+        Assert.Contains("EvaluationUtc:UnspecifiedKind", unspecifiedEval.MissingOrAmbiguousInputs);
+
+        // DateTimeKind.Local from an offset before vs at UTC cutover converts cleanly instead of re-labeling
+        var exactCutoverInUtcPlus0545 = new DateTimeOffset(2026, 6, 1, 5, 45, 0, TimeSpan.FromMinutes(345)).LocalDateTime;
+        var beforeCutoverInUtcPlus0545 = new DateTimeOffset(2026, 6, 1, 5, 44, 0, TimeSpan.FromMinutes(345)).LocalDateTime;
+
+        var resBefore = await evaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+            "NP", "UTC-BOUNDARY-TEST", beforeCutoverInUtcPlus0545, TaxpayerMandateFlag: true));
+        var resAt = await evaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+            "NP", "UTC-BOUNDARY-TEST", exactCutoverInUtcPlus0545, TaxpayerMandateFlag: true));
+
+        Assert.Equal(1, resBefore.EvaluatedPolicyVersion);
+        Assert.Equal(2, resAt.EvaluatedPolicyVersion);
     }
 
     [Fact]
@@ -497,6 +601,167 @@ public sealed class Mdm11GlobalReferencesAndComplianceTests
             (await http.SendAsync(Authed(HttpMethod.Put, $"/api/v1/compliance-policies/{approvedV2.Id}", jwtManageStaff, new { title = "Tamper" }))).StatusCode);
         Assert.Equal(HttpStatusCode.MethodNotAllowed,
             (await http.SendAsync(Authed(HttpMethod.Delete, $"/api/v1/compliance-policies/{historicalV1.Id}", jwtManageStaff))).StatusCode);
+
+        // MDM11-R03 HTTP negative gates: null/contradictory/unsupported predicate JSON -> 422, Unspecified DateTime -> 400/422
+        foreach (var badPred in new[]
+        {
+            """{"requiredBusinessClassifications":null,"requiresTaxpayerMandateFlag":true}""",
+            """{"requiredBusinessClassifications":["Wholesale"],"exemptBusinessClassifications":["wholesale"]}""",
+            """{"unsupportedProperty":123,"requiresTaxpayerMandateFlag":true}"""
+        })
+        {
+            var badPredResp = await http.SendAsync(Authed(
+                HttpMethod.Post,
+                "/api/v1/compliance-policies",
+                jwtManageStaff,
+                new
+                {
+                    countryCode = "NP",
+                    policyCode = "NP-BAD-PRED",
+                    title = "Bad Predicate Draft",
+                    statutorySourceRef = "Source",
+                    officialNoticeCitation = "Citation",
+                    applicabilityPredicateJson = badPred,
+                    enforcementMode = ComplianceEnforcementMode.ConditionalRequired,
+                    effectiveFromUtc = DateTime.UtcNow.AddDays(-1),
+                    effectiveToUtc = (DateTime?)null
+                }));
+            Assert.Equal(HttpStatusCode.UnprocessableEntity, badPredResp.StatusCode);
+        }
+
+        // Naive Unspecified effectiveFromUtc JSON without 'Z' or offset -> 400 ValidationException
+        var badUtcDraftResp = await http.SendAsync(Authed(
+            HttpMethod.Post,
+            "/api/v1/compliance-policies",
+            jwtManageStaff,
+            new
+            {
+                countryCode = "NP",
+                policyCode = "NP-BAD-UTC",
+                title = "Bad UTC Draft",
+                statutorySourceRef = "Source",
+                officialNoticeCitation = "Citation",
+                applicabilityPredicateJson = """{"requiresTaxpayerMandateFlag":true}""",
+                enforcementMode = ComplianceEnforcementMode.ConditionalRequired,
+                effectiveFromUtc = "2026-06-01T00:00:00",
+                effectiveToUtc = (string?)null
+            }));
+        Assert.Equal(HttpStatusCode.BadRequest, badUtcDraftResp.StatusCode);
+
+        // Naive Unspecified atUtc on timezones endpoint -> 422 DomainException
+        var badTzUtcResp = await http.SendAsync(Authed(
+            HttpMethod.Get,
+            "/api/v1/reference/timezones?atUtc=2026-06-01T00:00:00",
+            jwtClientLegit));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, badTzUtcResp.StatusCode);
+
+        // MDM11-R02 HTTP: Reject future-dated overlapping supersession that would create a coverage gap!
+        var baseNow = DateTime.UtcNow;
+        var createContV1 = await http.SendAsync(Authed(
+            HttpMethod.Post,
+            "/api/v1/compliance-policies",
+            jwtManageStaff,
+            new
+            {
+                countryCode = "NP",
+                policyCode = "NP-CUTOVER-TEST",
+                title = "Cutover V1",
+                statutorySourceRef = "Cutover Source v1",
+                officialNoticeCitation = "Cutover Notice v1",
+                applicabilityPredicateJson = """{"requiresTaxpayerMandateFlag":true}""",
+                enforcementMode = ComplianceEnforcementMode.MandatoryFailClosed,
+                effectiveFromUtc = baseNow.AddDays(-30),
+                effectiveToUtc = (DateTime?)null
+            }));
+        Assert.Equal(HttpStatusCode.Created, createContV1.StatusCode);
+        var cutoverV1 = (await createContV1.Content.ReadFromJsonAsync<CountryCompliancePolicyDto>(JsonOptions))!;
+
+        var approveCutoverV1 = await http.SendAsync(Authed(
+            HttpMethod.Post,
+            $"/api/v1/compliance-policies/{cutoverV1.Id}/approve",
+            jwtManageStaff,
+            new { evidenceVerified = true, verificationEvidenceNotes = "Approved currently active V1 baseline." }));
+        Assert.Equal(HttpStatusCode.OK, approveCutoverV1.StatusCode);
+
+        var createFutureV2 = await http.SendAsync(Authed(
+            HttpMethod.Post,
+            "/api/v1/compliance-policies",
+            jwtManageStaff,
+            new
+            {
+                countryCode = "NP",
+                policyCode = "NP-CUTOVER-TEST",
+                title = "Future Cutover V2",
+                statutorySourceRef = "Cutover Source v2",
+                officialNoticeCitation = "Cutover Notice v2",
+                applicabilityPredicateJson = """{"requiresTaxpayerMandateFlag":true}""",
+                enforcementMode = ComplianceEnforcementMode.MandatoryFailClosed,
+                effectiveFromUtc = baseNow.AddDays(30),
+                effectiveToUtc = (DateTime?)null
+            }));
+        Assert.Equal(HttpStatusCode.Created, createFutureV2.StatusCode);
+        var futureV2 = (await createFutureV2.Content.ReadFromJsonAsync<CountryCompliancePolicyDto>(JsonOptions))!;
+
+        // Attempting to supersede active v1 with future v2 leaves [now, now+30d) uncovered -> 422!
+        var gapRejected = await http.SendAsync(Authed(
+            HttpMethod.Post,
+            $"/api/v1/compliance-policies/{futureV2.Id}/approve",
+            jwtManageStaff,
+            new
+            {
+                evidenceVerified = true,
+                verificationEvidenceNotes = "Should fail closed due to coverage gap.",
+                supersedeOverlapping = true
+            }));
+        Assert.Equal(HttpStatusCode.UnprocessableEntity, gapRejected.StatusCode);
+
+        // Verify v1 remains VerifiedApproved & IsActive and historical as-of evaluation after immediate v3 replacement works!
+        var createImmediateV3 = await http.SendAsync(Authed(
+            HttpMethod.Post,
+            "/api/v1/compliance-policies",
+            jwtManageStaff,
+            new
+            {
+                countryCode = "NP",
+                policyCode = "NP-CUTOVER-TEST",
+                title = "Immediate Cutover V3",
+                statutorySourceRef = "Cutover Source v3",
+                officialNoticeCitation = "Cutover Notice v3",
+                applicabilityPredicateJson = """{"requiresTaxpayerMandateFlag":true}""",
+                enforcementMode = ComplianceEnforcementMode.AdvisoryWarning,
+                effectiveFromUtc = baseNow.AddSeconds(-2),
+                effectiveToUtc = (DateTime?)null
+            }));
+        Assert.Equal(HttpStatusCode.Created, createImmediateV3.StatusCode);
+        var immediateV3 = (await createImmediateV3.Content.ReadFromJsonAsync<CountryCompliancePolicyDto>(JsonOptions))!;
+
+        var approveImmediateV3 = await http.SendAsync(Authed(
+            HttpMethod.Post,
+            $"/api/v1/compliance-policies/{immediateV3.Id}/approve",
+            jwtManageStaff,
+            new
+            {
+                evidenceVerified = true,
+                verificationEvidenceNotes = "Immediate replacement leaves zero current coverage gap.",
+                supersedeOverlapping = true,
+                expectedActivePolicyId = cutoverV1.Id
+            }));
+        Assert.Equal(HttpStatusCode.OK, approveImmediateV3.StatusCode);
+
+        using var evalScope = host.Services.CreateScope();
+        var evaluator = evalScope.ServiceProvider.GetRequiredService<ICountryComplianceEvaluator>();
+        var historicalEval = await evaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+            "NP", "NP-CUTOVER-TEST", baseNow.AddDays(-15), TaxpayerMandateFlag: true));
+        var currentEval = await evaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+            "NP", "NP-CUTOVER-TEST", baseNow.AddMinutes(5), TaxpayerMandateFlag: true));
+
+        Assert.Equal(ComplianceApplicabilityStatus.Required, historicalEval.Status);
+        Assert.Equal(1, historicalEval.EvaluatedPolicyVersion);
+        Assert.Equal(ComplianceEnforcementMode.MandatoryFailClosed, historicalEval.EnforcementMode);
+
+        Assert.Equal(ComplianceApplicabilityStatus.Required, currentEval.Status);
+        Assert.Equal(3, currentEval.EvaluatedPolicyVersion);
+        Assert.Equal(ComplianceEnforcementMode.AdvisoryWarning, currentEval.EnforcementMode);
     }
 
     private static HttpRequestMessage Authed(HttpMethod method, string path, string jwt, object? body = null)

@@ -230,5 +230,12 @@ public class CountryCompliancePolicy : AuditableEntity
     }
 
     private static DateTime NormalizeUtc(DateTime value) =>
-        value.Kind == DateTimeKind.Utc ? value : DateTime.SpecifyKind(value, DateTimeKind.Utc);
+        value.Kind switch
+        {
+            DateTimeKind.Utc => value,
+            DateTimeKind.Local => value.ToUniversalTime(),
+            _ => throw new DomainException(
+                "COMPLIANCE_UNSPECIFIED_TIMESTAMP_KIND",
+                "Timestamps must explicitly specify UTC (DateTimeKind.Utc) or a timezone offset (DateTimeKind.Local). Unspecified DateTimeKind is rejected fail-closed.")
+        };
 }

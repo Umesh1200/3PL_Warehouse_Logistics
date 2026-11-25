@@ -49,10 +49,19 @@ public sealed class CreateCompliancePolicyDraftCommandValidator
         RuleFor(x => x.ApplicabilityPredicateJson)
             .NotEmpty();
 
+        RuleFor(x => x.EffectiveFromUtc)
+            .Must(dt => dt.Kind != DateTimeKind.Unspecified)
+            .WithMessage("EffectiveFromUtc must explicitly include UTC ('Z') or a timezone offset.");
+
         RuleFor(x => x.EffectiveToUtc)
-            .Must((cmd, to) => !to.HasValue || to.Value > cmd.EffectiveFromUtc)
+            .Must(to => !to.HasValue || to.Value.Kind != DateTimeKind.Unspecified)
+            .WithMessage("EffectiveToUtc must explicitly include UTC ('Z') or a timezone offset when specified.")
+            .Must((cmd, to) => !to.HasValue || ToUtcForCompare(to.Value) > ToUtcForCompare(cmd.EffectiveFromUtc))
             .WithMessage("EffectiveToUtc must be strictly greater than EffectiveFromUtc.");
     }
+
+    private static DateTime ToUtcForCompare(DateTime dt) =>
+        dt.Kind == DateTimeKind.Local ? dt.ToUniversalTime() : dt;
 }
 
 public sealed class CreateCompliancePolicyDraftCommandHandler

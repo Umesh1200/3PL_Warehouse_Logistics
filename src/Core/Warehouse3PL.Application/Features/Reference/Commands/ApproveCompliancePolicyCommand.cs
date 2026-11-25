@@ -161,6 +161,30 @@ public sealed class ApproveCompliancePolicyCommandHandler
                             $"An active VerifiedApproved policy (v{overlappingActive[0].Version}) already covers an overlapping effective window for '{policy.CountryCode}/{policy.PolicyCode}'. Pass SupersedeOverlapping=true to intentionally supersede it.");
                     }
 
+                    // MDM11-R02 Safe Cutover Continuity Guard:
+                    // Reject overlapping supersessions that would deactivate an existing applicable policy
+                    // and create a coverage gap before the replacement starts or after the replacement ends.
+                    foreach (var active in overlappingActive)
+                    {
+                        var continuityAnchorStart = active.EffectiveFromUtc > now ? active.EffectiveFromUtc : now;
+                        if (policy.EffectiveFromUtc > continuityAnchorStart)
+                        {
+                            throw new DomainException(
+                                "COMPLIANCE_SUPERSESSION_COVERAGE_GAP",
+                                $"Cannot supersede active policy '{active.PolicyCode}' v{active.Version} (effective {active.EffectiveFromUtc:O}..) with future-effective v{policy.Version} starting {policy.EffectiveFromUtc:O}, because interval [{continuityAnchorStart:O}, {policy.EffectiveFromUtc:O}) would lose active coverage. Use disjoint effective windows or immediate effective cutover.");
+                        }
+
+                        var activeEnd = active.EffectiveToUtc ?? DateTime.MaxValue;
+                        if (activeEnd > now &&
+                            policy.EffectiveToUtc.HasValue &&
+                            policy.EffectiveToUtc.Value < activeEnd)
+                        {
+                            throw new DomainException(
+                                "COMPLIANCE_SUPERSESSION_COVERAGE_GAP",
+                                $"Cannot supersede active policy '{active.PolicyCode}' v{active.Version} with bounded v{policy.Version} ending {policy.EffectiveToUtc.Value:O} earlier than existing coverage end {activeEnd:O}, which would leave a trailing coverage gap.");
+                        }
+                    }
+
                     // Deactivate superseded rows FIRST and flush within the same transaction so
                     // PostgreSQL's non-deferred EXCLUDE USING gist constraint never observes two overlapping active rows.
                     foreach (var active in overlappingActive)

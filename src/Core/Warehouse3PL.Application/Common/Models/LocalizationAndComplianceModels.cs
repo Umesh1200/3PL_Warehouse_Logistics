@@ -3,16 +3,18 @@ using Warehouse3PL.Domain.Enums;
 namespace Warehouse3PL.Application.Common.Models;
 
 /// <summary>
-/// Authoritative configuration scope hierarchy for domain-specific resolvers.
+/// Authoritative configuration scope hierarchy for domain-specific resolvers (Specification §2.1).
 /// </summary>
 public enum ConfigScope
 {
     Global = 1,
-    LegalEntity = 2,
-    Facility = 3,
-    Client = 4,
-    ClientFacility = 5,
-    OrderOverride = 6
+    Country = 2,
+    LegalEntity = 3,
+    Facility = 4,
+    Client = 5,
+    ClientCategory = 6,
+    ClientFacility = 7,
+    OrderOverride = 8
 }
 
 /// <summary>
@@ -29,19 +31,25 @@ public enum ConfigResolutionState
 }
 
 /// <summary>
-/// Formal configuration resolution envelope carrying provenance, version, and effective window.
+/// Formal configuration resolution envelope carrying provenance, version, applied safety constraints,
+/// evaluation timestamp, and policy approval provenance (Specification §2.1).
 /// </summary>
 public sealed record ResolvedConfigurationResult<T>(
-    T? Value,
-    ConfigResolutionState State,
+    T? EffectiveValue,
+    ConfigResolutionState ResolutionState,
     ConfigScope SourceScope,
     Guid? SourceEntityId,
-    string? SourceEntityCode,
-    long ConfigRevision,
-    DateTime? EffectiveFromUtc,
-    DateTime? EffectiveToUtc,
-    bool AllowsTenantOverride,
-    string ProvenanceReason);
+    int EffectiveVersion,
+    DateTimeOffset EffectiveFromUtc,
+    DateTimeOffset? EffectiveToUtc,
+    DateTimeOffset ResolvedAtUtc,
+    IReadOnlyList<string> AppliedConstraints,
+    string? StatutorySourceRef,
+    string? ApprovalStatus,
+    string? SourceEntityCode = null,
+    long ConfigRevision = 1,
+    bool AllowsTenantOverride = false,
+    string? ProvenanceReason = null);
 
 /// <summary>
 /// Typed statutory compliance applicability outcome (MDM11-D02).

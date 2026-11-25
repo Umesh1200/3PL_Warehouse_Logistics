@@ -11,9 +11,14 @@ public sealed class TimeZoneOffsetResolver : ITimeZoneOffsetResolver
             throw new ArgumentException("TimeZoneId cannot be empty.", nameof(timeZoneId));
         }
 
-        var utc = utcInstant.Kind == DateTimeKind.Utc
-            ? utcInstant
-            : DateTime.SpecifyKind(utcInstant, DateTimeKind.Utc);
+        var utc = utcInstant.Kind switch
+        {
+            DateTimeKind.Utc => utcInstant,
+            DateTimeKind.Local => utcInstant.ToUniversalTime(),
+            _ => throw new ArgumentException(
+                "Evaluation timestamp must specify DateTimeKind.Utc or DateTimeKind.Local.",
+                nameof(utcInstant))
+        };
 
         var tz = TimeZoneInfo.FindSystemTimeZoneById(timeZoneId.Trim());
         return (int)tz.GetUtcOffset(utc).TotalMinutes;

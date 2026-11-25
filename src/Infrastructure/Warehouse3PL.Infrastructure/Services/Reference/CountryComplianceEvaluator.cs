@@ -26,14 +26,38 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
         ComplianceEvaluationRequest request,
         CancellationToken cancellationToken = default)
     {
-        var evaluatedAtUtc = request.EvaluationUtc.HasValue
-            ? (request.EvaluationUtc.Value.Kind == DateTimeKind.Utc
-                ? request.EvaluationUtc.Value
-                : DateTime.SpecifyKind(request.EvaluationUtc.Value, DateTimeKind.Utc))
-            : _dateTime.UtcNow;
-
         var countryCode = (request.CountryCode ?? string.Empty).Trim().ToUpperInvariant();
         var policyCode = (request.PolicyCode ?? string.Empty).Trim().ToUpperInvariant();
+
+        DateTime evaluatedAtUtc;
+        if (request.EvaluationUtc.HasValue)
+        {
+            if (request.EvaluationUtc.Value.Kind == DateTimeKind.Unspecified)
+            {
+                return new ComplianceEvaluationResult(
+                    ComplianceApplicabilityStatus.Indeterminate,
+                    countryCode,
+                    policyCode,
+                    null,
+                    [],
+                    ["EvaluationUtc:UnspecifiedKind"],
+                    null,
+                    null,
+                    null,
+                    ComplianceEvidenceRequirement.None,
+                    false,
+                    "EvaluationUtc must be explicitly UTC (DateTimeKind.Utc) or timezone-aware (DateTimeKind.Local); naive Unspecified timestamps are rejected fail-closed.",
+                    _dateTime.UtcNow);
+            }
+
+            evaluatedAtUtc = request.EvaluationUtc.Value.Kind == DateTimeKind.Local
+                ? request.EvaluationUtc.Value.ToUniversalTime()
+                : request.EvaluationUtc.Value;
+        }
+        else
+        {
+            evaluatedAtUtc = _dateTime.UtcNow;
+        }
 
         if (countryCode.Length != 2 || string.IsNullOrWhiteSpace(policyCode))
         {
@@ -53,35 +77,22 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
                 evaluatedAtUtc);
         }
 
-        // Only active VerifiedApproved policies covering evaluatedAtUtc participate in evaluation.
-        var matchingActive = await _db.CountryCompliancePolicies
+        // MDM11-R02: Query published policies (VerifiedApproved or historical Superseded; NEVER Draft)
+        // whose [EffectiveFromUtc, EffectiveToUtc) interval covers evaluatedAtUtc.
+        var matchingPublished = await _db.CountryCompliancePolicies
             .AsNoTracking()
             .Where(p => p.CountryCode == countryCode &&
                         p.PolicyCode == policyCode &&
-                        p.ApprovalStatus == CompliancePolicyApprovalStatus.VerifiedApproved &&
-                        p.IsActive &&
+                        (p.ApprovalStatus == CompliancePolicyApprovalStatus.VerifiedApproved ||
+                         p.ApprovalStatus == CompliancePolicyApprovalStatus.Superseded) &&
                         p.EffectiveFromUtc <= evaluatedAtUtc &&
                         (p.EffectiveToUtc == null || evaluatedAtUtc < p.EffectiveToUtc))
             .OrderByDescending(p => p.Version)
             .ToListAsync(cancellationToken);
 
-        if (matchingActive.Count == 0)
-        {
-            return new ComplianceEvaluationResult(
-                ComplianceApplicabilityStatus.Indeterminate,
-                countryCode,
-                policyCode,
-                null,
-                [],
-                ["ActiveVerifiedPolicy"],
-                null,
-                null,
-                null,
-                ComplianceEvidenceRequirement.None,
-                false,
-                $"No active VerifiedApproved policy covers '{countryCode}/{policyCode}' at {evaluatedAtUtc:O}. Draft or expired definitions do not establish exemption.",
-                evaluatedAtUtc);
-        }
+        var matchingActive = matchingPublished
+            .Where(p => p.ApprovalStatus == CompliancePolicyApprovalStatus.VerifiedApproved && p.IsActive)
+            .ToList();
 
         if (matchingActive.Count > 1)
         {
@@ -101,7 +112,43 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
                 evaluatedAtUtc);
         }
 
-        var policy = matchingActive[0];
+        Warehouse3PL.Domain.Entities.Reference.CountryCompliancePolicy? policy = matchingActive.Count == 1
+            ? matchingActive[0]
+            : null;
+
+        // If no currently active VerifiedApproved policy covers evaluatedAtUtc, resolve the most recent
+        // historical Superseded policy whose window covered that historical instant (e.g. pre-cutover audit).
+        bool evaluatedAgainstHistoricalSuperseded = false;
+        if (policy == null)
+        {
+            policy = matchingPublished
+                .Where(p => p.ApprovalStatus == CompliancePolicyApprovalStatus.Superseded)
+                .OrderByDescending(p => p.Version)
+                .FirstOrDefault();
+
+            if (policy != null)
+            {
+                evaluatedAgainstHistoricalSuperseded = true;
+            }
+        }
+
+        if (policy == null)
+        {
+            return new ComplianceEvaluationResult(
+                ComplianceApplicabilityStatus.Indeterminate,
+                countryCode,
+                policyCode,
+                null,
+                [],
+                ["ActiveVerifiedPolicy"],
+                null,
+                null,
+                null,
+                ComplianceEvidenceRequirement.None,
+                false,
+                $"No published policy covers '{countryCode}/{policyCode}' at {evaluatedAtUtc:O}. Draft or uncovered periods do not establish exemption.",
+                evaluatedAtUtc);
+        }
         if (!ReferenceMappings.TryParsePredicate(policy.ApplicabilityPredicateJson, out var predicate, out var parseError) ||
             predicate == null)
         {
@@ -197,6 +244,10 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
 
         // If any dimension matched an explicit non-applicable category and no contradictory required-trigger
         // needs override, return NotRequired strictly per the approved policy predicate (never asserting statutory immunity).
+        var historicalNote = evaluatedAgainstHistoricalSuperseded
+            ? " (resolved via historical Superseded version for requested EvaluationUtc)"
+            : string.Empty;
+
         if (anyExplicitExempt && !anyExplicitRequired)
         {
             return new ComplianceEvaluationResult(
@@ -211,7 +262,7 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
                 policy.EnforcementMode,
                 ComplianceEvidenceRequirement.None,
                 false,
-                $"Evaluated NotRequired against configured policy '{policyCode}' v{policy.Version}.",
+                $"Evaluated NotRequired against configured policy '{policyCode}' v{policy.Version}{historicalNote}.",
                 evaluatedAtUtc);
         }
 
@@ -249,7 +300,7 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
             policy.EnforcementMode,
             evidenceReq,
             false, // ManualReferenceRecorded captures documentation only; never asserts external government verification.
-            $"Matched applicability predicates for policy '{policyCode}' v{policy.Version}.",
+            $"Matched applicability predicates for policy '{policyCode}' v{policy.Version}{historicalNote}.",
             evaluatedAtUtc);
     }
 
