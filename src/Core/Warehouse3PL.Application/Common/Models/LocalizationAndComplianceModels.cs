@@ -105,7 +105,8 @@ public sealed record ComplianceEvaluationRequest(
     string? BusinessClassification = null,
     string? OrderCategory = null,
     string? CargoClass = null,
-    bool? TaxpayerMandateFlag = null);
+    bool? TaxpayerMandateFlag = null,
+    DateTime? KnownAsOfUtc = null);
 
 public sealed record ComplianceEvaluationResult(
     ComplianceApplicabilityStatus Status,
@@ -120,7 +121,10 @@ public sealed record ComplianceEvaluationResult(
     ComplianceEvidenceRequirement EvidenceRequirement,
     bool AssertsAuthorityVerified,
     string Reason,
-    DateTime EvaluatedAtUtc);
+    DateTime EvaluatedAtUtc,
+    DateTime? KnownAsOfUtc = null,
+    CompliancePolicyApprovalStatus? EvaluatedPolicyApprovalStatus = null,
+    DateTime? PolicyApprovedAtUtc = null);
 
 public sealed record CountryProfileDto(
     string CountryCode,

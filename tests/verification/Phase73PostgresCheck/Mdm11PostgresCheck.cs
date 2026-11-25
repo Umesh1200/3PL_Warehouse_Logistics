@@ -470,7 +470,78 @@ internal static class Mdm11PostgresCheck
                 }
             }
 
-            Console.WriteLine("PASS PostgreSQL MDM-1.1 Migration, btree_gist Exclusion, Idempotent Seed, Concurrent Approval & Supersession Races, Temporal Continuity, Rollback & JWT Security verified cleanly.");
+            // 7. MDM11-R04 Live PostgreSQL Bitemporal Regression:
+            //    Backdated v2 published AFTER historical date must NOT rewrite historical as-known evaluation of v1!
+            var sep15 = new DateTime(2026, 9, 15, 0, 0, 0, DateTimeKind.Utc);
+            var oct1 = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
+            var oct15 = new DateTime(2026, 10, 15, 0, 0, 0, DateTimeKind.Utc);
+            var nov1 = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
+            var nov10 = new DateTime(2026, 11, 10, 12, 0, 0, DateTimeKind.Utc);
+            var nov25 = new DateTime(2026, 11, 25, 10, 0, 0, DateTimeKind.Utc);
+
+            var btV1Id = Guid.NewGuid();
+            var btV2Id = Guid.NewGuid();
+            var btClock = new ControllablePgClock { UtcNow = oct1 };
+            var btStaff = new PgStaffUserContext(manageStaffId);
+
+            await using (var btSeedDb = CreatePgDb(targetConn, null))
+            {
+                var pExempt = """{"exemptOrderCategories":["SyntheticMixedOrder"],"treatUnlistedValuesAsIndeterminate":true}""";
+                var pReq = """{"requiredOrderCategories":["SyntheticMixedOrder"],"treatUnlistedValuesAsIndeterminate":true}""";
+                btSeedDb.CountryCompliancePolicies.AddRange(
+                    CountryCompliancePolicy.CreateDraft("NP", "PG-BITEMPORAL", 1, "PG Bitemporal v1", "Statute BT1", "Notice BT1", pExempt, ComplianceEnforcementMode.MandatoryFailClosed, oct1, null, btV1Id),
+                    CountryCompliancePolicy.CreateDraft("NP", "PG-BITEMPORAL", 2, "PG Bitemporal Backdated v2", "Statute BT2", "Notice BT2", pReq, ComplianceEnforcementMode.MandatoryFailClosed, nov1, null, btV2Id));
+                await btSeedDb.SaveChangesAsync();
+            }
+
+            // Approve v1 at Oct 1
+            await using (var btApp1Db = CreatePgDb(targetConn, null, btStaff))
+            {
+                var h = new ApproveCompliancePolicyCommandHandler(btApp1Db, new CompliancePlatformAuthorization(btApp1Db, btStaff), btClock);
+                await h.Handle(new ApproveCompliancePolicyCommand(btV1Id, true, "PG bitemporal v1 approved on Oct 1."), CancellationToken.None);
+            }
+
+            // Advance clock to Nov 25 and approve backdated v2 effective Nov 1 (superseding v1 at Nov 25)
+            btClock.UtcNow = nov25;
+            await using (var btApp2Db = CreatePgDb(targetConn, null, btStaff))
+            {
+                var h = new ApproveCompliancePolicyCommandHandler(btApp2Db, new CompliancePlatformAuthorization(btApp2Db, btStaff), btClock);
+                await h.Handle(new ApproveCompliancePolicyCommand(btV2Id, true, "PG bitemporal backdated v2 approved on Nov 25.", SupersedeOverlapping: true, ExpectedActivePolicyId: btV1Id), CancellationToken.None);
+            }
+
+            await using (var btEvalDb = CreatePgDb(targetConn, null))
+            {
+                var btEvaluator = new CountryComplianceEvaluator(btEvalDb, btClock);
+
+                // Effective-date evaluation at Nov 10 (KnownAsOfUtc = null -> Nov 25 current approved law) => v2 Required
+                var effNov10 = await btEvaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+                    "NP", "PG-BITEMPORAL", nov10, OrderCategory: "SyntheticMixedOrder"));
+                // Historical as-known evaluation at Nov 10 => v1 NotRequired (original operational decision preserved!)
+                var knownNov10 = await btEvaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+                    "NP", "PG-BITEMPORAL", nov10, OrderCategory: "SyntheticMixedOrder", KnownAsOfUtc: nov10));
+                // Historical as-known at Nov 25 => v2 Required
+                var knownNov25 = await btEvaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+                    "NP", "PG-BITEMPORAL", nov10, OrderCategory: "SyntheticMixedOrder", KnownAsOfUtc: nov25));
+                // Oct 15 before backdated v2 start => v1 NotRequired
+                var effOct15 = await btEvaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+                    "NP", "PG-BITEMPORAL", oct15, OrderCategory: "SyntheticMixedOrder"));
+                // Before Oct 1 publication => Indeterminate
+                var prePub = await btEvaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+                    "NP", "PG-BITEMPORAL", nov10, OrderCategory: "SyntheticMixedOrder", KnownAsOfUtc: sep15));
+
+                if (effNov10.Status != ComplianceApplicabilityStatus.Required || effNov10.EvaluatedPolicyVersion != 2 ||
+                    knownNov10.Status != ComplianceApplicabilityStatus.NotRequired || knownNov10.EvaluatedPolicyVersion != 1 ||
+                    knownNov10.EvaluatedPolicyApprovalStatus != CompliancePolicyApprovalStatus.Superseded ||
+                    knownNov25.Status != ComplianceApplicabilityStatus.Required || knownNov25.EvaluatedPolicyVersion != 2 ||
+                    effOct15.Status != ComplianceApplicabilityStatus.NotRequired || effOct15.EvaluatedPolicyVersion != 1 ||
+                    prePub.Status != ComplianceApplicabilityStatus.Indeterminate)
+                {
+                    throw new InvalidOperationException(
+                        $"MDM11-R04 PostgreSQL bitemporal mismatch: effNov10=({effNov10.Status},v{effNov10.EvaluatedPolicyVersion}), knownNov10=({knownNov10.Status},v{knownNov10.EvaluatedPolicyVersion}), knownNov25=({knownNov25.Status},v{knownNov25.EvaluatedPolicyVersion}), effOct15=({effOct15.Status},v{effOct15.EvaluatedPolicyVersion}), prePub={prePub.Status}");
+                }
+            }
+
+            Console.WriteLine("PASS PostgreSQL MDM-1.1 Migration, btree_gist Exclusion, Idempotent Seed, Concurrent Approval & Supersession Races, Bitemporal Continuity, Rollback & JWT Security verified cleanly.");
         }
         finally
         {
@@ -586,6 +657,11 @@ internal static class Mdm11PostgresCheck
         app.MapControllers();
         await app.StartAsync();
         return app;
+    }
+
+    private sealed class ControllablePgClock : IDateTimeProvider
+    {
+        public DateTime UtcNow { get; set; } = DateTime.UtcNow;
     }
 
     private sealed class PgAdminTenantProvider : ITenantProvider

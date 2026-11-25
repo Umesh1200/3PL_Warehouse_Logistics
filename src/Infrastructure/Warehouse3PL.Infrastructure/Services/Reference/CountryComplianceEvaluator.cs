@@ -7,9 +7,11 @@ using Warehouse3PL.Domain.Enums;
 namespace Warehouse3PL.Infrastructure.Services.Reference;
 
 /// <summary>
-/// Evaluates statutory applicability strictly against active, VerifiedApproved policy versions.
-/// Draft and Superseded policies are ignored, and any missing active policy, invalid predicate,
-/// or missing/ambiguous input resolves to Indeterminate rather than NotRequired.
+/// Bitemporal country statutory compliance evaluator distinguishing:
+/// 1) Effective-date evaluation (<c>KnownAsOfUtc == null</c>): what currently approved policy specifies for <c>EvaluationUtc</c>.
+/// 2) Historical as-known evaluation (<c>KnownAsOfUtc != null</c>): which published policy was active and unsuperseded at <c>KnownAsOfUtc</c>
+///    using <c>ApprovedAtUtc</c> and <c>SupersededAtUtc</c>, preventing backdated later publications from rewriting past decisions.
+/// Draft policies are always ignored, and missing policies or ambiguous/unspecified inputs always return <c>Indeterminate</c>.
 /// </summary>
 public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
 {
@@ -28,56 +30,34 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
     {
         var countryCode = (request.CountryCode ?? string.Empty).Trim().ToUpperInvariant();
         var policyCode = (request.PolicyCode ?? string.Empty).Trim().ToUpperInvariant();
+        var clockNowUtc = _dateTime.UtcNow;
 
-        DateTime evaluatedAtUtc;
-        if (request.EvaluationUtc.HasValue)
+        if (!TryNormalizeUtcInput(request.EvaluationUtc, "EvaluationUtc", clockNowUtc, out var evaluatedAtUtc, out var evalErrCode, out var evalErrMsg))
         {
-            if (request.EvaluationUtc.Value.Kind == DateTimeKind.Unspecified)
+            return IndeterminateResult(countryCode, policyCode, null, [evalErrCode!], evalErrMsg!, clockNowUtc, request.KnownAsOfUtc);
+        }
+
+        DateTime? explicitKnownAsOfUtc = null;
+        if (request.KnownAsOfUtc.HasValue)
+        {
+            if (!TryNormalizeUtcInput(request.KnownAsOfUtc, "KnownAsOfUtc", clockNowUtc, out var normalizedKnown, out var knownErrCode, out var knownErrMsg))
             {
-                return new ComplianceEvaluationResult(
-                    ComplianceApplicabilityStatus.Indeterminate,
-                    countryCode,
-                    policyCode,
-                    null,
-                    [],
-                    ["EvaluationUtc:UnspecifiedKind"],
-                    null,
-                    null,
-                    null,
-                    ComplianceEvidenceRequirement.None,
-                    false,
-                    "EvaluationUtc must be explicitly UTC (DateTimeKind.Utc) or timezone-aware (DateTimeKind.Local); naive Unspecified timestamps are rejected fail-closed.",
-                    _dateTime.UtcNow);
+                return IndeterminateResult(countryCode, policyCode, null, [knownErrCode!], knownErrMsg!, evaluatedAtUtc, null);
             }
+            explicitKnownAsOfUtc = normalizedKnown;
+        }
 
-            evaluatedAtUtc = request.EvaluationUtc.Value.Kind == DateTimeKind.Local
-                ? request.EvaluationUtc.Value.ToUniversalTime()
-                : request.EvaluationUtc.Value;
-        }
-        else
-        {
-            evaluatedAtUtc = _dateTime.UtcNow;
-        }
+        var responseKnownAsOfUtc = explicitKnownAsOfUtc ?? clockNowUtc;
 
         if (countryCode.Length != 2 || string.IsNullOrWhiteSpace(policyCode))
         {
-            return new ComplianceEvaluationResult(
-                ComplianceApplicabilityStatus.Indeterminate,
-                countryCode,
-                policyCode,
-                null,
-                [],
-                ["CountryCode", "PolicyCode"],
-                null,
-                null,
-                null,
-                ComplianceEvidenceRequirement.None,
-                false,
+            return IndeterminateResult(
+                countryCode, policyCode, null, ["CountryCode", "PolicyCode"],
                 "CountryCode and PolicyCode are required to evaluate statutory applicability.",
-                evaluatedAtUtc);
+                evaluatedAtUtc, responseKnownAsOfUtc);
         }
 
-        // MDM11-R02: Query published policies (VerifiedApproved or historical Superseded; NEVER Draft)
+        // Query published policies (VerifiedApproved or Superseded; NEVER Draft)
         // whose [EffectiveFromUtc, EffectiveToUtc) interval covers evaluatedAtUtc.
         var matchingPublished = await _db.CountryCompliancePolicies
             .AsNoTracking()
@@ -90,65 +70,74 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
             .OrderByDescending(p => p.Version)
             .ToListAsync(cancellationToken);
 
-        var matchingActive = matchingPublished
-            .Where(p => p.ApprovalStatus == CompliancePolicyApprovalStatus.VerifiedApproved && p.IsActive)
-            .ToList();
-
-        if (matchingActive.Count > 1)
-        {
-            return new ComplianceEvaluationResult(
-                ComplianceApplicabilityStatus.Indeterminate,
-                countryCode,
-                policyCode,
-                null,
-                [],
-                ["UnambiguousActivePolicy"],
-                null,
-                null,
-                null,
-                ComplianceEvidenceRequirement.None,
-                false,
-                $"Multiple active VerifiedApproved policies matched '{countryCode}/{policyCode}' at {evaluatedAtUtc:O}; cannot disambiguate safely.",
-                evaluatedAtUtc);
-        }
-
-        Warehouse3PL.Domain.Entities.Reference.CountryCompliancePolicy? policy = matchingActive.Count == 1
-            ? matchingActive[0]
-            : null;
-
-        // If no currently active VerifiedApproved policy covers evaluatedAtUtc, resolve the most recent
-        // historical Superseded policy whose window covered that historical instant (e.g. pre-cutover audit).
+        Warehouse3PL.Domain.Entities.Reference.CountryCompliancePolicy? policy;
         bool evaluatedAgainstHistoricalSuperseded = false;
-        if (policy == null)
-        {
-            policy = matchingPublished
-                .Where(p => p.ApprovalStatus == CompliancePolicyApprovalStatus.Superseded)
-                .OrderByDescending(p => p.Version)
-                .FirstOrDefault();
 
-            if (policy != null)
+        if (explicitKnownAsOfUtc.HasValue)
+        {
+            var asKnownMatches = matchingPublished
+                .Where(p => p.ApprovedAtUtc.HasValue &&
+                            p.ApprovedAtUtc.Value <= explicitKnownAsOfUtc.Value &&
+                            (!p.SupersededAtUtc.HasValue || explicitKnownAsOfUtc.Value < p.SupersededAtUtc.Value))
+                .ToList();
+
+            if (asKnownMatches.Count > 1)
             {
-                evaluatedAgainstHistoricalSuperseded = true;
+                return IndeterminateResult(
+                    countryCode, policyCode, null, ["AmbiguousAsKnownPolicies"],
+                    $"Multiple published policies overlapped both effective instant {evaluatedAtUtc:O} and publication instant {explicitKnownAsOfUtc.Value:O} for '{countryCode}/{policyCode}'.",
+                    evaluatedAtUtc, responseKnownAsOfUtc);
+            }
+
+            if (asKnownMatches.Count == 0)
+            {
+                return IndeterminateResult(
+                    countryCode, policyCode, null, ["NoPublishedPolicyKnownAsOf"],
+                    $"No published policy for '{countryCode}/{policyCode}' covered {evaluatedAtUtc:O} as known at {explicitKnownAsOfUtc.Value:O}.",
+                    evaluatedAtUtc, responseKnownAsOfUtc);
+            }
+
+            policy = asKnownMatches[0];
+            evaluatedAgainstHistoricalSuperseded = policy.ApprovalStatus == CompliancePolicyApprovalStatus.Superseded;
+        }
+        else
+        {
+            var matchingActive = matchingPublished
+                .Where(p => p.ApprovalStatus == CompliancePolicyApprovalStatus.VerifiedApproved && p.IsActive)
+                .ToList();
+
+            if (matchingActive.Count > 1)
+            {
+                return IndeterminateResult(
+                    countryCode, policyCode, null, ["UnambiguousActivePolicy"],
+                    $"Multiple active VerifiedApproved policies matched '{countryCode}/{policyCode}' at {evaluatedAtUtc:O}; cannot disambiguate safely.",
+                    evaluatedAtUtc, responseKnownAsOfUtc);
+            }
+
+            policy = matchingActive.Count == 1 ? matchingActive[0] : null;
+
+            if (policy == null)
+            {
+                policy = matchingPublished
+                    .Where(p => p.ApprovalStatus == CompliancePolicyApprovalStatus.Superseded)
+                    .OrderByDescending(p => p.Version)
+                    .FirstOrDefault();
+
+                if (policy != null)
+                {
+                    evaluatedAgainstHistoricalSuperseded = true;
+                }
+            }
+
+            if (policy == null)
+            {
+                return IndeterminateResult(
+                    countryCode, policyCode, null, ["ActiveVerifiedPolicy"],
+                    $"No published policy covers '{countryCode}/{policyCode}' at {evaluatedAtUtc:O}. Draft or uncovered periods do not establish exemption.",
+                    evaluatedAtUtc, responseKnownAsOfUtc);
             }
         }
 
-        if (policy == null)
-        {
-            return new ComplianceEvaluationResult(
-                ComplianceApplicabilityStatus.Indeterminate,
-                countryCode,
-                policyCode,
-                null,
-                [],
-                ["ActiveVerifiedPolicy"],
-                null,
-                null,
-                null,
-                ComplianceEvidenceRequirement.None,
-                false,
-                $"No published policy covers '{countryCode}/{policyCode}' at {evaluatedAtUtc:O}. Draft or uncovered periods do not establish exemption.",
-                evaluatedAtUtc);
-        }
         if (!ReferenceMappings.TryParsePredicate(policy.ApplicabilityPredicateJson, out var predicate, out var parseError) ||
             predicate == null)
         {
@@ -165,7 +154,10 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
                 ComplianceEvidenceRequirement.None,
                 false,
                 parseError ?? "Active policy predicate is malformed or incomplete.",
-                evaluatedAtUtc);
+                evaluatedAtUtc,
+                responseKnownAsOfUtc,
+                policy.ApprovalStatus,
+                policy.ApprovedAtUtc);
         }
 
         var matchedPredicates = new List<string>();
@@ -239,14 +231,19 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
                 ComplianceEvidenceRequirement.None,
                 false,
                 $"Missing or ambiguous inputs for policy '{policyCode}' v{policy.Version}: {string.Join(", ", missingOrAmbiguous)}.",
-                evaluatedAtUtc);
+                evaluatedAtUtc,
+                responseKnownAsOfUtc,
+                policy.ApprovalStatus,
+                policy.ApprovedAtUtc);
         }
 
         // If any dimension matched an explicit non-applicable category and no contradictory required-trigger
         // needs override, return NotRequired strictly per the approved policy predicate (never asserting statutory immunity).
-        var historicalNote = evaluatedAgainstHistoricalSuperseded
-            ? " (resolved via historical Superseded version for requested EvaluationUtc)"
-            : string.Empty;
+        var historicalNote = explicitKnownAsOfUtc.HasValue
+            ? $" (as known at {explicitKnownAsOfUtc.Value:O})"
+            : evaluatedAgainstHistoricalSuperseded
+                ? " (resolved via historical Superseded version for requested EvaluationUtc)"
+                : string.Empty;
 
         if (anyExplicitExempt && !anyExplicitRequired)
         {
@@ -263,7 +260,10 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
                 ComplianceEvidenceRequirement.None,
                 false,
                 $"Evaluated NotRequired against configured policy '{policyCode}' v{policy.Version}{historicalNote}.",
-                evaluatedAtUtc);
+                evaluatedAtUtc,
+                responseKnownAsOfUtc,
+                policy.ApprovalStatus,
+                policy.ApprovedAtUtc);
         }
 
         if (anyExplicitExempt && anyExplicitRequired)
@@ -281,7 +281,10 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
                 ComplianceEvidenceRequirement.None,
                 false,
                 $"Inputs simultaneously matched required and excluded criteria in policy '{policyCode}' v{policy.Version}.",
-                evaluatedAtUtc);
+                evaluatedAtUtc,
+                responseKnownAsOfUtc,
+                policy.ApprovalStatus,
+                policy.ApprovedAtUtc);
         }
 
         var evidenceReq = policy.EnforcementMode == ComplianceEnforcementMode.AdvisoryWarning
@@ -301,8 +304,67 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
             evidenceReq,
             false, // ManualReferenceRecorded captures documentation only; never asserts external government verification.
             $"Matched applicability predicates for policy '{policyCode}' v{policy.Version}{historicalNote}.",
-            evaluatedAtUtc);
+            evaluatedAtUtc,
+            responseKnownAsOfUtc,
+            policy.ApprovalStatus,
+            policy.ApprovedAtUtc);
     }
+
+    private static bool TryNormalizeUtcInput(
+        DateTime? rawTimestamp,
+        string fieldName,
+        DateTime fallbackUtc,
+        out DateTime normalizedUtc,
+        out string? errorCode,
+        out string? errorMessage)
+    {
+        errorCode = null;
+        errorMessage = null;
+        if (!rawTimestamp.HasValue)
+        {
+            normalizedUtc = fallbackUtc;
+            return true;
+        }
+
+        switch (rawTimestamp.Value.Kind)
+        {
+            case DateTimeKind.Utc:
+                normalizedUtc = rawTimestamp.Value;
+                return true;
+            case DateTimeKind.Local:
+                normalizedUtc = rawTimestamp.Value.ToUniversalTime();
+                return true;
+            default:
+                normalizedUtc = fallbackUtc;
+                errorCode = $"{fieldName}:UnspecifiedKind";
+                errorMessage = $"{fieldName} must be explicitly UTC (DateTimeKind.Utc) or timezone-aware (DateTimeKind.Local); naive Unspecified timestamps are rejected fail-closed.";
+                return false;
+        }
+    }
+
+    private static ComplianceEvaluationResult IndeterminateResult(
+        string countryCode,
+        string policyCode,
+        int? policyVersion,
+        IReadOnlyList<string> missingOrAmbiguous,
+        string reason,
+        DateTime evaluatedAtUtc,
+        DateTime? knownAsOfUtc) =>
+        new(
+            ComplianceApplicabilityStatus.Indeterminate,
+            countryCode,
+            policyCode,
+            policyVersion,
+            [],
+            missingOrAmbiguous,
+            null,
+            null,
+            null,
+            ComplianceEvidenceRequirement.None,
+            false,
+            reason,
+            evaluatedAtUtc,
+            knownAsOfUtc);
 
     private static void EvaluateStringDimension(
         string dimensionName,

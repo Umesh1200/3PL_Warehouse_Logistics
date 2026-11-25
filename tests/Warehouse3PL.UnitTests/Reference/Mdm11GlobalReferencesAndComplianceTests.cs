@@ -276,6 +276,84 @@ public sealed class Mdm11GlobalReferencesAndComplianceTests
     }
 
     [Fact]
+    public async Task Evaluator_DistinguishesEffectiveDateFromHistoricalPublicationTime_ForBackdatedSupersession()
+    {
+        var dbName = $"mdm11-bitemporal-{Guid.NewGuid():N}";
+        using var db = TestDbContextFactory.Create(
+            new TestTenantProvider { BypassTenantFilter = true },
+            new TestCurrentUserContext { UserType = UserType.Staff },
+            dbName);
+
+        await ReferenceCatalogSeeder.SeedAsync(db);
+        var evaluator = new CountryComplianceEvaluator(db, new DateTimeProvider());
+
+        var sep15 = new DateTime(2026, 9, 15, 0, 0, 0, DateTimeKind.Utc);
+        var oct1 = new DateTime(2026, 10, 1, 0, 0, 0, DateTimeKind.Utc);
+        var nov1 = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc);
+        var nov10 = new DateTime(2026, 11, 10, 12, 0, 0, DateTimeKind.Utc);
+        var nov25 = new DateTime(2026, 11, 25, 10, 0, 0, DateTimeKind.Utc);
+
+        var v1Pred = ReferenceMappings.SerializePredicate(new ComplianceApplicabilityPredicate
+        {
+            ExemptOrderCategories = ["SyntheticMixedOrder"]
+        });
+        var v2Pred = ReferenceMappings.SerializePredicate(new ComplianceApplicabilityPredicate
+        {
+            RequiredOrderCategories = ["SyntheticMixedOrder"]
+        });
+
+        // v1 approved Oct 1 (effective Oct 1), initially evaluating SyntheticMixedOrder as NotRequired
+        var v1 = CountryCompliancePolicy.CreateDraft(
+            "NP", "BITEMPORAL-TEST", 1, "Bitemporal v1", "Statute v1", "Notice v1", v1Pred,
+            ComplianceEnforcementMode.MandatoryFailClosed, oct1, null);
+        v1.Approve(Guid.NewGuid(), oct1, "Approved v1 on Oct 1.");
+
+        // v2 approved Nov 25, backdated effective Nov 1, flipping SyntheticMixedOrder to Required
+        var v2 = CountryCompliancePolicy.CreateDraft(
+            "NP", "BITEMPORAL-TEST", 2, "Bitemporal v2", "Statute v2", "Notice v2 (Backdated)", v2Pred,
+            ComplianceEnforcementMode.MandatoryFailClosed, nov1, null);
+        v1.Supersede(v2.Id, nov25);
+        v2.Approve(Guid.NewGuid(), nov25, "Approved backdated v2 on Nov 25.");
+
+        db.CountryCompliancePolicies.AddRange(v1, v2);
+        await db.SaveChangesAsync();
+
+        // 1. Effective-date evaluation (KnownAsOfUtc = null) for Nov 10 applies currently active backdated v2 -> Required
+        var effectiveNov10 = await evaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+            "NP", "BITEMPORAL-TEST", nov10, OrderCategory: "SyntheticMixedOrder"));
+        Assert.Equal(ComplianceApplicabilityStatus.Required, effectiveNov10.Status);
+        Assert.Equal(2, effectiveNov10.EvaluatedPolicyVersion);
+        Assert.Equal(CompliancePolicyApprovalStatus.VerifiedApproved, effectiveNov10.EvaluatedPolicyApprovalStatus);
+
+        // 2. Historical as-known evaluation (KnownAsOfUtc = nov10) reconstructs Nov 10 publication state -> v1 NotRequired!
+        var asKnownNov10 = await evaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+            "NP", "BITEMPORAL-TEST", nov10, OrderCategory: "SyntheticMixedOrder", KnownAsOfUtc: nov10));
+        Assert.Equal(ComplianceApplicabilityStatus.NotRequired, asKnownNov10.Status);
+        Assert.Equal(1, asKnownNov10.EvaluatedPolicyVersion);
+        Assert.Equal(CompliancePolicyApprovalStatus.Superseded, asKnownNov10.EvaluatedPolicyApprovalStatus);
+        Assert.Equal(oct1, asKnownNov10.PolicyApprovedAtUtc);
+
+        // 3. As-known at Nov 25 (when v2 published and v1 superseded) selects v2 -> Required
+        var asKnownNov25 = await evaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+            "NP", "BITEMPORAL-TEST", nov10, OrderCategory: "SyntheticMixedOrder", KnownAsOfUtc: nov25));
+        Assert.Equal(ComplianceApplicabilityStatus.Required, asKnownNov25.Status);
+        Assert.Equal(2, asKnownNov25.EvaluatedPolicyVersion);
+
+        // 4. Pre-publication KnownAsOfUtc (Sep 15 before Oct 1) -> Indeterminate
+        var prePub = await evaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+            "NP", "BITEMPORAL-TEST", nov10, OrderCategory: "SyntheticMixedOrder", KnownAsOfUtc: sep15));
+        Assert.Equal(ComplianceApplicabilityStatus.Indeterminate, prePub.Status);
+        Assert.Contains("NoPublishedPolicyKnownAsOf", prePub.MissingOrAmbiguousInputs);
+
+        // 5. Unspecified KnownAsOfUtc fails closed as Indeterminate
+        var unspecKnown = await evaluator.EvaluateAsync(new ComplianceEvaluationRequest(
+            "NP", "BITEMPORAL-TEST", nov10, OrderCategory: "SyntheticMixedOrder",
+            KnownAsOfUtc: new DateTime(2026, 11, 10, 12, 0, 0, DateTimeKind.Unspecified)));
+        Assert.Equal(ComplianceApplicabilityStatus.Indeterminate, unspecKnown.Status);
+        Assert.Contains("KnownAsOfUtc:UnspecifiedKind", unspecKnown.MissingOrAmbiguousInputs);
+    }
+
+    [Fact]
     public async Task Evaluator_EnforcesDraftIsolation_AndDistinguishesRequiredNotRequiredAndIndeterminate()
     {
         var dbName = $"mdm11-eval-{Guid.NewGuid():N}";
