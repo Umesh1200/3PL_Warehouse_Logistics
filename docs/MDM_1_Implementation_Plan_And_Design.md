@@ -35,7 +35,7 @@ flowchart LR
 ### Design Invariants Preserved Across All `MDM-1` Sub-Units
 1. **Strict Scope Separation:** Immutable global standards (`CountryProfile`, `AdministrativeDivision`, `CurrencyMaster`, `UomDefinition`/`UomConversion`, `BikramSambatCalendarMonth`) permit zero client overrides and zero `PUT`/`DELETE` endpoints (`405`/`409`).
 2. **Reuse Existing Anchors:** Extend `Facility`, `Iso4217Currencies`, `FxRateProvider` (`IFxRateProvider`), `ICacheService` / `RedisCacheService`, `AuditableEntityInterceptor`, and `CarrierContractualSlaPolicy` rather than creating duplicate parallel services.
-3. **Zero Silent Defaults on Critical Paths:** Operations lacking an active `CountryProfile`, `TaxJurisdiction` linkage, `FxRateRecord`, or valid `CountryCompliancePolicy` evaluation fail closed (`422 Unprocessable Entity`), never silently falling back to `"USD"`, `"USA"`, or static mock values.
+3. **Staged Fail-Closed Activation Boundary (`MDM11-D04`):** Fail-closed operational enforcement activates **strictly in the sub-unit/stage where its backing domain and callers are wired** (`MDM-1.3` for `FxRateRecord`, `MDM-3` for `TaxJurisdiction`/`TaxRateRule` and CBMS invoicing, `MDM-4` for runtime dispatch/VCTS gating). **`MDM-1.1` introduces reference catalogs, versioned policy management, and a testable compliance evaluator without activating breaking dispatch, shipping, or billing enforcement prematurely.**
 4. **Preserve Closed Phase 7.4 & `MDM-0` Baselines:** All `1,409` .NET tests, `103` Vitest tests, `32` Playwright tests, and live PostgreSQL Phase 7.3–7.4 + `MDM-0.1`–`MDM-0.4` verifiers remain green after every sub-unit.
 
 ---
@@ -44,10 +44,10 @@ flowchart LR
 
 ### `MDM-1.1` — Immutable Global Reference Catalogs & `CountryCompliancePolicy` Engine *(Proposed First Unit)*
 *(Detailed implementation blueprint provided in Section 3 below for immediate approval.)*
-- **Deliverables:** `CountryProfile`, `AdministrativeDivision`, `TimeZoneProfile` (or verified IANA timezone registry), `CountryCompliancePolicy`, formal `ResolvedConfigurationResult<T>` / `ConfigResolutionState` / `ConfigScope` contract, platform reference seed (`US` + `NP`), read-only reference endpoints + versioned compliance policy management endpoints, and conditional VCTS/CBMS applicability evaluator.
-- **Database & Migration Gate:** Additive schema creating `country_profiles`, `administrative_divisions`, `time_zone_profiles`, `country_compliance_policies`; idempotent platform seed (`US` + 51 subdivisions, `NP` + 7 ISO 3166-2:NP provinces & sample district/Palika seed hierarchy, IANA zones incl. `Asia/Kathmandu` & US zones, conditional `NP-DRI-VCTS`, `NP-IRD-CBMS`, `NP-IRD-VAT` policy definitions).
-- **Tenant-Isolation & Authorization Gate:** Anonymous requests return `401`; `Client` / `Driver` / unprivileged `Staff` denied (`403`) on `CountryCompliancePolicy` mutations; only verified platform `SuperAdmin` or dedicated `Permissions.Global.ManageCompliance` (`Staff`) may publish/supersede `CountryCompliancePolicy` versions; reference catalogs reject `POST`/`PUT`/`DELETE` from non-platform callers (`403`/`405`).
-- **Regression Gate:** Unit + HTTP + live PostgreSQL tests verifying conditional `NP-DRI-VCTS` (exempt micro-retail vs. covered wholesale), `NP-IRD-CBMS` conditional applicability, retroactive policy window overlap rejection (`409 Conflict`), and `US` vs `NP` postal pattern validation (`^\d{5}(-\d{4})?$` vs `NP` 5/7-digit locality + legacy GPO codes).
+- **Deliverables:** `CountryProfile`, `AdministrativeDivision`, `TimeZoneProfile` (IANA `tzdb` registry with dynamic runtime offset resolution), `CountryCompliancePolicy`, formal `ResolvedConfigurationResult<T>` / `ConfigResolutionState` / `ConfigScope` contract, separate `ComplianceEvaluationResult` (`Required | NotRequired | Indeterminate`), platform reference seed (`US` + `NP`), initial **`Draft` (non-enforcing)** policy definitions (`NP-DRI-VCTS`, `NP-IRD-CBMS`, `NP-IRD-VAT`), read-only reference endpoints + concurrency-safe policy publication endpoints, and testable `ICountryComplianceEvaluator`.
+- **Database & Migration Gate:** Additive schema creating `country_profiles`, `administrative_divisions`, `time_zone_profiles`, `country_compliance_policies` with PostgreSQL `btree_gist` exclusion constraint + `pg_advisory_xact_lock` serialization preventing overlapping `VerifiedApproved` active windows; idempotent reference seed (`US` + 51 subdivisions, `NP` + 7 ISO 3166-2:NP provinces & hierarchy support, IANA zones incl. `Asia/Kathmandu` & US zones, plus `Draft`/`IsActive = false` statutory policy definitions).
+- **Tenant-Isolation & Authorization Gate:** Anonymous requests return `401`; `Client` / `Driver` / unprivileged `Staff` denied (`403`) on `CountryCompliancePolicy` mutations; only verified platform `SuperAdmin` or dedicated `Permissions.Global.ComplianceManage` (`Staff`) may draft/approve/supersede `CountryCompliancePolicy` versions; reference catalogs reject `POST`/`PUT`/`DELETE` (`403`/`405`).
+- **Regression Gate:** Unit + HTTP + live PostgreSQL tests verifying `Draft`-seeded policies never enforce before evidence-validated approval (`MDM11-D01`), separate `Required | NotRequired | Indeterminate` evaluation without equating `Indeterminate` with exemption (`MDM11-D02`), simultaneous concurrent approval contention serialization/exclusion (`MDM11-D03`), zero disruption to Phase 7.4 dispatch/shipping/billing (`MDM11-D04`), and `US` vs `NP` syntactic postal format checks.
 
 ---
 
@@ -133,7 +133,7 @@ flowchart LR
 
 ## 3. Proposed First Implementation Unit for Approval: `MDM-1.1`
 
-`MDM-1.1` is deliberately isolated as a **zero-breaking, additive foundation** that introduces no edits to `Facility`, `Client`, `Invoice`, or `RedisCacheService` yet, allowing clean review of the global reference schema and conditional Nepal compliance model before any foreign keys or backfills attach.
+`MDM-1.1` is strictly isolated as a **zero-breaking, additive foundation** that introduces no edits to `Facility`, `Client`, `Invoice`, or `RedisCacheService` and **activates no runtime dispatch, shipping, or billing enforcement** (`MDM11-D04`), allowing independent review of reference catalogs and regulatory policy publication before foreign keys or backfills attach.
 
 ### 3.1 Proposed Domain Entities (`src/Core/Warehouse3PL.Domain/Entities/Reference/`)
 1. **`CountryProfile`** (`country_profiles`)
@@ -142,11 +142,11 @@ flowchart LR
    - `NumericCode` (`string(3)`, e.g. `"840"`, `"524"`)
    - `Name` (`string(120)`)
    - `DefaultCurrencyCode` (`string(3)`, validated via `Iso4217Currencies`, e.g. `"USD"`, `"NPR"`)
-   - `PrimaryTimeZoneId` (`string(64)`, IANA, e.g. `"America/Chicago"`, `"Asia/Kathmandu"`)
+   - `PrimaryTimeZoneId` (`string(64)`, IANA `tzdb` ID, e.g. `"America/Chicago"`, `"Asia/Kathmandu"`)
    - `AddressSchemaType` (`enum`: `UsStateZip`, `NepalProvinceDistrictPalika`, `GenericPostal`)
-   - `PostalCodeRegex` (`string(120)`) and `LegacyPostalCodeRegex` (`string(120)?`) — `NP` validates 5/7-digit locality codes (`^\d{5}(\d{2})?$`) alongside legacy 5-digit district GPO codes
+   - `PostalCodeRegex` (`string(120)`) and `LegacyPostalCodeRegex` (`string(120)?`) — **syntactic format validation only** (e.g., `US` `^\d{5}(-\d{4})?$`; `NP` 5/7-digit locality format `^\d{5}(\d{2})?$` alongside legacy 5-digit GPO format); syntactic matching does **not** prove physical address or postal-code existence
    - `PrimaryCalendarSystem` (`enum`: `Gregorian`, `BikramSambatDual`)
-   - `FiscalYearStartMonth` (`int`: `1` for `US`, `4` Shrawan for `NP`)
+   - `FiscalCalendarSystem` (`enum`: `Gregorian`, `BikramSambat`) and `DefaultFiscalYearStartMonth` (`int`: for `NP`, `BikramSambat` month `4` = **Shrawan**, distinct from Gregorian April; for `US`, defaults to Gregorian month `1` = January while allowing issuing `LegalEntity` fiscal-year overrides in `MDM-1.2`/`MDM-3`)
    - `IsActive` (`bool`), audit timestamps (`SeedVersion` / `CreatedAt`)
 2. **`AdministrativeDivision`** (`administrative_divisions`)
    - `Id` (`Guid`, PK), `CountryCode` (`string(2)`, FK -> `country_profiles`), `ParentDivisionId` (`Guid?`, self-FK for hierarchy: Province -> District -> Palika)
@@ -156,24 +156,36 @@ flowchart LR
    - Unique index on `(CountryCode, DivisionLevel, Code)`
 3. **`TimeZoneProfile`** (`time_zone_profiles`)
    - `TimeZoneId` (`string(64)`, PK, valid IANA `tzdb` ID, e.g., `"Asia/Kathmandu"`, `"America/Chicago"`, `"America/New_York"`, `"America/Los_Angeles"`, `"UTC"`)
-   - `DisplayName` (`string(120)`), `StandardUtcOffsetMinutes` (`int`, e.g. `345` for `Asia/Kathmandu`), `ObservesDst` (`bool`), `CountryCode` (`string(2)?` primary hint), `IsActive` (`bool`)
+   - `DisplayName` (`string(120)`), `ObservesDst` (`bool`), `CountryCode` (`string(2)?` primary hint), `IsActive` (`bool`)
+   - **Dynamic IANA Offset Resolution:** Effective UTC offsets (especially DST-observing `US` zones such as `America/Chicago` shifting between `-06:00` and `-05:00`, versus fixed `Asia/Kathmandu` `+05:45`) MUST be computed dynamically at the target UTC instant via `TimeZoneInfo.FindSystemTimeZoneById(TimeZoneId).GetUtcOffset(utcInstant)` — never stored as a fixed operational offset column.
 4. **`CountryCompliancePolicy`** (`country_compliance_policies`)
    - `Id` (`Guid`, PK), `CountryCode` (`string(2)`, FK -> `country_profiles`)
    - `PolicyCode` (`string(50)`, e.g. `"NP-DRI-VCTS"`, `"NP-IRD-CBMS"`, `"NP-IRD-VAT"`)
    - `Version` (`int`, >= 1), `Title` (`string(160)`)
-   - `StatutorySourceRef` (`string(200)`), `OfficialNoticeCitation` (`string(300)?`)
-   - `ApplicabilityPredicateJson` (`jsonb` / `string`, evaluated by typed predicate engine: `BusinessClassification`, `OrderCategory`, `CargoClass`, `TaxpayerMandateFlag`)
+   - `StatutorySourceRef` (`string(200)`), `OfficialNoticeCitation` (`string(300)`) — mandatory non-empty statutory provenance before approval (`MDM11-D01`)
+   - `ApplicabilityPredicateJson` (`jsonb` / `string`, typed predicate schema: `BusinessClassification`, `OrderCategory`, `CargoClass`, `TaxpayerMandateFlag`)
    - `EnforcementMode` (`enum`: `MandatoryFailClosed = 1`, `ConditionalRequired = 2`, `AdvisoryWarning = 3`)
    - `EffectiveFromUtc` (`DateTime`), `EffectiveToUtc` (`DateTime?`)
    - `ApprovalStatus` (`enum`: `Draft = 1`, `VerifiedApproved = 2`, `Superseded = 3`), `ApprovedByUserId` (`Guid?`), `ApprovedAtUtc` (`DateTime?`)
    - `ConfigRevision` (`long`, concurrency token), `IsActive` (`bool`)
-   - Unique index on `(CountryCode, PolicyCode, Version)`
+   - **Publication & Concurrency Integrity (`MDM11-D01`, `MDM11-D03`):**
+     - Seeded regulatory rows (`NP-DRI-VCTS`, `NP-IRD-CBMS`, `NP-IRD-VAT`) start strictly as **`ApprovalStatus = Draft` and `IsActive = false`** (non-enforcing). Seeding alone does not activate regulatory enforcement.
+     - Unique index on `(CountryCode, PolicyCode, Version)` **plus** PostgreSQL `btree_gist` exclusion constraint over active approved windows:
+       `EXCLUDE USING gist (country_code WITH =, policy_code WITH =, tstzrange(effective_from_utc, COALESCE(effective_to_utc, 'infinity'::timestamptz), '[)') WITH &&) WHERE (approval_status = 'VerifiedApproved' AND is_active = true)`
+     - Atomic `Approve` transaction acquires `pg_advisory_xact_lock` on `(CountryCode, PolicyCode)` (plus `FOR UPDATE` on existing `VerifiedApproved` rows), supersedes overlapping active rows (`Superseded`, `IsActive = false`), and activates the approved version atomically. Published/superseded versions remain immutable and historically inspectable (`409 Conflict` on mutation/delete).
 
-### 3.2 Shared Contract & Conditional Applicability Evaluator (`src/Core/Warehouse3PL.Application/Common/Models/`)
-- Define `ResolvedConfigurationResult<T>`, `ConfigResolutionState`, and `ConfigScope` exactly matching Specification §2.1.
-- Define `ICountryComplianceEvaluator` evaluating `CountryCompliancePolicy` applicability rules deterministically without treating Nepal VCTS/CBMS as unconditional:
-  - Example: `NP-DRI-VCTS` returns `ExplicitValue(Required -> ManualReferenceRecorded mode)` for `Wholesale` / `Importer` / `Manufacturer` B2B commercial cargo, and `NotApplicable` / `Disabled` for exempt `RetailMicro` (*खुद्रा*) or `DirectConsumer` personal parcels.
-  - Never treats any compliance rule evaluation or user-supplied reference as `AuthorityVerified`.
+### 3.2 Shared Resolution & Separate Typed Compliance Contracts (`src/Core/Warehouse3PL.Application/Common/Models/`)
+1. **Configuration Resolution Envelope (Specification §2.1 preserved verbatim):**
+   - `ConfigResolutionState`: `ExplicitValue = 1 | Inherited = 2 | ExplicitNull = 3 | Disabled = 4 | Prohibited = 5` (never overloaded with compliance exemption states).
+   - `ResolvedConfigurationResult<T>` & `ConfigScope`.
+2. **Dedicated Compliance Evaluation Contract (`MDM11-D02`):**
+   - `ComplianceApplicabilityStatus`: `Required = 1 | NotRequired = 2 | Indeterminate = 3`
+   - `ComplianceEvaluationResult`:
+     - `Status` (`ComplianceApplicabilityStatus`), `CountryCode`, `PolicyCode`, `EvaluatedPolicyVersion` (`int?`), `MatchedPredicates` (`IReadOnlyList<string>`), `MissingOrAmbiguousInputs` (`IReadOnlyList<string>`), `StatutorySourceRef`, `OfficialNoticeCitation`, `EnforcementMode`, `EvidenceRequirement` (`ManualReferenceRecorded` vs. future external integration), `Reason`, `EvaluatedAtUtc`
+   - **Contract Rules:**
+     - `ICountryComplianceEvaluator` evaluates **only** `VerifiedApproved && IsActive` policies within `[EffectiveFromUtc, EffectiveToUtc)` (ignoring `Draft` / `Superseded` policies).
+     - Missing active approved policy, incomplete predicate schema, or missing/ambiguous caller inputs (`BusinessClassification`, `OrderCategory`, etc.) MUST return **`Indeterminate`** with diagnostic `MissingOrAmbiguousInputs` and `Reason` — **never silently coerced to `NotRequired`**.
+     - `Required` under `ManualReferenceRecorded` sets capture requirement only and **never** asserts `AuthorityVerified`.
 
 ### 3.3 Proposed API Surface & Permissions (`MDM-1.1`)
 - New permissions in `Permissions.Global`:
@@ -183,20 +195,22 @@ flowchart LR
 - Endpoints:
   - `GET /api/v1/reference/countries` & `GET /api/v1/reference/countries/{countryCode}` (authenticated read)
   - `GET /api/v1/reference/countries/{countryCode}/divisions` (optional `?level=&parentId=` filter)
-  - `GET /api/v1/reference/timezones` (optional `?countryCode=` filter)
-  - `GET /api/v1/compliance-policies` (authenticated `Staff` with `ComplianceView` or `SuperAdmin`, filtered by `countryCode`, `asOfUtc`, `activeOnly`)
-  - `POST /api/v1/compliance-policies` (creates new `Draft` version; requires `Staff` + `Permissions.Global.ComplianceManage` or verified `SuperAdmin`; rejects overlapping `VerifiedApproved` windows with `409 Conflict`)
-  - `POST /api/v1/compliance-policies/{id}/approve` (transitions `Draft` -> `VerifiedApproved` and supersedes prior active overlapping version atomically; records `ApprovedByUserId` + `ApprovedAtUtc`)
-  - Explicit `405` / no `PUT` / no `DELETE` routes on immutable `reference/*` endpoints and active `compliance-policies`.
+  - `GET /api/v1/reference/timezones` (optional `?countryCode=` filter, returning dynamic `CurrentUtcOffsetMinutes` computed via IANA `TimeZoneInfo` at request timestamp)
+  - `GET /api/v1/compliance-policies` & `GET /api/v1/compliance-policies/{id}` (`Staff` with `ComplianceView` or verified `SuperAdmin`; historically inspects `Draft`, `VerifiedApproved`, and `Superseded` versions)
+  - `POST /api/v1/compliance-policies` (creates new `Draft` version with `IsActive = false`; requires `Staff` + `Permissions.Global.ComplianceManage` or verified `SuperAdmin`; rejects invalid predicate schema or window bounds with `400`/`422`)
+  - `POST /api/v1/compliance-policies/{id}/approve` (validates mandatory non-empty `StatutorySourceRef`, `OfficialNoticeCitation`, predicate schema, effective window, and approver identity -> atomically supersedes conflicting active window under PostgreSQL advisory lock + `btree_gist` exclusion constraint and sets `VerifiedApproved` + `IsActive = true`; missing evidence returns `422`, concurrent overlap conflict returns `409`)
+  - Explicit `405` / absence of `PUT` and `DELETE` routes on immutable `reference/*` endpoints and published/superseded `compliance-policies`.
 
 ### 3.4 `MDM-1.1` Verification & Exit Criteria
-1. **Migration Test (Live PostgreSQL):** Cleanly applies `MDM1_1_GlobalReferencesAndCompliance` on top of `Phase745PodIdempotencyAndAuditColumns`, idempotently seeds `US` + `NP` profiles, 7 Nepal provinces + US states, `Asia/Kathmandu` + US IANA zones, and conditional `NP-DRI-VCTS` / `NP-IRD-CBMS` / `NP-IRD-VAT` policies.
+1. **Migration Test (Live PostgreSQL):** Cleanly applies `MDM1_1_GlobalReferencesAndCompliance` (including `btree_gist` extension + `CountryCompliancePolicy` active-window exclusion constraint) on top of `Phase745PodIdempotencyAndAuditColumns`, idempotently seeds `US` + `NP` profiles, 7 Nepal provinces + US states, `Asia/Kathmandu` + US IANA zones, and **`Draft` / `IsActive = false`** `NP-DRI-VCTS`, `NP-IRD-CBMS`, and `NP-IRD-VAT` records.
 2. **Unit & HTTP Security Tests:**
-   - Unauthenticated calls return `401`; `Client` and `Driver` (even with spoofed permissions) and permissionless `Staff` receive `403` on `compliance-policies` writes/reads; `reference/*` rejects `PUT`/`DELETE`.
-   - `NP` postal validation accepts both 7-digit locality codes and legacy 5-digit GPO codes (`44600`, `33700`) while rejecting invalid strings; `US` enforces 5/9-digit ZIP.
-   - `CountryCompliancePolicy` overlap guard returns `409 Conflict` for duplicate/overlapping active versions; conditional VCTS predicate separates wholesale B2B (`Required`) from micro-retail (`NotApplicable`).
-3. **Baseline Preservation:** All existing `1,409` .NET tests, `103` Vitest tests, `32` Playwright tests, and live PostgreSQL checks pass alongside new `MDM-1.1` tests.
+   - Unauthenticated calls return `401`; `Client` and `Driver` (even with spoofed permissions) and permissionless `Staff` receive `403` on `compliance-policies` reads/mutations; `reference/*` rejects `PUT`/`DELETE`.
+   - `Draft` enforcement check (`MDM11-D01`): evaluator ignores `Draft` seeded policies (`Indeterminate`) and `approve` fails closed (`422`) if `StatutorySourceRef`, `OfficialNoticeCitation`, or predicate JSON is missing.
+   - Typed compliance contract check (`MDM11-D02`): approved `NP-DRI-VCTS` separates B2B wholesale (`Required`, matched predicates + source ref) from exempt micro-retail (`NotRequired`) and missing classification (`Indeterminate`, never `NotRequired`).
+   - **Live PostgreSQL Concurrent Approval Contention Test (`MDM11-D03`):** `Task.WhenAll` launches simultaneous approval attempts for competing overlapping versions on `(NP, NP-DRI-VCTS)`, verifying PostgreSQL serialization + `btree_gist` exclusion constraint leave at most one active `VerifiedApproved` row per effective window while preserving superseded audit history.
+   - Dynamic IANA timezone DST check (`America/Chicago` winter `-360m` vs summer `-300m` vs `Asia/Kathmandu` fixed `+345m`) and syntactic postal format checks (`NP` 5/7-digit locality + legacy GPO codes vs `US` ZIP).
+3. **Baseline Preservation (`MDM11-D04`):** Existing `1,409` .NET tests, `103` Vitest tests, `32` Playwright tests, and live PostgreSQL Phase 7.3–7.4 + `MDM-0` operational dispatch/shipping/billing checks remain 100% green with zero premature cross-stage blocking.
 
 ---
 
-**Ready Gate:** Awaiting independent approval of this staged `MDM-1` plan and authorization to begin **`MDM-1.1`**.
+**Ready Gate:** Awaiting independent approval of this revised `MDM-1.1` specification to authorize implementing `MDM-1.1`.
