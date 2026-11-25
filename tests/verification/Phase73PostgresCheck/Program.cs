@@ -4826,6 +4826,11 @@ try
     Console.WriteLine("ALL PHASE 7.3, 7.4.0A, 7.4.0B & 7.4.0C POSTGRESQL VERIFICATIONS PASSED CLEANLY!");
     Console.WriteLine("================================================================================");
 }
+catch (Exception ex)
+{
+    Console.WriteLine($"::error::{ex.ToString().Replace("\r", " ").Replace("\n", " | ")}");
+    throw;
+}
 finally
 {
     NpgsqlConnection.ClearAllPools();
