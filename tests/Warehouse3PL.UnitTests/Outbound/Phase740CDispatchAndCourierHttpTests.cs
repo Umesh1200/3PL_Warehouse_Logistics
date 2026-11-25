@@ -104,6 +104,7 @@ public sealed class Phase740CDispatchAndCourierHttpTests : IAsyncLifetime
         builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
         {
             ["ObjectStorage:BaseDirectory"] = _storageDir,
+            ["ObjectStorage:SigningSecretKey"] = "Test740C-Secure-ObjectStorage-Signing-Key-2026!",
             ["CarrierWebhooks:TimestampToleranceSeconds"] = "300",
             ["CarrierWebhooks:MaxPayloadBytes"] = "262144",
             ["CarrierWebhooks:Carriers:SIM-FEDEX:PrimarySecret"] = FedExSecret

@@ -4,6 +4,7 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.IdentityModel.Tokens;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Infrastructure.Authentication;
@@ -98,8 +99,28 @@ public static class DependencyInjection
         services.AddScoped<IFreightCostVarianceService, Warehouse3PL.Infrastructure.Services.Analytics.FreightCostVarianceService>();
 
         // Private Object Storage & Carrier Webhook Config
-        services.Configure<Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions>(
-            configuration.GetSection(Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions.SectionName));
+        services.AddOptions<Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions>()
+            .Bind(configuration.GetSection(Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions.SectionName))
+            .Validate<IServiceProvider>((opts, sp) =>
+            {
+                if (string.Equals(opts.SigningSecretKey?.Trim(),
+                        Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions.RetiredLegacyDefaultKey,
+                        StringComparison.Ordinal))
+                {
+                    return false;
+                }
+
+                var env = sp.GetService<IHostEnvironment>();
+                bool isDevelopment = env != null && env.IsDevelopment();
+                if (!isDevelopment)
+                {
+                    return Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions.IsStrongSigningKey(opts.SigningSecretKey);
+                }
+
+                return string.IsNullOrWhiteSpace(opts.SigningSecretKey) ||
+                       Warehouse3PL.Infrastructure.Services.Storage.ObjectStorageOptions.IsStrongSigningKey(opts.SigningSecretKey);
+            }, "ObjectStorage:SigningSecretKey must be configured with a strong non-default key (minimum 32 characters) in non-Development environments.")
+            .ValidateOnStart();
         services.Configure<CarrierWebhookOptions>(
             configuration.GetSection(CarrierWebhookOptions.SectionName));
         services.AddSingleton<IObjectStorageService, Warehouse3PL.Infrastructure.Services.Storage.PrivateObjectStorageService>();

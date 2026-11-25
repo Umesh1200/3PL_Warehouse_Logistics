@@ -1,6 +1,8 @@
+using System.Globalization;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging;
 using Microsoft.Extensions.Options;
 using Warehouse3PL.Application.Common.Interfaces;
@@ -12,17 +14,21 @@ namespace Warehouse3PL.Infrastructure.Services.Storage;
 /// Authoritative private object storage service for shipment evidence.
 /// Enforces private container access, staged temporary-to-final promotion, streaming SHA-256 calculation,
 /// file signature magic-byte verification, and HMAC-signed time-limited download URLs.
-/// DB-SPEC-3PL-2026 Phase 4.5 Shipment Tracking & Delivery Confirmation.
+/// DB-SPEC-3PL-2026 Phase 4.5 Shipment Tracking & Delivery Confirmation; hardened in MDM-0.2.
 /// </summary>
 public class PrivateObjectStorageService : IObjectStorageService
 {
     private readonly ObjectStorageOptions _options;
     private readonly ILogger<PrivateObjectStorageService> _logger;
     private readonly string _baseDirectory;
+    private readonly string _tempRootWithSep;
+    private readonly string _finalRootWithSep;
+    private readonly byte[]? _signingKeyBytes;
 
     public PrivateObjectStorageService(
         IOptions<ObjectStorageOptions> options,
-        ILogger<PrivateObjectStorageService> logger)
+        ILogger<PrivateObjectStorageService> logger,
+        IHostEnvironment? hostEnvironment = null)
     {
         _options = options.Value;
         _logger = logger;
@@ -31,8 +37,14 @@ public class PrivateObjectStorageService : IObjectStorageService
             ? Path.GetFullPath(_options.BaseDirectory)
             : Path.Combine(AppContext.BaseDirectory, "storage", "private");
 
-        Directory.CreateDirectory(Path.Combine(_baseDirectory, "temp"));
-        Directory.CreateDirectory(Path.Combine(_baseDirectory, "final"));
+        var tempRoot = Path.Combine(_baseDirectory, "temp");
+        var finalRoot = Path.Combine(_baseDirectory, "final");
+        Directory.CreateDirectory(tempRoot);
+        Directory.CreateDirectory(finalRoot);
+        _tempRootWithSep = EnsureTrailingSeparator(Path.GetFullPath(tempRoot));
+        _finalRootWithSep = EnsureTrailingSeparator(Path.GetFullPath(finalRoot));
+
+        _signingKeyBytes = ResolveSigningKeyBytes(_options.SigningSecretKey, hostEnvironment, _logger);
     }
 
     public async Task<StagedUploadResult> UploadStagedAsync(
@@ -266,9 +278,15 @@ public class PrivateObjectStorageService : IObjectStorageService
         var expiresAtUtc = DateTime.UtcNow.AddMinutes(requestedMinutes);
         string expiryString = expiresAtUtc.ToString("o");
 
+        if (_signingKeyBytes == null || _signingKeyBytes.Length == 0)
+        {
+            throw new InvalidOperationException(
+                "ObjectStorage:SigningSecretKey is not configured. Pre-signed URL generation requires a configured strong signing key.");
+        }
+
         // Generate HMAC-SHA256 signature
         string payloadToSign = $"GET\n{normalizedKey}\n{expiryString}";
-        using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(_options.SigningSecretKey));
+        using var hmac = new HMACSHA256(_signingKeyBytes);
         byte[] signatureBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(payloadToSign));
         string signatureHex = Convert.ToHexString(signatureBytes).ToLowerInvariant();
 
@@ -296,7 +314,22 @@ public class PrivateObjectStorageService : IObjectStorageService
             return false;
         }
 
-        var normalizedKey = SanitizeObjectKey(objectKey);
+        if (_signingKeyBytes == null || _signingKeyBytes.Length == 0)
+        {
+            _logger.LogError("Rejected pre-signed token validation because ObjectStorage:SigningSecretKey is not configured.");
+            return false;
+        }
+
+        string normalizedKey;
+        try
+        {
+            normalizedKey = SanitizeObjectKey(objectKey);
+        }
+        catch (ValidationException ex)
+        {
+            _logger.LogWarning(ex, "Rejected pre-signed token validation due to unsafe object key.");
+            return false;
+        }
 
         try
         {
@@ -317,27 +350,39 @@ public class PrivateObjectStorageService : IObjectStorageService
 
             string expiryString = rawToken[..colonIndex];
             string providedSignatureHex = rawToken[(colonIndex + 1)..];
-
-            if (!DateTime.TryParse(expiryString, null, System.Globalization.DateTimeStyles.RoundtripKind, out var expiresAtUtc))
+            if (providedSignatureHex.Length != 64)
             {
                 return false;
             }
 
-            if (utcNow > expiresAtUtc)
+            if (!DateTime.TryParse(
+                    expiryString,
+                    CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind,
+                    out var expiresAtUtc) ||
+                expiresAtUtc.Kind != DateTimeKind.Utc)
             {
-                _logger.LogWarning("Pre-signed token expired at '{Expiry}', current time '{Now}'", expiresAtUtc, utcNow);
                 return false;
             }
+
+            var utcNowNormalized = utcNow.Kind == DateTimeKind.Utc
+                ? utcNow
+                : utcNow.ToUniversalTime();
+
+            if (utcNowNormalized > expiresAtUtc)
+            {
+                _logger.LogWarning("Pre-signed token expired at '{Expiry}', current time '{Now}'", expiresAtUtc, utcNowNormalized);
+                return false;
+            }
+
+            byte[] providedHash = Convert.FromHexString(providedSignatureHex);
 
             // Verify signature
             string payloadToSign = $"GET\n{normalizedKey}\n{expiryString}";
-            using var hmac = new HMACSHA256(Encoding.UTF8.GetBytes(_options.SigningSecretKey));
-            byte[] expectedSignatureBytes = hmac.ComputeHash(Encoding.UTF8.GetBytes(payloadToSign));
-            string expectedSignatureHex = Convert.ToHexString(expectedSignatureBytes).ToLowerInvariant();
+            using var hmac = new HMACSHA256(_signingKeyBytes);
+            byte[] expectedHash = hmac.ComputeHash(Encoding.UTF8.GetBytes(payloadToSign));
 
-            return CryptographicOperations.FixedTimeEquals(
-                Encoding.UTF8.GetBytes(expectedSignatureHex),
-                Encoding.UTF8.GetBytes(providedSignatureHex.ToLowerInvariant()));
+            return CryptographicOperations.FixedTimeEquals(expectedHash, providedHash);
         }
         catch (Exception ex)
         {
@@ -465,17 +510,74 @@ public class PrivateObjectStorageService : IObjectStorageService
 
     #region Helpers & Validation
 
-    private static string SanitizeObjectKey(string key)
+    private static byte[]? ResolveSigningKeyBytes(
+        string? configuredKey,
+        IHostEnvironment? hostEnvironment,
+        ILogger logger)
     {
-        var normalized = key.Trim().Replace('\\', '/');
-        while (normalized.StartsWith('/'))
+        var trimmed = configuredKey?.Trim() ?? string.Empty;
+        if (string.Equals(trimmed, ObjectStorageOptions.RetiredLegacyDefaultKey, StringComparison.Ordinal))
         {
-            normalized = normalized[1..];
+            throw new InvalidOperationException(
+                "ObjectStorage:SigningSecretKey cannot use the retired legacy default key. Provision a unique cryptographic secret.");
         }
 
-        if (normalized.Contains(".."))
+        if (ObjectStorageOptions.IsStrongSigningKey(trimmed))
+        {
+            return Encoding.UTF8.GetBytes(trimmed);
+        }
+
+        if (hostEnvironment != null && !hostEnvironment.IsDevelopment())
+        {
+            throw new InvalidOperationException(
+                $"ObjectStorage:SigningSecretKey must be explicitly configured with at least {ObjectStorageOptions.MinimumSigningKeyLength} characters in '{hostEnvironment.EnvironmentName}' environments.");
+        }
+
+        if (!string.IsNullOrEmpty(trimmed))
+        {
+            throw new InvalidOperationException(
+                $"ObjectStorage:SigningSecretKey must be at least {ObjectStorageOptions.MinimumSigningKeyLength} characters with sufficient entropy.");
+        }
+
+        if (hostEnvironment != null && hostEnvironment.IsDevelopment())
+        {
+            logger.LogWarning(
+                "ObjectStorage:SigningSecretKey is not configured in Development; generating ephemeral runtime key (pre-signed URLs will not survive process restarts).");
+            return RandomNumberGenerator.GetBytes(32);
+        }
+
+        // Unconfigured direct unit-test instantiation without IHostEnvironment: permit upload-only operations
+        // while failing closed on signing/validation calls.
+        return null;
+    }
+
+    private static string EnsureTrailingSeparator(string fullPath) =>
+        fullPath.EndsWith(Path.DirectorySeparatorChar)
+            ? fullPath
+            : fullPath + Path.DirectorySeparatorChar;
+
+    private static string SanitizeObjectKey(string key)
+    {
+        if (string.IsNullOrWhiteSpace(key))
+        {
+            throw new ValidationException(nameof(key), "Object key must be provided.");
+        }
+
+        if (key.Contains("..", StringComparison.Ordinal))
         {
             throw new ValidationException(nameof(key), "Path traversal characters ('..') are strictly prohibited.");
+        }
+
+        if (key.Contains('\\') || key.Contains(':') || key.IndexOf('\0') >= 0 || key.Any(char.IsControl))
+        {
+            throw new ValidationException(nameof(key), "Object key contains invalid path characters.");
+        }
+
+        var normalized = key.Trim().TrimStart('/');
+        if (string.IsNullOrWhiteSpace(normalized) ||
+            normalized.EndsWith(".meta.json", StringComparison.OrdinalIgnoreCase))
+        {
+            throw new ValidationException(nameof(key), "Object key is empty or references protected storage metadata.");
         }
 
         if (normalized.IndexOfAny(Path.GetInvalidPathChars()) >= 0)
@@ -483,17 +585,35 @@ public class PrivateObjectStorageService : IObjectStorageService
             throw new ValidationException(nameof(key), "Object key contains invalid path characters.");
         }
 
+        var segments = normalized.Split('/');
+        if (segments.Any(s => string.IsNullOrWhiteSpace(s) || s == "." || s == ".."))
+        {
+            throw new ValidationException(nameof(key), "Object key contains invalid or relative path segments.");
+        }
+
         return normalized;
     }
 
     private string GetTempFilePath(string sanitizedKey)
     {
-        return Path.GetFullPath(Path.Combine(_baseDirectory, "temp", sanitizedKey));
+        var full = Path.GetFullPath(Path.Combine(_baseDirectory, "temp", sanitizedKey));
+        var cmp = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (!full.StartsWith(_tempRootWithSep, cmp))
+        {
+            throw new ValidationException(nameof(sanitizedKey), "Resolved temporary storage path escapes root boundary.");
+        }
+        return full;
     }
 
     private string GetFinalFilePath(string sanitizedKey)
     {
-        return Path.GetFullPath(Path.Combine(_baseDirectory, "final", sanitizedKey));
+        var full = Path.GetFullPath(Path.Combine(_baseDirectory, "final", sanitizedKey));
+        var cmp = OperatingSystem.IsWindows() ? StringComparison.OrdinalIgnoreCase : StringComparison.Ordinal;
+        if (!full.StartsWith(_finalRootWithSep, cmp))
+        {
+            throw new ValidationException(nameof(sanitizedKey), "Resolved final storage path escapes root boundary.");
+        }
+        return full;
     }
 
     private static void ValidateFileSignature(byte[] headerBuffer, int bytesRead, string contentType)

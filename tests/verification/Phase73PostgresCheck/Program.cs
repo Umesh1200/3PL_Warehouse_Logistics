@@ -1732,6 +1732,7 @@ try
     p74WebBuilder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
     {
         ["ObjectStorage:BaseDirectory"] = pgPodStorageDir,
+        ["ObjectStorage:SigningSecretKey"] = "PgCi-Secure-ObjectStorage-Signing-Key-2026-Strong!",
         ["CarrierWebhooks:TimestampToleranceSeconds"] = "300",
         ["CarrierWebhooks:MaxPayloadBytes"] = "1024",
         ["CarrierWebhooks:Carriers:SIM-FEDEX:PrimarySecret"] = pgPrimarySecret,
@@ -4782,6 +4783,22 @@ try
         facilityId,
         StaffReq,
         bOpBId,
+        claims => TestAuthHandler.CustomClaims = claims);
+
+    await Mdm02PostgresCheck.RunAsync(
+        p74Client,
+        p74App.Services.GetRequiredService<IObjectStorageService>(),
+        client1Id,
+        client2Id,
+        facilityId,
+        p74FacB,
+        r01PkgSignedId,
+        supPkgId,
+        cDriverAId,
+        cDriverBId,
+        StaffReq,
+        bSupId,
+        utc => p74Clock.UtcNow = utc ?? DateTime.UtcNow,
         claims => TestAuthHandler.CustomClaims = claims);
 
     if (Directory.Exists(pgPodStorageDir))
