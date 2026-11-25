@@ -5,6 +5,7 @@ using System.Security.Claims;
 using System.Text.Json;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging.Abstractions;
+using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Putaway.Tasks.Commands.ConfirmPutawayTask;
 using Warehouse3PL.Domain.Constants;
@@ -276,14 +277,14 @@ internal static class Mdm04PostgresCheck
             AttemptAsync(async () =>
             {
                 await using var db = createDb();
-                var idCtx = new VerificationIdentity(facilityId);
+                var idCtx = new Mdm04StaffIdentity(staffId, facilityId);
                 var h = new ConfirmPutawayTaskCommandHandler(db, idCtx, new WarehouseOperationalAuthorization(db, idCtx));
                 await h.Handle(new ConfirmPutawayTaskCommand { TaskId = putawayTask1Id, ScannedLpn = "M4-LPN-1", ScannedLocationBarcode = "M4-CAP" }, CancellationToken.None);
             }),
             AttemptAsync(async () =>
             {
                 await using var db = createDb();
-                var idCtx = new VerificationIdentity(facilityId);
+                var idCtx = new Mdm04StaffIdentity(staffId, facilityId);
                 var h = new ConfirmPutawayTaskCommandHandler(db, idCtx, new WarehouseOperationalAuthorization(db, idCtx));
                 await h.Handle(new ConfirmPutawayTaskCommand { TaskId = putawayTask2Id, ScannedLpn = "M4-LPN-2", ScannedLocationBarcode = "M4-CAP" }, CancellationToken.None);
             }));
@@ -322,5 +323,22 @@ internal static class Mdm04PostgresCheck
         {
             return ex;
         }
+    }
+
+    private sealed class Mdm04StaffIdentity(Guid userId, Guid facilityId) : ICurrentUserContext
+    {
+        public Guid? UserId => userId;
+        public string? Email => "mdm04-pg@local";
+        public Guid? TenantId => null;
+        public Guid? FacilityId => facilityId;
+        public Guid? RequestedFacilityId => null;
+        public UserType? UserType => Warehouse3PL.Domain.Enums.UserType.Staff;
+        public IReadOnlyList<string> Roles => ["SuperAdmin"];
+        public IReadOnlyList<string> Permissions => [];
+        public bool IsAuthenticated => true;
+        public bool IsStaff => true;
+        public bool IsSuperAdmin => true;
+        public bool HasPermission(string permission) => true;
+        public bool IsInRole(string role) => true;
     }
 }
