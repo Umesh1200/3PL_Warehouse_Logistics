@@ -190,6 +190,15 @@ public interface IApplicationDbContext
     Task<TResult> ExecuteInTransactionAsync<TResult>(Func<Task<TResult>> action, CancellationToken cancellationToken = default);
     Task<TResult> ExecuteWithShipmentLockAsync<TResult>(Guid? shipmentId, Func<Task<TResult>> action, CancellationToken cancellationToken = default);
     Task<TResult> ExecuteWithPackageLockAsync<TResult>(Guid? packageId, Guid? shipmentId, Func<Task<TResult>> action, CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithInvoiceSequenceLockAsync<TResult>(
+        Guid clientId,
+        int fiscalYear,
+        string prefix,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default,
+        Guid? billingPeriodId = null,
+        Guid? invoiceId = null,
+        Guid? disputeId = null);
     Task<IAsyncDisposable> AcquirePackIdempotencyLockAsync(Guid facilityId, string idempotencyKey, CancellationToken cancellationToken = default);
     Task<IAsyncDisposable> AcquireScopedIdempotencyLockAsync(string lockScope, Guid facilityId, string idempotencyKey, CancellationToken cancellationToken = default);
     bool IsRelationalDatabase { get; }

@@ -4802,6 +4802,8 @@ try
         utc => p74Clock.UtcNow = utc ?? DateTime.UtcNow,
         claims => TestAuthHandler.CustomClaims = claims);
 
+    await Mdm03PostgresCheck.RunAsync(interceptor => CreateDb(operationalConn, user, interceptor));
+
     if (Directory.Exists(pgPodStorageDir))
     {
         try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }

@@ -102,117 +102,124 @@ public class DisputeManagementService : IDisputeManagementService
         ResolveDisputeRequest request,
         CancellationToken cancellationToken = default)
     {
-        var dispute = await _dbContext.InvoiceDisputes
-            .Include(d => d.Invoice)
-                .ThenInclude(i => i.Client)
-            .Include(d => d.Invoice)
-                .ThenInclude(i => i.Lines)
-            .Include(d => d.Invoice)
-                .ThenInclude(i => i.Disputes)
-            .FirstOrDefaultAsync(d => d.Id == request.DisputeId, cancellationToken);
+        var disputeMeta = await _dbContext.InvoiceDisputes
+            .AsNoTracking()
+            .Where(d => d.Id == request.DisputeId)
+            .Select(d => new { d.Id, d.ClientId, d.InvoiceId })
+            .FirstOrDefaultAsync(cancellationToken)
+            ?? throw new EntityNotFoundException(nameof(InvoiceDispute), request.DisputeId);
 
-        if (dispute == null)
-        {
-            throw new EntityNotFoundException(nameof(InvoiceDispute), request.DisputeId);
-        }
+        var fiscalYear = DateTime.UtcNow.Year;
 
-        if (dispute.Status == DisputeStatus.Resolved || dispute.Status == DisputeStatus.Accepted || dispute.Status == DisputeStatus.Rejected)
-        {
-            throw new InvalidDomainStateException(
-                $"Dispute '{dispute.DisputeReference}' has already been resolved with status '{dispute.Status}'. Duplicate resolution is prohibited.");
-        }
-
-        var invoice = dispute.Invoice;
-
-        if (request.Accept)
-        {
-            var approvedAmount = request.ApprovedCreditAmount ?? dispute.DisputedAmount;
-            if (approvedAmount <= 0)
+        return await _dbContext.ExecuteWithInvoiceSequenceLockAsync(
+            clientId: disputeMeta.ClientId,
+            fiscalYear: fiscalYear,
+            prefix: "CRN",
+            invoiceId: disputeMeta.InvoiceId,
+            disputeId: request.DisputeId,
+            cancellationToken: cancellationToken,
+            action: async () =>
             {
-                throw new ValidationException(nameof(request.ApprovedCreditAmount), "Approved credit amount must be positive.");
-            }
+                var dispute = await _dbContext.InvoiceDisputes
+                    .Include(d => d.Invoice)
+                        .ThenInclude(i => i.Client)
+                    .Include(d => d.Invoice)
+                        .ThenInclude(i => i.Lines)
+                    .Include(d => d.Invoice)
+                        .ThenInclude(i => i.Disputes)
+                    .FirstOrDefaultAsync(d => d.Id == request.DisputeId, cancellationToken)
+                    ?? throw new EntityNotFoundException(nameof(InvoiceDispute), request.DisputeId);
 
-            if (approvedAmount > dispute.DisputedAmount)
-            {
-                throw new InvalidDomainStateException($"Approved credit amount ({approvedAmount}) cannot exceed disputed amount ({dispute.DisputedAmount}).");
-            }
+                if (dispute.Status == DisputeStatus.Resolved || dispute.Status == DisputeStatus.Accepted || dispute.Status == DisputeStatus.Rejected)
+                {
+                    throw new InvalidDomainStateException(
+                        $"Dispute '{dispute.DisputeReference}' has already been resolved with status '{dispute.Status}'. Duplicate resolution is prohibited.");
+                }
 
-            var fiscalYear = DateTime.UtcNow.Year;
-            var sequence = await _dbContext.InvoiceSequences
-                .FirstOrDefaultAsync(s => s.ClientId == dispute.ClientId && s.FiscalYear == fiscalYear && s.Prefix == "CRN", cancellationToken);
+                var invoice = dispute.Invoice;
 
-            if (sequence == null)
-            {
-                sequence = InvoiceSequence.Create(dispute.ClientId, fiscalYear, "CRN");
-                await _dbContext.InvoiceSequences.AddAsync(sequence, cancellationToken);
-            }
+                if (request.Accept)
+                {
+                    var approvedAmount = request.ApprovedCreditAmount ?? dispute.DisputedAmount;
+                    if (approvedAmount <= 0)
+                    {
+                        throw new ValidationException(nameof(request.ApprovedCreditAmount), "Approved credit amount must be positive.");
+                    }
 
-            var clientCode = !string.IsNullOrWhiteSpace(invoice.Client?.AccountCode)
-                ? invoice.Client.AccountCode
-                : "CLI";
+                    if (approvedAmount > dispute.DisputedAmount)
+                    {
+                        throw new InvalidDomainStateException($"Approved credit amount ({approvedAmount}) cannot exceed disputed amount ({dispute.DisputedAmount}).");
+                    }
 
-            var creditNoteNumber = sequence.NextNumber(clientCode);
+                    var lineDesc = dispute.InvoiceLineId.HasValue
+                        ? $"Credit for dispute {dispute.DisputeReference} against line item"
+                        : $"Credit for dispute {dispute.DisputeReference}";
 
-            var creditNote = CreditNote.Create(
-                clientId: dispute.ClientId,
-                originalInvoiceId: invoice.Id,
-                creditNoteNumber: creditNoteNumber,
-                issueDate: DateTime.UtcNow.Date,
-                currency: invoice.Currency,
-                reason: $"Dispute Resolution: {dispute.DisputeReference} - {request.ResolutionNotes}",
-                disputeId: dispute.Id);
+                    var creditLine = CreditNoteLine.Create(
+                        lineNumber: 1,
+                        description: lineDesc,
+                        quantity: 1,
+                        unitPrice: approvedAmount,
+                        totalAmount: approvedAmount,
+                        originalInvoiceLineId: dispute.InvoiceLineId);
 
-            var lineDesc = dispute.InvoiceLineId.HasValue
-                ? $"Credit for dispute {dispute.DisputeReference} against line item"
-                : $"Credit for dispute {dispute.DisputeReference}";
+                    var clientCode = !string.IsNullOrWhiteSpace(invoice.Client?.AccountCode)
+                        ? invoice.Client.AccountCode
+                        : "CLI";
 
-            var creditLine = CreditNoteLine.Create(
-                lineNumber: 1,
-                description: lineDesc,
-                quantity: 1,
-                unitPrice: approvedAmount,
-                totalAmount: approvedAmount,
-                originalInvoiceLineId: dispute.InvoiceLineId);
+                    var allocatedNumbers = await InvoiceSequenceAllocator.AllocateNumbersAsync(
+                        _dbContext, dispute.ClientId, fiscalYear, "CRN", clientCode, count: 1, cancellationToken);
+                    var creditNoteNumber = allocatedNumbers[0];
 
-            creditNote.AddLine(creditLine);
-            creditNote.Issue();
+                    var creditNote = CreditNote.Create(
+                        clientId: dispute.ClientId,
+                        originalInvoiceId: invoice.Id,
+                        creditNoteNumber: creditNoteNumber,
+                        issueDate: DateTime.UtcNow.Date,
+                        currency: invoice.Currency,
+                        reason: $"Dispute Resolution: {dispute.DisputeReference} - {request.ResolutionNotes}",
+                        disputeId: dispute.Id);
 
-            // Apply credit note against invoice
-            creditNote.Apply(approvedAmount);
-            invoice.ApplyCredit(approvedAmount);
+                    creditNote.AddLine(creditLine);
+                    creditNote.Issue();
 
-            await _dbContext.CreditNotes.AddAsync(creditNote, cancellationToken);
+                    // Apply credit note against invoice
+                    creditNote.Apply(approvedAmount);
+                    invoice.ApplyCredit(approvedAmount);
 
-            dispute.Accept(request.ResolvedByUserId, approvedAmount, request.ResolutionNotes, creditNote.Id);
-            dispute.MarkResolved();
+                    await _dbContext.CreditNotes.AddAsync(creditNote, cancellationToken);
 
-            // If no other unresolved disputes exist on this invoice, update invoice status
-            var otherActiveDisputes = invoice.Disputes.Any(d => d.Id != dispute.Id && (d.Status == DisputeStatus.Submitted || d.Status == DisputeStatus.UnderReview));
-            if (!otherActiveDisputes)
-            {
-                invoice.ResolveDispute();
-            }
+                    dispute.Accept(request.ResolvedByUserId, approvedAmount, request.ResolutionNotes, creditNote.Id);
+                    dispute.MarkResolved();
 
-            _logger.LogInformation(
-                "Dispute '{DisputeRef}' accepted with Credit Note '{CRN}' for {Amount}. Invoice balance: {Balance}",
-                dispute.DisputeReference, creditNote.CreditNoteNumber, approvedAmount, invoice.OutstandingBalance);
-        }
-        else
-        {
-            dispute.Reject(request.ResolvedByUserId, request.ResolutionNotes);
-            dispute.MarkResolved();
+                    // If no other unresolved disputes exist on this invoice, update invoice status
+                    var otherActiveDisputes = invoice.Disputes.Any(d => d.Id != dispute.Id && (d.Status == DisputeStatus.Submitted || d.Status == DisputeStatus.UnderReview));
+                    if (!otherActiveDisputes)
+                    {
+                        invoice.ResolveDispute();
+                    }
 
-            var otherActiveDisputes = invoice.Disputes.Any(d => d.Id != dispute.Id && (d.Status == DisputeStatus.Submitted || d.Status == DisputeStatus.UnderReview));
-            if (!otherActiveDisputes)
-            {
-                invoice.ResolveDispute();
-            }
+                    _logger.LogInformation(
+                        "Dispute '{DisputeRef}' accepted with Credit Note '{CRN}' for {Amount}. Invoice balance: {Balance}",
+                        dispute.DisputeReference, creditNote.CreditNoteNumber, approvedAmount, invoice.OutstandingBalance);
+                }
+                else
+                {
+                    dispute.Reject(request.ResolvedByUserId, request.ResolutionNotes);
+                    dispute.MarkResolved();
 
-            _logger.LogInformation("Dispute '{DisputeRef}' rejected. Reason: {Notes}", dispute.DisputeReference, request.ResolutionNotes);
-        }
+                    var otherActiveDisputes = invoice.Disputes.Any(d => d.Id != dispute.Id && (d.Status == DisputeStatus.Submitted || d.Status == DisputeStatus.UnderReview));
+                    if (!otherActiveDisputes)
+                    {
+                        invoice.ResolveDispute();
+                    }
 
-        await _dbContext.SaveChangesAsync(cancellationToken);
-        return MapToDto(dispute);
+                    _logger.LogInformation("Dispute '{DisputeRef}' rejected. Reason: {Notes}", dispute.DisputeReference, request.ResolutionNotes);
+                }
+
+                await _dbContext.SaveChangesAsync(cancellationToken);
+                return MapToDto(dispute);
+            });
     }
 
     public async Task<InvoiceDisputeDto?> GetDisputeByIdAsync(

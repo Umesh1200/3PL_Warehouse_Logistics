@@ -127,21 +127,6 @@ public class InvoiceService : IInvoiceService
         CreateCreditNoteRequest request,
         CancellationToken cancellationToken = default)
     {
-        var invoice = await _dbContext.Invoices
-            .Include(i => i.Client)
-            .Include(i => i.Lines)
-            .FirstOrDefaultAsync(i => i.Id == request.OriginalInvoiceId && i.ClientId == request.ClientId, cancellationToken);
-
-        if (invoice == null)
-        {
-            throw new EntityNotFoundException(nameof(Invoice), request.OriginalInvoiceId);
-        }
-
-        if (invoice.Status == InvoiceStatus.Draft || invoice.Status == InvoiceStatus.Voided)
-        {
-            throw new InvalidDomainStateException($"Cannot issue a credit note against an invoice in '{invoice.Status}' status.");
-        }
-
         if (request.Lines == null || request.Lines.Count == 0)
         {
             throw new ValidationException(nameof(request.Lines), "Credit note must include at least one adjustment line.");
@@ -150,49 +135,67 @@ public class InvoiceService : IInvoiceService
         var issueDate = request.IssueDate ?? DateTime.UtcNow.Date;
         var fiscalYear = issueDate.Year;
 
-        var sequence = await _dbContext.InvoiceSequences
-            .FirstOrDefaultAsync(s => s.ClientId == request.ClientId && s.FiscalYear == fiscalYear && s.Prefix == "CRN", cancellationToken);
-
-        if (sequence == null)
-        {
-            sequence = InvoiceSequence.Create(request.ClientId, fiscalYear, "CRN");
-            await _dbContext.InvoiceSequences.AddAsync(sequence, cancellationToken);
-        }
-
-        var clientCode = !string.IsNullOrWhiteSpace(invoice.Client?.AccountCode)
-            ? invoice.Client.AccountCode
-            : "CLI";
-
-        var creditNoteNumber = sequence.NextNumber(clientCode);
-
-        var creditNote = CreditNote.Create(
+        return await _dbContext.ExecuteWithInvoiceSequenceLockAsync(
             clientId: request.ClientId,
-            originalInvoiceId: invoice.Id,
-            creditNoteNumber: creditNoteNumber,
-            issueDate: issueDate,
-            currency: invoice.Currency,
-            reason: request.Reason,
-            disputeId: request.DisputeId);
+            fiscalYear: fiscalYear,
+            prefix: "CRN",
+            invoiceId: request.OriginalInvoiceId,
+            cancellationToken: cancellationToken,
+            action: async () =>
+            {
+                var invoice = await _dbContext.Invoices
+                    .Include(i => i.Client)
+                    .Include(i => i.Lines)
+                    .FirstOrDefaultAsync(i => i.Id == request.OriginalInvoiceId && i.ClientId == request.ClientId, cancellationToken)
+                    ?? throw new EntityNotFoundException(nameof(Invoice), request.OriginalInvoiceId);
 
-        int lineNum = 1;
-        foreach (var l in request.Lines)
-        {
-            var line = CreditNoteLine.Create(
-                lineNumber: lineNum++,
-                description: l.Description,
-                quantity: l.Quantity,
-                unitPrice: l.UnitPrice,
-                totalAmount: l.TotalAmount,
-                originalInvoiceLineId: l.OriginalInvoiceLineId);
+                if (invoice.Status == InvoiceStatus.Draft || invoice.Status == InvoiceStatus.Voided)
+                {
+                    throw new InvalidDomainStateException($"Cannot issue a credit note against an invoice in '{invoice.Status}' status.");
+                }
 
-            creditNote.AddLine(line);
-        }
+                // Validate credit note lines prior to consuming a persisted sequence number
+                var validatedLines = new List<CreditNoteLine>(request.Lines.Count);
+                int lineNum = 1;
+                foreach (var l in request.Lines)
+                {
+                    validatedLines.Add(CreditNoteLine.Create(
+                        lineNumber: lineNum++,
+                        description: l.Description,
+                        quantity: l.Quantity,
+                        unitPrice: l.UnitPrice,
+                        totalAmount: l.TotalAmount,
+                        originalInvoiceLineId: l.OriginalInvoiceLineId));
+                }
 
-        await _dbContext.CreditNotes.AddAsync(creditNote, cancellationToken);
-        await _dbContext.SaveChangesAsync(cancellationToken);
+                var clientCode = !string.IsNullOrWhiteSpace(invoice.Client?.AccountCode)
+                    ? invoice.Client.AccountCode
+                    : "CLI";
 
-        _logger.LogInformation("Credit note '{CreditNoteNumber}' created for Invoice '{InvoiceNumber}'.", creditNote.CreditNoteNumber, invoice.InvoiceNumber);
-        return MapToCreditNoteDto(creditNote);
+                var allocatedNumbers = await InvoiceSequenceAllocator.AllocateNumbersAsync(
+                    _dbContext, request.ClientId, fiscalYear, "CRN", clientCode, count: 1, cancellationToken);
+                var creditNoteNumber = allocatedNumbers[0];
+
+                var creditNote = CreditNote.Create(
+                    clientId: request.ClientId,
+                    originalInvoiceId: invoice.Id,
+                    creditNoteNumber: creditNoteNumber,
+                    issueDate: issueDate,
+                    currency: invoice.Currency,
+                    reason: request.Reason,
+                    disputeId: request.DisputeId);
+
+                foreach (var line in validatedLines)
+                {
+                    creditNote.AddLine(line);
+                }
+
+                await _dbContext.CreditNotes.AddAsync(creditNote, cancellationToken);
+                await _dbContext.SaveChangesAsync(cancellationToken);
+
+                _logger.LogInformation("Credit note '{CreditNoteNumber}' created for Invoice '{InvoiceNumber}'.", creditNote.CreditNoteNumber, invoice.InvoiceNumber);
+                return MapToCreditNoteDto(creditNote);
+            });
     }
 
     public async Task<CreditNoteDto> IssueCreditNoteAsync(

@@ -34,15 +34,49 @@ public class BillingRunService : IBillingRunService
             "Initiating commercial billing run for Client {ClientId}, Period {BillingPeriodId}, DryRun: {DryRun}",
             request.ClientId, request.BillingPeriodId, request.DryRun);
 
-        var period = await _dbContext.BillingPeriods
-            .Include(p => p.Client)
-            .FirstOrDefaultAsync(p => p.Id == request.BillingPeriodId && p.ClientId == request.ClientId, cancellationToken);
-
-        if (period == null)
+        if (request.DryRun)
         {
-            throw new EntityNotFoundException(nameof(BillingPeriod), request.BillingPeriodId);
+            var dryPeriod = await _dbContext.BillingPeriods
+                .AsNoTracking()
+                .Include(p => p.Client)
+                .FirstOrDefaultAsync(p => p.Id == request.BillingPeriodId && p.ClientId == request.ClientId, cancellationToken)
+                ?? throw new EntityNotFoundException(nameof(BillingPeriod), request.BillingPeriodId);
+
+            return await ExecuteBillingRunCoreAsync(dryPeriod, request, trackEntities: false, cancellationToken);
         }
 
+        var periodHeader = await _dbContext.BillingPeriods
+            .AsNoTracking()
+            .Where(p => p.Id == request.BillingPeriodId && p.ClientId == request.ClientId)
+            .Select(p => new { p.Id, p.EndDateUtc })
+            .FirstOrDefaultAsync(cancellationToken)
+            ?? throw new EntityNotFoundException(nameof(BillingPeriod), request.BillingPeriodId);
+
+        var fiscalYear = periodHeader.EndDateUtc.Year;
+
+        return await _dbContext.ExecuteWithInvoiceSequenceLockAsync(
+            clientId: request.ClientId,
+            fiscalYear: fiscalYear,
+            prefix: "INV",
+            billingPeriodId: request.BillingPeriodId,
+            cancellationToken: cancellationToken,
+            action: async () =>
+            {
+                var period = await _dbContext.BillingPeriods
+                    .Include(p => p.Client)
+                    .FirstOrDefaultAsync(p => p.Id == request.BillingPeriodId && p.ClientId == request.ClientId, cancellationToken)
+                    ?? throw new EntityNotFoundException(nameof(BillingPeriod), request.BillingPeriodId);
+
+                return await ExecuteBillingRunCoreAsync(period, request, trackEntities: true, cancellationToken);
+            });
+    }
+
+    private async Task<BillingRunResult> ExecuteBillingRunCoreAsync(
+        BillingPeriod period,
+        BillingRunRequest request,
+        bool trackEntities,
+        CancellationToken cancellationToken)
+    {
         if (period.Status == BillingPeriodStatus.Closed || period.Status == BillingPeriodStatus.Invoiced)
         {
             throw new InvalidDomainStateException(
@@ -69,7 +103,7 @@ public class BillingRunService : IBillingRunService
         }
 
         // 2. Query eligible rated and waived activities
-        var eligibleQuery = _dbContext.BillableActivities
+        IQueryable<BillableActivity> eligibleQuery = _dbContext.BillableActivities
             .Where(a => a.ClientId == request.ClientId &&
                         (a.BillingPeriodId == request.BillingPeriodId ||
                          (a.OccurredAtUtc >= period.StartDateUtc && a.OccurredAtUtc <= period.EndDateUtc)) &&
@@ -81,8 +115,14 @@ public class BillingRunService : IBillingRunService
             eligibleQuery = eligibleQuery.Where(a => a.FacilityId == request.FacilityId.Value);
         }
 
+        if (!trackEntities)
+        {
+            eligibleQuery = eligibleQuery.AsNoTracking();
+        }
+
         var eligibleActivities = await eligibleQuery
             .OrderBy(a => a.OccurredAtUtc)
+            .ThenBy(a => a.Id)
             .ToListAsync(cancellationToken);
 
         if (eligibleActivities.Count == 0)
@@ -99,40 +139,37 @@ public class BillingRunService : IBillingRunService
                 InvoiceSummaries: Array.Empty<InvoiceSummaryDto>());
         }
 
-        // 3. Concurrency-safe sequence tracking
-        var fiscalYear = period.EndDateUtc.Year;
-        var sequence = await _dbContext.InvoiceSequences
-            .FirstOrDefaultAsync(s => s.ClientId == request.ClientId && s.FiscalYear == fiscalYear && s.Prefix == "INV", cancellationToken);
-
-        if (sequence == null)
-        {
-            sequence = InvoiceSequence.Create(request.ClientId, fiscalYear, "INV");
-            if (!request.DryRun)
-            {
-                await _dbContext.InvoiceSequences.AddAsync(sequence, cancellationToken);
-            }
-        }
-
         var clientCode = !string.IsNullOrWhiteSpace(period.Client?.AccountCode)
             ? period.Client.AccountCode
             : "CLI";
 
-        // 4. Group activities by Currency and (if not consolidated) Facility
+        // 3. Group activities by Currency and (if not consolidated) Facility
         var activityGroups = eligibleActivities
             .GroupBy(a => new
             {
                 Currency = string.IsNullOrWhiteSpace(a.Currency) ? "USD" : a.Currency.Trim().ToUpperInvariant(),
                 FacilityId = request.ConsolidateByFacility ? (Guid?)null : a.FacilityId
             })
+            .OrderBy(g => g.Key.Currency, StringComparer.Ordinal)
+            .ThenBy(g => g.Key.FacilityId ?? Guid.Empty)
             .ToList();
 
-        var createdInvoices = new List<Invoice>();
-        var summaries = new List<InvoiceSummaryDto>();
+        var fiscalYear = period.EndDateUtc.Year;
+        var allocatedNumbers = request.DryRun
+            ? await InvoiceSequenceAllocator.PreviewNumbersAsync(
+                _dbContext, request.ClientId, fiscalYear, "INV", clientCode, activityGroups.Count, cancellationToken)
+            : await InvoiceSequenceAllocator.AllocateNumbersAsync(
+                _dbContext, request.ClientId, fiscalYear, "INV", clientCode, activityGroups.Count, cancellationToken);
+
+        var createdInvoices = new List<Invoice>(activityGroups.Count);
+        var summaries = new List<InvoiceSummaryDto>(activityGroups.Count);
         var now = DateTime.UtcNow;
 
-        foreach (var group in activityGroups)
+        for (int groupIndex = 0; groupIndex < activityGroups.Count; groupIndex++)
         {
-            var invoiceNumber = sequence.NextNumber(clientCode);
+            var group = activityGroups[groupIndex];
+            var invoiceNumber = allocatedNumbers[groupIndex];
+
             var invoice = Invoice.Create(
                 clientId: request.ClientId,
                 billingPeriodId: period.Id,
@@ -188,7 +225,7 @@ public class BillingRunService : IBillingRunService
                 LinesCount: invoice.Lines.Count));
         }
 
-        // 5. Commit state if not dry-run
+        // 4. Commit state atomically if not dry-run
         if (!request.DryRun)
         {
             if (period.Status == BillingPeriodStatus.Open)

@@ -27,6 +27,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryShipmentLocks = new();
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryPackageLocks = new();
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryPackIdempotencyLocks = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryBillingLocks = new(StringComparer.Ordinal);
 
     public ApplicationDbContext(
         DbContextOptions<ApplicationDbContext> options,
@@ -428,6 +429,127 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             try
             {
                 await AcquireRelationalRowLocksAsync();
+                var result = await action();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
+    }
+
+    public async Task<TResult> ExecuteWithInvoiceSequenceLockAsync<TResult>(
+        Guid clientId,
+        int fiscalYear,
+        string prefix,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default,
+        Guid? billingPeriodId = null,
+        Guid? invoiceId = null,
+        Guid? disputeId = null)
+    {
+        var normalizedPrefix = string.IsNullOrWhiteSpace(prefix) ? "INV" : prefix.Trim().ToUpperInvariant();
+        var sequenceLockKey = $"INVSEQ:{clientId:N}:{fiscalYear}:{normalizedPrefix}";
+
+        if (!Database.IsRelational())
+        {
+            var acquired = new List<SemaphoreSlim>(4);
+            try
+            {
+                // Canonical BillingPeriod -> Dispute -> Invoice -> Sequence lock order avoids deadlocks.
+                if (billingPeriodId.HasValue && billingPeriodId.Value != Guid.Empty)
+                {
+                    var gate = InMemoryBillingLocks.GetOrAdd($"PERIOD:{billingPeriodId.Value:N}", _ => new SemaphoreSlim(1, 1));
+                    await gate.WaitAsync(cancellationToken);
+                    acquired.Add(gate);
+                }
+
+                if (disputeId.HasValue && disputeId.Value != Guid.Empty)
+                {
+                    var gate = InMemoryBillingLocks.GetOrAdd($"DISPUTE:{disputeId.Value:N}", _ => new SemaphoreSlim(1, 1));
+                    await gate.WaitAsync(cancellationToken);
+                    acquired.Add(gate);
+                }
+
+                if (invoiceId.HasValue && invoiceId.Value != Guid.Empty)
+                {
+                    var gate = InMemoryBillingLocks.GetOrAdd($"INVOICE:{invoiceId.Value:N}", _ => new SemaphoreSlim(1, 1));
+                    await gate.WaitAsync(cancellationToken);
+                    acquired.Add(gate);
+                }
+
+                var seqGate = InMemoryBillingLocks.GetOrAdd(sequenceLockKey, _ => new SemaphoreSlim(1, 1));
+                await seqGate.WaitAsync(cancellationToken);
+                acquired.Add(seqGate);
+
+                return await action();
+            }
+            finally
+            {
+                for (int i = acquired.Count - 1; i >= 0; i--)
+                {
+                    acquired[i].Release();
+                }
+            }
+        }
+
+        async Task AcquireBillingLocksAsync()
+        {
+            // Canonical BillingPeriod -> Dispute -> Invoice -> Sequence lock order avoids deadlocks.
+            if (billingPeriodId.HasValue && billingPeriodId.Value != Guid.Empty)
+            {
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM billing_periods WHERE period_id = {billingPeriodId.Value} FOR UPDATE",
+                    cancellationToken);
+            }
+
+            if (disputeId.HasValue && disputeId.Value != Guid.Empty)
+            {
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM invoice_disputes WHERE dispute_id = {disputeId.Value} FOR UPDATE",
+                    cancellationToken);
+            }
+
+            if (invoiceId.HasValue && invoiceId.Value != Guid.Empty)
+            {
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM invoices WHERE invoice_id = {invoiceId.Value} FOR UPDATE",
+                    cancellationToken);
+            }
+
+            if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                // Transaction-scoped advisory lock serializes first-row creation and sequence increments
+                // per (ClientId, FiscalYear, Prefix) while keeping distinct clients and prefixes unblocked.
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({sequenceLockKey}, 0::bigint))",
+                    cancellationToken);
+            }
+        }
+
+        // Reuse an active caller-owned transaction (caller controls commit/rollback).
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            await AcquireBillingLocksAsync();
+            return await action();
+        }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt)
+            {
+                ClearChangeTracker();
+            }
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await AcquireBillingLocksAsync();
                 var result = await action();
                 await CommitTransactionAsync(cancellationToken);
                 return result;
