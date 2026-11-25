@@ -8,6 +8,7 @@ using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Entities.Outbound;
+using Warehouse3PL.Domain.Entities.Reference;
 using Warehouse3PL.Domain.Entities.Security;
 
 namespace Warehouse3PL.Application.Common.Interfaces;
@@ -183,6 +184,12 @@ public interface IApplicationDbContext
     DbSet<CrossDockTask> CrossDockTasks { get; }
     DbSet<CrossDockException> CrossDockExceptions { get; }
 
+    // Global Localization Reference & Statutory Compliance Policies (MDM-1.1)
+    DbSet<CountryProfile> CountryProfiles { get; }
+    DbSet<AdministrativeDivision> AdministrativeDivisions { get; }
+    DbSet<TimeZoneProfile> TimeZoneProfiles { get; }
+    DbSet<CountryCompliancePolicy> CountryCompliancePolicies { get; }
+
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
     Task BeginTransactionAsync(CancellationToken cancellationToken = default);
     Task CommitTransactionAsync(CancellationToken cancellationToken = default);
@@ -203,6 +210,11 @@ public interface IApplicationDbContext
     Task<IAsyncDisposable> AcquireScopedIdempotencyLockAsync(string lockScope, Guid facilityId, string idempotencyKey, CancellationToken cancellationToken = default);
     Task<IAsyncDisposable> AcquireStockAllocationLocksAsync(IReadOnlyCollection<Guid> stockOnHandIds, CancellationToken cancellationToken = default);
     Task<IAsyncDisposable> AcquirePutawayExecutionLocksAsync(Guid? sourceStockId, Guid destinationLocationId, CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithCompliancePolicyLockAsync<TResult>(
+        string countryCode,
+        string policyCode,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default);
     bool IsRelationalDatabase { get; }
     void ClearChangeTracker();
     bool AllowExplicitAuditTimestamps { get; set; }

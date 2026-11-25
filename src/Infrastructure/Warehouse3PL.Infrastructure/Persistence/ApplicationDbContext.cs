@@ -13,6 +13,7 @@ using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Entities.Outbound;
+using Warehouse3PL.Domain.Entities.Reference;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Infrastructure.Persistence.Interceptors;
 
@@ -28,6 +29,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryPackageLocks = new();
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryPackIdempotencyLocks = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryBillingLocks = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryComplianceLocks = new(StringComparer.Ordinal);
 
     public ApplicationDbContext(
         DbContextOptions<ApplicationDbContext> options,
@@ -223,6 +225,12 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<CrossDockAllocation> CrossDockAllocations => Set<CrossDockAllocation>();
     public DbSet<CrossDockTask> CrossDockTasks => Set<CrossDockTask>();
     public DbSet<CrossDockException> CrossDockExceptions => Set<CrossDockException>();
+
+    // Global Localization Reference & Statutory Compliance Policies (MDM-1.1)
+    public DbSet<CountryProfile> CountryProfiles => Set<CountryProfile>();
+    public DbSet<AdministrativeDivision> AdministrativeDivisions => Set<AdministrativeDivision>();
+    public DbSet<TimeZoneProfile> TimeZoneProfiles => Set<TimeZoneProfile>();
+    public DbSet<CountryCompliancePolicy> CountryCompliancePolicies => Set<CountryCompliancePolicy>();
 
     public async Task BeginTransactionAsync(CancellationToken cancellationToken = default)
     {
@@ -670,6 +678,89 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             {
                 await AcquireBillingLocksAsync();
                 var result = await action();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
+    }
+
+    public async Task<TResult> ExecuteWithCompliancePolicyLockAsync<TResult>(
+        string countryCode,
+        string policyCode,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default)
+    {
+        var normalizedCountry = (countryCode ?? string.Empty).Trim().ToUpperInvariant();
+        var normalizedPolicy = (policyCode ?? string.Empty).Trim().ToUpperInvariant();
+        var lockKey = $"COMPLIANCE:{normalizedCountry}:{normalizedPolicy}";
+
+        if (!Database.IsRelational())
+        {
+            var gate = InMemoryComplianceLocks.GetOrAdd(lockKey, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                return await action();
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        async Task AcquireComplianceLocksAsync()
+        {
+            if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0::bigint))",
+                    cancellationToken);
+
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM country_compliance_policies WHERE country_code = {normalizedCountry} AND policy_code = {normalizedPolicy} AND approval_status = 'VerifiedApproved' AND is_active = true FOR UPDATE",
+                    cancellationToken);
+            }
+        }
+
+        async Task<TResult> RunLockedActionAsync()
+        {
+            try
+            {
+                await AcquireComplianceLocksAsync();
+                return await action();
+            }
+            catch (DbUpdateException dbEx) when (dbEx.InnerException is Npgsql.PostgresException pgEx &&
+                                                 (pgEx.SqlState == "23P01" || pgEx.SqlState == "23505"))
+            {
+                throw new Domain.Exceptions.ConcurrencyException(
+                    "COMPLIANCE_POLICY_CONFLICT",
+                    $"Concurrent modification or active window overlap prevented for '{normalizedCountry}/{normalizedPolicy}' ({pgEx.SqlState}).");
+            }
+        }
+
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            return await RunLockedActionAsync();
+        }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt)
+            {
+                ClearChangeTracker();
+            }
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                var result = await RunLockedActionAsync();
                 await CommitTransactionAsync(cancellationToken);
                 return result;
             }

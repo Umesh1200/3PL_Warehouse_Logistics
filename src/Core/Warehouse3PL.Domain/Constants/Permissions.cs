@@ -162,6 +162,13 @@ public static class Permissions
         public const string TransportationFinancialView = "analytics:transportation:financial:view";
     }
 
+    public static class Global
+    {
+        public const string ReferenceView = "global:reference:view";
+        public const string ComplianceView = "global:compliance:view";
+        public const string ComplianceManage = "global:compliance:manage";
+    }
+
     /// <summary>
     /// Returns all registered permission strings in the system.
     /// </summary>
@@ -193,6 +200,7 @@ public static class Permissions
         Analytics.InventoryHealthView, Analytics.InventoryAgingManage, Analytics.AbcPolicyManage, Analytics.WarehouseHeatmapView,
         Analytics.SlottingView, Analytics.SlottingManage,
         Analytics.MonitoringView, Analytics.MonitoringManage, Analytics.DecisionLaborView, Analytics.DecisionTransportationView,
-        Analytics.TransportationView, Analytics.TransportationClaimsView, Analytics.TransportationFinancialView
+        Analytics.TransportationView, Analytics.TransportationClaimsView, Analytics.TransportationFinancialView,
+        Global.ReferenceView, Global.ComplianceView, Global.ComplianceManage
     ];
 }

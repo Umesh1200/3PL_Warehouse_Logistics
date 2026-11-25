@@ -15662,6 +15662,382 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.ToTable("shipping_labels", (string)null);
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.AdministrativeDivision", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("division_id");
+
+                    b.Property<string>("Code")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("code");
+
+                    b.Property<string>("CountryCode")
+                        .IsRequired()
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)")
+                        .HasColumnName("country_code");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<string>("DivisionLevel")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("division_level");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<string>("IsoCode")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("iso_code");
+
+                    b.Property<string>("LocalName")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("local_name");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("name");
+
+                    b.Property<Guid?>("ParentDivisionId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("parent_division_id");
+
+                    b.Property<string>("PostalPrefix")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("postal_prefix");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_administrative_divisions");
+
+                    b.HasIndex("IsoCode")
+                        .IsUnique()
+                        .HasDatabaseName("ix_administrative_divisions_iso_code")
+                        .HasFilter("iso_code IS NOT NULL");
+
+                    b.HasIndex("ParentDivisionId")
+                        .HasDatabaseName("ix_administrative_divisions_parent_division_id");
+
+                    b.HasIndex("CountryCode", "ParentDivisionId")
+                        .HasDatabaseName("ix_administrative_divisions_country_code_parent_division_id");
+
+                    b.HasIndex("CountryCode", "DivisionLevel", "Code")
+                        .IsUnique()
+                        .HasDatabaseName("ix_administrative_divisions_country_code_division_level_code");
+
+                    b.ToTable("administrative_divisions", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.CountryCompliancePolicy", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("policy_id");
+
+                    b.Property<string>("ApplicabilityPredicateJson")
+                        .IsRequired()
+                        .HasColumnType("jsonb")
+                        .HasColumnName("applicability_predicate_json");
+
+                    b.Property<string>("ApprovalStatus")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("approval_status");
+
+                    b.Property<DateTime?>("ApprovedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("approved_at_utc");
+
+                    b.Property<Guid?>("ApprovedByUserId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("approved_by_user_id");
+
+                    b.Property<long>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
+                    b.Property<string>("CountryCode")
+                        .IsRequired()
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)")
+                        .HasColumnName("country_code");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime>("EffectiveFromUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("effective_from_utc");
+
+                    b.Property<DateTime?>("EffectiveToUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("effective_to_utc");
+
+                    b.Property<string>("EnforcementMode")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("enforcement_mode");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_active");
+
+                    b.Property<string>("OfficialNoticeCitation")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("official_notice_citation");
+
+                    b.Property<string>("PolicyCode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("policy_code");
+
+                    b.Property<string>("StatutorySourceRef")
+                        .IsRequired()
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("statutory_source_ref");
+
+                    b.Property<DateTime?>("SupersededAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("superseded_at_utc");
+
+                    b.Property<Guid?>("SupersededByPolicyId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("superseded_by_policy_id");
+
+                    b.Property<string>("Title")
+                        .IsRequired()
+                        .HasMaxLength(160)
+                        .HasColumnType("character varying(160)")
+                        .HasColumnName("title");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.Property<string>("VerificationEvidenceNotes")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("verification_evidence_notes");
+
+                    b.Property<int>("Version")
+                        .HasColumnType("integer")
+                        .HasColumnName("version");
+
+                    b.HasKey("Id")
+                        .HasName("pk_country_compliance_policies");
+
+                    b.HasIndex("SupersededByPolicyId")
+                        .HasDatabaseName("ix_country_compliance_policies_superseded_by_policy_id");
+
+                    b.HasIndex("CountryCode", "PolicyCode", "Version")
+                        .IsUnique()
+                        .HasDatabaseName("ix_country_compliance_policies_country_code_policy_code_version");
+
+                    b.HasIndex("CountryCode", "PolicyCode", "ApprovalStatus", "IsActive")
+                        .HasDatabaseName("ix_country_compliance_policies_country_code_policy_code_approv");
+
+                    b.ToTable("country_compliance_policies", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_country_compliance_policies_version_positive", "version >= 1");
+
+                            t.HasCheckConstraint("ck_country_compliance_policies_window", "effective_to_utc IS NULL OR effective_to_utc > effective_from_utc");
+                        });
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.CountryProfile", b =>
+                {
+                    b.Property<string>("CountryCode")
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)")
+                        .HasColumnName("country_code");
+
+                    b.Property<string>("AddressSchemaType")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("address_schema_type");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("DefaultCurrencyCode")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("default_currency_code");
+
+                    b.Property<int>("DefaultFiscalYearStartMonth")
+                        .HasColumnType("integer")
+                        .HasColumnName("default_fiscal_year_start_month");
+
+                    b.Property<string>("FiscalCalendarSystem")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("fiscal_calendar_system");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<string>("IsoAlpha3Code")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("iso_alpha3_code");
+
+                    b.Property<string>("LegacyPostalCodeRegex")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("legacy_postal_code_regex");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("NumericCode")
+                        .IsRequired()
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("numeric_code");
+
+                    b.Property<string>("PostalCodeRegex")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("postal_code_regex");
+
+                    b.Property<string>("PrimaryCalendarSystem")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("primary_calendar_system");
+
+                    b.Property<string>("PrimaryTimeZoneId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("primary_time_zone_id");
+
+                    b.Property<int>("SeedVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("seed_version");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("CountryCode")
+                        .HasName("pk_country_profiles");
+
+                    b.HasIndex("IsoAlpha3Code")
+                        .IsUnique()
+                        .HasDatabaseName("ix_country_profiles_iso_alpha3_code");
+
+                    b.ToTable("country_profiles", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_country_profiles_fiscal_month", "default_fiscal_year_start_month BETWEEN 1 AND 12");
+                        });
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.TimeZoneProfile", b =>
+                {
+                    b.Property<string>("TimeZoneId")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("time_zone_id");
+
+                    b.Property<string>("CountryCode")
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)")
+                        .HasColumnName("country_code");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<string>("DisplayName")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("display_name");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("ObservesDst")
+                        .HasColumnType("boolean")
+                        .HasColumnName("observes_dst");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.HasKey("TimeZoneId")
+                        .HasName("pk_time_zone_profiles");
+
+                    b.HasIndex("CountryCode")
+                        .HasDatabaseName("ix_time_zone_profiles_country_code");
+
+                    b.ToTable("time_zone_profiles", (string)null);
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.Client", b =>
                 {
                     b.Property<Guid>("Id")
@@ -19636,6 +20012,46 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("Package");
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.AdministrativeDivision", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.CountryProfile", "CountryProfile")
+                        .WithMany("Divisions")
+                        .HasForeignKey("CountryCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_administrative_divisions_country_profiles_country_code");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.AdministrativeDivision", "ParentDivision")
+                        .WithMany("ChildDivisions")
+                        .HasForeignKey("ParentDivisionId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_administrative_divisions_administrative_divisions_parent_di");
+
+                    b.Navigation("CountryProfile");
+
+                    b.Navigation("ParentDivision");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.CountryCompliancePolicy", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.CountryProfile", "CountryProfile")
+                        .WithMany("CompliancePolicies")
+                        .HasForeignKey("CountryCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_country_compliance_policies_country_profiles_country_code");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.CountryCompliancePolicy", "SupersededByPolicy")
+                        .WithMany()
+                        .HasForeignKey("SupersededByPolicyId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_country_compliance_policies_country_compliance_policies_sup");
+
+                    b.Navigation("CountryProfile");
+
+                    b.Navigation("SupersededByPolicy");
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.ClientContact", b =>
                 {
                     b.HasOne("Warehouse3PL.Domain.Entities.Security.Client", "Client")
@@ -20007,6 +20423,18 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("ContactLogs");
 
                     b.Navigation("ReturnShipment");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.AdministrativeDivision", b =>
+                {
+                    b.Navigation("ChildDivisions");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.CountryProfile", b =>
+                {
+                    b.Navigation("CompliancePolicies");
+
+                    b.Navigation("Divisions");
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.Client", b =>

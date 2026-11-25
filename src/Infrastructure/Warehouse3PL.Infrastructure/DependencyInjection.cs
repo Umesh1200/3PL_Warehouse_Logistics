@@ -19,6 +19,7 @@ using Warehouse3PL.Infrastructure.Services;
 using Warehouse3PL.Infrastructure.Services.Allocation;
 using Warehouse3PL.Infrastructure.Services.Picking;
 using Warehouse3PL.Infrastructure.Services.Packing;
+using Warehouse3PL.Infrastructure.Services.Reference;
 using Warehouse3PL.Infrastructure.Services.Shipping;
 
 namespace Warehouse3PL.Infrastructure;
@@ -36,6 +37,8 @@ public static class DependencyInjection
         services.AddSingleton<IPasswordHasher, PasswordHasher>();
         services.AddScoped<ICurrentUserContext, CurrentUserContext>();
         services.AddScoped<ITenantProvider, TenantProvider>();
+        services.AddSingleton<ITimeZoneOffsetResolver, TimeZoneOffsetResolver>();
+        services.AddScoped<ICountryComplianceEvaluator, CountryComplianceEvaluator>();
         services.AddScoped<IPutawayLocationSelector, PutawayLocationSelector>();
         services.AddScoped<IPutawayRecommendationService, PutawayLocationSelector>();
         services.AddScoped<ICrossDockEngine, CrossDockEngine>();

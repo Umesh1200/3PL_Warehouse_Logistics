@@ -4814,6 +4814,8 @@ try
         bSupId,
         claims => TestAuthHandler.CustomClaims = claims);
 
+    await Mdm11PostgresCheck.RunAsync(builder.ConnectionString);
+
     if (Directory.Exists(pgPodStorageDir))
     {
         try { Directory.Delete(pgPodStorageDir, recursive: true); } catch { }

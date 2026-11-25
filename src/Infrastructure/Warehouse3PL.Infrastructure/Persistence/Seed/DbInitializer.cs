@@ -48,6 +48,7 @@ public class DbInitializer
             await _context.Database.EnsureCreatedAsync();
 
             await SeedRolesAndPermissionsAsync();
+            await ReferenceCatalogSeeder.SeedAsync(_context);
             var facility = await SeedFacilitiesAsync();
             var client = await SeedClientsAsync();
             await SeedUsersAsync(client);
@@ -95,6 +96,22 @@ public class DbInitializer
             }
 
             _context.Roles.Add(superAdminRole);
+        }
+        else if (superAdminRole.IsSystemRole)
+        {
+            foreach (var permission in allPermissions)
+            {
+                if (!superAdminRole.RolePermissions.Any(rp =>
+                    string.Equals(rp.PermissionKey, permission, StringComparison.OrdinalIgnoreCase)))
+                {
+                    superAdminRole.RolePermissions.Add(new RolePermission
+                    {
+                        Role = superAdminRole,
+                        PermissionKey = permission,
+                        AccessLevel = AccessLevel.Admin
+                    });
+                }
+            }
         }
 
         // 2. ClientAdmin Role (reconcile idempotently — never leave legacy floor execution grants)
