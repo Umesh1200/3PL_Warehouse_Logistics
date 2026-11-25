@@ -49,6 +49,21 @@ public class AllocationExecutionService : IAllocationExecutionService
         for (var attempt = 1; attempt <= maxAttempts; attempt++)
         {
             await _context.BeginTransactionAsync(cancellationToken);
+            var heldStockLocks = new List<IAsyncDisposable>();
+            var lockedStockIds = new HashSet<Guid>();
+
+            async Task AcquireNewStockLocksAsync(IEnumerable<Guid> stockIds)
+            {
+                var newIds = stockIds
+                    .Where(id => id != Guid.Empty && lockedStockIds.Add(id))
+                    .OrderBy(id => id)
+                    .ToList();
+
+                if (newIds.Count > 0)
+                {
+                    heldStockLocks.Add(await _context.AcquireStockAllocationLocksAsync(newIds, cancellationToken));
+                }
+            }
 
             try
             {
@@ -112,9 +127,23 @@ public class AllocationExecutionService : IAllocationExecutionService
                     return BuildSummary(order, isDuplicate: false, attempt: attempt);
                 }
 
+                // Pre-lock candidate stock rows for all active SKUs in global sorted StockOnHandId order BEFORE planning
+                // so concurrent allocators serialize cleanly without stale plans, InMemory lock gaps, or lock-order deadlocks.
+                var activeItemIds = activeLines.Select(l => l.ItemId).Distinct().ToList();
+                var preLockStockIds = await _context.StockOnHand
+                    .AsNoTracking()
+                    .Where(s => s.ClientId == order.ClientId &&
+                                s.FacilityId == order.FacilityId &&
+                                activeItemIds.Contains(s.ItemId) &&
+                                s.QtyAvailable > 0)
+                    .Select(s => s.Id)
+                    .ToListAsync(cancellationToken);
+                await AcquireNewStockLocksAsync(preLockStockIds);
+
                 // 5. Execute allocation planning & transactional reservation per line
-                foreach (var line in activeLines)
+                for (var lineIndex = 0; lineIndex < activeLines.Count; lineIndex++)
                 {
+                    var line = activeLines[lineIndex];
                     var request = new AllocationRequest
                     {
                         ClientId = order.ClientId,
@@ -129,15 +158,15 @@ public class AllocationExecutionService : IAllocationExecutionService
                     };
 
                     var linePlan = await _allocationEngine.PlanLineAllocationAsync(request, cancellationToken);
-                    var attemptedDepletion = false;
 
-                    async Task ReserveFromPlanAsync(LineAllocationPlan activePlan, AllocationRequest activeRequest)
+                    async Task<bool> ReserveFromPlanAsync(LineAllocationPlan activePlan, AllocationRequest activeRequest)
                     {
+                        var depletedDuringReservation = false;
                         var candidateStockIds = activePlan.CandidateAllocations
                             .Select(c => c.StockOnHandId)
                             .ToList();
 
-                        await using var stockLocks = await _context.AcquireStockAllocationLocksAsync(candidateStockIds, cancellationToken);
+                        await AcquireNewStockLocksAsync(candidateStockIds);
 
                         foreach (var candidatePlan in activePlan.CandidateAllocations)
                         {
@@ -156,17 +185,23 @@ public class AllocationExecutionService : IAllocationExecutionService
 
                             if (stock == null)
                             {
-                                attemptedDepletion = true;
+                                depletedDuringReservation = true;
                                 continue;
                             }
 
                             var eligibility = _candidateFilter.Evaluate(stock, activeRequest);
-                            if (!eligibility.IsEligible) continue;
+                            if (!eligibility.IsEligible)
+                            {
+                                // A planned candidate became depleted (QtyAvailable <= 0) or ineligible under concurrency;
+                                // mark depletion so remaining demand re-plans against fallback bins.
+                                depletedDuringReservation = true;
+                                continue;
+                            }
 
                             var availableNow = stock.QtyAvailable;
                             if (availableNow < candidatePlan.QuantityAllocated)
                             {
-                                attemptedDepletion = true;
+                                depletedDuringReservation = true;
                             }
 
                             if (availableNow <= 0) continue;
@@ -203,14 +238,19 @@ public class AllocationExecutionService : IAllocationExecutionService
                             line.Allocations.Add(allocation);
                             line.Allocate(qtyToReserve);
                         }
+
+                        return depletedDuringReservation;
                     }
 
-                    await ReserveFromPlanAsync(linePlan, request);
+                    var attemptedDepletion = await ReserveFromPlanAsync(linePlan, request);
 
-                    // If concurrent contention depleted a planned bin mid-flight while remaining demand exists,
-                    // re-plan once with updated remaining demand to pick up fallback eligible stock cleanly.
-                    if (line.RemainingDemand > 0 && attemptedDepletion)
+                    // If concurrent contention depleted or invalidated a planned bin mid-flight while remaining demand exists,
+                    // flush intra-transaction reservations so fallback planning observes updated bin balances and re-plan cleanly.
+                    const int maxReplans = 5;
+                    for (var replan = 0; replan < maxReplans && line.RemainingDemand > 0 && attemptedDepletion; replan++)
                     {
+                        await _context.SaveChangesAsync(cancellationToken);
+
                         var fallbackRequest = new AllocationRequest
                         {
                             ClientId = order.ClientId,
@@ -225,7 +265,12 @@ public class AllocationExecutionService : IAllocationExecutionService
                         };
 
                         var fallbackPlan = await _allocationEngine.PlanLineAllocationAsync(fallbackRequest, cancellationToken);
-                        await ReserveFromPlanAsync(fallbackPlan, fallbackRequest);
+                        if (fallbackPlan.CandidateAllocations.Count == 0)
+                        {
+                            break;
+                        }
+
+                        attemptedDepletion = await ReserveFromPlanAsync(fallbackPlan, fallbackRequest);
                     }
 
                     // Record shortage if demand could not be completely satisfied
@@ -248,6 +293,12 @@ public class AllocationExecutionService : IAllocationExecutionService
 
                         _context.AllocationShortages.Add(shortage);
                         order.Shortages.Add(shortage);
+                    }
+
+                    // Flush intra-transaction reservations before planning any subsequent active line so duplicate-SKU lines observe remaining stock.
+                    if (lineIndex < activeLines.Count - 1)
+                    {
+                        await _context.SaveChangesAsync(cancellationToken);
                     }
                 }
 
@@ -281,6 +332,13 @@ public class AllocationExecutionService : IAllocationExecutionService
             {
                 await _context.RollbackTransactionAsync(cancellationToken);
                 throw;
+            }
+            finally
+            {
+                for (var i = heldStockLocks.Count - 1; i >= 0; i--)
+                {
+                    await heldStockLocks[i].DisposeAsync();
+                }
             }
         }
 

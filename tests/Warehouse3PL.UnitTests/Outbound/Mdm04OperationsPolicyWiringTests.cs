@@ -488,4 +488,72 @@ public sealed class Mdm04OperationsPolicyWiringTests
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(JsonReq(HttpMethod.Get, $"/api/v1/putaway/strategies?facilityId={facB}&clientId={clientA}", jwtStaffRulesA))).StatusCode);
         Assert.Equal(HttpStatusCode.OK, (await http.SendAsync(JsonReq(HttpMethod.Get, $"/api/v1/putaway/strategies?facilityId={facA}&clientId={clientA}", jwtStaffRulesA))).StatusCode);
     }
+
+    [Fact]
+    public async Task ConcurrentAllocation_TotalBinDepletion_ReplansAndConservesAcrossAllBins()
+    {
+        var dbName = $"mdm04-conc-alloc-{Guid.NewGuid():N}";
+        var clientId = Guid.NewGuid();
+        var facId = Guid.NewGuid();
+        var itemId = Guid.NewGuid();
+        var bin1Id = Guid.NewGuid();
+        var bin2Id = Guid.NewGuid();
+        var bin3Id = Guid.NewGuid();
+        var huId = Guid.NewGuid();
+        var orderIds = Enumerable.Range(0, 4).Select(_ => Guid.NewGuid()).ToArray();
+
+        var tenantProvider = new TestTenantProvider { TenantId = clientId, BypassTenantFilter = true };
+        var currentUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff, FacilityId = facId };
+
+        await using (var seed = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
+        {
+            seed.Locations.AddRange(
+                new Location { Id = bin1Id, FacilityId = facId, LocationCode = "B1", LocationType = LocationType.Bin, PickSequence = 1, IsPickable = true, IsActive = true },
+                new Location { Id = bin2Id, FacilityId = facId, LocationCode = "B2", LocationType = LocationType.Bin, PickSequence = 5, IsPickable = true, IsActive = true },
+                new Location { Id = bin3Id, FacilityId = facId, LocationCode = "B3", LocationType = LocationType.Bin, PickSequence = 1, IsPickable = true, IsActive = true });
+
+            seed.Items.Add(new Item { Id = itemId, ClientId = clientId, Sku = "SKU-RACE", StorageTempClass = StorageTempClass.Ambient });
+            seed.HandlingUnits.Add(new HandlingUnit { Id = huId, ClientId = clientId, FacilityId = facId, LpnCode = "LPN-40", UnitType = HandlingUnitType.Pallet });
+
+            var sameUtc = DateTime.UtcNow.AddDays(-1);
+            seed.StockOnHand.AddRange(
+                new StockOnHand { ClientId = clientId, FacilityId = facId, ItemId = itemId, LocationId = bin1Id, QtyAvailable = 15m, ReceivedAtUtc = DateTime.UtcNow.AddDays(-20) },
+                new StockOnHand { ClientId = clientId, FacilityId = facId, ItemId = itemId, LocationId = bin2Id, HandlingUnitId = huId, LpnCode = "LPN-40", QtyAvailable = 40m, ReceivedAtUtc = sameUtc },
+                new StockOnHand { ClientId = clientId, FacilityId = facId, ItemId = itemId, LocationId = bin3Id, QtyAvailable = 20m, ReceivedAtUtc = sameUtc });
+
+            seed.AllocationPolicies.Add(new AllocationPolicy
+            {
+                ClientId = clientId,
+                FacilityId = facId,
+                DefaultStrategy = AllocationStrategyType.FIFO,
+                PreferFullHandlingUnits = true,
+                AllowPartialAllocation = true,
+                IsActive = true
+            });
+
+            foreach (var oid in orderIds)
+            {
+                var ord = new OutboundOrder { Id = oid, ClientId = clientId, FacilityId = facId, OrderNumber = $"ORD-{oid:N}"[..12], CustomerName = "C", Status = OutboundOrderStatus.Released };
+                ord.Lines.Add(new OutboundOrderLine { ItemId = itemId, LineNumber = 1, QuantityOrdered = 25m });
+                seed.OutboundOrders.Add(ord);
+            }
+
+            await seed.SaveChangesAsync();
+        }
+
+        var results = await Task.WhenAll(orderIds.Select(oid => Task.Run(async () =>
+        {
+            await using var db = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
+            var (_, exec) = CreateAllocationServices(db, tenantProvider);
+            return await exec.ExecuteOrderAllocationAsync(oid, userId: currentUser.UserId);
+        })));
+
+        Assert.Equal(75m, results.Sum(r => r.TotalQuantityAllocated));
+
+        await using var chk = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
+        var stocks = await chk.StockOnHand.Where(s => s.ItemId == itemId).ToListAsync();
+        Assert.All(stocks, s => Assert.True(s.QtyAvailable >= 0m));
+        Assert.Equal(0m, stocks.Sum(s => s.QtyAvailable));
+        Assert.Equal(75m, stocks.Sum(s => s.QtyAllocated));
+    }
 }
