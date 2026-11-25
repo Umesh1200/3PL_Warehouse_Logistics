@@ -4670,30 +4670,38 @@ try
         {
             var preMigrator = preMigDb.GetInfrastructure().GetRequiredService<IMigrator>();
             await preMigrator.MigrateAsync("20261122154043_Phase740CCustodyHandoverAndFencing");
-
-            preMigDb.Facilities.Add(new Facility { Id = migFacId, FacilityCode = "MIG745", Name = "Migration 745 Hub", Timezone = "UTC", CountryCode = "US", DockDoorCount = 2, IsActive = true });
-            preMigDb.Clients.AddRange(
-                new Client { Id = migCliAId, CompanyName = "Legacy Client A", AccountCode = "LCA1", Status = ClientStatus.Active, SlaTier = SlaTier.Standard, Currency = "USD" },
-                new Client { Id = migCliBId, CompanyName = "Legacy Client B", AccountCode = "LCB1", Status = ClientStatus.Active, SlaTier = SlaTier.Standard, Currency = "USD" });
-            preMigDb.OutboundOrders.AddRange(
-                new OutboundOrder { Id = migOrdAId, ClientId = migCliAId, FacilityId = migFacId, OrderNumber = "LEG-ORD-A", CustomerName = "Legacy Cust A", Status = OutboundOrderStatus.Completed },
-                new OutboundOrder { Id = migOrdBId, ClientId = migCliBId, FacilityId = migFacId, OrderNumber = "LEG-ORD-B", CustomerName = "Legacy Cust B", Status = OutboundOrderStatus.Completed },
-                new OutboundOrder { Id = migOrdCId, ClientId = migCliAId, FacilityId = migFacId, OrderNumber = "LEG-ORD-C", CustomerName = "Legacy Cust C", Status = OutboundOrderStatus.Completed });
-            preMigDb.HandlingUnits.AddRange(
-                new HandlingUnit { Id = migHuAId, ClientId = migCliAId, FacilityId = migFacId, LpnCode = "LEG-HU-A", UnitType = HandlingUnitType.ShippingCarton },
-                new HandlingUnit { Id = migHuBId, ClientId = migCliBId, FacilityId = migFacId, LpnCode = "LEG-HU-B", UnitType = HandlingUnitType.ShippingCarton },
-                new HandlingUnit { Id = migHuCId, ClientId = migCliAId, FacilityId = migFacId, LpnCode = "LEG-HU-C", UnitType = HandlingUnitType.ShippingCarton });
-            preMigDb.Packages.AddRange(
-                new Package { Id = migPkgAId, ClientId = migCliAId, FacilityId = migFacId, OutboundOrderId = migOrdAId, HandlingUnitId = migHuAId, PackageNumber = "LEG-PKG-A", TrackingNumber = "LEG-TRK-A", CarrierCode = "SIM-FEDEX", Status = PackageStatus.Loaded, GrossWeightKg = 1m, LengthCm = 10, WidthCm = 10, HeightCm = 10 },
-                new Package { Id = migPkgBId, ClientId = migCliBId, FacilityId = migFacId, OutboundOrderId = migOrdBId, HandlingUnitId = migHuBId, PackageNumber = "LEG-PKG-B", TrackingNumber = "LEG-TRK-B", CarrierCode = "SIM-FEDEX", Status = PackageStatus.Loaded, GrossWeightKg = 1m, LengthCm = 10, WidthCm = 10, HeightCm = 10 },
-                new Package { Id = migPkgCId, ClientId = migCliAId, FacilityId = migFacId, OutboundOrderId = migOrdCId, HandlingUnitId = migHuCId, PackageNumber = "LEG-PKG-C", TrackingNumber = "LEG-TRK-C", CarrierCode = "SIM-FEDEX", Status = PackageStatus.Loaded, GrossWeightKg = 1m, LengthCm = 10, WidthCm = 10, HeightCm = 10 });
-            await preMigDb.SaveChangesAsync();
         }
 
         await using (var migSqlConn = new NpgsqlConnection(p745MigConn))
         {
             await migSqlConn.OpenAsync();
             await using var seedCmd = new NpgsqlCommand($@"
+                INSERT INTO facilities (facility_id, facility_code, name, timezone, country_code, dock_door_count, is_active, is_deleted, created_at)
+                VALUES ('{migFacId}', 'MIG745', 'Migration 745 Hub', 'UTC', 'US', 2, true, false, NOW());
+
+                INSERT INTO clients (client_id, company_name, account_code, status, sla_tier, currency, is_deleted, created_at)
+                VALUES
+                    ('{migCliAId}', 'Legacy Client A', 'LCA1', 'Active', 'Standard', 'USD', false, NOW()),
+                    ('{migCliBId}', 'Legacy Client B', 'LCB1', 'Active', 'Standard', 'USD', false, NOW());
+
+                INSERT INTO outbound_orders (order_id, client_id, facility_id, order_number, order_type, status, delivery_status, priority, service_level, customer_name, order_date_utc, version, is_deleted, created_at)
+                VALUES
+                    ('{migOrdAId}', '{migCliAId}', '{migFacId}', 'LEG-ORD-A', 'B2BSalesOrder', 'Completed', 'PendingShipment', 1, 'StandardGround', 'Legacy Cust A', NOW(), 1, false, NOW()),
+                    ('{migOrdBId}', '{migCliBId}', '{migFacId}', 'LEG-ORD-B', 'B2BSalesOrder', 'Completed', 'PendingShipment', 1, 'StandardGround', 'Legacy Cust B', NOW(), 1, false, NOW()),
+                    ('{migOrdCId}', '{migCliAId}', '{migFacId}', 'LEG-ORD-C', 'B2BSalesOrder', 'Completed', 'PendingShipment', 1, 'StandardGround', 'Legacy Cust C', NOW(), 1, false, NOW());
+
+                INSERT INTO handling_units (handling_unit_id, client_id, facility_id, lpn_code, unit_type, status, version, is_deleted, created_at)
+                VALUES
+                    ('{migHuAId}', '{migCliAId}', '{migFacId}', 'LEG-HU-A', 'ShippingCarton', 'Available', 1, false, NOW()),
+                    ('{migHuBId}', '{migCliBId}', '{migFacId}', 'LEG-HU-B', 'ShippingCarton', 'Available', 1, false, NOW()),
+                    ('{migHuCId}', '{migCliAId}', '{migFacId}', 'LEG-HU-C', 'ShippingCarton', 'Available', 1, false, NOW());
+
+                INSERT INTO packages (package_id, client_id, facility_id, outbound_order_id, handling_unit_id, package_number, tracking_number, carrier_code, status, current_tracking_status, carton_sequence, gross_weight_kg, tare_weight_kg, net_weight_kg, length_cm, width_cm, height_cm, volumetric_divisor, volumetric_weight_kg, version, is_deleted, created_at)
+                VALUES
+                    ('{migPkgAId}', '{migCliAId}', '{migFacId}', '{migOrdAId}', '{migHuAId}', 'LEG-PKG-A', 'LEG-TRK-A', 'SIM-FEDEX', 'Loaded', 'PendingHandover', 1, 1.0, 0, 0, 10, 10, 10, 5000, 0, 1, false, NOW()),
+                    ('{migPkgBId}', '{migCliBId}', '{migFacId}', '{migOrdBId}', '{migHuBId}', 'LEG-PKG-B', 'LEG-TRK-B', 'SIM-FEDEX', 'Loaded', 'PendingHandover', 1, 1.0, 0, 0, 10, 10, 10, 5000, 0, 1, false, NOW()),
+                    ('{migPkgCId}', '{migCliAId}', '{migFacId}', '{migOrdCId}', '{migHuCId}', 'LEG-PKG-C', 'LEG-TRK-C', 'SIM-FEDEX', 'Loaded', 'PendingHandover', 1, 1.0, 0, 0, 10, 10, 10, 5000, 0, 1, false, NOW());
+
                 INSERT INTO proof_of_deliveries (pod_id, client_id, facility_id, package_id, tracking_number, carrier_code, recipient_name, is_signed, is_storage_finalized, idempotency_key, evidence_source, captured_at_utc, delivered_at_utc, is_superseded, created_at)
                 VALUES
                     ('{legPod1Id}', '{migCliAId}', '{migFacId}', '{migPkgAId}', 'LEG-TRK-A', 'SIM-FEDEX', 'Legacy Recip 1', false, true, 'DELIVERY-LEGACY-1', 'DriverHandheld', NOW() - INTERVAL '2 hours', NOW() - INTERVAL '2 hours', false, NOW()),
@@ -4825,11 +4833,6 @@ try
     Console.WriteLine("\n================================================================================");
     Console.WriteLine("ALL PHASE 7.3, 7.4.0A, 7.4.0B & 7.4.0C POSTGRESQL VERIFICATIONS PASSED CLEANLY!");
     Console.WriteLine("================================================================================");
-}
-catch (Exception ex)
-{
-    Console.WriteLine($"::error::{ex.ToString().Replace("\r", " ").Replace("\n", " | ")}");
-    throw;
 }
 finally
 {
