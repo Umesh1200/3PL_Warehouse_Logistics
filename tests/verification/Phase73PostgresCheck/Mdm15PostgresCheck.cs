@@ -670,6 +670,7 @@ internal static class Mdm15PostgresCheck
             // 2. Instance A updates policy to V2 and runs dispatcher against REAL Redis
             await using (var dbA = CreatePgDb(pgConn))
             {
+                await dbA.BeginTransactionAsync();
                 var p1 = await dbA.CountryCompliancePolicies.SingleAsync(p => p.CountryCode == "NP" && p.PolicyCode == "NP-REDIS-LIVE" && p.Version == 1);
                 var p2 = CountryCompliancePolicy.CreateDraft(
                     "NP", "NP-REDIS-LIVE", 2, "Redis Live V2", "Gazette RL2", "Notice-RL-2",
@@ -678,8 +679,10 @@ internal static class Mdm15PostgresCheck
                 dbA.CountryCompliancePolicies.Add(p2);
                 await dbA.SaveChangesAsync();
                 p1.Supersede(p2.Id, eff);
+                await dbA.SaveChangesAsync(); // Flush supersede before activating replacement (non-deferred EXCLUDE USING gist)
                 p2.Approve(approverId, eff.AddDays(1), "Approved RL2");
                 await dbA.SaveChangesAsync();
+                await dbA.CommitTransactionAsync();
 
                 var transportA = new RedisConfigurationInvalidationTransport(cacheA, optsA, NullLogger<RedisConfigurationInvalidationTransport>.Instance, muxA);
                 var procA = new ConfigurationInvalidationProcessor(dbA, transportA, clock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
@@ -731,6 +734,7 @@ internal static class Mdm15PostgresCheck
 
             await using (var outageDb = CreatePgDb(pgConn))
             {
+                await outageDb.BeginTransactionAsync();
                 var p2 = await outageDb.CountryCompliancePolicies.SingleAsync(p => p.CountryCode == "NP" && p.PolicyCode == "NP-REDIS-LIVE" && p.Version == 2);
                 var p3 = CountryCompliancePolicy.CreateDraft(
                     "NP", "NP-REDIS-LIVE", 3, "Redis Live V3 Outage", "Gazette RL3", "Notice-RL-3",
@@ -739,8 +743,10 @@ internal static class Mdm15PostgresCheck
                 outageDb.CountryCompliancePolicies.Add(p3);
                 await outageDb.SaveChangesAsync();
                 p2.Supersede(p3.Id, eff);
+                await outageDb.SaveChangesAsync(); // Flush supersede before activating replacement (non-deferred EXCLUDE USING gist)
                 p3.Approve(approverId, eff.AddDays(2), "Approved RL3 during Redis outage");
                 await outageDb.SaveChangesAsync();
+                await outageDb.CommitTransactionAsync();
 
                 var brokenTransport = new RedisConfigurationInvalidationTransport(cacheA, deadCacheOpts, NullLogger<RedisConfigurationInvalidationTransport>.Instance, deadMux);
                 var outageProc = new ConfigurationInvalidationProcessor(outageDb, brokenTransport, clock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
