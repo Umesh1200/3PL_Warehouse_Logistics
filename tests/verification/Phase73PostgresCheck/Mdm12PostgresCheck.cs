@@ -97,10 +97,21 @@ internal static class Mdm12PostgresCheck
                 var migrator = postMigDb.GetInfrastructure().GetRequiredService<IMigrator>();
                 await migrator.MigrateAsync("20261125134640_MDM1_2_LegalEntitiesAndFacilityBinding");
 
-                var legacyAfter = await postMigDb.Facilities.AsNoTracking().SingleAsync(f => f.Id == legacyFacId);
-                if (legacyAfter.CountryCode != "USA" || legacyAfter.DefaultLegalEntityId != null || legacyAfter.DefaultCurrencyCode != null)
+                await using (var chkConn = new NpgsqlConnection(targetConn))
                 {
-                    throw new InvalidOperationException("MDM-1.2 PostgreSQL migration mutated legacy facility defaults unexpectedly.");
+                    await chkConn.OpenAsync();
+                    await using var chkCmd = new NpgsqlCommand(
+                        "SELECT country_code, default_legal_entity_id, default_currency_code FROM facilities WHERE facility_id = @id",
+                        chkConn);
+                    chkCmd.Parameters.AddWithValue("@id", legacyFacId);
+                    await using var rdr = await chkCmd.ExecuteReaderAsync();
+                    if (!await rdr.ReadAsync() ||
+                        rdr.GetString(0) != "USA" ||
+                        !rdr.IsDBNull(1) ||
+                        !rdr.IsDBNull(2))
+                    {
+                        throw new InvalidOperationException("MDM-1.2 PostgreSQL migration mutated legacy facility defaults unexpectedly.");
+                    }
                 }
 
                 // Upgrade remaining MDM migrations so live HTTP checks run on current full schema
