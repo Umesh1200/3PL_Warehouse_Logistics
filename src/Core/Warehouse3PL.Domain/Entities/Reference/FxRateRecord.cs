@@ -35,6 +35,7 @@ public class FxRateRecord : AuditableEntity<Guid>
     public string BulletinVersion { get; set; } = string.Empty;
     public string? BenchmarkSeriesId { get; set; }
     public string? IntegrityHash { get; set; }
+    public string? EvidenceReference { get; set; }
     public DateTime PublishedAtUtc { get; set; }
 
     public FxRateApprovalStatus ApprovalStatus { get; set; } = FxRateApprovalStatus.Draft;
@@ -76,7 +77,8 @@ public class FxRateRecord : AuditableEntity<Guid>
         string? benchmarkSeriesId = null,
         string? integrityHash = null,
         FxRateDirection rateDirection = FxRateDirection.QuotePerUnitBase,
-        Guid? id = null)
+        Guid? id = null,
+        string? evidenceReference = null)
     {
         var normalizedBase = ValidateIsoCurrency(baseCurrencyCode, nameof(baseCurrencyCode));
         var normalizedQuote = ValidateIsoCurrency(quoteCurrencyCode, nameof(quoteCurrencyCode));
@@ -146,6 +148,7 @@ public class FxRateRecord : AuditableEntity<Guid>
             BulletinVersion = bulletinVersion.Trim(),
             BenchmarkSeriesId = string.IsNullOrWhiteSpace(benchmarkSeriesId) ? null : benchmarkSeriesId.Trim(),
             IntegrityHash = string.IsNullOrWhiteSpace(integrityHash) ? null : integrityHash.Trim(),
+            EvidenceReference = string.IsNullOrWhiteSpace(evidenceReference) ? null : evidenceReference.Trim(),
             PublishedAtUtc = publishedAtUtc,
             ApprovalStatus = FxRateApprovalStatus.Draft,
             ConfigRevision = 1,
@@ -160,7 +163,13 @@ public class FxRateRecord : AuditableEntity<Guid>
         return record;
     }
 
-    public void Approve(Guid approvedByUserId, DateTime approvedAtUtc, string verificationNotes)
+    public void Approve(
+        Guid approvedByUserId,
+        DateTime approvedAtUtc,
+        string verificationNotes,
+        string? verifiedBenchmarkSeriesId = null,
+        string? verifiedIntegrityHash = null,
+        string? evidenceReference = null)
     {
         if (ApprovalStatus != FxRateApprovalStatus.Draft || IsActive)
         {
@@ -177,6 +186,21 @@ public class FxRateRecord : AuditableEntity<Guid>
         if (string.IsNullOrWhiteSpace(verificationNotes))
         {
             throw new DomainException("VerificationNotes are required to approve an FX rate bulletin.", "FX_RATE_MISSING_VERIFICATION_NOTES");
+        }
+
+        if (!string.IsNullOrWhiteSpace(verifiedBenchmarkSeriesId))
+        {
+            BenchmarkSeriesId = verifiedBenchmarkSeriesId.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(verifiedIntegrityHash))
+        {
+            IntegrityHash = verifiedIntegrityHash.Trim();
+        }
+
+        if (!string.IsNullOrWhiteSpace(evidenceReference))
+        {
+            EvidenceReference = evidenceReference.Trim();
         }
 
         ApprovalStatus = FxRateApprovalStatus.VerifiedApproved;

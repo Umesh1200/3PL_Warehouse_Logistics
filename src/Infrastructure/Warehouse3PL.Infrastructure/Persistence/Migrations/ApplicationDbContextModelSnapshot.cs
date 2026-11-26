@@ -16280,6 +16280,11 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("effective_to_utc");
 
+                    b.Property<string>("EvidenceReference")
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)")
+                        .HasColumnName("evidence_reference");
+
                     b.Property<string>("IntegrityHash")
                         .HasMaxLength(128)
                         .HasColumnType("character varying(128)")

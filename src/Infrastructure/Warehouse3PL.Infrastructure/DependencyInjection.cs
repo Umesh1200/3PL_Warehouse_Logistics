@@ -41,6 +41,7 @@ public static class DependencyInjection
         services.AddScoped<ICountryComplianceEvaluator, CountryComplianceEvaluator>();
         services.AddScoped<IUomConversionService, UomConversionService>();
         services.AddScoped<IFxConversionService, FxConversionService>();
+        services.AddSingleton<IOfficialFxBulletinVerifier, OfficialFxBulletinVerifier>();
         services.AddScoped<IPutawayLocationSelector, PutawayLocationSelector>();
         services.AddScoped<IPutawayRecommendationService, PutawayLocationSelector>();
         services.AddScoped<ICrossDockEngine, CrossDockEngine>();

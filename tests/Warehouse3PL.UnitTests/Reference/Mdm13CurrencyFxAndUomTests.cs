@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -116,7 +117,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
         // 2. FX rate RBAC: Client/Driver/spoofed Staff denied 403
         var effStart = new DateTime(2026, 11, 20, 0, 0, 0, DateTimeKind.Utc);
         var pubAt = new DateTime(2026, 11, 19, 10, 0, 0, DateTimeKind.Utc);
-        var nrbPayload1 = "NRB-BULLETIN|2026-11-20|INR/NPR|100|160.00|160.15|160.075";
+        var nrbPayload1 = ReadEmbeddedFxArtifact("NRB_FX_20261120.json");
         var draftBody = new
         {
             baseCurrencyCode = "INR",
@@ -130,7 +131,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
             sourceAuthority = FxRateSourceAuthority.NRB,
             bulletinVersion = "NRB-20261120",
             publishedAtUtc = pubAt,
-            benchmarkSeriesId = "NRB-FX-INR-NPR",
+            benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
             sourceArtifactPayload = nrbPayload1
         };
 
@@ -139,15 +140,39 @@ public sealed class Mdm13CurrencyFxAndUomTests
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtDriver, draftBody))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtPlainSpoof, draftBody))).StatusCode);
 
-        // MDM13-R03: Official authority (NRB) without verifiable series/hash OR with placeholder/tampered digest MUST reject 422!
+        // MDM13-R03: Official authority (NRB) with untrusted bulletin, fabricated self-hashed payload, altered quotation,
+        // placeholder digest, or mismatched SHA-256 MUST fail closed 422!
+        var fakePayload = "{\"bulletinVersion\":\"NRB-FABRICATED-999\",\"rates\":[{\"base\":\"INR\",\"quote\":\"NPR\",\"mid\":999}]}";
+        var fakeSha256 = $"SHA256:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(fakePayload))).ToLowerInvariant()}";
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
             (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
             {
                 baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
-                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-NO-HASH",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-INR-NPR"
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-FABRICATED-999",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
+                integrityHash = fakeSha256,
+                sourceArtifactPayload = fakePayload
+            }))).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
+            {
+                baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
+                effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
+                unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 165.000m,
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
+                sourceArtifactPayload = nrbPayload1
+            }))).StatusCode);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
+            {
+                baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
+                effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
+                unitMultiplier = 1, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20"
             }))).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
             (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
@@ -155,8 +180,8 @@ public sealed class Mdm13CurrencyFxAndUomTests
                 baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
-                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-ZERO-HASH",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "PENDING",
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
                 integrityHash = "SHA256:0000000000000000000000000000000000000000000000000000000000000000"
             }))).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
@@ -165,8 +190,8 @@ public sealed class Mdm13CurrencyFxAndUomTests
                 baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
-                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-MISMATCH",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-INR-NPR",
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
                 integrityHash = "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 sourceArtifactPayload = nrbPayload1
             }))).StatusCode);
@@ -177,6 +202,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
         var nrbDraft = (await createNrb.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
         Assert.Equal(FxRateApprovalStatus.Draft, nrbDraft.ApprovalStatus);
         Assert.False(nrbDraft.IsActive);
+        Assert.Equal("https://www.nrb.org.np/api/forex/v1/rates?from=2026-11-20&to=2026-11-20#NRB_FX_20261120.json", nrbDraft.EvidenceReference);
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
             (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
@@ -213,6 +239,9 @@ public sealed class Mdm13CurrencyFxAndUomTests
         Assert.Equal(FxRateApprovalStatus.VerifiedApproved, nrbApproved.ApprovalStatus);
         Assert.True(nrbApproved.IsActive);
         Assert.Equal(1.60075m, nrbApproved.EffectiveMidUnitRate);
+        Assert.Equal("NRB-FX-DAILY-2026-11-20", nrbApproved.BenchmarkSeriesId);
+        Assert.Equal("SHA256:549552d081529155bc6724e37b18ca18ba68fbb6c1e3f87a4f3190f5cdf51acb", nrbApproved.IntegrityHash);
+        Assert.Equal("https://www.nrb.org.np/api/forex/v1/rates?from=2026-11-20&to=2026-11-20#NRB_FX_20261120.json", nrbApproved.EvidenceReference);
 
         // 4. UnitMultiplier=100 conversion (1000 INR -> 1600.75 Mid / 1600.00 Buy / 1601.50 Sell NPR)
         var convMidResp = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
@@ -288,14 +317,15 @@ public sealed class Mdm13CurrencyFxAndUomTests
         Assert.Equal(HttpStatusCode.Conflict, (await http.SendAsync(Authed(HttpMethod.Delete, $"/api/v1/fx-rates/{nrbApproved.Id}", jwtFin))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Delete, $"/api/v1/fx-rates/{nrbApproved.Id}", jwtPlainSpoof))).StatusCode);
 
-        var futurePayload = "NRB-BULLETIN|FUTURE|INR/NPR|100|160.50|160.65|160.575";
+        var nrbPub2 = new DateTime(2026, 11, 20, 10, 0, 0, DateTimeKind.Utc);
+        var nrbPayload2 = ReadEmbeddedFxArtifact("NRB_FX_20261121.json");
         var futureDraft = await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
         {
             baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
             effectiveFromUtc = DateTime.UtcNow.AddDays(10), effectiveToUtc = (DateTime?)null,
-            unitMultiplier = 100, buyRate = 160.50m, sellRate = 160.65m, midRate = 160.575m,
-            sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-FUTURE-GAP",
-            publishedAtUtc = effStart.AddDays(1), benchmarkSeriesId = "NRB-FX-INR-NPR", sourceArtifactPayload = futurePayload
+            unitMultiplier = 100, buyRate = 160.10m, sellRate = 160.25m, midRate = 160.175m,
+            sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261121",
+            publishedAtUtc = nrbPub2, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-21", sourceArtifactPayload = nrbPayload2
         }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions);
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
             (await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{futureDraft!.Id}/approve", jwtFin, new
@@ -305,15 +335,15 @@ public sealed class Mdm13CurrencyFxAndUomTests
         // Active nrbApproved remains untouched!
         Assert.True((await (await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/fx-rates/{nrbApproved.Id}", jwtClient))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!.IsActive);
 
-        var nrbPayload2 = "NRB-BULLETIN|2026-11-21|INR/NPR|100|160.10|160.25|160.175";
         var draft2Resp = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
         {
             baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
             effectiveFromUtc = effStart.AddDays(1), effectiveToUtc = (DateTime?)null,
             unitMultiplier = 100, buyRate = 160.10m, sellRate = 160.25m, midRate = 160.175m,
             sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261121",
-            publishedAtUtc = effStart.AddDays(1), benchmarkSeriesId = "NRB-FX-INR-NPR", sourceArtifactPayload = nrbPayload2
+            publishedAtUtc = nrbPub2, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-21", sourceArtifactPayload = nrbPayload2
         }));
+        Assert.Equal(HttpStatusCode.Created, draft2Resp.StatusCode);
         var nrbDraft2 = (await draft2Resp.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
 
         Assert.Equal(HttpStatusCode.Conflict,
@@ -369,6 +399,30 @@ public sealed class Mdm13CurrencyFxAndUomTests
             evidenceVerified = true, verificationNotes = "Manual treasury desk JPY fixing approved."
         }));
         Assert.Equal(HttpStatusCode.OK, jpyAppResp.StatusCode);
+        var jpyApproved = (await jpyAppResp.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
+        Assert.Equal("MANUAL_GOVERNANCE_OVERRIDE", jpyApproved.EvidenceReference);
+
+        // Trusted ECB embedded XML bulletin (ECB-20261113) verifies without caller supplying any hash/payload!
+        var ecbMeta = FxBulletinManifest.Entries["ECB-20261113"];
+        var ecbDraftResp = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
+        {
+            baseCurrencyCode = "EUR", quoteCurrencyCode = "USD",
+            effectiveFromUtc = new DateTime(2026, 11, 13, 0, 0, 0, DateTimeKind.Utc), effectiveToUtc = (DateTime?)null,
+            unitMultiplier = 1, buyRate = 1.1052m, sellRate = 1.1052m, midRate = 1.1052m,
+            sourceAuthority = FxRateSourceAuthority.ECB, bulletinVersion = "ECB-20261113",
+            publishedAtUtc = ecbMeta.PublishedAtUtc
+        }));
+        Assert.Equal(HttpStatusCode.Created, ecbDraftResp.StatusCode);
+        var ecbDraft = (await ecbDraftResp.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
+        var ecbAppResp = await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{ecbDraft.Id}/approve", jwtFin, new
+        {
+            evidenceVerified = true, verificationNotes = "Verified against ECB SDMX official artifact."
+        }));
+        Assert.Equal(HttpStatusCode.OK, ecbAppResp.StatusCode);
+        var ecbApproved = (await ecbAppResp.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
+        Assert.Equal(ecbMeta.BenchmarkSeriesId, ecbApproved.BenchmarkSeriesId);
+        Assert.Equal(ecbMeta.ExpectedSha256Digest, ecbApproved.IntegrityHash);
+        Assert.Equal($"{ecbMeta.SourceUrl}#{ecbMeta.ArtifactFileName}", ecbApproved.EvidenceReference);
 
         var jpyConv = await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
         {
@@ -554,6 +608,16 @@ public sealed class Mdm13CurrencyFxAndUomTests
         Assert.Equal("ManualApproved", explicitManConv.SourceAuthority);
     }
 
+    private static string ReadEmbeddedFxArtifact(string fileName)
+    {
+        var assembly = typeof(FxRateProvider).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .First(n => n.EndsWith(fileName, StringComparison.OrdinalIgnoreCase));
+        using var stream = assembly.GetManifestResourceStream(resourceName)!;
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+
     private static HttpRequestMessage Authed(HttpMethod method, string path, string jwt, object? body = null)
     {
         var req = new HttpRequestMessage(method, path);
@@ -583,6 +647,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
         builder.Services.AddApplicationServices();
         builder.Services.AddSingleton<IPasswordHasher, PasswordHasher>();
         builder.Services.AddSingleton<ITokenService, JwtTokenService>();
+        builder.Services.AddSingleton<IOfficialFxBulletinVerifier, OfficialFxBulletinVerifier>();
         builder.Services.AddSingleton<IFxRateProvider>(sp => new FxRateProvider(sp.GetService<IServiceScopeFactory>()));
         builder.Services.AddScoped<IFxConversionService, FxConversionService>();
         builder.Services.AddScoped<IUomConversionService, UomConversionService>();

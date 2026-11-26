@@ -40,7 +40,8 @@ public sealed record FxRateRecordDto(
     Guid? VoidedByUserId,
     DateTime? VoidedAtUtc,
     long ConfigRevision,
-    bool IsActive);
+    bool IsActive,
+    string? EvidenceReference = null);
 
 public sealed record FxConversionResultDto(
     decimal SourceAmount,
@@ -131,7 +132,8 @@ public static class CurrencyFxUomMappings
         r.VoidedByUserId,
         r.VoidedAtUtc,
         r.ConfigRevision,
-        r.IsActive);
+        r.IsActive,
+        r.EvidenceReference);
 
     public static UomDefinitionDto ToDto(this UomDefinition d) => new(
         d.UomCode,

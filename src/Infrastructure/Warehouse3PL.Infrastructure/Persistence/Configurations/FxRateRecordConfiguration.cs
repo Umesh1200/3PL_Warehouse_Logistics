@@ -92,6 +92,10 @@ public class FxRateRecordConfiguration : IEntityTypeConfiguration<FxRateRecord>
             .HasColumnName("integrity_hash")
             .HasMaxLength(128);
 
+        builder.Property(r => r.EvidenceReference)
+            .HasColumnName("evidence_reference")
+            .HasMaxLength(400);
+
         builder.Property(r => r.PublishedAtUtc)
             .HasColumnName("published_at_utc")
             .IsRequired();

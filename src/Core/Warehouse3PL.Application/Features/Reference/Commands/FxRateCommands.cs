@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.RegularExpressions;
 using FluentValidation;
 using MediatR;
@@ -16,10 +14,7 @@ namespace Warehouse3PL.Application.Features.Reference.Commands;
 
 internal static class FxProvenanceValidationHelper
 {
-    private static readonly Regex CanonicalSha256Regex = new(
-        @"^SHA256:[0-9a-fA-F]{64}$",
-        RegexOptions.CultureInvariant,
-        TimeSpan.FromMilliseconds(100));
+    public const string ManualGovernanceOverrideEvidence = "MANUAL_GOVERNANCE_OVERRIDE";
 
     private static readonly string[] PlaceholderTokens =
     [
@@ -29,96 +24,15 @@ internal static class FxProvenanceValidationHelper
     public static bool IsOfficialAuthority(FxRateSourceAuthority authority)
         => authority != FxRateSourceAuthority.ManualApproved;
 
-    public static string ComputeCanonicalSha256(string payload)
+    public static void ValidateVerificationNotes(string verificationNotes)
     {
-        var hash = SHA256.HashData(Encoding.UTF8.GetBytes(payload));
-        return $"SHA256:{Convert.ToHexString(hash).ToLowerInvariant()}";
-    }
-
-    public static string? ResolveOrVerifyDraftIntegrityHash(
-        FxRateSourceAuthority authority,
-        string? integrityHash,
-        string? sourceArtifactPayload,
-        string? benchmarkSeriesId)
-    {
-        string? normalizedHash = string.IsNullOrWhiteSpace(integrityHash) ? null : integrityHash.Trim();
-
-        if (!string.IsNullOrWhiteSpace(sourceArtifactPayload))
-        {
-            var computed = ComputeCanonicalSha256(sourceArtifactPayload);
-            if (normalizedHash != null &&
-                !string.Equals(normalizedHash, computed, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new DomainException(
-                    $"Supplied IntegrityHash '{normalizedHash}' does not match cryptographic SHA-256 digest '{computed}' computed from SourceArtifactPayload.",
-                    "FX_RATE_PROVENANCE_HASH_MISMATCH");
-            }
-
-            normalizedHash = computed;
-        }
-
-        if (IsOfficialAuthority(authority))
-        {
-            ValidateOfficialSeriesAndHash(benchmarkSeriesId, normalizedHash);
-        }
-
-        return normalizedHash;
-    }
-
-    public static void ValidateApprovalProvenance(
-        FxRateRecord rate,
-        string verificationNotes,
-        string? sourceArtifactPayload)
-    {
-        if (IsPlaceholderText(verificationNotes) || verificationNotes.Trim().Length < 10)
+        if (string.IsNullOrWhiteSpace(verificationNotes) ||
+            IsPlaceholderText(verificationNotes) ||
+            verificationNotes.Trim().Length < 10)
         {
             throw new DomainException(
                 "VerificationNotes must provide substantive non-placeholder review details (minimum 10 characters).",
                 "FX_RATE_PLACEHOLDER_VERIFICATION_NOTES");
-        }
-
-        if (!IsOfficialAuthority(rate.SourceAuthority))
-        {
-            return;
-        }
-
-        if (!string.IsNullOrWhiteSpace(sourceArtifactPayload))
-        {
-            var computed = ComputeCanonicalSha256(sourceArtifactPayload);
-            if (!string.IsNullOrWhiteSpace(rate.IntegrityHash) &&
-                !string.Equals(rate.IntegrityHash, computed, StringComparison.OrdinalIgnoreCase))
-            {
-                throw new DomainException(
-                    $"Approval SourceArtifactPayload SHA-256 '{computed}' does not match draft IntegrityHash '{rate.IntegrityHash}'.",
-                    "FX_RATE_PROVENANCE_HASH_MISMATCH");
-            }
-        }
-
-        ValidateOfficialSeriesAndHash(rate.BenchmarkSeriesId, rate.IntegrityHash);
-    }
-
-    private static void ValidateOfficialSeriesAndHash(string? benchmarkSeriesId, string? integrityHash)
-    {
-        if (string.IsNullOrWhiteSpace(benchmarkSeriesId) || IsPlaceholderText(benchmarkSeriesId))
-        {
-            throw new DomainException(
-                "Official central-bank FX bulletins (NRB/FRB/ECB/BOE) require a valid non-placeholder BenchmarkSeriesId. Use ManualApproved for non-bulletin governance overrides.",
-                "FX_RATE_OFFICIAL_SERIES_REQUIRED");
-        }
-
-        if (string.IsNullOrWhiteSpace(integrityHash) || !CanonicalSha256Regex.IsMatch(integrityHash))
-        {
-            throw new DomainException(
-                "Official central-bank FX bulletins (NRB/FRB/ECB/BOE) require a verifiable SHA-256 IntegrityHash ('SHA256:<64 hex>') or SourceArtifactPayload. Use ManualApproved for non-bulletin governance overrides.",
-                "FX_RATE_OFFICIAL_INTEGRITY_HASH_REQUIRED");
-        }
-
-        var hexPart = integrityHash.Substring("SHA256:".Length);
-        if (hexPart.ToLowerInvariant().Distinct().Count() <= 4)
-        {
-            throw new DomainException(
-                "Official FX IntegrityHash failed entropy validation (placeholder or repeated-character digest rejected).",
-                "FX_RATE_PLACEHOLDER_INTEGRITY_HASH");
         }
     }
 
@@ -169,11 +83,16 @@ public sealed class CreateFxRateDraftCommandHandler : IRequestHandler<CreateFxRa
 {
     private readonly IApplicationDbContext _db;
     private readonly CompliancePlatformAuthorization _auth;
+    private readonly IOfficialFxBulletinVerifier _bulletinVerifier;
 
-    public CreateFxRateDraftCommandHandler(IApplicationDbContext db, CompliancePlatformAuthorization auth)
+    public CreateFxRateDraftCommandHandler(
+        IApplicationDbContext db,
+        CompliancePlatformAuthorization auth,
+        IOfficialFxBulletinVerifier bulletinVerifier)
     {
         _db = db;
         _auth = auth;
+        _bulletinVerifier = bulletinVerifier;
     }
 
     public async Task<FxRateRecordDto> Handle(CreateFxRateDraftCommand request, CancellationToken cancellationToken)
@@ -206,11 +125,31 @@ public sealed class CreateFxRateDraftCommandHandler : IRequestHandler<CreateFxRa
                 "FX_RATE_UNKNOWN_QUOTE_CURRENCY");
         }
 
-        var verifiedIntegrityHash = FxProvenanceValidationHelper.ResolveOrVerifyDraftIntegrityHash(
-            request.SourceAuthority,
-            request.IntegrityHash,
-            request.SourceArtifactPayload,
-            request.BenchmarkSeriesId);
+        string? resolvedBenchmarkSeriesId = request.BenchmarkSeriesId;
+        string? resolvedIntegrityHash = request.IntegrityHash;
+        string evidenceReference = FxProvenanceValidationHelper.ManualGovernanceOverrideEvidence;
+
+        if (FxProvenanceValidationHelper.IsOfficialAuthority(request.SourceAuthority))
+        {
+            var verification = _bulletinVerifier.VerifyOfficialQuotation(
+                request.SourceAuthority,
+                request.BulletinVersion,
+                baseCode,
+                quoteCode,
+                FxRateDirection.QuotePerUnitBase,
+                request.UnitMultiplier,
+                request.BuyRate,
+                request.SellRate,
+                request.MidRate,
+                request.PublishedAtUtc,
+                request.BenchmarkSeriesId,
+                request.IntegrityHash,
+                request.SourceArtifactPayload);
+
+            resolvedBenchmarkSeriesId = verification.BenchmarkSeriesId;
+            resolvedIntegrityHash = verification.VerifiedIntegrityHash;
+            evidenceReference = verification.EvidenceReference;
+        }
 
         var record = FxRateRecord.CreateDraft(
             baseCode,
@@ -224,8 +163,11 @@ public sealed class CreateFxRateDraftCommandHandler : IRequestHandler<CreateFxRa
             request.SourceAuthority,
             request.BulletinVersion,
             request.PublishedAtUtc,
-            request.BenchmarkSeriesId,
-            verifiedIntegrityHash);
+            resolvedBenchmarkSeriesId,
+            resolvedIntegrityHash,
+            FxRateDirection.QuotePerUnitBase,
+            id: null,
+            evidenceReference: evidenceReference);
 
         record.CreatedBy = staffUserId;
         _db.FxRateRecords.Add(record);
@@ -258,15 +200,18 @@ public sealed class ApproveFxRateCommandHandler : IRequestHandler<ApproveFxRateC
     private readonly IApplicationDbContext _db;
     private readonly CompliancePlatformAuthorization _auth;
     private readonly IDateTimeProvider _dateTime;
+    private readonly IOfficialFxBulletinVerifier _bulletinVerifier;
 
     public ApproveFxRateCommandHandler(
         IApplicationDbContext db,
         CompliancePlatformAuthorization auth,
-        IDateTimeProvider dateTime)
+        IDateTimeProvider dateTime,
+        IOfficialFxBulletinVerifier bulletinVerifier)
     {
         _db = db;
         _auth = auth;
         _dateTime = dateTime;
+        _bulletinVerifier = bulletinVerifier;
     }
 
     public async Task<FxRateRecordDto> Handle(ApproveFxRateCommand request, CancellationToken cancellationToken)
@@ -315,12 +260,35 @@ public sealed class ApproveFxRateCommandHandler : IRequestHandler<ApproveFxRateC
                         "FX_RATE_VERIFICATION_REQUIRED");
                 }
 
-                // MDM13-R03: Validate authoritative central-bank provenance (series ID + SHA-256 digest + non-placeholder evidence)
-                // BEFORE checking/mutating overlapping active rates so invalid official bulletins always fail closed 422.
-                FxProvenanceValidationHelper.ValidateApprovalProvenance(
-                    rate,
-                    request.VerificationNotes,
-                    request.SourceArtifactPayload);
+                // MDM13-R03: Validate substantive VerificationNotes and verify official central-bank bulletins
+                // against retained trust-anchor artifacts BEFORE checking/mutating overlapping active rates.
+                FxProvenanceValidationHelper.ValidateVerificationNotes(request.VerificationNotes);
+
+                string? verifiedBenchmarkSeriesId = null;
+                string? verifiedIntegrityHash = null;
+                string evidenceReference = FxProvenanceValidationHelper.ManualGovernanceOverrideEvidence;
+
+                if (FxProvenanceValidationHelper.IsOfficialAuthority(rate.SourceAuthority))
+                {
+                    var verification = _bulletinVerifier.VerifyOfficialQuotation(
+                        rate.SourceAuthority,
+                        rate.BulletinVersion,
+                        rate.BaseCurrencyCode,
+                        rate.QuoteCurrencyCode,
+                        rate.RateDirection,
+                        rate.UnitMultiplier,
+                        rate.BuyRate,
+                        rate.SellRate,
+                        rate.MidRate,
+                        rate.PublishedAtUtc,
+                        rate.BenchmarkSeriesId,
+                        rate.IntegrityHash,
+                        request.SourceArtifactPayload);
+
+                    verifiedBenchmarkSeriesId = verification.BenchmarkSeriesId;
+                    verifiedIntegrityHash = verification.VerifiedIntegrityHash;
+                    evidenceReference = verification.EvidenceReference;
+                }
 
                 var now = _dateTime.UtcNow;
 
@@ -389,7 +357,13 @@ public sealed class ApproveFxRateCommandHandler : IRequestHandler<ApproveFxRateC
                     await _db.SaveChangesAsync(cancellationToken);
                 }
 
-                rate.Approve(staffUserId, now, request.VerificationNotes);
+                rate.Approve(
+                    staffUserId,
+                    now,
+                    request.VerificationNotes,
+                    verifiedBenchmarkSeriesId,
+                    verifiedIntegrityHash,
+                    evidenceReference);
                 rate.UpdatedBy = staffUserId;
 
                 await _db.SaveChangesAsync(cancellationToken);

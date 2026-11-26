@@ -1,6 +1,7 @@
 using System.Net;
 using System.Net.Http.Headers;
 using System.Net.Http.Json;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using Microsoft.AspNetCore.Authentication.JwtBearer;
@@ -196,11 +197,10 @@ internal static class Mdm13PostgresCheck
             var jwtFin = TokenFor(finStaffId, UserType.Staff, null, facilityId, ["PgFinanceFxMgr"], [Permissions.Global.ManageFxRates, Permissions.Billing.ManageRates]);
 
             var effFrom = new DateTime(2026, 11, 20, 0, 0, 0, DateTimeKind.Utc);
-            var pubAt = new DateTime(2026, 11, 20, 4, 0, 0, DateTimeKind.Utc);
-            var pgNrbPayloadA = "PG-NRB|2026-11-20|INR/NPR|100|160.00|160.15|160.075";
-            var pgNrbPayloadB = "PG-NRB|2026-11-20-R2|INR/NPR|100|160.05|160.20|160.125";
-            var pgNrbPayloadSup = "PG-NRB|SUP-RB|INR/NPR|100|160.20|160.35|160.275";
-            var pgUsdNprPayload = "PG-NRB|2026-11-20|USD/NPR|1|135.20|135.80|135.50";
+            var pubAt1 = new DateTime(2026, 11, 19, 10, 0, 0, DateTimeKind.Utc);
+            var pubAt2 = new DateTime(2026, 11, 20, 10, 0, 0, DateTimeKind.Utc);
+            var pgNrbPayloadA = ReadEmbeddedFxArtifact("NRB_FX_20261120.json");
+            var pgNrbPayloadB = ReadEmbeddedFxArtifact("NRB_FX_20261121.json");
 
             // RBAC + R03 provenance checks
             var raceBodyA = new
@@ -208,8 +208,8 @@ internal static class Mdm13PostgresCheck
                 baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effFrom, effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
-                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "PG-NRB-RACE-1",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-INR-NPR", sourceArtifactPayload = pgNrbPayloadA
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
+                publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20", sourceArtifactPayload = pgNrbPayloadA
             };
             if ((await http.PostAsJsonAsync("/api/v1/fx-rates", raceBodyA)).StatusCode != HttpStatusCode.Unauthorized ||
                 (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtClient, raceBodyA))).StatusCode != HttpStatusCode.Forbidden ||
@@ -218,17 +218,28 @@ internal static class Mdm13PostgresCheck
                 throw new InvalidOperationException("MDM-1.3 PostgreSQL FX RBAC check failed.");
             }
 
-            // MDM13-R03 negative check on PostgreSQL HTTP API: NRB without SHA-256 / payload fails closed 422
+            // MDM13-R03 negative checks on PostgreSQL HTTP API: fabricated bulletin even with valid self-SHA256 & tampered rate fail closed 422
+            var fakePgPayload = "{\"bulletinVersion\":\"NRB-PG-FABRICATED\",\"midRate\":999}";
+            var fakePgSha = $"SHA256:{Convert.ToHexString(SHA256.HashData(Encoding.UTF8.GetBytes(fakePgPayload))).ToLowerInvariant()}";
             if ((await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
                 {
                     baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
                     effectiveFromUtc = effFrom, effectiveToUtc = (DateTime?)null,
                     unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
-                    sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "PG-NRB-NO-PROVENANCE",
-                    publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-INR-NPR"
+                    sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-PG-FABRICATED",
+                    publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
+                    integrityHash = fakePgSha, sourceArtifactPayload = fakePgPayload
+                }))).StatusCode != HttpStatusCode.UnprocessableEntity ||
+                (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
+                {
+                    baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
+                    effectiveFromUtc = effFrom, effectiveToUtc = (DateTime?)null,
+                    unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 188.888m,
+                    sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
+                    publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20"
                 }))).StatusCode != HttpStatusCode.UnprocessableEntity)
             {
-                throw new InvalidOperationException("MDM13-R03 PostgreSQL official authority missing-hash check did not fail closed.");
+                throw new InvalidOperationException("MDM13-R03 PostgreSQL official authority authenticity check did not fail closed.");
             }
 
             // Create two overlapping Draft INR/NPR rates & approve concurrently (SupersedeOverlapping=false -> strictly 1x 200, 1x 409)
@@ -238,9 +249,9 @@ internal static class Mdm13PostgresCheck
             {
                 baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effFrom.AddHours(2), effectiveToUtc = (DateTime?)null,
-                unitMultiplier = 100, buyRate = 160.05m, sellRate = 160.20m, midRate = 160.125m,
-                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "PG-NRB-RACE-2",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-INR-NPR", sourceArtifactPayload = pgNrbPayloadB
+                unitMultiplier = 100, buyRate = 160.10m, sellRate = 160.25m, midRate = 160.175m,
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261121",
+                publishedAtUtc = pubAt2, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-21", sourceArtifactPayload = pgNrbPayloadB
             }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
 
             var raceStatuses = await Task.WhenAll(
@@ -254,28 +265,40 @@ internal static class Mdm13PostgresCheck
             }
 
             Guid winningRateId;
+            string winningBulletinVersion;
             await using (var chkDb = CreatePgDb(targetConn, null))
             {
-                winningRateId = await chkDb.FxRateRecords
+                var winner = await chkDb.FxRateRecords
                     .Where(r => r.BaseCurrencyCode == "INR" && r.QuoteCurrencyCode == "NPR" && r.SourceAuthority == FxRateSourceAuthority.NRB && r.ApprovalStatus == FxRateApprovalStatus.VerifiedApproved && r.IsActive)
-                    .Select(r => r.Id)
+                    .Select(r => new { r.Id, r.BulletinVersion, r.EvidenceReference })
                     .SingleAsync();
+                if (string.IsNullOrWhiteSpace(winner.EvidenceReference))
+                    throw new InvalidOperationException("MDM13-R03 PostgreSQL official rate missing persisted EvidenceReference.");
+                winningRateId = winner.Id;
+                winningBulletinVersion = winner.BulletinVersion;
             }
 
             // Rollback atomicity during intentional FX supersession via ThrowAfterSaveInterceptor
+            var useSecondForRollback = string.Equals(winningBulletinVersion, "NRB-20261120", StringComparison.Ordinal);
             var draftSupersede = (await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
             {
                 baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effFrom.AddDays(1), effectiveToUtc = (DateTime?)null,
-                unitMultiplier = 100, buyRate = 160.20m, sellRate = 160.35m, midRate = 160.275m,
-                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "PG-NRB-SUP-RB",
-                publishedAtUtc = effFrom.AddDays(1), benchmarkSeriesId = "NRB-INR-NPR", sourceArtifactPayload = pgNrbPayloadSup
+                unitMultiplier = 100,
+                buyRate = useSecondForRollback ? 160.10m : 160.00m,
+                sellRate = useSecondForRollback ? 160.25m : 160.15m,
+                midRate = useSecondForRollback ? 160.175m : 160.075m,
+                sourceAuthority = FxRateSourceAuthority.NRB,
+                bulletinVersion = useSecondForRollback ? "NRB-20261121" : "NRB-20261120",
+                publishedAtUtc = useSecondForRollback ? pubAt2 : pubAt1,
+                benchmarkSeriesId = useSecondForRollback ? "NRB-FX-DAILY-2026-11-21" : "NRB-FX-DAILY-2026-11-20",
+                sourceArtifactPayload = useSecondForRollback ? pgNrbPayloadB : pgNrbPayloadA
             }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
 
             var rbUser = new PgStaffUserContext(finStaffId);
             await using (var rbDb = CreatePgDb(targetConn, new ThrowAfterSaveInterceptor(), rbUser))
             {
-                var h = new ApproveFxRateCommandHandler(rbDb, new CompliancePlatformAuthorization(rbDb, rbUser), new DateTimeProvider());
+                var h = new ApproveFxRateCommandHandler(rbDb, new CompliancePlatformAuthorization(rbDb, rbUser), new DateTimeProvider(), new OfficialFxBulletinVerifier());
                 try
                 {
                     await h.Handle(new ApproveFxRateCommand(
@@ -295,8 +318,8 @@ internal static class Mdm13PostgresCheck
                 baseCurrencyCode = "USD", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effFrom, effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 1, buyRate = 135.20m, sellRate = 135.80m, midRate = 135.50m,
-                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "PG-NRB-USD-1",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-USD-NPR", sourceArtifactPayload = pgUsdNprPayload
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
+                publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20", sourceArtifactPayload = pgNrbPayloadA
             }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
             if ((await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{usdNprDraft.Id}/approve", jwtFin, new
             {
@@ -308,9 +331,9 @@ internal static class Mdm13PostgresCheck
             {
                 baseCurrencyCode = "USD", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = DateTime.UtcNow.AddDays(15), effectiveToUtc = (DateTime?)null,
-                unitMultiplier = 1, buyRate = 136.00m, sellRate = 136.60m, midRate = 136.30m,
-                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "PG-NRB-USD-FUT",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-USD-NPR", sourceArtifactPayload = "PG-NRB|FUT|USD/NPR|1|136.30"
+                unitMultiplier = 1, buyRate = 136.10m, sellRate = 136.70m, midRate = 136.40m,
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261121",
+                publishedAtUtc = pubAt2, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-21", sourceArtifactPayload = pgNrbPayloadB
             }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
             if ((await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{usdNprFuture.Id}/approve", jwtFin, new
             {
@@ -326,8 +349,8 @@ internal static class Mdm13PostgresCheck
                 baseCurrencyCode = "USD", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effFrom.AddDays(1), effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 1, buyRate = 136.10m, sellRate = 136.70m, midRate = 136.40m,
-                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "PG-NRB-USD-2",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-USD-NPR", sourceArtifactPayload = "PG-NRB|V2|USD/NPR|1|136.40"
+                sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261121",
+                publishedAtUtc = pubAt2, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-21", sourceArtifactPayload = pgNrbPayloadB
             }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
             var sup2Approve = await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{usdNprSup2.Id}/approve", jwtFin, new
             {
@@ -336,6 +359,8 @@ internal static class Mdm13PostgresCheck
             if (sup2Approve.StatusCode != HttpStatusCode.OK)
                 throw new InvalidOperationException($"PG USD/NPR v2 supersession failed: {sup2Approve.StatusCode}");
             var sup2Dto = (await sup2Approve.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
+            if (string.IsNullOrWhiteSpace(sup2Dto.EvidenceReference) || !sup2Dto.EvidenceReference.Contains("NRB_FX_20261121.json", StringComparison.Ordinal))
+                throw new InvalidOperationException($"PG USD/NPR v2 missing expected EvidenceReference: {sup2Dto.EvidenceReference}");
 
             var asKnownBeforeSup = await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
             {
@@ -405,6 +430,16 @@ internal static class Mdm13PostgresCheck
         }
     }
 
+    private static string ReadEmbeddedFxArtifact(string fileName)
+    {
+        var assembly = typeof(FxRateProvider).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .First(n => n.EndsWith(fileName, StringComparison.OrdinalIgnoreCase));
+        using var stream = assembly.GetManifestResourceStream(resourceName)!;
+        using var reader = new StreamReader(stream, Encoding.UTF8);
+        return reader.ReadToEnd();
+    }
+
     private static HttpRequestMessage Authed(HttpMethod method, string path, string jwt, object? body = null)
     {
         var req = new HttpRequestMessage(method, path);
@@ -446,6 +481,7 @@ internal static class Mdm13PostgresCheck
         builder.Services.AddApplicationServices();
         builder.Services.AddSingleton<IPasswordHasher, PasswordHasher>();
         builder.Services.AddSingleton<ITokenService, JwtTokenService>();
+        builder.Services.AddSingleton<IOfficialFxBulletinVerifier, OfficialFxBulletinVerifier>();
         builder.Services.AddSingleton<IFxRateProvider>(sp => new FxRateProvider(sp.GetService<IServiceScopeFactory>()));
         builder.Services.AddScoped<IFxConversionService, FxConversionService>();
         builder.Services.AddScoped<IUomConversionService, UomConversionService>();
