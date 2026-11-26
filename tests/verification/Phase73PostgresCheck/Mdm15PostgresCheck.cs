@@ -1230,9 +1230,11 @@ internal static class Mdm15PostgresCheck
                 throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: recovered outbox retry notification was not delivered to reconnected subscriber.");
             }
 
-            // Subsequent mutation V3 -> V4 MUST increment ReceivedNotificationCount by EXACTLY 1 (proving zero duplicate callback registration across reconnect)
+            // Subsequent mutation V3 -> V4 MUST increment ReceivedNotificationCount by exact 1:1 count (proving zero duplicate callback registration across reconnect)
             await Task.Delay(150);
             string npV3FullKey;
+            string usPostReconnectKey = "mdm:cfg:Country:US:post-reconnect-keep";
+            string usPostReconnectFullKey = $"{hostInstancePrefix}{usPostReconnectKey}";
             await using (var warmScope3 = host.Services.CreateAsyncScope())
             {
                 var cons3 = warmScope3.ServiceProvider.GetRequiredService<IConfigurationConsistencyService>();
@@ -1240,10 +1242,14 @@ internal static class Mdm15PostgresCheck
                     ConfigurationScopeType.Country, "NP", "compliance-policies:NP-HOST-LIVE",
                     (d, ct) => d.CountryCompliancePolicies.AsNoTracking()
                         .Where(p => p.CountryCode == "NP" && p.PolicyCode == "NP-HOST-LIVE").ToListAsync(ct));
-                await cons3.GetOrLoadVerifiedWithDiagnosticsAsync(
-                    ConfigurationScopeType.Country, "US", "host-us-unrelated",
-                    (d, ct) => d.HolidayCalendars.AsNoTracking().CountAsync(h => h.CountryCode == "US", ct));
                 npV3FullKey = $"{hostInstancePrefix}{d3.ScopedCacheKey}";
+
+                // Warm an explicit US L1 entry directly so local L1 retention is tested regardless of L2 Redis hits
+                await hostCache.SetAsync(usPostReconnectKey, "keep-us-l1");
+                if (!hostMem.TryGetValue(npV3FullKey, out _) || !hostMem.TryGetValue(usPostReconnectFullKey, out _))
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05-F01 setup failure: V3 NP or US L1 entry missing prior to V4 invalidation.");
+                }
             }
 
             long notifBeforeV4 = sub.ReceivedNotificationCount;
@@ -1282,9 +1288,13 @@ internal static class Mdm15PostgresCheck
             {
                 throw new InvalidOperationException($"MDM-1.5 R05-F01 FAIL: duplicate/missing subscriber callback after reconnect (dispatched={expectedV4Dispatched}, delta={sub.ReceivedNotificationCount - notifBeforeV4}).");
             }
-            if (hostMem.TryGetValue(npV3FullKey, out _) || !hostMem.TryGetValue(usKeepFullKey, out _))
+            if (hostMem.TryGetValue(npV3FullKey, out _))
             {
-                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: targeted NP eviction or unrelated US retention failed post-reconnect.");
+                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: targeted NP L1 entry was retained after post-reconnect V4 notification.");
+            }
+            if (!hostMem.TryGetValue(usPostReconnectFullKey, out _))
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: unrelated US L1 entry was evicted during post-reconnect NP V4 invalidation.");
             }
 
             // 8. Harmless duplicate notification + authoritative V4 verification
