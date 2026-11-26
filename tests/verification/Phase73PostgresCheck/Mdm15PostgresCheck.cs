@@ -744,13 +744,28 @@ internal static class Mdm15PostgresCheck
         var cacheA = new RedisCacheService(memA, optsA, NullLogger<RedisCacheService>.Instance, distA);
         var cacheB = new RedisCacheService(memB, optsB, NullLogger<RedisCacheService>.Instance, distB);
 
+        // Drain pending outbox events emitted by prior setup/remediation phases so Instance B only observes V2 invalidation here
+        await using (var preDrainDb = CreatePgDb(pgConn))
+        {
+            var preDrainTransport = new RedisConfigurationInvalidationTransport(cacheA, optsA, NullLogger<RedisConfigurationInvalidationTransport>.Instance, muxA);
+            var preDrainProc = new ConfigurationInvalidationProcessor(preDrainDb, preDrainTransport, clock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
+            await preDrainProc.DispatchPendingAsync();
+        }
+
         var subB = new RedisConfigurationInvalidationSubscriber(cacheB, optsB, NullLogger<RedisConfigurationInvalidationSubscriber>.Instance, muxB);
         await subB.StartAsync(CancellationToken.None);
 
         try
         {
-            // Wait briefly for Redis pub/sub subscription handshake
-            await Task.Delay(250);
+            // Wait deterministically for Redis pub/sub subscription registration
+            for (int i = 0; i < 40 && !subB.IsSubscribed; i++)
+            {
+                await Task.Delay(50);
+            }
+            if (!subB.IsSubscribed)
+            {
+                throw new InvalidOperationException("MDM-1.5 R05 Instance B subscriber did not establish initial Redis subscription.");
+            }
 
             // 1. Instance B warms targeted Country:NP L1 + Redis entries AND unrelated Country:US entry at V1
             string targetedPolicyFullKey;
@@ -938,6 +953,18 @@ internal static class Mdm15PostgresCheck
             p1.Approve(approverId, eff, "Approved HL1");
             seedDb.CountryCompliancePolicies.Add(p1);
             await seedDb.SaveChangesAsync();
+
+            // Drain seed setup outbox row before proxy outage/host checks so V2 dispatch emits a single clean notification
+            using var seedMux = await ConnectionMultiplexer.ConnectAsync(parsedRedis);
+            using var seedMem = new MemoryCache(new MemoryCacheOptions { SizeLimit = 100 });
+            var seedOpts = Options.Create(new CacheOptions { EnableRedis = true, ConnectionString = redisConn, InstanceName = hostInstancePrefix });
+            var seedTransport = new RedisConfigurationInvalidationTransport(
+                new RedisCacheService(seedMem, seedOpts, NullLogger<RedisCacheService>.Instance),
+                seedOpts,
+                NullLogger<RedisConfigurationInvalidationTransport>.Instance,
+                seedMux);
+            var seedProc = new ConfigurationInvalidationProcessor(seedDb, seedTransport, testClock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
+            await seedProc.DispatchPendingAsync();
         }
 
         // 1. Build REAL Production Generic Host pointing to proxy.Port BEFORE proxy starts listening (Redis unreachable at startup!)
