@@ -465,6 +465,7 @@ internal static class Mdm15PostgresCheck
             txDb.CountryCompliancePolicies.Add(pBad);
             await txDb.SaveChangesAsync();
             p1.Supersede(pBad.Id, r02Eff);
+            await txDb.SaveChangesAsync(); // Flush supersede before activating replacement (non-deferred EXCLUDE USING gist)
             pBad.Approve(approverId, r02Eff.AddDays(1), "Uncommitted bad version");
             await txDb.SaveChangesAsync();
 
@@ -483,6 +484,7 @@ internal static class Mdm15PostgresCheck
         // Now commit a NEW valid change cleanly -> PostgreSQL reuses epoch baselineNpEpoch + 1 (or next monotonic)!
         await using (var realCommitDb = CreatePgDb(connStr))
         {
+            await realCommitDb.BeginTransactionAsync();
             var p1 = await realCommitDb.CountryCompliancePolicies.SingleAsync(p => p.CountryCode == "NP" && p.PolicyCode == "NP-PG15-R02" && p.Version == 1);
             var pGood = CountryCompliancePolicy.CreateDraft(
                 "NP", "NP-PG15-R02", 2, "R02 AUTHORITATIVE V2", "Gazette R02", "Notice-R02-GOOD",
@@ -491,8 +493,10 @@ internal static class Mdm15PostgresCheck
             realCommitDb.CountryCompliancePolicies.Add(pGood);
             await realCommitDb.SaveChangesAsync();
             p1.Supersede(pGood.Id, r02Eff);
+            await realCommitDb.SaveChangesAsync(); // Flush supersede before activating replacement (non-deferred EXCLUDE USING gist)
             pGood.Approve(approverId, r02Eff.AddDays(1), "Committed real V2");
             await realCommitDb.SaveChangesAsync();
+            await realCommitDb.CommitTransactionAsync();
         }
 
         await using (var verifyDb = CreatePgDb(connStr))
