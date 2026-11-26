@@ -1,211 +1,171 @@
-# MDM-1.5 Acceptance Remediation Report (`R01`–`R05` & Hardening)
+# MDM-1.5 Acceptance Remediation Report (`R01`–`R05` & `R05-F01` Final Hardening)
 
 - **Repository:** `Umesh1200/3PL_Warehouse_Logistics`
 - **Branch:** `feature/phase-7-enterprise-frontend`
-- **Authoritative Review Baseline:** `83fba921c91bbef3cc0e439cf6a73c1e297a801c`
-- **Code & Test Remediation Commits:**
-  - `a16ebafd91abae850b34213cdc5e31fc7180d59e` (`fix(mdm-1.5): remediate R01-R05 FX/tx/loop/prefix-tracking/Redis pubsub & outbox backoff`)
-  - `7245300e09627e0ffeedd017dd255b0a0a61b3fc` (`fix(mdm15): flush policy supersede before approval in live Redis check`)
-  - `b37bf4dbb9201c9da5879449dd669e9694e47a0d` (`fix(mdm15): flush R02 policy supersede before approval deterministically`)
+- **Initial Review Baseline:** `83fba921c91bbef3cc0e439cf6a73c1e297a801c`
+- **R05-F01 Authoritative Baseline:** `5c3ef24a3fe9a44b30504dce40fa9018722dac5c`
+- **R01–R05 Remediation Commits (`83fba92` → `5c3ef24`):**
+  - `a16ebaf` — `fix(mdm-1.5): remediate R01-R05 FX/tx/loop/prefix-tracking/Redis pubsub & outbox backoff`
+  - `7245300` — `fix(mdm15): flush policy supersede before approval in live Redis check`
+  - `b37bf4d` — `fix(mdm15): flush R02 policy supersede before approval deterministically`
+  - `5c3ef24` — `docs(mdm-1.5): update remediation report with verified CI run 45807364080`
+- **R05-F01 Code & Verification Commits (`5c3ef24` → `2931be0`):**
+  - `39cb07c` — `fix(mdm-1.5): harden Redis subscriber startup/reconnection, L1 bounds, and live host integration checks (R05-F01)`
+  - `819a12c` — `fix(mdm15): drain prior setup outbox rows before isolated US/NP Redis checks`
+  - `7b9eb4b` — `fix(mdm15): use isolated ChannelMessageQueue and assert 1:1 post-reconnect delivery`
+  - `2931be0` — `fix(mdm15): warm explicit US L1 entry before post-reconnect V4 isolation assertion`
 - **Preserved `main` & `origin/main`:** `a198f02090194ce4d59dec2941c89d519757f4b4`
-- **Passing CI Verification Run (before final doc commit):** [GitHub Actions Run `45807364080`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45807364080) on commit `b37bf4dbb9201c9da5879449dd669e9694e47a0d`
+- **Verified CI Run for `2931be0` (Code & Test HEAD):** [GitHub Actions Run `45834357619`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45834357619) (`139959159388` & `139959160231`)
 
 ---
 
-## 1. Root Cause Analysis (`R01`–`R05` & Review Findings)
+## 1. Root Cause Analysis (`R01`–`R05` & `R05-F01`)
 
-| Finding | Root Cause at `83fba92` | Impact |
+| Finding | Root Cause | Impact |
 | :--- | :--- | :--- |
-| **MDM15-R01** Effective-date-safe FX caching | `FxConversionService` cached filtered rate results by effective-date/pair key or mismatched query window, risking incorrect or stale historical FX selection when requests arrive in non-monotonic `effectiveAtUtc` order. | Reversed historical/future FX conversion queries on the same currency pair could return empty or mismatched rate candidates compared to an uncached authoritative lookup. |
-| **MDM15-R02** Transaction-local configuration reads | `ConfigurationConsistencyService.GetOrLoadVerifiedAsync` read/wrote shared L1/L2 caches even inside an active database transaction (`HasActiveTransaction == true`). | Inside an uncommitted transaction with own uncommitted writes (which later might roll back), shared L1/L2 could be poisoned with uncommitted state or hide intra-transaction mutations behind pre-tx cached snapshots under the same epoch. |
-| **MDM15-R03** Bounded verified reload loop & contention fail-closed | Only a single post-load epoch comparison/reload was attempted without bounded retries or fail-closed exception when concurrent writers continuously bumped the epoch. | Under concurrent mutations, a second overlapping race could either serve an unverified mixed snapshot or publish inconsistent epoch data into L1/L2 cache. |
-| **MDM15-R04** Generation-safe L1 prefix tracking & bounded cache footprint | Plain key tracking in `RedisCacheService` was vulnerable to ABA/race removal during `PostEvictionCallback` and lacked hard L1 entry/total bounds (`SizeLimit`, `MaxCachedEntrySizeBytes`, L1 fallback TTL hard cap) and a dedicated local-only invalidation API (`RemoveLocalByPrefixAsync`). | Concurrent set/evict callbacks could drop tracking of newly inserted keys; unbounded `MemoryCache` payloads risked excessive local heap growth or extended stale L1 lifetimes if pub/sub failed. |
-| **MDM15-R05** End-to-end Redis pub/sub invalidation, DI & outage resilience | No live `BackgroundService` subscriber (`RedisConfigurationInvalidationSubscriber`) or `IConnectionMultiplexer` DI registration was wired for `nexus3pl:config-invalidations`; Redis outage retry lacked backoff/retention; CI did not run a live `redis:7-alpine` container against multi-instance cache consistency. | Running multiple API instances with Redis enabled lacked automatic cross-instance L1 eviction upon outbox publish and reconnect L1 flush after Redis downtime. |
-| **Additional Hardening** Mutable scope tracking, fail-closed schema check & outbox retry | `ConfigurationScopeMapper` needed both `OriginalValues` and `CurrentValues` invalidation when mutable foreign-key/country scopes (`CountryCode`, `FacilityId`, `ClientId`) change; `ApplicationDbContext` needed fail-closed MDM-1.5 schema detection once migration `>= 20261126083415` is applied or history is missing; `ConfigurationInvalidationDispatcher` lacked exponential backoff + aged-row retention pruning. | Reparenting a `Facility`/`Client` could leave old-scope epochs unchanged; partial/corrupted schemas could silently skip epoch enforcement; failed Redis dispatches hot-looped without backoff or table retention hygiene. |
+| **MDM15-R01** *(Accepted)* Effective-date-safe FX caching | `FxConversionService` cached filtered rate results with mismatched effective-date bundle keys. | Non-monotonic FX conversion queries could mismatch uncached lookups. |
+| **MDM15-R02** *(Accepted)* Transaction-local configuration reads | `ConfigurationConsistencyService` accessed shared L1/L2 caches inside active transactions (`HasActiveTransaction == true`). | Uncommitted writes or rollbacks could poison shared cache or hide transaction-local mutations. |
+| **MDM15-R03** *(Accepted)* Bounded reload loop & fail-closed contention | Single post-load epoch comparison could fail or return unverified snapshots under concurrent updates. | Concurrent writers could destabilize cached epoch consistency. |
+| **MDM15-R04** *(Accepted)* Generation-safe L1 prefix tracking & bounded footprint | Plain key tracking risked ABA callback races; L1 required hard bounds and `RemoveLocalByPrefixAsync`. | Concurrent set/evict cycles could drop key tracking; local memory could retain oversized/stale entries. |
+| **MDM15-R05-F01A** Subscriber startup & reconnection resilience | `RedisConfigurationInvalidationSubscriber.ExecuteAsync` called `SubscribeAsync` once directly on startup without exception handling or backoff retry, AND delegate-based `SubscribeAsync(channel, handler)` could retain duplicate delegates in `StackExchange.Redis` across transient connection failures/retries. | If Redis was down at host startup, an unhandled exception could terminate the Generic Host (`StopHost`); across rapid reconnect/subscribe failures, duplicate delegates could fire `2x` callbacks per message. |
+| **MDM15-R05-F01B** Live Redis test assertion & host recovery proof | `Mdm15PostgresCheck.cs` lines 706–714 ignored `memB.Count != 0` after the final `Task.Delay` check (false-positive pass if targeted L1 keys remained) and did not verify a full production Generic Host starting offline, recovering via the **same** `mux`/`subscriber`/`transport` instances across an actual TCP outage, and enforcing `1:1` delivery without duplicate callbacks. | Targeted L1 eviction regression, host crash on offline Redis startup, or duplicate post-reconnect callbacks could go undetected in live CI. |
+| **Final Hardening** Oversized L1 payloads, shared `IMemoryCache`, strict schema check & caller rollback | `RedisCacheService.SetAsync` checked `MaxCachedEntrySizeBytes` (`262_144`) only before L2 Redis writes while still writing oversized values into L1 `MemoryCache`; `ApplicationDbContext` allowed empty `__EFMigrationsHistory` without checking `configuration_invalidation_events`; live PostgreSQL lacked an explicit caller-owned post-save rollback isolation check. | Oversized objects rejected from L2 could enter/remain stale in L1; partial/corrupt schemas needed stricter fail-closed detection. |
 
 ---
 
-## 2. File-Level Implementation Changes
+## 2. File-Level Implementation Changes (`R01`–`R05` & `R05-F01`)
 
-### Application & Domain
-- `src/Core/Warehouse3PL.Application/Common/Interfaces/IApplicationDbContext.cs`
-  - Added `bool HasActiveTransaction { get; }` so `ConfigurationConsistencyService` detects active DB transactions without leaking EF Core internals.
-- `src/Core/Warehouse3PL.Application/Common/Interfaces/ICacheService.cs`
-  - Added `RemoveLocalByPrefixAsync(string prefixKey, CancellationToken cancellationToken = default)` to evict L1 entries safely without deleting shared L2 Redis keys.
+### Core & Infrastructure Changes
+- `src/Core/Warehouse3PL.Application/Common/Interfaces/IApplicationDbContext.cs` & `ICacheService.cs`
+  - Added `bool HasActiveTransaction { get; }` and `RemoveLocalByPrefixAsync(string prefixKey, CancellationToken cancellationToken = default)`.
 - `src/Core/Warehouse3PL.Domain/Entities/Reference/ConfigurationInvalidationEvent.cs`
-  - Added `NextRetryAtUtc` backoff scheduling property and exponential retry state helpers (`ScheduleNextRetry` / `ComputeRetryBackoff`).
-
-### Infrastructure & Persistence
-- `src/Infrastructure/Warehouse3PL.Infrastructure/Services/Reference/FxDatabaseRateResolver.cs`
-  - Added `internal static IQueryable<FxRateRecord> QueryAllPublishedForPair(...)` returning unfiltered published history for `(baseCurrencyCode, quoteCurrencyCode, preferredAuthority)`.
-- `src/Infrastructure/Warehouse3PL.Infrastructure/Services/Reference/FxConversionService.cs`
-  - Updated caching key to `fx-pair-history:{fromNorm}:{toNorm}:{preferredAuthority?.ToString() ?? "ANY"}`, caching complete published pair history and filtering `[EffectiveFromUtc, EffectiveToUtc)` + calling `SelectBestCandidate` in memory per requested `effectiveAtUtc`.
+  - Added `NextRetryAtUtc` + exponential retry backoff (`ScheduleNextRetry` / `ComputeRetryBackoff`).
+- `src/Infrastructure/Warehouse3PL.Infrastructure/Services/Reference/FxDatabaseRateResolver.cs` & `FxConversionService.cs`
+  - Unfiltered pair-history loader `QueryAllPublishedForPair` + full-pair bundle cache (`fx-pair-history:{from}:{to}:{authority}`) filtered cleanly over `[EffectiveFromUtc, EffectiveToUtc)` in memory.
 - `src/Infrastructure/Warehouse3PL.Infrastructure/Caching/ConfigurationConsistencyService.cs`
-  - Enforces transaction-local bypass when `_db.HasActiveTransaction` is `true` (bypassing both L1/L2 reads and cache writes, failing closed with `CONFIG_EPOCH_VERIFICATION_UNAVAILABLE` if transaction state/DB check fails).
-  - Replaced single retry with a bounded verification loop (`MaxEpochVerificationAttempts = 5`) asserting `preLoadEpoch == postLoadEpoch` before publishing to cache; throws `DomainException(..., "CONFIG_EPOCH_CONTENTION_EXCEEDED")` fail-closed when exhausted.
-- `src/Infrastructure/Warehouse3PL.Infrastructure/Caching/CacheOptions.cs`
-  - Added bounded cache/outbox settings: `LocalFallbackMaxTtlSeconds = 30`, `LocalCacheSizeLimit = 10_000`, `MaxCachedEntrySizeBytes = 262_144`, `OutboxDispatchedRetentionDays = 7`.
-- `src/Infrastructure/Warehouse3PL.Infrastructure/Caching/RedisCacheService.cs`
-  - Added generation-monotonic L1 tracking (`_trackedLocalKeys`, `TrackedLocalKeyCount`, striped locking, `PostEvictionCallback` generation-guarded cleanup), L1 TTL clamping (`<= 30s`), `Size = 1` entries, `MaxCachedEntrySizeBytes` guard, and `RemoveLocalByPrefixAsync`.
-- `src/Infrastructure/Warehouse3PL.Infrastructure/Caching/RedisConfigurationInvalidationSubscriber.cs` *(new)*
-  - `BackgroundService` subscribing to Redis channel `nexus3pl:config-invalidations`, evicting scoped L1 prefixes via `RemoveLocalByPrefixAsync`, flushing `"mdm:cfg:"` on `ConnectionRestored`, and handling duplicate notifications idempotently (`ReceivedNotificationCount`).
-- `src/Infrastructure/Warehouse3PL.Infrastructure/Caching/RedisConfigurationInvalidationTransport.cs`
-  - Fails dispatch cleanly (without false outbox completion) when `_multiplexer == null || !_multiplexer.IsConnected`.
-- `src/Infrastructure/Warehouse3PL.Infrastructure/BackgroundJobs/ConfigurationInvalidationDispatcher.cs`
-  - Added exponential backoff filtering (`NextRetryAtUtc <= now`) and aged dispatched retention pruning (`PurgeDispatchedRetentionAsync` using `OutboxDispatchedRetentionDays`) plus sweep diagnostics (`ConfigurationOutboxDiagnostics`).
-- `src/Infrastructure/Warehouse3PL.Infrastructure/Persistence/ConfigurationScopeMapper.cs`
-  - Inspects `entry.OriginalValues` and `CurrentValues` on `Modified` mutable scopes (`CountryCode`, `FacilityId`, `ClientId`) so both source and target configuration scopes increment epochs and emit invalidations; tracks `Client` entity lifecycle cleanly.
-- `src/Infrastructure/Warehouse3PL.Infrastructure/Persistence/ApplicationDbContext.cs`
-  - Exposes `HasActiveTransaction` and hardens `CheckHasMdm15SchemaSync` / `CheckHasMdm15SchemaAsync` to fail closed if `__EFMigrationsHistory` is missing or shows migration `>= 20261126083415` while `configuration_scope_epochs` is absent.
-- `src/Infrastructure/Warehouse3PL.Infrastructure/Persistence/Configurations/Reference/ConfigurationInvalidationEventConfiguration.cs` & EF Core Migration `20261126100927_MDM1_5_R01_OutboxBackoffAndRetention.cs`
-  - Configures `next_retry_at_utc` column and index on `configuration_invalidation_events` and updates `ApplicationDbContextModelSnapshot.cs`.
-- `src/Infrastructure/Warehouse3PL.Infrastructure/DependencyInjection.cs`
-  - Configures `MemoryCacheOptions.SizeLimit`, registers `IConnectionMultiplexer` (`AbortOnConnectFail = false`) and `RedisConfigurationInvalidationSubscriber` hosted service when `EnableRedis && !string.IsNullOrWhiteSpace(ConnectionString)`, plus `IConfigurationConsistencyService`, `ICacheService`, `IConfigurationInvalidationTransport`, `ConfigurationInvalidationProcessor`, and `ConfigurationInvalidationDispatcher`.
+  - Transaction-local bypass (`HasActiveTransaction`) + bounded verification loop (`MaxEpochVerificationAttempts = 5`, fail-closed `CONFIG_EPOCH_CONTENTION_EXCEEDED` / `CONFIG_EPOCH_VERIFICATION_UNAVAILABLE`).
+- `src/Infrastructure/Warehouse3PL.Infrastructure/Caching/CacheOptions.cs` & `RedisCacheService.cs`
+  - Generation-monotonic `_trackedLocalKeys` + striped key gates, L1 TTL clamp (`HardCapLocalFallbackSeconds = 30`), `MemoryCache` `Size = 1` (`LocalCacheSizeLimit = 10_000`), `OutboxDispatchedRetentionDays = 7`, and unified `MaxCachedEntrySizeBytes` (`262_144`) enforcement in `SetAsync<T>`: payloads serialized above `MaxCachedEntrySizeBytes` are skipped from **both** Redis L2 and L1 `MemoryCache` (and any previously cached local key is removed so stale data cannot linger).
+- `src/Infrastructure/Warehouse3PL.Infrastructure/Caching/RedisConfigurationInvalidationSubscriber.cs` *(F01-A hardened)*
+  - Protected startup retry loop with cancellation-aware bounded exponential backoff (`1s, 2s, 4s, ... capped at MaxBackoffSeconds = 30`), never escaping `ExecuteAsync` to crash the host.
+  - Replaced delegate subscription with an explicitly managed, serialized `ChannelMessageQueue` (`_channelQueue`) inside `_subscriptionLock`, tearing down any prior queue before subscribing cleanly so duplicate callbacks cannot accumulate across retries or reconnects.
+  - Subscribes cleanly to `ConnectionFailed` and `ConnectionRestored`, immediately waking `_signal` on reconnect to restore the subscription, flush `"mdm:cfg:"` local L1 entries (`ReconnectFlushCount`), and clear failure flags cleanly.
+  - Clean `ExecuteAsync` `finally` handler + `Dispose()` override detaching `ConnectionRestored`/`ConnectionFailed`, unsubscribing `_channelQueue`, and disposing synchronization primitives safely.
+- `src/Infrastructure/Warehouse3PL.Infrastructure/Caching/RedisConfigurationInvalidationTransport.cs` & `BackgroundJobs/ConfigurationInvalidationDispatcher.cs`
+  - Fail-fast publish on `!_multiplexer.IsConnected` + outbox backoff scheduling (`NextRetryAtUtc`) and aged dispatched pruning (`PurgeDispatchedRetentionAsync`).
+- `src/Infrastructure/Warehouse3PL.Infrastructure/Persistence/ApplicationDbContext.cs` & `ConfigurationScopeMapper.cs`
+  - Hardened `CheckHasMdm15SchemaSync` / `CheckHasMdm15SchemaAsync` so bypassing epoch tracking is restricted strictly to controlled pre-MDM-1.5 databases (`__EFMigrationsHistory` exists **and is non-empty**, zero migrations `>= 20261126083415`, and neither `configuration_scope_epochs` nor `configuration_invalidation_events` exists). Partial schemas (one table missing) or empty/missing migration history fail closed (`InvalidOperationException`).
+  - `ConfigurationScopeMapper` invalidates both `OriginalValues` and `CurrentValues` on mutable scopes (`CountryCode`, `FacilityId`, `ClientId`) and tracks `Client` entity lifecycle.
+- `src/Infrastructure/Warehouse3PL.Infrastructure/DependencyInjection.cs` & `20261126100927_MDM1_5_R01_OutboxBackoffAndRetention.cs`
+  - Configured `MemoryCacheOptions.SizeLimit`, resilient `IConnectionMultiplexer` (`AbortOnConnectFail = false`), hosted `RedisConfigurationInvalidationSubscriber`, and outbox backoff migration.
 
-### Tests & CI Pipeline
+### Verification Suite Enhancements (`F01-B` & Final Hardening)
 - `tests/Warehouse3PL.UnitTests/Reference/Mdm15ConfigurationConsistencyTests.cs`
-  - Added dedicated `R01`, `R02`/`R03`, and `R04`/`R05` test suites covering reverse-order FX window parity, active-tx bypass + rollback isolation, bounded reload contention failure, generation-safe L1 prefix eviction, duplicate subscriber payloads, mutable scope moves, and real production DI registration.
+  - Added `F01A_ProductionGenericHost_StartsCleanlyWhenRedisUnavailable_AndShutDownIsSafe`
+  - Added `F01_FinalHardening_OversizedL1PayloadRejected_SharedMemoryCacheCompatible_And_CallerRollbackIsolated`
 - `tests/verification/Phase73PostgresCheck/Mdm15PostgresCheck.cs` & `.github/workflows/phase73-postgres-verification.yml`
-  - Added `redis:7-alpine` service container (`6379:6379`, `PHASE73_REDIS_CONNECTION`) to CI and expanded PostgreSQL verification (`RunRemediationPgChecksAsync` & `RunLiveRedisMultiInstanceChecksAsync`) testing real 2-instance Redis pub/sub L1 eviction, duplicate payload idempotency, outage retention/DB-authoritative fallback, backoff recovery, transaction rollback isolation, and outbox retention cleanup (flushing `Supersede` before `Approve` inside an explicit PostgreSQL transaction to satisfy non-deferred `excl_country_compliance_policies_active_window`).
+  - Fixed `RunLiveRedisMultiInstanceChecksAsync` lines 700–714 false-positive assertion: independently verifies `subB.ReceivedNotificationCount > 0`, actual eviction of targeted `Country:NP` L1 keys in `memB`, and preservation of unrelated `Country:US` L1 keys.
+  - Added partial-schema fail-closed check (dropping only `configuration_invalidation_events`) and caller-owned post-`SaveChangesAsync` rollback check on live PostgreSQL.
+  - Added `RunLiveHostRedisResilienceChecksAsync` using a real in-process TCP proxy (`RedisTcpProxy`) in front of live `redis:7-alpine` proving all 8 required Generic Host live integration scenarios on the **exact same** host/multiplexer/subscriber/cache/transport instances.
 
 ---
 
-## 3. Before vs. After Behavioral Evidence
+## 3. Before vs. After Behavioral Evidence (`R05-F01`)
 
-| Scenario | Before Remediation (`83fba92`) | After Remediation (`b37bf4d`) |
+| Scenario | Before `R05-F01` (`5c3ef24`) | After `R05-F01` (`2931be0`) |
 | :--- | :--- | :--- |
-| **Reversed-window FX lookup** (`Jun -> Feb` on non-overlapping `[Jan, Jun)` / `[Jun, Dec)` pair) | Effective-date cache key / subset risk could mismatch uncached query. | `FxConversionService` caches full published pair history (`fx-pair-history:EUR:NPR:ManualApproved`) and evaluates `[EffectiveFromUtc, EffectiveToUtc)` identically (`14600.00m` and `13900.00m`, matching uncached path). |
-| **Transaction-local config read & rollback** | Reads inside an open transaction could read/populate shared L1/L2 cache with pre-commit or uncommitted rows. | `HasActiveTransaction == true` bypasses L1/L2 read & write completely; callers inside a transaction read DB-local uncommitted changes, and rolled-back changes never poison other instances (`CONFIG_EPOCH_CONTENTION_EXCEEDED` prevents torn snapshots under sustained concurrency). |
-| **Concurrent epoch mutation during reload** | Single retry could emit stale snapshot or lose verification invariant. | Bounded loop (`MaxEpochVerificationAttempts = 5`) checks `preLoadEpoch == postLoadEpoch`; fails closed with `DomainException` (`CONFIG_EPOCH_CONTENTION_EXCEEDED`) if concurrent writes outlast all 5 attempts. |
-| **L1 prefix eviction & reconnect flush** | No `RemoveLocalByPrefixAsync` / generation tracking / hosted pubsub subscriber; L1 TTL not clamped to `<= 30s`. | `RemoveLocalByPrefixAsync` + generation-safe `PostEvictionCallback` + `SizeLimit` + `<= 30s` L1 cap; `RedisConfigurationInvalidationSubscriber` evicts L1 automatically on live `nexus3pl:config-invalidations` messages and flushes `mdm:cfg:` on `ConnectionRestored`. |
-| **Redis outage & recovery** | Transport could lack explicit backoff/retention lifecycle in outbox dispatch. | Unreachable Redis retains outbox rows (`DispatchedToRedisAtUtc == null`) with exponential `NextRetryAtUtc`, PostgreSQL epoch checks still serve fresh `V3` reads authoritatively, and subsequent healthy recovery sweeps dispatch & later prune rows past `OutboxDispatchedRetentionDays`. |
+| **Generic Host startup when Redis is down** | `SubscribeAsync` threw synchronously inside `ExecuteAsync` if multiplexer was disconnected, risking host termination. | Host starts cleanly (`mux.IsConnected == false`, `sub.IsSubscribed == false`), serves PostgreSQL-authoritative reads without errors, and retries with bounded `1s..30s` backoff (`F01A_ProductionGenericHost_...` & `RunLiveHostRedisResilienceChecksAsync`). |
+| **Post-startup Redis recovery & reconnect flush** | Fire-and-forget `OnConnectionRestored` lacked serialized re-subscription and could leave/duplicate handlers on startup failure. | Single serialized `ExecuteAsync` loop using isolated `ChannelMessageQueue` wakes on `ConnectionRestored`, restores single subscription, flushes `"mdm:cfg:"` (`ReconnectFlushCount++`), and delivers `1:1` callbacks (`dispatched == delta`, zero `2x` callbacks). |
+| **Live Redis targeted eviction check** | `Mdm15PostgresCheck` lines 706–714 only checked `ReceivedNotificationCount == 0` after fallback delay (false-positive risk). | Test now independently fails if targeted `NP` L1 keys remain in `memB` OR if unrelated `US` L1 keys are evicted. |
+| **L1 oversized value handling** | Payloads > `MaxCachedEntrySizeBytes` (`262_144`) skipped Redis L2 but were still stored in L1 `MemoryCache`. | Payloads > `MaxCachedEntrySizeBytes` skip both L2 and L1 and remove any stale local value for that key. |
+| **Pre-MDM schema bypass check** | Checked only `configuration_scope_epochs` existence and non-null `__EFMigrationsHistory`. | Requires both `configuration_scope_epochs` and `configuration_invalidation_events` AND non-empty `__EFMigrationsHistory`; partial schemas fail closed. |
 
 ---
 
-## 4. Architecture & Sequence Flows
+## 4. Architecture & Live Resilience Flows
 
-### (a) Transaction-Local Reads (`MDM15-R02`)
-
-```mermaid
-sequenceDiagram
-    autonumber
-    participant Caller as "Service / Handler"
-    participant Cons as "ConfigurationConsistencyService"
-    participant Db as "ApplicationDbContext (PostgreSQL)"
-    participant Cache as "L1 / L2 Cache"
-
-    Caller->>Db: "BeginTransactionAsync() + staged uncommitted write"
-    Caller->>Cons: "GetOrLoadVerifiedWithDiagnosticsAsync(scopeType, scopeKey)"
-    Cons->>Db: "Inspect HasActiveTransaction"
-    alt "HasActiveTransaction == true"
-        Cons->>Db: "Execute authoritative loader inside tx"
-        Db-->>Cons: "Returns uncommitted tx-local rows"
-        Note over Cons,Cache: "Shared L1 and L2 reads/writes bypassed completely"
-        Cons-->>Caller: "Tx-local snapshot (ServedFromCache = false)"
-    else "Transaction lookup throws"
-        Cons-->>Caller: "Fail closed (CONFIG_EPOCH_VERIFICATION_UNAVAILABLE)"
-    end
-```
-
-### (b) Repeated Epoch Changes & Bounded Verification (`MDM15-R03`)
+### (a) Generic Host Offline Startup, Late Redis Recovery & TCP Interruption (`F01-A` / `F01-B`)
 
 ```mermaid
 sequenceDiagram
     autonumber
-    participant Reader as "ConfigurationConsistencyService"
-    participant Cache as "L1 / Redis L2"
-    participant Pg as "PostgreSQL (ScopeEpochs + Config)"
-    participant Writer as "Concurrent Admin Transaction"
+    participant Host as "Production Generic Host"
+    participant Sub as "RedisConfigurationInvalidationSubscriber"
+    participant Proxy as "RedisTcpProxy / Live Redis 7"
+    participant Pg as "PostgreSQL 16 (Authoritative)"
 
-    Reader->>Pg: "Read preLoadEpoch (Attempt 1)"
-    Cache-->>Reader: "Cache miss or stale Epoch"
-    Reader->>Pg: "Load config rows"
-    Writer->>Pg: "Commit config change (Epoch N -> N+1)"
-    Reader->>Pg: "Re-read postLoadEpoch"
-    Note over Reader: "preLoadEpoch (N) != postLoadEpoch (N+1) -> discard & retry"
-    loop "Attempt 2..5 (MaxEpochVerificationAttempts = 5)"
-        Reader->>Pg: "Read preLoadEpoch -> Load rows -> Read postLoadEpoch"
-        alt "preLoadEpoch == postLoadEpoch"
-            Reader->>Cache: "SetAsync with Epoch tag & <= 30s L1 TTL"
-            Reader-->>Caller: "Verified consistent snapshot"
-        end
-    end
-    alt "All 5 attempts see epoch drift"
-        Reader-->>Caller: "Throw DomainException (CONFIG_EPOCH_CONTENTION_EXCEEDED)"
-    end
-```
+    Note over Host,Proxy: "1-2. Startup with Redis unavailable (port closed)"
+    Host->>Sub: "StartAsync() -> ExecuteAsync()"
+    Sub-xProxy: "EnsureSubscribedAsync() sees !IsConnected"
+    Sub-->>Host: "Logs warning + bounded backoff (NO host crash)"
+    Host->>Pg: "Evaluate V1 -> served authoritatively via DB + L1"
 
-### (c) Multi-Instance Redis Outage & Recovery (`MDM15-R04` / `R05`)
+    Note over Host,Proxy: "3-4. Redis becomes available after startup"
+    Proxy-->>Sub: "ConnectionRestored -> signal wakes ExecuteAsync"
+    Sub->>Proxy: "SubscribeAsync(channel) -> isolated ChannelMessageQueue"
+    Sub->>Sub: "RemoveLocalByPrefixAsync(mdm:cfg:) [ReconnectFlushCount++]"
+    Host->>Proxy: "Dispatch V2 -> 1:1 notification evicts NP L1 (US intact)"
 
-```mermaid
-sequenceDiagram
-    autonumber
-    participant InstA as "API Instance A + Dispatcher"
-    participant Pg as "PostgreSQL (Epochs + Outbox)"
-    participant Redis as "Redis 7 (L2 + Pub/Sub)"
-    participant InstB as "API Instance B (Subscriber + L1)"
-
-    Note over InstA,InstB: "Healthy Pub/Sub Invalidation"
-    InstA->>Pg: "Commit policy V2 + epoch increment + Outbox row"
-    InstA->>Redis: "Publish to nexus3pl:config-invalidations"
-    Redis-->>InstB: "Deliver invalidation payload"
-    InstB->>InstB: "RemoveLocalByPrefixAsync(mdm:cfg:...) + generation check"
-    InstB->>Pg: "Verify epoch & load V2 authoritatively"
-
-    Note over InstA,InstB: "Redis Outage & Authoritative Fallback"
-    InstA->>Pg: "Commit policy V3 + epoch increment + Outbox row"
-    InstA-xRedis: "Publish fails (Connection unavailable)"
-    InstA->>Pg: "Record DispatchAttempts, LastDispatchError, NextRetryAtUtc"
-    InstB->>Pg: "Detect DB epoch increment despite outage -> load V3"
-
-    Note over InstA,InstB: "Redis Recovery"
-    Redis-->>InstB: "ConnectionRestored event"
-    InstB->>InstB: "RemoveLocalByPrefixAsync(mdm:cfg:) safety flush"
-    InstA->>Redis: "Retry sweep (after NextRetryAtUtc) dispatches pending event"
-    InstA->>Pg: "Mark DispatchedToRedisAtUtc (+ retention purge > 7d)"
+    Note over Host,Proxy: "5-8. Mid-flight TCP outage -> Recovery -> Single-callback V4"
+    Proxy--xHost: "SimulateOutageAsync() -> !mux.IsConnected"
+    Host->>Proxy: "Dispatch V3 fails cleanly -> Outbox retained + backoff"
+    Host->>Pg: "Authoritative read during outage still observes V3"
+    Proxy-->>Sub: "Restore() -> ConnectionRestored -> Queue recreated & L1 flushed"
+    Host->>Proxy: "Retry after backoff dispatches V3 -> V4 delivers 1:1 callbacks"
 ```
 
 ---
 
-## 5. Verification Evidence
+## 5. Exact Test & Verification Evidence
 
-### 5.1 .NET Unit & Security Tests (`Warehouse3PL.UnitTests`)
+### 5.1 .NET Unit & Security Regression Tests (`Warehouse3PL.UnitTests`)
 - **Command:** `dotnet test tests/Warehouse3PL.UnitTests/Warehouse3PL.UnitTests.csproj --configuration Release`
-- **CI Job:** [Run `45807364080` / Job `139866012690`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45807364080)
-- **Observed Result:** `Passed! - Failed: 0, Passed: 1438, Skipped: 0, Total: 1438` (Duration: `49 s`)
-- **MDM-1.5 Tests Executed & Passed in `Mdm15ConfigurationConsistencyTests.cs`:**
+- **Local Release Run & CI Job:** [Run `45834357619` / Job `139959159388`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45834357619) (at `2931be0`)
+- **Observed Result:** `Passed! - Failed: 0, Passed: 1440, Skipped: 0, Total: 1440` (CI Duration: `1 m 7 s`)
+- **Exact MDM-1.5 Test Names in `Mdm15ConfigurationConsistencyTests.cs`:**
   - `TwoInstances_WithoutRedis_DetectPolicyFxCalendarAndLegalEntityMutations_Immediately`
   - `CachePrefixEviction_TenantPartitionIsolation_DispatcherRetry_And_FailClosedDbError_Work`
   - `R01_EffectiveDateSafeFxCaching_PreservesWindowParityAcrossReversedRequests`
   - `R02_R03_TransactionBypass_And_VerifiedReloadLoop_FailClosedUnderContention`
   - `R04_R05_GenerationSafePrefixTracking_SubscriberIdempotency_ScopeChanges_And_ProductionDi_Work`
+  - `F01A_ProductionGenericHost_StartsCleanlyWhenRedisUnavailable_AndShutDownIsSafe`
+  - `F01_FinalHardening_OversizedL1PayloadRejected_SharedMemoryCacheCompatible_And_CallerRollbackIsolated`
 
 ### 5.2 Live PostgreSQL 16 + Live Redis 7 Verification (`Phase73PostgresCheck`)
 - **Workflow:** `.github/workflows/phase73-postgres-verification.yml` (`postgres:16-alpine` + `redis:7-alpine`, `PHASE73_REDIS_CONNECTION: 127.0.0.1:6379,abortConnect=false`)
-- **CI Job:** [Run `45807364080` / Job `139866013201` (`rollback-retry`)](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45807364080)
-- **Observed CI Output:**
+- **CI Job:** [Run `45834357619` / Job `139959160231` (`rollback-retry`)](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45834357619) (at `2931be0`)
+- **Local Build:** `dotnet build tests/verification/Phase73PostgresCheck/Phase73PostgresCheck.csproj --configuration Release` → `0 Warning(s), 0 Error(s)`
+- **Observed CI Output Lines:**
   - `PASS PostgreSQL MDM-1.1 Migration, btree_gist Exclusion, Idempotent Seed, Concurrent Approval & Supersession Races, Bitemporal Continuity, Rollback & JWT Security verified cleanly.`
   - `PASS PostgreSQL MDM-1.2 Migration, LegalEntity Separation, RBAC R01, Cross-Validation R02, Concurrent Lock R03 & Physical Origin verified cleanly.`
   - `PASS PostgreSQL MDM-1.3 Migration, CurrencyMaster, Dynamic FX Exclusion/Race, UnitMultiplier, Rollback & UOM verified cleanly.`
   - `PASS PostgreSQL MDM-1.4 Migration, Contiguous BS 2075-2090, FacilityCalendar Exclusion/Race, Holidays & NP/US SLA Verified.`
   - `PASS Live PostgreSQL + Real Redis 7 Two-Instance Pub/Sub, Duplicate Handling & Outage Recovery Verified.`
+  - `PASS Live Generic Host Offline Startup -> Late Redis -> Disconnect/Reconnect Flush -> Single-Callback Recovery Verified.`
   - `PASS PostgreSQL MDM-1.5 Scope Epochs, Outbox Backoff/Retry, Concurrency, R01-R05 & Real Redis Verification.`
   - `ALL PHASE 7.3, 7.4.0A, 7.4.0B & 7.4.0C POSTGRESQL VERIFICATIONS PASSED CLEANLY!`
-- **Local Release Build Command:** `dotnet build tests/verification/Phase73PostgresCheck/Phase73PostgresCheck.csproj --configuration Release` -> `Build succeeded. 0 Warning(s), 0 Error(s)`.
+- **8-Point Live Generic Host + Real Redis TCP Proxy Interruption/Recovery Coverage (`RunLiveHostRedisResilienceChecksAsync`):**
+  1. Production Generic Host started with proxy port closed (`!mux.IsConnected`, `!sub.IsSubscribed`).
+  2. PostgreSQL-authoritative `V1` evaluation & L1 caching succeeded during startup Redis unavailability.
+  3. Proxy opened on same port after startup -> same `mux`/`sub` connected (`ReconnectFlushCount >= 1`), automatically clearing offline-era L1 keys.
+  4. Same subscriber delivered V2 invalidations `1:1` (`dispatched == delta`), evicting targeted `Country:NP` L1 while keeping unrelated `Country:US` L1 intact.
+  5. Proxy killed active TCP sockets & entered outage mode (`!mux.IsConnected`) -> same host `IConfigurationInvalidationTransport` retained pending outbox rows, enforced exponential backoff deferral, and same host still served `V3` authoritatively from PostgreSQL.
+  6. Proxy restored on same port -> same `sub` restored subscription cleanly and flushed outage-era local `"mdm:cfg:"` L1 entries; `V3 -> V4` invalidation verified single-callback `1:1` delivery post-reconnect and selective `NP` eviction with `US` L1 intact.
+  7. Pending outbox backoff window honored (`DeferredByBackoff > 0`) before advancing test clock `+15s` and completing dispatch on the same transport.
+  8. Harmless duplicate `Country:NP` pub/sub payload handled idempotently before clean `host.StopAsync()` teardown (`!sub.IsSubscribed`).
 
-### 5.3 Frontend TypeScript, Unit, Production Build & Playwright E2E
-All frontend suites were run locally in `src/UI/Nexus3PLFrontend`:
-1. **Vitest:** `npx vitest run --maxWorkers=2`
-   - Result: `Test Files 12 passed (12), Tests 108 passed (108)` (`52.61s`)
-2. **TypeScript Check & Production Vite Build:** `npx tsc --noEmit` & `npm run build`
-   - Result: Exit `0`, `✓ built in 8.90s`
-3. **Playwright Chromium E2E:** `npm run test:e2e`
-   - Result: `32 passed (2.3m)`
+### 5.3 Frontend Suites (`src/UI/Nexus3PLFrontend`)
+All frontend suites were run cleanly locally (zero frontend files modified in `R01`–`R05-F01`):
+- **Vitest:** `npx vitest run --maxWorkers=2` → `Test Files 12 passed (12), Tests 108 passed (108)` (`35.10s`)
+- **TypeScript & Production Build:** `npx tsc --noEmit` & `npm run build` → exit `0`, `✓ built in 7.89s`
+- **Playwright Chromium E2E:** `npm run test:e2e` → `32 passed (2.2m)`
 
 ---
 
-## 6. Operational Notes & Verification Scope Limitations
+## 6. Hardening Audit Findings & Outstanding Limitations
 
-1. **Docker-backed live PostgreSQL 16 & Redis 7 execution environment:** Because Docker is not installed on the local Windows workstation, the full `Phase73PostgresCheck` suite (including live `postgres:16-alpine` and live `redis:7-alpine` 2-instance integration checks) ran in the GitHub Actions Linux runner (`phase73-postgres-verification.yml`).
-2. **Default runtime Redis flag:** `src/Presentation/Warehouse3PL.WebApi/appsettings.json` keeps `Redis:EnableRedis` disabled (`false`) for zero-dependency single-node startup unless Redis connection settings are enabled in deployment configuration, in which case `DependencyInjection.cs` automatically activates `IConnectionMultiplexer` and `RedisConfigurationInvalidationSubscriber`.
-3. **User workspace preservation:** `test_script.sql` was checked prior to remediation and was not present in the working directory; untracked reference artifacts (`docs/Phase6_7_8_Discovery.md`, `mapnav/`) were preserved untouched, and `main`/`origin/main` remained unchanged at `a198f02090194ce4d59dec2941c89d519757f4b4`.
+1. **L1 `MemoryCache` size/capacity policy:** `RedisCacheService.SetAsync<T>` enforces `MaxCachedEntrySizeBytes` (`262_144` bytes) via UTF-8 JSON serialization before storing in **either** Redis L2 or local L1 `MemoryCache` (removing any stale L1 value for that key if overwritten with an oversized payload). Because `IMemoryCache` meters logical entry counts (`Size = 1` within `LocalCacheSizeLimit = 10_000`, `CompactionPercentage = 0.25`, `HardCapLocalFallbackSeconds = 30`) rather than live CLR heap byte size, runtime types that are not JSON-serializable cannot be byte-sized and fall back to entry-count/TTL bounding only.
+2. **Shared `IMemoryCache` `SizeLimit` compatibility:** Solution-wide inspection (`src/` and `tests/`) confirms `RedisCacheService` is the sole `IMemoryCache` caller in application/infrastructure code and always sets `MemoryCacheEntryOptions.Size = 1`. Any future consumer injected with the shared `IMemoryCache` from `DependencyInjection.cs` must continue supplying `Size` on `MemoryCacheEntryOptions` because `MemoryCache` rejects entries without `Size` whenever `SizeLimit` is configured.
+3. **Controlled pre-MDM schema bypass:** `ApplicationDbContext.CheckHasMdm15SchemaSync/Async` permits bypassing MDM-1.5 outbox writes only when `"__EFMigrationsHistory"` exists with at least one applied row, zero migrations `>= 20261126083415` are recorded, and both `configuration_scope_epochs` and `configuration_invalidation_events` are absent.
+4. **Live container environment:** Because Docker is not installed on the Windows workstation, live `postgres:16-alpine` + `redis:7-alpine` execution runs in the GitHub Actions Linux runner (`phase73-postgres-verification.yml`).
+5. **Default configuration & preserved workspace:** `appsettings.json` keeps `Redis:EnableRedis: false` by default unless configured; `main` / `origin/main` remains untouched at `a198f02090194ce4d59dec2941c89d519757f4b4` alongside user-owned untracked files.
