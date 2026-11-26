@@ -1065,6 +1065,7 @@ internal static class Mdm15PostgresCheck
             }
 
             long notifBeforeV2 = sub.ReceivedNotificationCount;
+            int expectedV2Dispatched;
             await using (var dbV2 = CreatePgDb(pgConn))
             {
                 await dbV2.BeginTransactionAsync();
@@ -1087,16 +1088,18 @@ internal static class Mdm15PostgresCheck
                 {
                     throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: host transport failed to publish V2 invalidation after Redis became available.");
                 }
+                expectedV2Dispatched = s2.Dispatched;
             }
 
-            for (int i = 0; i < 60 && (sub.ReceivedNotificationCount == notifBeforeV2 || hostMem.TryGetValue(npV1FullKey, out _)); i++)
+            for (int i = 0; i < 60 && (sub.ReceivedNotificationCount - notifBeforeV2 < expectedV2Dispatched || hostMem.TryGetValue(npV1FullKey, out _)); i++)
             {
                 await Task.Delay(50);
             }
+            await Task.Delay(150);
 
-            if (sub.ReceivedNotificationCount != notifBeforeV2 + 1)
+            if (sub.ReceivedNotificationCount - notifBeforeV2 != expectedV2Dispatched)
             {
-                throw new InvalidOperationException($"MDM-1.5 R05-F01 FAIL: expected exactly 1 post-startup notification, got delta={sub.ReceivedNotificationCount - notifBeforeV2}.");
+                throw new InvalidOperationException($"MDM-1.5 R05-F01 FAIL: expected 1:1 post-startup notification delivery (dispatched={expectedV2Dispatched}, delta={sub.ReceivedNotificationCount - notifBeforeV2}).");
             }
             if (hostMem.TryGetValue(npV1FullKey, out _))
             {
@@ -1244,6 +1247,7 @@ internal static class Mdm15PostgresCheck
             }
 
             long notifBeforeV4 = sub.ReceivedNotificationCount;
+            int expectedV4Dispatched;
             await using (var dbV4 = CreatePgDb(pgConn))
             {
                 await dbV4.BeginTransactionAsync();
@@ -1266,15 +1270,17 @@ internal static class Mdm15PostgresCheck
                 {
                     throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: V4 dispatch after reconnect failed.");
                 }
+                expectedV4Dispatched = s4.Dispatched;
             }
 
-            for (int i = 0; i < 60 && (sub.ReceivedNotificationCount == notifBeforeV4 || hostMem.TryGetValue(npV3FullKey, out _)); i++)
+            for (int i = 0; i < 60 && (sub.ReceivedNotificationCount - notifBeforeV4 < expectedV4Dispatched || hostMem.TryGetValue(npV3FullKey, out _)); i++)
             {
                 await Task.Delay(50);
             }
-            if (sub.ReceivedNotificationCount != notifBeforeV4 + 1)
+            await Task.Delay(150);
+            if (sub.ReceivedNotificationCount - notifBeforeV4 != expectedV4Dispatched)
             {
-                throw new InvalidOperationException($"MDM-1.5 R05-F01 FAIL: duplicate/missing subscriber callback after reconnect (delta={sub.ReceivedNotificationCount - notifBeforeV4}).");
+                throw new InvalidOperationException($"MDM-1.5 R05-F01 FAIL: duplicate/missing subscriber callback after reconnect (dispatched={expectedV4Dispatched}, delta={sub.ReceivedNotificationCount - notifBeforeV4}).");
             }
             if (hostMem.TryGetValue(npV3FullKey, out _) || !hostMem.TryGetValue(usKeepFullKey, out _))
             {

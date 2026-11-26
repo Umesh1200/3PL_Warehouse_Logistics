@@ -31,7 +31,7 @@ public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
     private bool _needsReconnectFlush;
     private bool _hadSubscriptionAttemptFailureOrDisconnect;
     private bool _handlersAttached;
-    private Action<RedisChannel, RedisValue>? _messageHandler;
+    private ChannelMessageQueue? _channelQueue;
     private int _disposed;
 
     public RedisConfigurationInvalidationSubscriber(
@@ -58,15 +58,6 @@ public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
         }
 
         var channel = RedisChannel.Literal(ChannelName);
-        _messageHandler = (_, message) =>
-        {
-            if (message.IsNullOrEmpty || stoppingToken.IsCancellationRequested)
-            {
-                return;
-            }
-
-            Task pendingTask = ProcessNotificationSafeAsync(message.ToString(), stoppingToken);
-        };
 
         _multiplexer.ConnectionRestored += OnConnectionRestored;
         _multiplexer.ConnectionFailed += OnConnectionFailed;
@@ -122,7 +113,7 @@ public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
                 _handlersAttached = false;
             }
 
-            await UnsubscribeSafeAsync(channel);
+            await UnsubscribeSafeAsync();
         }
     }
 
@@ -159,17 +150,17 @@ public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
         Interlocked.Increment(ref _receivedNotificationCount);
     }
 
-    private async Task<bool> EnsureSubscribedAsync(RedisChannel channel, CancellationToken cancellationToken)
+    private async Task<bool> EnsureSubscribedAsync(RedisChannel channel, CancellationToken stoppingToken)
     {
         if (_multiplexer == null || !_multiplexer.IsConnected)
         {
             return false;
         }
 
-        await _subscriptionLock.WaitAsync(cancellationToken);
+        await _subscriptionLock.WaitAsync(stoppingToken);
         try
         {
-            if (!_multiplexer.IsConnected || _messageHandler == null)
+            if (!_multiplexer.IsConnected)
             {
                 return false;
             }
@@ -177,23 +168,41 @@ public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
             bool needsFlush = Volatile.Read(ref _needsReconnectFlush) ||
                               Volatile.Read(ref _hadSubscriptionAttemptFailureOrDisconnect);
 
-            if (!Volatile.Read(ref _isSubscribed) || needsFlush)
+            if (!Volatile.Read(ref _isSubscribed) || _channelQueue == null || needsFlush)
             {
-                var subscriber = _multiplexer.GetSubscriber();
-
-                // Guarantee idempotent single-callback registration across startup retries and reconnects.
-                if (Volatile.Read(ref _isSubscribed))
+                // Tear down any previous or partially-registered queue instance BEFORE subscribing cleanly.
+                // Using an isolated ChannelMessageQueue guarantees zero duplicate delegate registrations across retries/reconnects.
+                if (_channelQueue != null)
                 {
-                    await subscriber.UnsubscribeAsync(channel, _messageHandler);
+                    try
+                    {
+                        await _channelQueue.UnsubscribeAsync();
+                    }
+                    catch
+                    {
+                        // Ignore stale queue cleanup errors during reconnect
+                    }
+
+                    _channelQueue = null;
                     Volatile.Write(ref _isSubscribed, false);
                 }
 
-                await subscriber.SubscribeAsync(channel, _messageHandler);
+                var subscriber = _multiplexer.GetSubscriber();
+                var queue = await subscriber.SubscribeAsync(channel);
+                queue.OnMessage(async msg =>
+                {
+                    if (!msg.Message.IsNullOrEmpty && !stoppingToken.IsCancellationRequested)
+                    {
+                        await ProcessNotificationSafeAsync(msg.Message.ToString(), stoppingToken);
+                    }
+                });
+
+                _channelQueue = queue;
                 Volatile.Write(ref _isSubscribed, true);
 
                 if (needsFlush)
                 {
-                    await _cache.RemoveLocalByPrefixAsync("mdm:cfg:", cancellationToken);
+                    await _cache.RemoveLocalByPrefixAsync("mdm:cfg:", stoppingToken);
                     Volatile.Write(ref _needsReconnectFlush, false);
                     Volatile.Write(ref _hadSubscriptionAttemptFailureOrDisconnect, false);
                     Interlocked.Increment(ref _reconnectFlushCount);
@@ -224,13 +233,8 @@ public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
         }
     }
 
-    private async Task UnsubscribeSafeAsync(RedisChannel channel)
+    private async Task UnsubscribeSafeAsync()
     {
-        if (_multiplexer == null || _messageHandler == null)
-        {
-            return;
-        }
-
         try
         {
             await _subscriptionLock.WaitAsync(TimeSpan.FromSeconds(2));
@@ -242,11 +246,10 @@ public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
 
         try
         {
-            if (Volatile.Read(ref _isSubscribed))
+            if (_channelQueue != null)
             {
-                var subscriber = _multiplexer.GetSubscriber();
-                await subscriber.UnsubscribeAsync(channel, _messageHandler);
-                Volatile.Write(ref _isSubscribed, false);
+                await _channelQueue.UnsubscribeAsync();
+                _channelQueue = null;
             }
         }
         catch
@@ -255,6 +258,7 @@ public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
         }
         finally
         {
+            Volatile.Write(ref _isSubscribed, false);
             _subscriptionLock.Release();
         }
     }
