@@ -1,15 +1,22 @@
+using System.Collections.Concurrent;
+using System.Net;
+using System.Net.Sockets;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Caching.StackExchangeRedis;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
 using StackExchange.Redis;
+using Warehouse3PL.Application;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Infrastructure;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Reference;
@@ -378,6 +385,7 @@ internal static class Mdm15PostgresCheck
             if (!string.IsNullOrWhiteSpace(redisConn))
             {
                 await RunLiveRedisMultiInstanceChecksAsync(targetConn, redisConn, approverId);
+                await RunLiveHostRedisResilienceChecksAsync(targetConn, redisConn, approverId);
             }
 
             Console.WriteLine("PASS PostgreSQL MDM-1.5 Scope Epochs, Outbox Backoff/Retry, Concurrency, R01-R05 & Real Redis Verification.");
@@ -554,6 +562,91 @@ internal static class Mdm15PostgresCheck
             }
         }
 
+        // Additional Hardening: Partial MDM-1.5 schema (epochs present, outbox missing) MUST fail closed
+        await using (var partialFailDb = CreatePgDb(connStr))
+        {
+            await partialFailDb.BeginTransactionAsync();
+            await partialFailDb.Database.ExecuteSqlRawAsync("DROP TABLE configuration_invalidation_events;");
+            partialFailDb.HolidayCalendars.Add(HolidayCalendar.Create("NP", HolidayScope.National, new DateOnly(2029, 5, 16), "Partial Schema Should Fail"));
+            bool partialBlocked = false;
+            try
+            {
+                await partialFailDb.SaveChangesAsync();
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("failing closed", StringComparison.OrdinalIgnoreCase))
+            {
+                partialBlocked = true;
+            }
+            await partialFailDb.RollbackTransactionAsync();
+            if (!partialBlocked)
+            {
+                throw new InvalidOperationException("MDM-1.5 PG silently bypassed partial MDM-1.5 schema when configuration_invalidation_events was dropped!");
+            }
+        }
+
+        // Additional Hardening: Caller-owned transaction failure after SaveChangesAsync MUST roll back holiday, epoch, and outbox atomically without polluting shared cache
+        using (var callerMem = new MemoryCache(new MemoryCacheOptions { SizeLimit = 100 }))
+        {
+            var callerCache = new RedisCacheService(callerMem, Options.Create(new CacheOptions()), NullLogger<RedisCacheService>.Instance);
+            long npEpochBaseline;
+            int outboxCountBaseline;
+            int warmHolidayCount;
+
+            await using (var baselineDb = CreatePgDb(connStr))
+            {
+                var consBaseline = new ConfigurationConsistencyService(baselineDb, callerCache, clock, NullLogger<ConfigurationConsistencyService>.Instance);
+                var warmed = await consBaseline.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "NP", "caller-tx-holidays",
+                    (d, ct) => d.HolidayCalendars.AsNoTracking().CountAsync(h => h.CountryCode == "NP", ct));
+                warmHolidayCount = warmed.Value;
+                npEpochBaseline = await baselineDb.ConfigurationScopeEpochs.AsNoTracking()
+                    .Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "NP")
+                    .Select(e => e.CurrentEpoch).FirstAsync();
+                outboxCountBaseline = await baselineDb.ConfigurationInvalidationEvents.AsNoTracking().CountAsync();
+            }
+
+            await using (var callerTxDb = CreatePgDb(connStr))
+            {
+                await callerTxDb.BeginTransactionAsync();
+                callerTxDb.HolidayCalendars.Add(HolidayCalendar.Create("NP", HolidayScope.National, new DateOnly(2029, 5, 25), "Caller Abort Should Rollback"));
+                await callerTxDb.SaveChangesAsync();
+
+                // Verify inside caller tx we observe uncommitted holiday (+1) via cache bypass before caller fails
+                var consInsideCallerTx = new ConfigurationConsistencyService(callerTxDb, callerCache, clock, NullLogger<ConfigurationConsistencyService>.Instance);
+                var insideCallerRead = await consInsideCallerTx.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "NP", "caller-tx-holidays",
+                    (d, ct) => d.HolidayCalendars.AsNoTracking().CountAsync(h => h.CountryCode == "NP", ct));
+                if (insideCallerRead.ServedFromCache || insideCallerRead.Value != warmHolidayCount + 1)
+                {
+                    throw new InvalidOperationException("MDM-1.5 PG caller-owned tx did not reflect uncommitted write via tx-local bypass.");
+                }
+
+                // Simulated caller domain error after SaveChangesAsync triggers caller rollback
+                await callerTxDb.RollbackTransactionAsync();
+            }
+
+            await using (var verifyRollbackDb = CreatePgDb(connStr))
+            {
+                long npEpochAfter = await verifyRollbackDb.ConfigurationScopeEpochs.AsNoTracking()
+                    .Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "NP")
+                    .Select(e => e.CurrentEpoch).FirstAsync();
+                int outboxAfter = await verifyRollbackDb.ConfigurationInvalidationEvents.AsNoTracking().CountAsync();
+                bool leakedCallerRow = await verifyRollbackDb.HolidayCalendars.AsNoTracking()
+                    .AnyAsync(h => h.HolidayDate == new DateOnly(2029, 5, 25) && h.Name == "Caller Abort Should Rollback");
+
+                var consPostRollback = new ConfigurationConsistencyService(verifyRollbackDb, callerCache, clock, NullLogger<ConfigurationConsistencyService>.Instance);
+                var cachedPostRollback = await consPostRollback.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "NP", "caller-tx-holidays",
+                    (d, ct) => d.HolidayCalendars.AsNoTracking().CountAsync(h => h.CountryCode == "NP", ct));
+
+                if (npEpochAfter != npEpochBaseline || outboxAfter != outboxCountBaseline || leakedCallerRow ||
+                    !cachedPostRollback.ServedFromCache || cachedPostRollback.Value != warmHolidayCount)
+                {
+                    throw new InvalidOperationException("MDM-1.5 PG caller-owned transaction rollback leaked PostgreSQL state or polluted shared L1 cache!");
+                }
+            }
+        }
+
         // Additional Review: When outbox persistence fails inside SaveChangesAsync's own transaction, primary MDM entity & epoch rollback atomically
         long npBeforeOutboxFail;
         await using (var outboxFailSetup = CreatePgDb(connStr))
@@ -659,15 +752,42 @@ internal static class Mdm15PostgresCheck
             // Wait briefly for Redis pub/sub subscription handshake
             await Task.Delay(250);
 
-            // 1. Instance B warms L1 + Redis cache at V1
+            // 1. Instance B warms targeted Country:NP L1 + Redis entries AND unrelated Country:US entry at V1
+            string targetedPolicyFullKey;
+            string targetedBundleFullKey;
+            string unrelatedFullKey;
             await using (var dbB1 = CreatePgDb(pgConn))
             {
                 var consB1 = new ConfigurationConsistencyService(dbB1, cacheB, clock, NullLogger<ConfigurationConsistencyService>.Instance);
+                var diagPolicy = await consB1.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "NP", "compliance-policies:NP-REDIS-LIVE",
+                    (d, ct) => d.CountryCompliancePolicies.AsNoTracking()
+                        .Where(p => p.CountryCode == "NP" && p.PolicyCode == "NP-REDIS-LIVE")
+                        .OrderBy(p => p.Version)
+                        .ToListAsync(ct));
+                var diagBundle = await consB1.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "NP", "r05-np-targeted",
+                    (d, ct) => d.CountryCompliancePolicies.AsNoTracking()
+                        .Where(p => p.CountryCode == "NP" && p.PolicyCode == "NP-REDIS-LIVE")
+                        .Select(p => p.Title)
+                        .FirstAsync(ct));
+                var diagUs = await consB1.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "US", "r05-us-unrelated",
+                    (d, ct) => d.HolidayCalendars.AsNoTracking()
+                        .CountAsync(h => h.CountryCode == "US", ct));
+
+                targetedPolicyFullKey = $"{instancePrefix}{diagPolicy.ScopedCacheKey}";
+                targetedBundleFullKey = $"{instancePrefix}{diagBundle.ScopedCacheKey}";
+                unrelatedFullKey = $"{instancePrefix}{diagUs.ScopedCacheKey}";
+
                 var evalB1 = new CountryComplianceEvaluator(dbB1, clock, consB1);
                 var r1 = await evalB1.EvaluateAsync(new ComplianceEvaluationRequest("NP", "NP-REDIS-LIVE", BusinessClassification: "MICRO_RETAIL", EvaluationUtc: evalTime));
-                if (r1.Status != ComplianceApplicabilityStatus.NotRequired || cacheB.TrackedLocalKeyCount == 0)
+                if (r1.Status != ComplianceApplicabilityStatus.NotRequired ||
+                    !memB.TryGetValue(targetedPolicyFullKey, out _) ||
+                    !memB.TryGetValue(targetedBundleFullKey, out _) ||
+                    !memB.TryGetValue(unrelatedFullKey, out _))
                 {
-                    throw new InvalidOperationException("MDM-1.5 R05 Instance B failed to warm L1+Redis cache at V1.");
+                    throw new InvalidOperationException("MDM-1.5 R05 Instance B failed to warm targeted NP and unrelated US L1+Redis entries at V1.");
                 }
             }
 
@@ -697,20 +817,28 @@ internal static class Mdm15PostgresCheck
                 }
             }
 
-            // 3. Verify Instance B's live Redis subscriber evicted L1 automatically
-            for (int i = 0; i < 30 && subB.ReceivedNotificationCount == 0; i++)
+            // 3. Verify Instance B's live Redis subscriber received notification AND actually evicted targeted NP L1 keys while keeping unrelated US L1 key intact
+            for (int i = 0; i < 40 &&
+                 (subB.ReceivedNotificationCount == 0 ||
+                  memB.TryGetValue(targetedPolicyFullKey, out _) ||
+                  memB.TryGetValue(targetedBundleFullKey, out _)); i++)
             {
                 await Task.Delay(100);
             }
 
-            if (subB.ReceivedNotificationCount == 0 || memB.Count != 0)
+            if (subB.ReceivedNotificationCount == 0)
             {
-                // Allow slight async delay for callback removal
-                await Task.Delay(200);
-                if (subB.ReceivedNotificationCount == 0)
-                {
-                    throw new InvalidOperationException($"MDM-1.5 R05 receiving instance subscriber did not receive real Redis notification (count={subB.ReceivedNotificationCount}).");
-                }
+                throw new InvalidOperationException($"MDM-1.5 R05 receiving instance subscriber did not receive real Redis notification (count={subB.ReceivedNotificationCount}).");
+            }
+
+            if (memB.TryGetValue(targetedPolicyFullKey, out _) || memB.TryGetValue(targetedBundleFullKey, out _))
+            {
+                throw new InvalidOperationException($"MDM-1.5 R05-F01-B FAIL: receiving instance RETAINED targeted NP L1 cache entry after bounded notification window (TrackedLocalKeyCount={cacheB.TrackedLocalKeyCount}, memB.Count={memB.Count}).");
+            }
+
+            if (!memB.TryGetValue(unrelatedFullKey, out _))
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01-B FAIL: unrelated Country:US L1 cache entry was unexpectedly evicted by Country:NP invalidation!");
             }
 
             // Send duplicate notification cleanly (idempotent)
@@ -785,6 +913,514 @@ internal static class Mdm15PostgresCheck
         finally
         {
             await subB.StopAsync(CancellationToken.None);
+        }
+    }
+
+    private static async Task RunLiveHostRedisResilienceChecksAsync(string pgConn, string redisConn, Guid approverId)
+    {
+        Console.WriteLine("[MDM-1.5-R05-F01] Running Production Generic Host Offline Startup -> Late Redis -> Disconnect -> Reconnect Flush -> Outbox Backoff Recovery Checks...");
+
+        var parsedRedis = ConfigurationOptions.Parse(redisConn, ignoreUnknown: true);
+        var (upstreamHost, upstreamPort) = ExtractRedisEndpoint(parsedRedis);
+
+        await using var proxy = new RedisTcpProxy(upstreamHost, upstreamPort);
+        var hostInstancePrefix = $"Mdm15HostLive:{Guid.NewGuid():N}:";
+        var eff = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var evalTime = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc);
+        var testClock = new PgMutableClock(DateTime.UtcNow);
+
+        await using (var seedDb = CreatePgDb(pgConn))
+        {
+            var p1 = CountryCompliancePolicy.CreateDraft(
+                "NP", "NP-HOST-LIVE", 1, "Host Live V1", "Gazette HL1", "Notice-HL-1",
+                """{"ExemptBusinessClassifications":["MICRO_RETAIL"]}""",
+                ComplianceEnforcementMode.MandatoryFailClosed, eff, null);
+            p1.Approve(approverId, eff, "Approved HL1");
+            seedDb.CountryCompliancePolicies.Add(p1);
+            await seedDb.SaveChangesAsync();
+        }
+
+        // 1. Build REAL Production Generic Host pointing to proxy.Port BEFORE proxy starts listening (Redis unreachable at startup!)
+        var builder = Host.CreateApplicationBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:DefaultConnection"] = pgConn,
+            ["Redis:EnableRedis"] = "true",
+            ["Redis:ConnectionString"] = $"127.0.0.1:{proxy.Port},abortConnect=false,connectTimeout=500,syncTimeout=1000",
+            ["Redis:InstanceName"] = hostInstancePrefix,
+            ["Redis:DefaultExpirationMinutes"] = "30",
+            ["Redis:LocalFallbackMaxTtlSeconds"] = "30",
+            ["ConfigurationConsistency:EnableDispatcher"] = "false",
+            ["ObjectStorage:SigningSecretKey"] = "ProductionGradeTestSigningSecretKeyForMdm15Verification2026!"
+        });
+        builder.Services.AddApplicationServices();
+        builder.Services.AddInfrastructureServices(builder.Configuration);
+        builder.Services.AddSingleton<IDateTimeProvider>(testClock);
+        builder.Services.AddScoped<ICurrentUserContext>(_ => new PgAdminUserContext(approverId));
+        builder.Services.AddScoped<ITenantProvider>(_ => new PgBypassTenantProvider());
+
+        using var host = builder.Build();
+        await host.StartAsync();
+
+        var mux = host.Services.GetRequiredService<IConnectionMultiplexer>();
+        var sub = host.Services.GetRequiredService<RedisConfigurationInvalidationSubscriber>();
+        var hostCache = host.Services.GetRequiredService<ICacheService>();
+        var hostMem = host.Services.GetRequiredService<IMemoryCache>();
+        var hostTransport = host.Services.GetRequiredService<IConfigurationInvalidationTransport>();
+
+        try
+        {
+            if (mux.IsConnected || sub.IsSubscribed)
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: multiplexer/subscriber reported connected when proxy was closed at startup.");
+            }
+
+            // 2. Successful PostgreSQL-authoritative reads during Redis unavailability at startup
+            string offlineNpKey;
+            string offlineUsKey;
+            await using (var offlineScope = host.Services.CreateAsyncScope())
+            {
+                var consOffline = offlineScope.ServiceProvider.GetRequiredService<IConfigurationConsistencyService>();
+                var evalOffline = offlineScope.ServiceProvider.GetRequiredService<ICountryComplianceEvaluator>();
+
+                var offlinePolicyDiag = await consOffline.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "NP", "host-np-offline",
+                    (d, ct) => d.CountryCompliancePolicies.AsNoTracking()
+                        .Where(p => p.CountryCode == "NP" && p.PolicyCode == "NP-HOST-LIVE" && p.IsActive)
+                        .Select(p => p.Version).FirstAsync(ct));
+                var offlineUsDiag = await consOffline.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "US", "host-us-keep",
+                    (d, ct) => d.HolidayCalendars.AsNoTracking().CountAsync(h => h.CountryCode == "US", ct));
+
+                offlineNpKey = $"{hostInstancePrefix}{offlinePolicyDiag.ScopedCacheKey}";
+                offlineUsKey = $"{hostInstancePrefix}{offlineUsDiag.ScopedCacheKey}";
+
+                var r1 = await evalOffline.EvaluateAsync(new ComplianceEvaluationRequest("NP", "NP-HOST-LIVE", BusinessClassification: "MICRO_RETAIL", EvaluationUtc: evalTime));
+                if (r1.Status != ComplianceApplicabilityStatus.NotRequired || r1.EvaluatedPolicyVersion != 1 ||
+                    !hostMem.TryGetValue(offlineNpKey, out _))
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: PostgreSQL-authoritative reads did not succeed while Redis was unavailable at startup.");
+                }
+            }
+
+            // 3. Redis becomes available AFTER application startup on SAME host/mux/subscriber instances
+            proxy.StartListening();
+            for (int i = 0; i < 250 && (!mux.IsConnected || !sub.IsSubscribed || sub.ReconnectFlushCount < 1); i++)
+            {
+                await Task.Delay(100);
+            }
+
+            if (!mux.IsConnected || !sub.IsSubscribed || sub.ReconnectFlushCount < 1)
+            {
+                throw new InvalidOperationException($"MDM-1.5 R05-F01 FAIL: subscriber did not recover after Redis came online (connected={mux.IsConnected}, subscribed={sub.IsSubscribed}, flushes={sub.ReconnectFlushCount}).");
+            }
+
+            if (hostMem.TryGetValue(offlineNpKey, out _) || hostMem.TryGetValue(offlineUsKey, out _))
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: post-startup recovery flush did not clear offline-era local MDM cache entries.");
+            }
+
+            // 4. Subscriber receives live invalidations after late startup connection & evicts only targeted scope
+            string npV1FullKey;
+            string usKeepFullKey;
+            await using (var warmScope1 = host.Services.CreateAsyncScope())
+            {
+                var cons1 = warmScope1.ServiceProvider.GetRequiredService<IConfigurationConsistencyService>();
+                var npDiag = await cons1.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "NP", "compliance-policies:NP-HOST-LIVE",
+                    (d, ct) => d.CountryCompliancePolicies.AsNoTracking()
+                        .Where(p => p.CountryCode == "NP" && p.PolicyCode == "NP-HOST-LIVE").ToListAsync(ct));
+                var usDiag = await cons1.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "US", "host-us-unrelated",
+                    (d, ct) => d.HolidayCalendars.AsNoTracking().CountAsync(h => h.CountryCode == "US", ct));
+                npV1FullKey = $"{hostInstancePrefix}{npDiag.ScopedCacheKey}";
+                usKeepFullKey = $"{hostInstancePrefix}{usDiag.ScopedCacheKey}";
+            }
+
+            long notifBeforeV2 = sub.ReceivedNotificationCount;
+            await using (var dbV2 = CreatePgDb(pgConn))
+            {
+                await dbV2.BeginTransactionAsync();
+                var p1 = await dbV2.CountryCompliancePolicies.SingleAsync(p => p.CountryCode == "NP" && p.PolicyCode == "NP-HOST-LIVE" && p.Version == 1);
+                var p2 = CountryCompliancePolicy.CreateDraft(
+                    "NP", "NP-HOST-LIVE", 2, "Host Live V2", "Gazette HL2", "Notice-HL-2",
+                    """{"RequiredBusinessClassifications":["MICRO_RETAIL"]}""",
+                    ComplianceEnforcementMode.MandatoryFailClosed, eff, null);
+                dbV2.CountryCompliancePolicies.Add(p2);
+                await dbV2.SaveChangesAsync();
+                p1.Supersede(p2.Id, eff);
+                await dbV2.SaveChangesAsync();
+                p2.Approve(approverId, eff.AddDays(1), "Approved HL2");
+                await dbV2.SaveChangesAsync();
+                await dbV2.CommitTransactionAsync();
+
+                var procV2 = new ConfigurationInvalidationProcessor(dbV2, hostTransport, testClock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
+                var s2 = await procV2.DispatchPendingAsync();
+                if (s2.Failed != 0 || s2.Dispatched == 0)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: host transport failed to publish V2 invalidation after Redis became available.");
+                }
+            }
+
+            for (int i = 0; i < 60 && (sub.ReceivedNotificationCount == notifBeforeV2 || hostMem.TryGetValue(npV1FullKey, out _)); i++)
+            {
+                await Task.Delay(50);
+            }
+
+            if (sub.ReceivedNotificationCount != notifBeforeV2 + 1)
+            {
+                throw new InvalidOperationException($"MDM-1.5 R05-F01 FAIL: expected exactly 1 post-startup notification, got delta={sub.ReceivedNotificationCount - notifBeforeV2}.");
+            }
+            if (hostMem.TryGetValue(npV1FullKey, out _))
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: targeted NP L1 entry was retained after notification.");
+            }
+            if (!hostMem.TryGetValue(usKeepFullKey, out _))
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: unrelated US L1 entry was evicted during NP invalidation.");
+            }
+
+            // Warm V2 into L1 before simulating mid-flight Redis interruption
+            string npV2FullKey;
+            await using (var warmScope2 = host.Services.CreateAsyncScope())
+            {
+                var cons2 = warmScope2.ServiceProvider.GetRequiredService<IConfigurationConsistencyService>();
+                var eval2 = warmScope2.ServiceProvider.GetRequiredService<ICountryComplianceEvaluator>();
+                var r2 = await eval2.EvaluateAsync(new ComplianceEvaluationRequest("NP", "NP-HOST-LIVE", BusinessClassification: "MICRO_RETAIL", EvaluationUtc: evalTime));
+                if (r2.Status != ComplianceApplicabilityStatus.Required || r2.EvaluatedPolicyVersion != 2)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: host did not evaluate V2 cleanly.");
+                }
+                var d2 = await cons2.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "NP", "compliance-policies:NP-HOST-LIVE",
+                    (d, ct) => d.CountryCompliancePolicies.AsNoTracking()
+                        .Where(p => p.CountryCode == "NP" && p.PolicyCode == "NP-HOST-LIVE").ToListAsync(ct));
+                npV2FullKey = $"{hostInstancePrefix}{d2.ScopedCacheKey}";
+            }
+
+            // 5. Actual Redis connection interruption on SAME host/mux/subscriber/transport
+            long flushBeforeInterrupt = sub.ReconnectFlushCount;
+            await proxy.SimulateOutageAsync();
+            for (int i = 0; i < 100 && mux.IsConnected; i++)
+            {
+                await Task.Delay(100);
+            }
+            if (mux.IsConnected)
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: multiplexer stayed connected after TCP proxy outage simulation.");
+            }
+
+            await using (var outageDb = CreatePgDb(pgConn))
+            {
+                await outageDb.BeginTransactionAsync();
+                var p2 = await outageDb.CountryCompliancePolicies.SingleAsync(p => p.CountryCode == "NP" && p.PolicyCode == "NP-HOST-LIVE" && p.Version == 2);
+                var p3 = CountryCompliancePolicy.CreateDraft(
+                    "NP", "NP-HOST-LIVE", 3, "Host Live V3 Outage", "Gazette HL3", "Notice-HL-3",
+                    """{"ExemptBusinessClassifications":["MICRO_RETAIL"]}""",
+                    ComplianceEnforcementMode.MandatoryFailClosed, eff, null);
+                outageDb.CountryCompliancePolicies.Add(p3);
+                await outageDb.SaveChangesAsync();
+                p2.Supersede(p3.Id, eff);
+                await outageDb.SaveChangesAsync();
+                p3.Approve(approverId, eff.AddDays(2), "Approved HL3 during proxy outage");
+                await outageDb.SaveChangesAsync();
+                await outageDb.CommitTransactionAsync();
+
+                var outageProc = new ConfigurationInvalidationProcessor(outageDb, hostTransport, testClock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
+                var outSweep = await outageProc.DispatchPendingAsync();
+                if (outSweep.Failed == 0 || outSweep.Dispatched != 0)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: host transport did not fail/retain outbox events during Redis interruption.");
+                }
+
+                // Immediate backoff check while pending event awaits NextRetryAtUtc
+                var earlyRetrySweep = await outageProc.DispatchPendingAsync();
+                if (earlyRetrySweep.Attempted != 0 || earlyRetrySweep.DeferredByBackoff == 0)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: pending outbox event did not enforce exponential backoff window.");
+                }
+            }
+
+            // Authoritative PostgreSQL read during outage MUST observe V3 cleanly on SAME host
+            await using (var outageReadScope = host.Services.CreateAsyncScope())
+            {
+                var evalOut = outageReadScope.ServiceProvider.GetRequiredService<ICountryComplianceEvaluator>();
+                var r3 = await evalOut.EvaluateAsync(new ComplianceEvaluationRequest("NP", "NP-HOST-LIVE", BusinessClassification: "MICRO_RETAIL", EvaluationUtc: evalTime));
+                if (r3.Status != ComplianceApplicabilityStatus.NotRequired || r3.EvaluatedPolicyVersion != 3)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: host did not serve V3 authoritatively from PostgreSQL during Redis outage.");
+                }
+            }
+
+            // Add an outage-era local L1 entry directly in hostCache to verify reconnect flush explicitly
+            await hostCache.SetAsync("mdm:cfg:Country:NP:outage-stale-key", "stale-v3");
+            var staleOutageFullKey = $"{hostInstancePrefix}mdm:cfg:Country:NP:outage-stale-key";
+            if (!hostMem.TryGetValue(staleOutageFullKey, out _))
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01 setup failure: outage-era L1 key missing before reconnect.");
+            }
+
+            // 6. Restore SAME proxy port -> same multiplexer/subscriber reconnects, flushes L1, and pending outbox retries succeed
+            long notifBeforeRecovery = sub.ReceivedNotificationCount;
+            proxy.Restore();
+            for (int i = 0; i < 250 &&
+                 (!mux.IsConnected || !sub.IsSubscribed || sub.ReconnectFlushCount <= flushBeforeInterrupt ||
+                  hostMem.TryGetValue(staleOutageFullKey, out _) || hostMem.TryGetValue(npV2FullKey, out _)); i++)
+            {
+                await Task.Delay(100);
+            }
+
+            if (!mux.IsConnected || !sub.IsSubscribed || sub.ReconnectFlushCount <= flushBeforeInterrupt)
+            {
+                throw new InvalidOperationException($"MDM-1.5 R05-F01 FAIL: host subscriber did not restore subscription & flush after Redis reconnection (connected={mux.IsConnected}, sub={sub.IsSubscribed}, flush={sub.ReconnectFlushCount}/{flushBeforeInterrupt}).");
+            }
+            if (hostMem.TryGetValue(staleOutageFullKey, out _) || hostMem.TryGetValue(npV2FullKey, out _))
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: reconnect flush left stale NP local L1 cache entries behind.");
+            }
+
+            // 7. Advance clock past NextRetryAtUtc backoff and dispatch pending outbox events on SAME hostTransport
+            testClock.UtcNow = testClock.UtcNow.AddSeconds(15);
+            await using (var recDb = CreatePgDb(pgConn))
+            {
+                var recoverProc = new ConfigurationInvalidationProcessor(recDb, hostTransport, testClock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
+                var recSweep = await recoverProc.DispatchPendingAsync();
+                if (recSweep.Failed != 0 || recSweep.Dispatched == 0)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: outbox retry sweep on recovered host transport failed.");
+                }
+            }
+
+            for (int i = 0; i < 60 && sub.ReceivedNotificationCount == notifBeforeRecovery; i++)
+            {
+                await Task.Delay(50);
+            }
+            if (sub.ReceivedNotificationCount == notifBeforeRecovery)
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: recovered outbox retry notification was not delivered to reconnected subscriber.");
+            }
+
+            // Subsequent mutation V3 -> V4 MUST increment ReceivedNotificationCount by EXACTLY 1 (proving zero duplicate callback registration across reconnect)
+            await Task.Delay(150);
+            string npV3FullKey;
+            await using (var warmScope3 = host.Services.CreateAsyncScope())
+            {
+                var cons3 = warmScope3.ServiceProvider.GetRequiredService<IConfigurationConsistencyService>();
+                var d3 = await cons3.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "NP", "compliance-policies:NP-HOST-LIVE",
+                    (d, ct) => d.CountryCompliancePolicies.AsNoTracking()
+                        .Where(p => p.CountryCode == "NP" && p.PolicyCode == "NP-HOST-LIVE").ToListAsync(ct));
+                await cons3.GetOrLoadVerifiedWithDiagnosticsAsync(
+                    ConfigurationScopeType.Country, "US", "host-us-unrelated",
+                    (d, ct) => d.HolidayCalendars.AsNoTracking().CountAsync(h => h.CountryCode == "US", ct));
+                npV3FullKey = $"{hostInstancePrefix}{d3.ScopedCacheKey}";
+            }
+
+            long notifBeforeV4 = sub.ReceivedNotificationCount;
+            await using (var dbV4 = CreatePgDb(pgConn))
+            {
+                await dbV4.BeginTransactionAsync();
+                var p3 = await dbV4.CountryCompliancePolicies.SingleAsync(p => p.CountryCode == "NP" && p.PolicyCode == "NP-HOST-LIVE" && p.Version == 3);
+                var p4 = CountryCompliancePolicy.CreateDraft(
+                    "NP", "NP-HOST-LIVE", 4, "Host Live V4 Post-Reconnect", "Gazette HL4", "Notice-HL-4",
+                    """{"RequiredBusinessClassifications":["MICRO_RETAIL"]}""",
+                    ComplianceEnforcementMode.MandatoryFailClosed, eff, null);
+                dbV4.CountryCompliancePolicies.Add(p4);
+                await dbV4.SaveChangesAsync();
+                p3.Supersede(p4.Id, eff);
+                await dbV4.SaveChangesAsync();
+                p4.Approve(approverId, eff.AddDays(3), "Approved HL4 post reconnect");
+                await dbV4.SaveChangesAsync();
+                await dbV4.CommitTransactionAsync();
+
+                var procV4 = new ConfigurationInvalidationProcessor(dbV4, hostTransport, testClock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
+                var s4 = await procV4.DispatchPendingAsync();
+                if (s4.Failed != 0 || s4.Dispatched == 0)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: V4 dispatch after reconnect failed.");
+                }
+            }
+
+            for (int i = 0; i < 60 && (sub.ReceivedNotificationCount == notifBeforeV4 || hostMem.TryGetValue(npV3FullKey, out _)); i++)
+            {
+                await Task.Delay(50);
+            }
+            if (sub.ReceivedNotificationCount != notifBeforeV4 + 1)
+            {
+                throw new InvalidOperationException($"MDM-1.5 R05-F01 FAIL: duplicate/missing subscriber callback after reconnect (delta={sub.ReceivedNotificationCount - notifBeforeV4}).");
+            }
+            if (hostMem.TryGetValue(npV3FullKey, out _) || !hostMem.TryGetValue(usKeepFullKey, out _))
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: targeted NP eviction or unrelated US retention failed post-reconnect.");
+            }
+
+            // 8. Harmless duplicate notification + authoritative V4 verification
+            await mux.GetSubscriber().PublishAsync(
+                RedisChannel.Literal(RedisConfigurationInvalidationSubscriber.ChannelName),
+                """{"Id":88888,"ScopeType":"Country","ScopeKey":"NP","NewEpoch":404,"EntityType":"CountryCompliancePolicy","EntityId":"dup-host"}""");
+            await Task.Delay(250);
+
+            await using (var finalScope = host.Services.CreateAsyncScope())
+            {
+                var eval4 = finalScope.ServiceProvider.GetRequiredService<ICountryComplianceEvaluator>();
+                var r4 = await eval4.EvaluateAsync(new ComplianceEvaluationRequest("NP", "NP-HOST-LIVE", BusinessClassification: "MICRO_RETAIL", EvaluationUtc: evalTime));
+                if (r4.Status != ComplianceApplicabilityStatus.Required || r4.EvaluatedPolicyVersion != 4)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: host did not serve V4 cleanly after duplicate notification.");
+                }
+            }
+
+            await host.StopAsync();
+            if (sub.IsSubscribed)
+            {
+                throw new InvalidOperationException("MDM-1.5 R05-F01 FAIL: subscriber remained marked subscribed after host shutdown.");
+            }
+
+            Console.WriteLine("PASS Live Generic Host Offline Startup -> Late Redis -> Disconnect/Reconnect Flush -> Single-Callback Recovery Verified.");
+        }
+        finally
+        {
+            if (host != null)
+            {
+                try { await host.StopAsync(TimeSpan.FromSeconds(5)); } catch { }
+            }
+        }
+    }
+
+    private static (string Host, int Port) ExtractRedisEndpoint(ConfigurationOptions options)
+    {
+        var ep = options.EndPoints.FirstOrDefault() ?? throw new InvalidOperationException("Redis connection string missing endpoint.");
+        return ep switch
+        {
+            DnsEndPoint dns => (dns.Host, dns.Port > 0 ? dns.Port : 6379),
+            IPEndPoint ip => (ip.Address.ToString(), ip.Port > 0 ? ip.Port : 6379),
+            _ => ("127.0.0.1", 6379)
+        };
+    }
+
+    private sealed class RedisTcpProxy : IAsyncDisposable
+    {
+        private readonly string _upstreamHost;
+        private readonly int _upstreamPort;
+        private readonly CancellationTokenSource _cts = new();
+        private readonly ConcurrentDictionary<long, (TcpClient Client, TcpClient Upstream)> _sessions = new();
+        private TcpListener? _listener;
+        private Task? _acceptTask;
+        private long _nextSessionId;
+        private volatile bool _outageMode;
+
+        public int Port { get; }
+
+        public RedisTcpProxy(string upstreamHost, int upstreamPort)
+        {
+            _upstreamHost = upstreamHost;
+            _upstreamPort = upstreamPort;
+
+            var probe = new TcpListener(IPAddress.Loopback, 0);
+            probe.Start();
+            Port = ((IPEndPoint)probe.LocalEndpoint).Port;
+            probe.Stop();
+        }
+
+        public void StartListening()
+        {
+            if (_listener != null) return;
+            _listener = new TcpListener(IPAddress.Loopback, Port);
+            _listener.Server.SetSocketOption(SocketOptionLevel.Socket, SocketOptionName.ReuseAddress, true);
+            _listener.Start();
+            _acceptTask = Task.Run(() => AcceptLoopAsync(_cts.Token));
+        }
+
+        public async Task SimulateOutageAsync()
+        {
+            _outageMode = true;
+            foreach (var session in _sessions.Values)
+            {
+                try { session.Client.Dispose(); } catch { }
+                try { session.Upstream.Dispose(); } catch { }
+            }
+            _sessions.Clear();
+            await Task.Delay(200);
+        }
+
+        public void Restore() => _outageMode = false;
+
+        private async Task AcceptLoopAsync(CancellationToken ct)
+        {
+            while (!ct.IsCancellationRequested && _listener != null)
+            {
+                TcpClient? client = null;
+                try
+                {
+                    client = await _listener.AcceptTcpClientAsync(ct);
+                    if (_outageMode)
+                    {
+                        client.Dispose();
+                        continue;
+                    }
+
+                    _ = Task.Run(() => ForwardClientAsync(client, ct), ct);
+                }
+                catch (OperationCanceledException) when (ct.IsCancellationRequested)
+                {
+                    client?.Dispose();
+                    break;
+                }
+                catch
+                {
+                    client?.Dispose();
+                }
+            }
+        }
+
+        private async Task ForwardClientAsync(TcpClient client, CancellationToken ct)
+        {
+            var upstream = new TcpClient();
+            long sessionId = Interlocked.Increment(ref _nextSessionId);
+            try
+            {
+                client.NoDelay = true;
+                upstream.NoDelay = true;
+                await upstream.ConnectAsync(_upstreamHost, _upstreamPort, ct);
+                if (_outageMode)
+                {
+                    return;
+                }
+
+                _sessions[sessionId] = (client, upstream);
+                await using var cStream = client.GetStream();
+                await using var uStream = upstream.GetStream();
+
+                var t1 = cStream.CopyToAsync(uStream, ct);
+                var t2 = uStream.CopyToAsync(cStream, ct);
+                await Task.WhenAny(t1, t2);
+            }
+            catch
+            {
+            }
+            finally
+            {
+                _sessions.TryRemove(sessionId, out _);
+                try { client.Dispose(); } catch { }
+                try { upstream.Dispose(); } catch { }
+            }
+        }
+
+        public async ValueTask DisposeAsync()
+        {
+            _cts.Cancel();
+            try { _listener?.Stop(); } catch { }
+            foreach (var session in _sessions.Values)
+            {
+                try { session.Client.Dispose(); } catch { }
+                try { session.Upstream.Dispose(); } catch { }
+            }
+            _sessions.Clear();
+            if (_acceptTask != null)
+            {
+                try { await _acceptTask.WaitAsync(TimeSpan.FromSeconds(2)); } catch { }
+            }
+            _cts.Dispose();
         }
     }
 

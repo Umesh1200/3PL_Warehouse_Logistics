@@ -16,12 +16,23 @@ namespace Warehouse3PL.Infrastructure.Caching;
 public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
 {
     public const string ChannelName = "nexus3pl:config-invalidations";
+    private const int MaxBackoffSeconds = 30;
 
     private readonly ICacheService _cache;
     private readonly CacheOptions _options;
     private readonly ILogger<RedisConfigurationInvalidationSubscriber> _logger;
     private readonly IConnectionMultiplexer? _multiplexer;
+    private readonly SemaphoreSlim _subscriptionLock = new(1, 1);
+    private readonly SemaphoreSlim _signal = new(0, int.MaxValue);
+
     private long _receivedNotificationCount;
+    private long _reconnectFlushCount;
+    private bool _isSubscribed;
+    private bool _needsReconnectFlush;
+    private bool _hadSubscriptionAttemptFailureOrDisconnect;
+    private bool _handlersAttached;
+    private Action<RedisChannel, RedisValue>? _messageHandler;
+    private int _disposed;
 
     public RedisConfigurationInvalidationSubscriber(
         ICacheService cache,
@@ -36,6 +47,8 @@ public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
     }
 
     public long ReceivedNotificationCount => Interlocked.Read(ref _receivedNotificationCount);
+    public long ReconnectFlushCount => Interlocked.Read(ref _reconnectFlushCount);
+    public bool IsSubscribed => Volatile.Read(ref _isSubscribed);
 
     protected override async Task ExecuteAsync(CancellationToken stoppingToken)
     {
@@ -44,46 +57,72 @@ public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
             return;
         }
 
-        _multiplexer.ConnectionRestored += OnConnectionRestored;
-
-        var subscriber = _multiplexer.GetSubscriber();
         var channel = RedisChannel.Literal(ChannelName);
-
-        await subscriber.SubscribeAsync(channel, async (_, message) =>
+        _messageHandler = (_, message) =>
         {
-            if (message.IsNullOrEmpty)
+            if (message.IsNullOrEmpty || stoppingToken.IsCancellationRequested)
             {
                 return;
             }
 
-            try
-            {
-                await HandleInvalidationPayloadAsync(message.ToString(), CancellationToken.None);
-            }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Error processing Redis configuration invalidation notification.");
-            }
-        });
+            Task pendingTask = ProcessNotificationSafeAsync(message.ToString(), stoppingToken);
+        };
+
+        _multiplexer.ConnectionRestored += OnConnectionRestored;
+        _multiplexer.ConnectionFailed += OnConnectionFailed;
+        _handlersAttached = true;
+
+        int failureAttempt = 0;
 
         try
         {
-            await Task.Delay(Timeout.Infinite, stoppingToken);
+            while (!stoppingToken.IsCancellationRequested)
+            {
+                bool ready = false;
+                try
+                {
+                    ready = await EnsureSubscribedAsync(channel, stoppingToken);
+                }
+                catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
+                {
+                    break;
+                }
+                catch (Exception ex)
+                {
+                    Volatile.Write(ref _hadSubscriptionAttemptFailureOrDisconnect, true);
+                    Volatile.Write(ref _isSubscribed, false);
+                    _logger.LogWarning(
+                        ex,
+                        "Redis configuration invalidation subscription attempt failed; continuing with PostgreSQL-authoritative reads.");
+                }
+
+                if (ready)
+                {
+                    failureAttempt = 0;
+                    await _signal.WaitAsync(stoppingToken);
+                }
+                else
+                {
+                    Volatile.Write(ref _hadSubscriptionAttemptFailureOrDisconnect, true);
+                    int backoffSeconds = Math.Min(MaxBackoffSeconds, 1 << Math.Min(failureAttempt, 5));
+                    failureAttempt++;
+                    await _signal.WaitAsync(TimeSpan.FromSeconds(backoffSeconds), stoppingToken);
+                }
+            }
         }
         catch (OperationCanceledException) when (stoppingToken.IsCancellationRequested)
         {
         }
         finally
         {
-            _multiplexer.ConnectionRestored -= OnConnectionRestored;
-            try
+            if (_handlersAttached)
             {
-                await subscriber.UnsubscribeAllAsync();
+                _multiplexer.ConnectionRestored -= OnConnectionRestored;
+                _multiplexer.ConnectionFailed -= OnConnectionFailed;
+                _handlersAttached = false;
             }
-            catch
-            {
-                // Ignore shutdown cleanup errors when multiplexer is closing
-            }
+
+            await UnsubscribeSafeAsync(channel);
         }
     }
 
@@ -120,20 +159,152 @@ public sealed class RedisConfigurationInvalidationSubscriber : BackgroundService
         Interlocked.Increment(ref _receivedNotificationCount);
     }
 
+    private async Task<bool> EnsureSubscribedAsync(RedisChannel channel, CancellationToken cancellationToken)
+    {
+        if (_multiplexer == null || !_multiplexer.IsConnected)
+        {
+            return false;
+        }
+
+        await _subscriptionLock.WaitAsync(cancellationToken);
+        try
+        {
+            if (!_multiplexer.IsConnected || _messageHandler == null)
+            {
+                return false;
+            }
+
+            bool needsFlush = Volatile.Read(ref _needsReconnectFlush) ||
+                              Volatile.Read(ref _hadSubscriptionAttemptFailureOrDisconnect);
+
+            if (!Volatile.Read(ref _isSubscribed) || needsFlush)
+            {
+                var subscriber = _multiplexer.GetSubscriber();
+
+                // Guarantee idempotent single-callback registration across startup retries and reconnects.
+                if (Volatile.Read(ref _isSubscribed))
+                {
+                    await subscriber.UnsubscribeAsync(channel, _messageHandler);
+                    Volatile.Write(ref _isSubscribed, false);
+                }
+
+                await subscriber.SubscribeAsync(channel, _messageHandler);
+                Volatile.Write(ref _isSubscribed, true);
+
+                if (needsFlush)
+                {
+                    await _cache.RemoveLocalByPrefixAsync("mdm:cfg:", cancellationToken);
+                    Volatile.Write(ref _needsReconnectFlush, false);
+                    Volatile.Write(ref _hadSubscriptionAttemptFailureOrDisconnect, false);
+                    Interlocked.Increment(ref _reconnectFlushCount);
+                    _logger.LogInformation("Redis invalidation subscription active after recovery; flushed local MDM L1 cache entries.");
+                }
+            }
+
+            return true;
+        }
+        finally
+        {
+            _subscriptionLock.Release();
+        }
+    }
+
+    private async Task ProcessNotificationSafeAsync(string payload, CancellationToken cancellationToken)
+    {
+        try
+        {
+            await HandleInvalidationPayloadAsync(payload, cancellationToken);
+        }
+        catch (OperationCanceledException) when (cancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception ex)
+        {
+            _logger.LogWarning(ex, "Error processing Redis configuration invalidation notification.");
+        }
+    }
+
+    private async Task UnsubscribeSafeAsync(RedisChannel channel)
+    {
+        if (_multiplexer == null || _messageHandler == null)
+        {
+            return;
+        }
+
+        try
+        {
+            await _subscriptionLock.WaitAsync(TimeSpan.FromSeconds(2));
+        }
+        catch
+        {
+            return;
+        }
+
+        try
+        {
+            if (Volatile.Read(ref _isSubscribed))
+            {
+                var subscriber = _multiplexer.GetSubscriber();
+                await subscriber.UnsubscribeAsync(channel, _messageHandler);
+                Volatile.Write(ref _isSubscribed, false);
+            }
+        }
+        catch
+        {
+            // Ignore shutdown cleanup errors when multiplexer is closing
+        }
+        finally
+        {
+            _subscriptionLock.Release();
+        }
+    }
+
+    private void OnConnectionFailed(object? sender, ConnectionFailedEventArgs e)
+    {
+        Volatile.Write(ref _hadSubscriptionAttemptFailureOrDisconnect, true);
+        Volatile.Write(ref _needsReconnectFlush, true);
+    }
+
     private void OnConnectionRestored(object? sender, ConnectionFailedEventArgs e)
     {
-        _ = Task.Run(async () =>
+        Volatile.Write(ref _needsReconnectFlush, true);
+        ReleaseSignalSafe();
+    }
+
+    private void ReleaseSignalSafe()
+    {
+        if (Volatile.Read(ref _disposed) != 0)
         {
-            try
+            return;
+        }
+
+        try
+        {
+            _signal.Release();
+        }
+        catch (ObjectDisposedException)
+        {
+        }
+        catch (SemaphoreFullException)
+        {
+        }
+    }
+
+    public override void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) == 0)
+        {
+            if (_handlersAttached && _multiplexer != null)
             {
-                // Flush local MDM L1 entries after Redis reconnection so notifications missed during outage cannot linger.
-                await _cache.RemoveLocalByPrefixAsync("mdm:cfg:");
-                _logger.LogInformation("Redis connection restored; flushed local MDM L1 cache entries.");
+                _multiplexer.ConnectionRestored -= OnConnectionRestored;
+                _multiplexer.ConnectionFailed -= OnConnectionFailed;
+                _handlersAttached = false;
             }
-            catch (Exception ex)
-            {
-                _logger.LogWarning(ex, "Failed to flush local MDM L1 cache entries upon Redis reconnect.");
-            }
-        });
+
+            _signal.Dispose();
+            _subscriptionLock.Dispose();
+        }
+
+        base.Dispose();
     }
 }

@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using Microsoft.Extensions.Hosting;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using StackExchange.Redis;
@@ -500,6 +501,125 @@ public sealed class Mdm15ConfigurationConsistencyTests
         Assert.NotNull(diScope.ServiceProvider.GetRequiredService<IWorkingCalendarService>());
 
         scopeMem.Dispose();
+        await db.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task F01A_ProductionGenericHost_StartsCleanlyWhenRedisUnavailable_AndShutDownIsSafe()
+    {
+        // Bind free port then immediately stop so TCP connection actively refuses Redis at startup
+        var probe = new System.Net.Sockets.TcpListener(System.Net.IPAddress.Loopback, 0);
+        probe.Start();
+        int closedPort = ((System.Net.IPEndPoint)probe.LocalEndpoint).Port;
+        probe.Stop();
+
+        var builder = Host.CreateApplicationBuilder();
+        builder.Configuration.AddInMemoryCollection(new Dictionary<string, string?>
+        {
+            ["ConnectionStrings:DefaultConnection"] = "Host=localhost;Database=warehouse3pl_db;Username=postgres;Password=postgres",
+            ["Redis:EnableRedis"] = "true",
+            ["Redis:ConnectionString"] = $"127.0.0.1:{closedPort},abortConnect=false,connectTimeout=200",
+            ["Redis:InstanceName"] = $"Mdm15HostUnit:{Guid.NewGuid():N}:",
+            ["ConfigurationConsistency:EnableDispatcher"] = "false",
+            ["ObjectStorage:SigningSecretKey"] = "ProductionGradeTestSigningSecretKeyForMdm15Verification2026!"
+        });
+        builder.Services.AddApplicationServices();
+        builder.Services.AddInfrastructureServices(builder.Configuration);
+
+        using var host = builder.Build();
+        // Host MUST start cleanly without throwing or crashing when Redis is unreachable at startup
+        await host.StartAsync();
+
+        var sub = host.Services.GetRequiredService<RedisConfigurationInvalidationSubscriber>();
+        var mux = host.Services.GetRequiredService<IConnectionMultiplexer>();
+        var cache = host.Services.GetRequiredService<ICacheService>();
+        Assert.False(mux.IsConnected);
+        Assert.False(sub.IsSubscribed);
+
+        // Local L1 caching remains usable even when Redis is unreachable
+        await cache.SetAsync("mdm:cfg:Country:NP:offline-unit", "ok");
+        Assert.Equal("ok", await cache.GetAsync<string>("mdm:cfg:Country:NP:offline-unit"));
+
+        // Stopping host while subscriber is in backoff wait MUST complete promptly and cleanly
+        await host.StopAsync();
+        Assert.False(sub.IsSubscribed);
+    }
+
+    [Fact]
+    public async Task F01_FinalHardening_OversizedL1PayloadRejected_SharedMemoryCacheCompatible_And_CallerRollbackIsolated()
+    {
+        // 1. Oversized values (> MaxCachedEntrySizeBytes) MUST be skipped from L1 as well as L2
+        using var memSized = new MemoryCache(new MemoryCacheOptions { SizeLimit = 100 });
+        var sizedOpts = Options.Create(new CacheOptions { EnableRedis = false, MaxCachedEntrySizeBytes = 4096 });
+        var sizedCache = new RedisCacheService(memSized, sizedOpts, NullLogger<RedisCacheService>.Instance);
+
+        await sizedCache.SetAsync("mdm:cfg:Country:NP:small-ok", "small-value");
+        Assert.Equal("small-value", await sizedCache.GetAsync<string>("mdm:cfg:Country:NP:small-ok"));
+        Assert.Equal(1, sizedCache.TrackedLocalKeyCount);
+
+        var oversizedPayload = new string('X', 8192);
+        await sizedCache.SetAsync("mdm:cfg:Country:NP:too-large", oversizedPayload);
+        Assert.Null(await sizedCache.GetAsync<string>("mdm:cfg:Country:NP:too-large"));
+        Assert.Equal(1, sizedCache.TrackedLocalKeyCount);
+
+        // Overwriting an existing key with an oversized payload MUST NOT leave the stale smaller value in L1
+        await sizedCache.SetAsync("mdm:cfg:Country:NP:small-ok", oversizedPayload);
+        Assert.Null(await sizedCache.GetAsync<string>("mdm:cfg:Country:NP:small-ok"));
+        Assert.Equal(0, sizedCache.TrackedLocalKeyCount);
+
+        // 2. Shared IMemoryCache configured with SizeLimit in DependencyInjection.cs accepts entries with Size
+        var diCfg = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:DefaultConnection"] = "Host=localhost;Database=warehouse3pl_db;Username=postgres;Password=postgres",
+                ["Redis:EnableRedis"] = "false",
+                ["Cache:LocalCacheSizeLimit"] = "100",
+                ["ObjectStorage:SigningSecretKey"] = "ProductionGradeTestSigningSecretKeyForMdm15Verification2026!"
+            })
+            .Build();
+        var sc = new ServiceCollection();
+        sc.AddLogging();
+        sc.AddApplicationServices();
+        sc.AddInfrastructureServices(diCfg);
+        await using var sp = sc.BuildServiceProvider();
+        var sharedMem = sp.GetRequiredService<IMemoryCache>();
+        var diCache = sp.GetRequiredService<ICacheService>();
+        await diCache.SetAsync("mdm:cfg:Country:US:di-sized", "ok");
+        sharedMem.Set("direct-consumer-with-size", "ok", new MemoryCacheEntryOptions { Size = 1 });
+        Assert.Equal("ok", await diCache.GetAsync<string>("mdm:cfg:Country:US:di-sized"));
+
+        // 3. Transaction bypass + rollback isolation when caller fails after simulated uncommitted mutation
+        var dbName = $"mdm15-caller-rb-{Guid.NewGuid():N}";
+        var (db, mem, cache, cons) = CreateInstance(dbName);
+        var committed = await cons.GetOrLoadVerifiedWithDiagnosticsAsync(
+            ConfigurationScopeType.Country, "NP", "caller-rb",
+            (d, ct) => d.HolidayCalendars.AsNoTracking().CountAsync(h => h.CountryCode == "NP", ct));
+        Assert.False(committed.ServedFromCache);
+
+        var txUser = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var txDb = new TxSimulatedDbContext(
+            new DbContextOptionsBuilder<ApplicationDbContext>().UseInMemoryDatabase(dbName).Options,
+            new TestTenantProvider { BypassTenantFilter = true },
+            txUser,
+            new AuditableEntityInterceptor(txUser, new DateTimeProvider()))
+        {
+            SimulateActiveTransaction = true
+        };
+        var txCons = new ConfigurationConsistencyService(txDb, cache, new DateTimeProvider(), NullLogger<ConfigurationConsistencyService>.Instance, txUser);
+        var insideTx = await txCons.GetOrLoadVerifiedWithDiagnosticsAsync(
+            ConfigurationScopeType.Country, "NP", "caller-rb",
+            (_, _) => Task.FromResult(committed.Value + 99));
+        Assert.False(insideTx.ServedFromCache);
+        Assert.Equal(committed.Value + 99, insideTx.Value);
+
+        var afterCallerAbort = await cons.GetOrLoadVerifiedWithDiagnosticsAsync(
+            ConfigurationScopeType.Country, "NP", "caller-rb",
+            (d, ct) => d.HolidayCalendars.AsNoTracking().CountAsync(h => h.CountryCode == "NP", ct));
+        Assert.True(afterCallerAbort.ServedFromCache);
+        Assert.Equal(committed.Value, afterCallerAbort.Value);
+
+        mem.Dispose();
+        await txDb.DisposeAsync();
         await db.DisposeAsync();
     }
 

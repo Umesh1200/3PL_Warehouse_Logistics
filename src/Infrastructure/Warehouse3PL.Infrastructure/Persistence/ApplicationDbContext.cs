@@ -270,28 +270,32 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             cmd.Transaction = Database.CurrentTransaction?.GetDbTransaction();
             cmd.CommandText = """
                 SELECT
-                    CASE WHEN to_regclass('configuration_scope_epochs') IS NOT NULL THEN 1 ELSE 0 END AS has_table,
-                    CASE WHEN to_regclass('"__EFMigrationsHistory"') IS NOT NULL THEN 1 ELSE 0 END AS has_history,
+                    CASE WHEN to_regclass('configuration_scope_epochs') IS NOT NULL THEN 1 ELSE 0 END AS has_epochs,
+                    CASE WHEN to_regclass('configuration_invalidation_events') IS NOT NULL THEN 1 ELSE 0 END AS has_outbox,
+                    CASE WHEN to_regclass('"__EFMigrationsHistory"') IS NOT NULL
+                              AND EXISTS (SELECT 1 FROM "__EFMigrationsHistory")
+                         THEN 1 ELSE 0 END AS has_history,
                     CASE WHEN to_regclass('"__EFMigrationsHistory"') IS NOT NULL
                               AND EXISTS (SELECT 1 FROM "__EFMigrationsHistory" WHERE migration_id >= '20261126083415')
                          THEN 1 ELSE 0 END AS has_mdm15_migration;
                 """;
             using var reader = cmd.ExecuteReader();
             reader.Read();
-            bool hasTable = reader.GetInt32(0) == 1;
-            bool hasHistory = reader.GetInt32(1) == 1;
-            bool hasMdm15Migration = reader.GetInt32(2) == 1;
+            bool hasEpochs = reader.GetInt32(0) == 1;
+            bool hasOutbox = reader.GetInt32(1) == 1;
+            bool hasHistory = reader.GetInt32(2) == 1;
+            bool hasMdm15Migration = reader.GetInt32(3) == 1;
 
-            if (hasTable)
+            if (hasEpochs && hasOutbox)
             {
                 _hasMdm15Schema = true;
                 return true;
             }
 
-            if (!hasHistory || hasMdm15Migration)
+            if (hasEpochs != hasOutbox || !hasHistory || hasMdm15Migration)
             {
                 throw new InvalidOperationException(
-                    "MDM-1.5 configuration_scope_epochs table is missing while MDM-1.5 or non-migration schema is active; failing closed rather than bypassing epoch tracking.");
+                    "MDM-1.5 configuration_scope_epochs / configuration_invalidation_events schema is incomplete or missing outside a controlled pre-MDM-1.5 migration state; failing closed rather than bypassing epoch tracking.");
             }
 
             return false;
@@ -314,28 +318,32 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             cmd.Transaction = Database.CurrentTransaction?.GetDbTransaction();
             cmd.CommandText = """
                 SELECT
-                    CASE WHEN to_regclass('configuration_scope_epochs') IS NOT NULL THEN 1 ELSE 0 END AS has_table,
-                    CASE WHEN to_regclass('"__EFMigrationsHistory"') IS NOT NULL THEN 1 ELSE 0 END AS has_history,
+                    CASE WHEN to_regclass('configuration_scope_epochs') IS NOT NULL THEN 1 ELSE 0 END AS has_epochs,
+                    CASE WHEN to_regclass('configuration_invalidation_events') IS NOT NULL THEN 1 ELSE 0 END AS has_outbox,
+                    CASE WHEN to_regclass('"__EFMigrationsHistory"') IS NOT NULL
+                              AND EXISTS (SELECT 1 FROM "__EFMigrationsHistory")
+                         THEN 1 ELSE 0 END AS has_history,
                     CASE WHEN to_regclass('"__EFMigrationsHistory"') IS NOT NULL
                               AND EXISTS (SELECT 1 FROM "__EFMigrationsHistory" WHERE migration_id >= '20261126083415')
                          THEN 1 ELSE 0 END AS has_mdm15_migration;
                 """;
             await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
             await reader.ReadAsync(cancellationToken);
-            bool hasTable = reader.GetInt32(0) == 1;
-            bool hasHistory = reader.GetInt32(1) == 1;
-            bool hasMdm15Migration = reader.GetInt32(2) == 1;
+            bool hasEpochs = reader.GetInt32(0) == 1;
+            bool hasOutbox = reader.GetInt32(1) == 1;
+            bool hasHistory = reader.GetInt32(2) == 1;
+            bool hasMdm15Migration = reader.GetInt32(3) == 1;
 
-            if (hasTable)
+            if (hasEpochs && hasOutbox)
             {
                 _hasMdm15Schema = true;
                 return true;
             }
 
-            if (!hasHistory || hasMdm15Migration)
+            if (hasEpochs != hasOutbox || !hasHistory || hasMdm15Migration)
             {
                 throw new InvalidOperationException(
-                    "MDM-1.5 configuration_scope_epochs table is missing while MDM-1.5 or non-migration schema is active; failing closed rather than bypassing epoch tracking.");
+                    "MDM-1.5 configuration_scope_epochs / configuration_invalidation_events schema is incomplete or missing outside a controlled pre-MDM-1.5 migration state; failing closed rather than bypassing epoch tracking.");
             }
 
             return false;

@@ -79,28 +79,41 @@ public class RedisCacheService : ICacheService
         var localCap = TimeSpan.FromSeconds(maxLocalSeconds);
         var localAbsExp = distributedAbsExp <= localCap ? distributedAbsExp : localCap;
 
-        if (_options.EnableRedis && _distributedCache != null)
+        var maxEntryBytes = Math.Max(4096, _options.MaxCachedEntrySizeBytes);
+        byte[]? serializedBytes = null;
+        try
+        {
+            serializedBytes = JsonSerializer.SerializeToUtf8Bytes(value, JsonOptions);
+        }
+        catch (Exception ex) when (ex is NotSupportedException or JsonException)
+        {
+            // Limitation: non-JSON-serializable runtime values cannot be pushed to Redis L2 and bypass byte-size estimation.
+            if (_options.EnableRedis && _distributedCache != null)
+            {
+                _logger.LogWarning(ex, "Skipping Redis cache SET for key {Key}: value is not JSON serializable.", fullKey);
+            }
+        }
+
+        if (serializedBytes != null && serializedBytes.Length > maxEntryBytes)
+        {
+            _logger.LogWarning(
+                "Skipping L2 and L1 cache SET for key {Key}: serialized size {Size} bytes exceeds limit {Limit} bytes.",
+                fullKey, serializedBytes.Length, maxEntryBytes);
+            RemoveLocalKeySynchronized(fullKey);
+            return;
+        }
+
+        if (_options.EnableRedis && _distributedCache != null && serializedBytes != null)
         {
             try
             {
-                var bytes = JsonSerializer.SerializeToUtf8Bytes(value, JsonOptions);
-                var maxEntryBytes = Math.Max(4096, _options.MaxCachedEntrySizeBytes);
-                if (bytes.Length <= maxEntryBytes)
+                var entryOptions = new DistributedCacheEntryOptions
                 {
-                    var entryOptions = new DistributedCacheEntryOptions
-                    {
-                        AbsoluteExpirationRelativeToNow = distributedAbsExp,
-                        SlidingExpiration = slidingExpiration
-                    };
+                    AbsoluteExpirationRelativeToNow = distributedAbsExp,
+                    SlidingExpiration = slidingExpiration
+                };
 
-                    await _distributedCache.SetAsync(fullKey, bytes, entryOptions, cancellationToken);
-                }
-                else
-                {
-                    _logger.LogWarning(
-                        "Skipping distributed Redis SET for key {Key}: serialized size {Size} bytes exceeds limit {Limit} bytes.",
-                        fullKey, bytes.Length, maxEntryBytes);
-                }
+                await _distributedCache.SetAsync(fullKey, serializedBytes, entryOptions, cancellationToken);
             }
             catch (Exception ex)
             {
