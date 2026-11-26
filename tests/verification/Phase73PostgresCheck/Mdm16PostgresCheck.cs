@@ -39,7 +39,7 @@ using Warehouse3PL.WebApi.Middleware;
 
 internal static class Mdm16PostgresCheck
 {
-    private const string Mdm15Migration = "20261126083415_MDM1_5_CacheEpochsInvalidationAndOutbox";
+    private const string Mdm15Migration = "20261126100927_MDM1_5_R01_OutboxBackoffAndRetention";
     private const string Mdm16Migration = "20261126143014_MDM1_6_LegacyCountryNormalization";
     private const string JwtSecret = "Nexus3PL-Mdm16-PostgreSql-Verification-Key-2026!";
     private const string JwtIssuer = "nexus3pl-mdm16-pg-auth";
@@ -417,9 +417,11 @@ internal static class Mdm16PostgresCheck
                 await using var adminConn = new NpgsqlConnection(adminBuilder.ConnectionString);
                 await adminConn.OpenAsync();
                 await using var termCmd = new NpgsqlCommand(
-                    $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{dbName}' AND pid <> pg_backend_pid(); DROP DATABASE IF EXISTS \"{dbName}\";",
+                    $"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{dbName}' AND pid <> pg_backend_pid();",
                     adminConn);
                 await termCmd.ExecuteNonQueryAsync();
+                await using var dropCmd = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{dbName}\";", adminConn);
+                await dropCmd.ExecuteNonQueryAsync();
             }
             catch
             {
