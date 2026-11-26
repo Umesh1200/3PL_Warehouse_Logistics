@@ -154,8 +154,8 @@ internal static class Mdm16PostgresCheck
                 await ExecAsync(insertClientSql, ("@id", clientUsId), ("@code", "PG16-CLUS"), ("@name", "PG16 US Client"));
 
                 const string insertCfaSql = """
-                    INSERT INTO client_facility_access (access_id, client_id, facility_id, effective_date, status, primary_operating_facility, created_at)
-                    VALUES (gen_random_uuid(), @cid, @fid, NOW(), 'Active', true, NOW());
+                    INSERT INTO client_facility_access (client_id, facility_id, effective_date, status, primary_operating_facility, created_at)
+                    VALUES (@cid, @fid, NOW(), 'Active', true, NOW());
                     """;
                 await ExecAsync(insertCfaSql, ("@cid", clientNpId), ("@fid", facNpId));
                 await ExecAsync(insertCfaSql, ("@cid", clientUsId), ("@fid", facUsId));
