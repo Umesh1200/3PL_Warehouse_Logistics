@@ -19,6 +19,7 @@ public class TransportationProjectionService : ITransportationProjectionService
 {
     private readonly IApplicationDbContext _dbContext;
     private readonly ILogger<TransportationProjectionService> _logger;
+    private readonly IWorkingCalendarService _workingCalendarService;
 
     public const string SlaComplianceProjection = "CarrierSlaCompliance";
     public const string CarrierPerformanceProjection = "CarrierPerformance";
@@ -29,10 +30,12 @@ public class TransportationProjectionService : ITransportationProjectionService
 
     public TransportationProjectionService(
         IApplicationDbContext dbContext,
-        ILogger<TransportationProjectionService> logger)
+        ILogger<TransportationProjectionService> logger,
+        IWorkingCalendarService? workingCalendarService = null)
     {
         _dbContext = dbContext;
         _logger = logger;
+        _workingCalendarService = workingCalendarService ?? new Reference.WorkingCalendarService(_dbContext);
     }
 
     #region Stream Checkpointing & Deduplication
@@ -167,7 +170,10 @@ public class TransportationProjectionService : ITransportationProjectionService
             policyId = policy.Id;
             policyVersion = policy.SlaPolicyVersion;
             transitCommitmentDays = policy.TransitCommitmentDays;
-            committedEdd = policy.CalculateCommittedDeliveryDate(@event.DispatchedAtUtc);
+            committedEdd = await _workingCalendarService.CalculateCommittedDeliveryDateUtcAsync(
+                policy,
+                @event.DispatchedAtUtc,
+                cancellationToken);
             evalStatus = SlaEvaluationStatus.Evaluated;
         }
         else if (@event.InitialEstimatedDeliveryDateUtc.HasValue)

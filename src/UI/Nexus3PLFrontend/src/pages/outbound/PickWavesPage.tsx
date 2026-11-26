@@ -14,6 +14,7 @@ import { useFacility } from '../../context/FacilityContext';
 import { useRouter } from '../../context/RouterContext';
 import { ApiError } from '../../services/apiClient';
 import { outboundApi } from '../../services/outboundApi';
+import { formatDateTime } from '../../utils/formatters';
 import { PickWaveDto, PickWaveStatus, PickWaveType } from '../../types/outbound';
 import '../../styles/outbound.css';
 
@@ -333,7 +334,7 @@ export const PickWavesPage: React.FC = () => {
                               </span>
                             </div>
                           </td>
-                          <td>{new Date(wave.createdAt).toLocaleString()}</td>
+                          <td>{formatDateTime(wave.createdAt, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })}</td>
                           <td>
                             <div className="actions-toolbar">
                               <button
@@ -482,7 +483,7 @@ export const PickWavesPage: React.FC = () => {
                 {selectedWave.releasedAtUtc && (
                   <div className="detail-meta-item">
                     <span className="meta-label">Released At</span>
-                    <span>{new Date(selectedWave.releasedAtUtc).toLocaleString()}</span>
+                    <span>{formatDateTime(selectedWave.releasedAtUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })}</span>
                   </div>
                 )}
               </div>

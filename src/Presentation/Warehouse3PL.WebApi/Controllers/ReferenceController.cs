@@ -85,4 +85,50 @@ public sealed class ReferenceController : BaseApiController
 
         return Ok(result);
     }
+
+    /// <summary>
+    /// Lists authoritative seeded Nepal Bikram Sambat (BS) calendar month definitions (2075–2090 BS).
+    /// Immutable global reference table.
+    /// </summary>
+    [HttpGet("bikram-sambat/months")]
+    [ProducesResponseType(typeof(IReadOnlyList<BikramSambatCalendarMonthDto>), StatusCodes.Status200OK)]
+    public async Task<ActionResult<IReadOnlyList<BikramSambatCalendarMonthDto>>> GetBikramSambatMonths(
+        [FromQuery] int? bsYear = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await Mediator.Send(new GetBikramSambatMonthsQuery(bsYear), cancellationToken);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Converts Gregorian dates or IANA timezone-aware UTC instants to/from Bikram Sambat,
+    /// returning Nepal Shrawan-1 fiscal year labels and optional statutory VAT return due dates.
+    /// </summary>
+    [HttpGet("bikram-sambat/convert")]
+    [ProducesResponseType(typeof(BikramSambatConversionResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status422UnprocessableEntity)]
+    public async Task<ActionResult<BikramSambatConversionResponse>> ConvertBikramSambat(
+        [FromQuery] DateOnly? gregorianDate = null,
+        [FromQuery] DateTime? utcInstant = null,
+        [FromQuery] string? timeZoneId = null,
+        [FromQuery] int? bsYear = null,
+        [FromQuery] int? bsMonth = null,
+        [FromQuery] int? bsDay = null,
+        [FromQuery] int? vatForBsYear = null,
+        [FromQuery] int? vatForBsMonth = null,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await Mediator.Send(
+            new ConvertBikramSambatDateQuery(
+                gregorianDate,
+                utcInstant,
+                timeZoneId,
+                bsYear,
+                bsMonth,
+                bsDay,
+                vatForBsYear,
+                vatForBsMonth),
+            cancellationToken);
+        return Ok(result);
+    }
 }

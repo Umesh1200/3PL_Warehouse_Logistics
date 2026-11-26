@@ -42,6 +42,8 @@ public static class DependencyInjection
         services.AddScoped<IUomConversionService, UomConversionService>();
         services.AddScoped<IFxConversionService, FxConversionService>();
         services.AddSingleton<IOfficialFxBulletinVerifier, OfficialFxBulletinVerifier>();
+        services.AddScoped<IBikramSambatCalendarService, BikramSambatCalendarService>();
+        services.AddScoped<IWorkingCalendarService, WorkingCalendarService>();
         services.AddScoped<IPutawayLocationSelector, PutawayLocationSelector>();
         services.AddScoped<IPutawayRecommendationService, PutawayLocationSelector>();
         services.AddScoped<ICrossDockEngine, CrossDockEngine>();

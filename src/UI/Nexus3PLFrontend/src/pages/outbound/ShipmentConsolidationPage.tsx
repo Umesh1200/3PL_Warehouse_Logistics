@@ -12,6 +12,7 @@ import {
   ShipmentStatus,
 } from '../../types/outbound';
 import { outboundApi } from '../../services/outboundApi';
+import { formatDateTime } from '../../utils/formatters';
 import {
   PackageStatusBadge,
   ShipmentCustodyBadge,
@@ -695,7 +696,7 @@ export const ShipmentConsolidationPage: React.FC = () => {
                   <span>
                     <strong>Dispatched</strong>{' '}
                     {activeShipment.dispatchedAtUtc
-                      ? `at ${new Date(activeShipment.dispatchedAtUtc).toLocaleString()}`
+                      ? `at ${formatDateTime(activeShipment.dispatchedAtUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })}`
                       : ''}{' '}
                     &bull; Trailer: <code>{activeShipment.trailerNumber || 'N/A'}</code> &bull; Seal:{' '}
                     <code>{activeShipment.sealNumber || 'N/A'}</code> &bull; Zero secondary stock mutation executed.

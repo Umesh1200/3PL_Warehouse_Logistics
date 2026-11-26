@@ -7,6 +7,7 @@ import {
 } from '../../types/outbound';
 import { generateActionIdempotencyKey } from './OutboundStatusBadge';
 import { Modal } from '../common/Modal';
+import { formatDateTime } from '../../utils/formatters';
 
 export interface ProofOfDeliveryModalProps {
   isOpen: boolean;
@@ -285,7 +286,7 @@ export const ProofOfDeliveryModal: React.FC<ProofOfDeliveryModalProps> = ({
         {confirmationResult && (
           <div className="outbound-alert success" data-testid="pod-confirmation-banner">
             <span>
-              Delivered confirmed at {new Date(confirmationResult.deliveredAtUtc).toLocaleString()} • Order
+              Delivered confirmed at {formatDateTime(confirmationResult.deliveredAtUtc)} • Order
               Rollup: <strong>{confirmationResult.orderDeliveryStatus}</strong>
             </span>
           </div>
@@ -310,7 +311,7 @@ export const ProofOfDeliveryModal: React.FC<ProofOfDeliveryModalProps> = ({
                   ? 'Signed (Signature Artifact Verified)'
                   : 'Recipient Name Acknowledgment (Unsigned)'}
               </span>
-              <span>Delivered: {new Date(existingPod.deliveredAtUtc).toLocaleString()}</span>
+              <span>Delivered: {formatDateTime(existingPod.deliveredAtUtc)}</span>
             </div>
             {(existingPod.preSignedSignatureUrl || existingPod.preSignedPhotoUrl) && (
               <div className="pod-media-grid">

@@ -3,6 +3,7 @@ import { useFacility } from '../../context/FacilityContext';
 import { useAuth } from '../../context/AuthContext';
 import { putawayApi } from '../../services/putawayApi';
 import { AppIcon } from '../../components/common/AppIcon';
+import { formatTime } from '../../utils/formatters';
 import {
   PutawayTaskDto,
   PutawayTaskStatus,
@@ -533,7 +534,9 @@ export const PutawayPage: React.FC = () => {
                           <td className="code-font">{task.sourceLocationCode}</td>
                           <td className="code-font highlight-bin">{task.suggestedLocationCode}</td>
                           <td>{getStatusBadge(task.status)}</td>
-                          <td className="text-muted">{new Date(task.createdAtUtc).toLocaleTimeString()}</td>
+                          <td className="text-muted">
+                            {formatTime(task.createdAtUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })}
+                          </td>
                         </tr>
                       ))
                     )}

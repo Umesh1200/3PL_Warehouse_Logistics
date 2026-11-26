@@ -24,10 +24,13 @@ public static class ReferenceCatalogSeeder
         await SeedDraftCompliancePoliciesAsync(db, cancellationToken);
 
         bool hasMdm13Schema = !db.Database.IsRelational();
-        if (!hasMdm13Schema)
+        bool hasMdm14Schema = !db.Database.IsRelational();
+        if (db.Database.IsRelational())
         {
             var applied = await db.Database.GetAppliedMigrationsAsync(cancellationToken);
-            hasMdm13Schema = applied.Any(m => m.Contains("MDM1_3", StringComparison.OrdinalIgnoreCase));
+            var appliedList = applied.ToList();
+            hasMdm13Schema = appliedList.Any(m => m.Contains("MDM1_3", StringComparison.OrdinalIgnoreCase));
+            hasMdm14Schema = appliedList.Any(m => m.Contains("MDM1_4", StringComparison.OrdinalIgnoreCase));
         }
 
         if (hasMdm13Schema)
@@ -35,6 +38,12 @@ public static class ReferenceCatalogSeeder
             await SeedCurrenciesAsync(db, cancellationToken);
             await SeedUomDefinitionsAsync(db, cancellationToken);
             await SeedUomConversionsAsync(db, cancellationToken);
+        }
+
+        if (hasMdm14Schema)
+        {
+            await SeedBikramSambatCalendarAsync(db, cancellationToken);
+            await SeedBaselineHolidaysAsync(db, cancellationToken);
         }
     }
 
@@ -483,6 +492,127 @@ public static class ReferenceCatalogSeeder
             if (!existingPairs.Contains(key))
             {
                 db.UomConversions.Add(conv);
+            }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private const string ExpectedBsDatasetDigest = "SHA256:3b4cf9e84d7882f7150fe241294049c440c9f48f7879f5d22832ae5287374e28";
+    private const string BsDatasetCitation = "https://raw.githubusercontent.com/amitgaru/nepali-datetime/master/nepali_datetime/data/calendar_bs.csv (SHA256:3b4cf9e84d7882f7150fe241294049c440c9f48f7879f5d22832ae5287374e28)";
+
+    private static readonly (string En, string Ne)[] BsMonthNames =
+    [
+        ("Baishakh", "बैशाख"),
+        ("Jestha", "जेठ"),
+        ("Ashadh", "असार"),
+        ("Shrawan", "साउन"),
+        ("Bhadra", "भदौ"),
+        ("Ashwin", "असोज"),
+        ("Kartik", "कार्तिक"),
+        ("Mangsir", "मंसिर"),
+        ("Poush", "पुष"),
+        ("Magh", "माघ"),
+        ("Falgun", "फागुन"),
+        ("Chaitra", "चैत")
+    ];
+
+    private static async Task SeedBikramSambatCalendarAsync(ApplicationDbContext db, CancellationToken cancellationToken)
+    {
+        var assembly = typeof(ReferenceCatalogSeeder).Assembly;
+        var resourceName = assembly.GetManifestResourceNames()
+            .FirstOrDefault(n => n.EndsWith("BS_Calendar_2075_2090.csv", StringComparison.OrdinalIgnoreCase))
+            ?? throw new FileNotFoundException("Embedded authoritative BS_Calendar_2075_2090.csv artifact not found.");
+
+        byte[] rawBytes;
+        using (var stream = assembly.GetManifestResourceStream(resourceName)!)
+        using (var ms = new MemoryStream())
+        {
+            await stream.CopyToAsync(ms, cancellationToken);
+            rawBytes = ms.ToArray();
+        }
+
+        var normalizedText = Encoding.UTF8.GetString(rawBytes).Replace("\r\n", "\n");
+        var normalizedBytes = Encoding.UTF8.GetBytes(normalizedText);
+        var actualDigest = $"SHA256:{Convert.ToHexString(SHA256.HashData(normalizedBytes)).ToLowerInvariant()}";
+        if (!string.Equals(actualDigest, ExpectedBsDatasetDigest, StringComparison.OrdinalIgnoreCase))
+        {
+            throw new CryptographicException(
+                $"Bikram Sambat catalog integrity failure: expected '{ExpectedBsDatasetDigest}', computed '{actualDigest}'.");
+        }
+
+        var existingKeys = (await db.BikramSambatCalendarMonths
+            .AsNoTracking()
+            .Select(m => new { m.BsYear, m.BsMonth })
+            .ToListAsync(cancellationToken))
+            .Select(m => $"{m.BsYear}|{m.BsMonth}")
+            .ToHashSet(StringComparer.Ordinal);
+
+        // Verified epoch anchor derived continuously from 1975-01-01 BS == 1918-04-13 AD
+        var cursorGregorian = new DateOnly(2018, 4, 14);
+        var lines = normalizedText.Split('\n', StringSplitOptions.RemoveEmptyEntries)
+            .Where(l => !l.StartsWith("Year,", StringComparison.OrdinalIgnoreCase));
+
+        foreach (var line in lines)
+        {
+            var parts = line.Trim().Split(',');
+            int bsYear = int.Parse(parts[0], System.Globalization.CultureInfo.InvariantCulture);
+
+            for (int m = 1; m <= 12; m++)
+            {
+                int daysInMonth = int.Parse(parts[m], System.Globalization.CultureInfo.InvariantCulture);
+                var startDate = cursorGregorian;
+                var endDate = startDate.AddDays(daysInMonth - 1);
+                var key = $"{bsYear}|{m}";
+
+                if (!existingKeys.Contains(key))
+                {
+                    var (en, ne) = BsMonthNames[m - 1];
+                    db.BikramSambatCalendarMonths.Add(
+                        BikramSambatCalendarMonth.Create(
+                            bsYear, m, en, ne, daysInMonth, startDate, endDate, BsDatasetCitation, seedVersion: 1));
+                }
+
+                cursorGregorian = endDate.AddDays(1);
+            }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    private static async Task SeedBaselineHolidaysAsync(ApplicationDbContext db, CancellationToken cancellationToken)
+    {
+        var baselines = new[]
+        {
+            HolidayCalendar.Create(
+                "NP", HolidayScope.National, new DateOnly(2026, 4, 14),
+                "Nepali New Year 2083 BS (Baishakh 1)",
+                id: CreateDeterministicGuid("HOLIDAY:NP:2026-04-14:NEWYEAR2083")),
+            HolidayCalendar.Create(
+                "NP", HolidayScope.National, new DateOnly(2026, 9, 20),
+                "Nepal Constitution Day (Ashwin 4, 2083)",
+                id: CreateDeterministicGuid("HOLIDAY:NP:2026-09-20:CONSTITUTION")),
+            HolidayCalendar.Create(
+                "US", HolidayScope.National, new DateOnly(2026, 7, 4),
+                "US Independence Day",
+                id: CreateDeterministicGuid("HOLIDAY:US:2026-07-04:INDEPENDENCE")),
+            HolidayCalendar.Create(
+                "US", HolidayScope.National, new DateOnly(2026, 11, 26),
+                "US Thanksgiving Day",
+                id: CreateDeterministicGuid("HOLIDAY:US:2026-11-26:THANKSGIVING"))
+        };
+
+        var existingIds = (await db.HolidayCalendars
+            .AsNoTracking()
+            .Select(h => h.Id)
+            .ToListAsync(cancellationToken))
+            .ToHashSet();
+
+        foreach (var h in baselines)
+        {
+            if (!existingIds.Contains(h.Id))
+            {
+                db.HolidayCalendars.Add(h);
             }
         }
 

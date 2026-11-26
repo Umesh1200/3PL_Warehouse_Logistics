@@ -15908,6 +15908,88 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.ToTable("administrative_divisions", (string)null);
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.BikramSambatCalendarMonth", b =>
+                {
+                    b.Property<int>("BsYear")
+                        .HasColumnType("integer")
+                        .HasColumnName("bs_year");
+
+                    b.Property<int>("BsMonth")
+                        .HasColumnType("integer")
+                        .HasColumnName("bs_month");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<int>("DaysInMonth")
+                        .HasColumnType("integer")
+                        .HasColumnName("days_in_month");
+
+                    b.Property<string>("FiscalYearLabel")
+                        .IsRequired()
+                        .HasMaxLength(16)
+                        .HasColumnType("character varying(16)")
+                        .HasColumnName("fiscal_year_label");
+
+                    b.Property<DateOnly>("GregorianEndDate")
+                        .HasColumnType("date")
+                        .HasColumnName("gregorian_end_date");
+
+                    b.Property<DateOnly>("GregorianStartDate")
+                        .HasColumnType("date")
+                        .HasColumnName("gregorian_start_date");
+
+                    b.Property<string>("MonthNameEn")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("month_name_en");
+
+                    b.Property<string>("MonthNameNe")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("month_name_ne");
+
+                    b.Property<int>("SeedVersion")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("seed_version");
+
+                    b.Property<string>("SourceCitation")
+                        .IsRequired()
+                        .HasMaxLength(300)
+                        .HasColumnType("character varying(300)")
+                        .HasColumnName("source_citation");
+
+                    b.HasKey("BsYear", "BsMonth")
+                        .HasName("pk_bikram_sambat_calendar_months");
+
+                    b.HasIndex("GregorianEndDate")
+                        .IsUnique()
+                        .HasDatabaseName("ix_bikram_sambat_calendar_months_gregorian_end_date");
+
+                    b.HasIndex("GregorianStartDate")
+                        .IsUnique()
+                        .HasDatabaseName("ix_bikram_sambat_calendar_months_gregorian_start_date");
+
+                    b.HasIndex("GregorianStartDate", "GregorianEndDate")
+                        .HasDatabaseName("ix_bikram_sambat_calendar_months_gregorian_start_date_gregoria");
+
+                    b.ToTable("bikram_sambat_calendar_months", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_bs_months_days_range", "days_in_month >= 29 AND days_in_month <= 32");
+
+                            t.HasCheckConstraint("ck_bs_months_month_range", "bs_month >= 1 AND bs_month <= 12");
+
+                            t.HasCheckConstraint("ck_bs_months_span", "gregorian_end_date >= gregorian_start_date");
+
+                            t.HasCheckConstraint("ck_bs_months_year_range", "bs_year >= 2075 AND bs_year <= 2090");
+                        });
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.CountryCompliancePolicy", b =>
                 {
                     b.Property<Guid>("Id")
@@ -16215,6 +16297,85 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.FacilityCalendar", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_calendar_id");
+
+                    b.Property<long>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<TimeSpan>("DefaultCutoffLocalTime")
+                        .HasColumnType("interval")
+                        .HasColumnName("default_cutoff_local_time");
+
+                    b.Property<DateTime>("EffectiveFromUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("effective_from_utc");
+
+                    b.Property<DateTime?>("EffectiveToUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("effective_to_utc");
+
+                    b.Property<Guid>("FacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_id");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.Property<string>("WeeklyRestDaysCsv")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)")
+                        .HasColumnName("weekly_rest_days_csv");
+
+                    b.Property<TimeSpan>("WorkdayEndLocalTime")
+                        .HasColumnType("interval")
+                        .HasColumnName("workday_end_local_time");
+
+                    b.Property<TimeSpan>("WorkdayStartLocalTime")
+                        .HasColumnType("interval")
+                        .HasColumnName("workday_start_local_time");
+
+                    b.HasKey("Id")
+                        .HasName("pk_facility_calendars");
+
+                    b.HasIndex("FacilityId", "IsActive", "EffectiveFromUtc")
+                        .HasDatabaseName("ix_facility_calendars_facility_id_is_active_effective_from_utc");
+
+                    b.ToTable("facility_calendars", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_facility_calendars_hours", "workday_end_local_time > workday_start_local_time AND default_cutoff_local_time >= workday_start_local_time AND default_cutoff_local_time <= workday_end_local_time");
+
+                            t.HasCheckConstraint("ck_facility_calendars_window", "effective_to_utc IS NULL OR effective_to_utc > effective_from_utc");
+                        });
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.FxRateRecord", b =>
                 {
                     b.Property<Guid>("Id")
@@ -16394,6 +16555,93 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                             t.HasCheckConstraint("ck_fx_rates_unit_multiplier_positive", "unit_multiplier > 0");
 
                             t.HasCheckConstraint("ck_fx_rates_window", "effective_to_utc IS NULL OR effective_to_utc > effective_from_utc");
+                        });
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.HolidayCalendar", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("holiday_id");
+
+                    b.Property<long>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
+                    b.Property<string>("CountryCode")
+                        .IsRequired()
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)")
+                        .HasColumnName("country_code");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<Guid?>("FacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_id");
+
+                    b.Property<DateOnly>("HolidayDate")
+                        .HasColumnType("date")
+                        .HasColumnName("holiday_date");
+
+                    b.Property<string>("HolidayScope")
+                        .IsRequired()
+                        .HasMaxLength(24)
+                        .HasColumnType("character varying(24)")
+                        .HasColumnName("holiday_scope");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("IsWorkingDayOverride")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_working_day_override");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("SubdivisionCode")
+                        .HasMaxLength(20)
+                        .HasColumnType("character varying(20)")
+                        .HasColumnName("subdivision_code");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_holiday_calendars");
+
+                    b.HasIndex("CountryCode", "HolidayDate", "IsActive")
+                        .HasDatabaseName("ix_holiday_calendars_country_code_holiday_date_is_active");
+
+                    b.HasIndex("FacilityId", "HolidayDate", "IsActive")
+                        .HasDatabaseName("ix_holiday_calendars_facility_id_holiday_date_is_active");
+
+                    b.ToTable("holiday_calendars", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_holiday_calendars_scope_binding", "(holiday_scope = 'National' AND subdivision_code IS NULL AND facility_id IS NULL) OR (holiday_scope = 'Regional' AND subdivision_code IS NOT NULL AND facility_id IS NULL) OR (holiday_scope = 'Facility' AND facility_id IS NOT NULL)");
                         });
                 });
 
@@ -20602,6 +20850,18 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("SupersededByPolicy");
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.FacilityCalendar", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "Facility")
+                        .WithMany()
+                        .HasForeignKey("FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_facility_calendars_facilities_facility_id");
+
+                    b.Navigation("Facility");
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.FxRateRecord", b =>
                 {
                     b.HasOne("Warehouse3PL.Domain.Entities.Reference.CurrencyMaster", "BaseCurrency")
@@ -20629,6 +20889,26 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("QuoteCurrency");
 
                     b.Navigation("SupersededByRate");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.HolidayCalendar", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.CountryProfile", "Country")
+                        .WithMany()
+                        .HasForeignKey("CountryCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_holiday_calendars_country_profiles_country_code");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "Facility")
+                        .WithMany()
+                        .HasForeignKey("FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_holiday_calendars_facilities_facility_id");
+
+                    b.Navigation("Country");
+
+                    b.Navigation("Facility");
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.UomConversion", b =>

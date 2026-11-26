@@ -1,6 +1,7 @@
 import React from 'react';
 import { ControlTowerSummaryDto } from '../../types/controlTower';
 import { AppIcon } from '../common/AppIcon';
+import { formatNumber } from '../../utils/formatters';
 
 export interface KpiMetricsGridProps {
   summary: ControlTowerSummaryDto | null;
@@ -73,7 +74,7 @@ export const KpiMetricsGrid: React.FC<KpiMetricsGridProps> = ({
           </div>
         </div>
         <div className="kpi-value-row">
-          <span className="kpi-value">{summary.inboundPalletsReceivedToday.toLocaleString()}</span>
+          <span className="kpi-value">{formatNumber(summary.inboundPalletsReceivedToday)}</span>
           <span className="kpi-unit">pallets</span>
         </div>
         <p className="kpi-subtitle">
@@ -92,7 +93,7 @@ export const KpiMetricsGrid: React.FC<KpiMetricsGridProps> = ({
           </div>
         </div>
         <div className="kpi-value-row">
-          <span className="kpi-value">{summary.putawayCompletedToday.toLocaleString()}</span>
+          <span className="kpi-value">{formatNumber(summary.putawayCompletedToday)}</span>
           <span className="kpi-unit">tasks</span>
         </div>
         <p className="kpi-subtitle">Completed and confirmed to primary racks</p>
@@ -107,11 +108,11 @@ export const KpiMetricsGrid: React.FC<KpiMetricsGridProps> = ({
           </div>
         </div>
         <div className="kpi-value-row">
-          <span className="kpi-value">{summary.unitsPickedToday.toLocaleString()}</span>
+          <span className="kpi-value">{formatNumber(summary.unitsPickedToday)}</span>
           <span className="kpi-unit">units</span>
         </div>
         <p className="kpi-subtitle">
-          {summary.cartonsPackedToday.toLocaleString()} cartons packed
+          {formatNumber(summary.cartonsPackedToday)} cartons packed
         </p>
       </div>
 
@@ -124,11 +125,11 @@ export const KpiMetricsGrid: React.FC<KpiMetricsGridProps> = ({
           </div>
         </div>
         <div className="kpi-value-row">
-          <span className="kpi-value">{summary.ordersDispatchedToday.toLocaleString()}</span>
+          <span className="kpi-value">{formatNumber(summary.ordersDispatchedToday)}</span>
           <span className="kpi-unit">orders</span>
         </div>
         <p className="kpi-subtitle">
-          {summary.packagesDispatchedToday.toLocaleString()} packages carrier-manifested
+          {formatNumber(summary.packagesDispatchedToday)} packages carrier-manifested
         </p>
       </div>
 

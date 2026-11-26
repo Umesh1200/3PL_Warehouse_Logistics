@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { FacilityDto, CurrentUserDto } from '../../types/auth';
 import { AppIcon } from '../common/AppIcon';
+import { formatTime } from '../../utils/formatters';
 
 export type TelemetryFreshnessStatus = 'live' | 'refreshing' | 'stale' | 'error' | 'restricted';
 
@@ -33,13 +34,16 @@ export const ControlTowerHeader: React.FC<ControlTowerHeaderProps> = ({
     const updateTime = () => {
       const now = new Date();
       setCurrentTime(
-        now.toISOString().substring(11, 19) + ' UTC'
+        formatTime(now, {
+          timeZone: activeFacility?.timezone,
+          countryCode: activeFacility?.countryCode,
+        })
       );
     };
     updateTime();
     const interval = setInterval(updateTime, 1000);
     return () => clearInterval(interval);
-  }, []);
+  }, [activeFacility?.timezone, activeFacility?.countryCode]);
 
   const renderFreshnessBadge = () => {
     switch (telemetryStatus) {
@@ -112,12 +116,22 @@ export const ControlTowerHeader: React.FC<ControlTowerHeaderProps> = ({
           )}
           {backendAsOfUtc && (
             <span style={{ color: '#cbd5e1' }}>
-              Backend As-Of: <strong>{new Date(backendAsOfUtc).toISOString().substring(11, 19)} UTC</strong>
+              Backend As-Of:{' '}
+              <strong>
+                {formatTime(backendAsOfUtc, {
+                  timeZone: activeFacility?.timezone,
+                  countryCode: activeFacility?.countryCode,
+                })}
+              </strong>
             </span>
           )}
           {lastSuccessfulSync ? (
             <span style={{ color: '#94a3b8', fontSize: '12px' }}>
-              Last Synchronized: {lastSuccessfulSync.toLocaleTimeString()}
+              Last Synchronized:{' '}
+              {formatTime(lastSuccessfulSync, {
+                timeZone: activeFacility?.timezone,
+                countryCode: activeFacility?.countryCode,
+              })}
             </span>
           ) : (
             <span style={{ color: '#f87171', fontSize: '12px' }}>
@@ -130,7 +144,7 @@ export const ControlTowerHeader: React.FC<ControlTowerHeaderProps> = ({
       <div className="ct-header-right">
         <div className="ct-clock-widget" aria-label="Current Operating Time">
           <span className="ct-clock-label">OPERATING SHIFT CLOCK</span>
-          <span className="ct-clock-time">{currentTime || '--:--:-- UTC'}</span>
+          <span className="ct-clock-time">{currentTime || '--:--:--'}</span>
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>

@@ -3,6 +3,7 @@ import { useFacility } from '../../context/FacilityContext';
 import { useAuth } from '../../context/AuthContext';
 import { receivingApi, ReceivingSessionQueryParams } from '../../services/receivingApi';
 import { AppIcon } from '../../components/common/AppIcon';
+import { formatDate, formatTime } from '../../utils/formatters';
 import {
   ReceivingSessionDto,
   ReceivingStatus,
@@ -553,7 +554,9 @@ export const ReceivingPage: React.FC = () => {
                 <span className="summary-label">
                   <AppIcon name="Clock" size="sm" /> Started At
                 </span>
-                <span className="summary-val">{new Date(sessionDetail.startedAtUtc).toLocaleTimeString()}</span>
+                <span className="summary-val">
+                  {formatTime(sessionDetail.startedAtUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })}
+                </span>
               </div>
               <div className="summary-col">
                 <span className="summary-label">
@@ -831,7 +834,9 @@ export const ReceivingPage: React.FC = () => {
                         <td className="fw-700">{line.quantityReceived}</td>
                         <td className="code-font">{line.lotNumber || '—'}</td>
                         <td className="code-font highlight-staging">{line.stagingLocationCode || 'Auto Staging'}</td>
-                        <td className="text-muted">{new Date(line.scannedAtUtc).toLocaleTimeString()}</td>
+                        <td className="text-muted">
+                          {formatTime(line.scannedAtUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })}
+                        </td>
                       </tr>
                     ))
                   )}
@@ -868,13 +873,20 @@ export const ReceivingPage: React.FC = () => {
                           <td className="fw-600 text-danger">{d.type}</td>
                           <td className="fw-600">{d.discrepantQuantity}</td>
                           <td>{d.notes || '—'}</td>
-                          <td className="text-muted">{new Date(d.reportedAtUtc).toLocaleTimeString()}</td>
+                          <td className="text-muted">
+                            {formatTime(d.reportedAtUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })}
+                          </td>
                           <td>
                             <span className={`status-badge badge-${d.status.toLowerCase()}`}>
                               {d.status}
                             </span>
                           </td>
-                          <td className="text-muted">{d.resolutionNotes || (d.resolvedAtUtc ? `Resolved at ${new Date(d.resolvedAtUtc).toLocaleTimeString()}` : '—')}</td>
+                          <td className="text-muted">
+                            {d.resolutionNotes ||
+                              (d.resolvedAtUtc
+                                ? `Resolved at ${formatTime(d.resolvedAtUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })}`
+                                : '—')}
+                          </td>
                           {canResolveDiscrepancy && (
                             <td>
                               {d.status === DiscrepancyResolutionStatus.PendingReview ? (
@@ -1017,7 +1029,9 @@ export const ReceivingPage: React.FC = () => {
                           <td>{s.trailerNumber || s.visitNumber || '—'}</td>
                           <td>{s.asnNumber || s.poNumber || 'Blind'}</td>
                           <td>{getStatusBadge(s.status)}</td>
-                          <td className="text-muted">{new Date(s.startedAtUtc).toLocaleDateString()}</td>
+                          <td className="text-muted">
+                            {formatDate(s.startedAtUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })}
+                          </td>
                           <td className="fw-600">{s.lines?.length || 0}</td>
                           <td>
                             <button

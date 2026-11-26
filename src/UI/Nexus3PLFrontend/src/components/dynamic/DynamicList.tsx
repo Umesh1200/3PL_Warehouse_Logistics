@@ -3,6 +3,7 @@ import { EntitySchema, ListColumnDefinition, ActionDefinition } from '../../type
 import { AppIcon } from '../common/AppIcon';
 import { StatusBadge } from '../common/StatusBadge';
 import { AuthContext } from '../../context/AuthContext';
+import { formatDate, formatDateTime } from '../../utils/formatters';
 
 export interface DynamicListProps {
   schema: EntitySchema;
@@ -96,18 +97,10 @@ export const DynamicList: React.FC<DynamicListProps> = ({
         return <span className="currency-pill">{String(rawVal)}</span>;
 
       case 'date':
-        try {
-          return <span>{new Date(rawVal).toLocaleDateString()}</span>;
-        } catch {
-          return <span>{String(rawVal)}</span>;
-        }
+        return <span>{formatDate(rawVal)}</span>;
 
       case 'datetime':
-        try {
-          return <span>{new Date(rawVal).toLocaleString()}</span>;
-        } catch {
-          return <span>{String(rawVal)}</span>;
-        }
+        return <span>{formatDateTime(rawVal)}</span>;
 
       default:
         return <span>{String(rawVal)}</span>;

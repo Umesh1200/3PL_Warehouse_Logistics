@@ -238,7 +238,7 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
             id: primaryKeyVal,
             companyName: formData.companyName?.trim(),
             slaTier: normalizeSlaTier(formData.slaTier),
-            currency: (formData.currency?.trim() || 'USD').toUpperCase(),
+            currency: (formData.currency ?? '').trim().toUpperCase(),
             status: normalizeClientStatus(formData.status),
           };
           await adminApi.updateClient(primaryKeyVal, updatePayload);
@@ -258,7 +258,7 @@ export const DynamicEntityPage: React.FC<DynamicEntityPageProps> = ({
             companyName: formData.companyName?.trim(),
             accountCode: formData.accountCode?.trim().toUpperCase(),
             slaTier: normalizeSlaTier(formData.slaTier),
-            currency: (formData.currency?.trim() || 'USD').toUpperCase(),
+            currency: (formData.currency ?? '').trim().toUpperCase(),
             status: normalizeClientStatus(formData.status),
           };
           await adminApi.createClient(createPayload);

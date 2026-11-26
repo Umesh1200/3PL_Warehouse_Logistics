@@ -59,3 +59,14 @@ public enum CompliancePolicyApprovalStatus
     VerifiedApproved = 2,
     Superseded = 3
 }
+
+/// <summary>
+/// Geographic or operational applicability tier for HolidayCalendar entries.
+/// Precedence at evaluation time: Facility &gt; Regional &gt; National.
+/// </summary>
+public enum HolidayScope
+{
+    National = 1,
+    Regional = 2,
+    Facility = 3
+}

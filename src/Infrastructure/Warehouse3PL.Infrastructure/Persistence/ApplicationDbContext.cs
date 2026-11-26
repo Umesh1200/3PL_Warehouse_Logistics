@@ -32,6 +32,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryComplianceLocks = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryLegalEntityLocks = new();
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryFxRateLocks = new(StringComparer.Ordinal);
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryFacilityCalendarLocks = new();
 
     public ApplicationDbContext(
         DbContextOptions<ApplicationDbContext> options,
@@ -238,6 +239,9 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<FxRateRecord> FxRateRecords => Set<FxRateRecord>();
     public DbSet<UomDefinition> UomDefinitions => Set<UomDefinition>();
     public DbSet<UomConversion> UomConversions => Set<UomConversion>();
+    public DbSet<BikramSambatCalendarMonth> BikramSambatCalendarMonths => Set<BikramSambatCalendarMonth>();
+    public DbSet<HolidayCalendar> HolidayCalendars => Set<HolidayCalendar>();
+    public DbSet<FacilityCalendar> FacilityCalendars => Set<FacilityCalendar>();
 
     public async Task BeginTransactionAsync(CancellationToken cancellationToken = default)
     {
@@ -943,6 +947,85 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
                 throw new Domain.Exceptions.ConcurrencyException(
                     "FX_RATE_CONFLICT",
                     $"Concurrent modification or active window overlap prevented for '{normalizedBase}/{normalizedQuote}' ({sourceAuthority}, {pgEx.SqlState}).");
+            }
+        }
+
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            return await RunLockedActionAsync();
+        }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt)
+            {
+                ClearChangeTracker();
+            }
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                var result = await RunLockedActionAsync();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
+    }
+
+    public async Task<TResult> ExecuteWithFacilityCalendarLockAsync<TResult>(
+        Guid facilityId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Database.IsRelational())
+        {
+            var gate = InMemoryFacilityCalendarLocks.GetOrAdd(facilityId, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                return await action();
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        async Task AcquireCalendarLocksAsync()
+        {
+            if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var lockKey = $"FACILITYCALENDAR:{facilityId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0::bigint))",
+                    cancellationToken);
+
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM facility_calendars WHERE facility_id = {facilityId} AND is_active = true FOR UPDATE",
+                    cancellationToken);
+            }
+        }
+
+        async Task<TResult> RunLockedActionAsync()
+        {
+            try
+            {
+                await AcquireCalendarLocksAsync();
+                return await action();
+            }
+            catch (DbUpdateException dbEx) when (dbEx.InnerException is Npgsql.PostgresException pgEx &&
+                                                 (pgEx.SqlState == "23P01" || pgEx.SqlState == "23505"))
+            {
+                throw new Domain.Exceptions.ConcurrencyException(
+                    "FACILITY_CALENDAR_CONFLICT",
+                    $"Concurrent modification or active window overlap prevented for facility calendar '{facilityId}' ({pgEx.SqlState}).");
             }
         }
 

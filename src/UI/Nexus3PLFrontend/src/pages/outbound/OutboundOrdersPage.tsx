@@ -13,6 +13,7 @@ import { useAuth } from '../../context/AuthContext';
 import { useFacility } from '../../context/FacilityContext';
 import { useRouter } from '../../context/RouterContext';
 import { outboundApi } from '../../services/outboundApi';
+import { formatDate } from '../../utils/formatters';
 import {
   GetOutboundOrdersParams,
   OutboundOrderDto,
@@ -364,7 +365,7 @@ export const OutboundOrdersPage: React.FC = () => {
                           <td>{order.serviceLevel}</td>
                           <td>
                             {order.requiredShipDateUtc
-                              ? new Date(order.requiredShipDateUtc).toLocaleDateString()
+                              ? formatDate(order.requiredShipDateUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })
                               : '—'}
                           </td>
                           <td>

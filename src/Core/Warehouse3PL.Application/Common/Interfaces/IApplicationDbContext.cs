@@ -194,6 +194,9 @@ public interface IApplicationDbContext
     DbSet<FxRateRecord> FxRateRecords { get; }
     DbSet<UomDefinition> UomDefinitions { get; }
     DbSet<UomConversion> UomConversions { get; }
+    DbSet<BikramSambatCalendarMonth> BikramSambatCalendarMonths { get; }
+    DbSet<HolidayCalendar> HolidayCalendars { get; }
+    DbSet<FacilityCalendar> FacilityCalendars { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
     Task BeginTransactionAsync(CancellationToken cancellationToken = default);
@@ -229,6 +232,10 @@ public interface IApplicationDbContext
         string baseCurrencyCode,
         string quoteCurrencyCode,
         Domain.Enums.FxRateSourceAuthority sourceAuthority,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithFacilityCalendarLockAsync<TResult>(
+        Guid facilityId,
         Func<Task<TResult>> action,
         CancellationToken cancellationToken = default);
     bool IsRelationalDatabase { get; }

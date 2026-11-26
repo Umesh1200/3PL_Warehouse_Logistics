@@ -18,6 +18,7 @@ import {
   generateActionIdempotencyKey,
 } from './OutboundStatusBadge';
 import { OutboundTableRegion } from './OutboundTableRegion';
+import { formatDate, formatDateTime } from '../../utils/formatters';
 
 export interface OrderDetailDrawerProps {
   orderId: string | null;
@@ -437,7 +438,7 @@ export const OrderDetailDrawer: React.FC<OrderDetailDrawerProps> = ({
                   <span className="meta-label">Required Ship Date</span>
                   <span>
                     {order.requiredShipDateUtc
-                      ? new Date(order.requiredShipDateUtc).toLocaleDateString()
+                      ? formatDate(order.requiredShipDateUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })
                       : '—'}
                   </span>
                 </div>
@@ -521,7 +522,7 @@ export const OrderDetailDrawer: React.FC<OrderDetailDrawerProps> = ({
                           <td>
                             {line.requiredLotNumber ? `Lot: ${line.requiredLotNumber}` : 'Any lot'}
                             {line.minExpiryDateUtc
-                              ? ` • Min Exp ${new Date(line.minExpiryDateUtc).toLocaleDateString()}`
+                              ? ` • Min Exp ${formatDate(line.minExpiryDateUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })}`
                               : ''}
                           </td>
                           <td>
@@ -747,7 +748,7 @@ export const OrderDetailDrawer: React.FC<OrderDetailDrawerProps> = ({
                         </span>
                         <span className="cell-sub">
                           {h.reason || h.notes || 'Status transition'} &bull;{' '}
-                          {new Date(h.changedAtUtc).toLocaleString()}
+                          {formatDateTime(h.changedAtUtc, { timeZone: activeFacility?.timezone, countryCode: activeFacility?.countryCode })}
                         </span>
                       </li>
                     ))}

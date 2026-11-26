@@ -7,6 +7,7 @@ import {
 } from '../../types/outbound';
 import { Modal } from '../common/Modal';
 import { OrderDeliveryStatusBadge, TrackingMilestoneBadge } from './OutboundStatusBadge';
+import { formatDateTime } from '../../utils/formatters';
 
 export interface TrackingTimelineModalProps {
   isOpen: boolean;
@@ -188,7 +189,7 @@ export const TrackingTimelineModal: React.FC<TrackingTimelineModalProps> = ({
                   <span>In Transit: {orderRollup.inTransitPackages}</span>
                   <span>Exceptions: {orderRollup.exceptionPackages}</span>
                   {orderRollup.deliveredAtUtc && (
-                    <span>Delivered At: {new Date(orderRollup.deliveredAtUtc).toLocaleString()}</span>
+                    <span>Delivered At: {formatDateTime(orderRollup.deliveredAtUtc)}</span>
                   )}
                 </div>
               </div>
@@ -211,7 +212,7 @@ export const TrackingTimelineModal: React.FC<TrackingTimelineModalProps> = ({
                         <TrackingMilestoneBadge status={ev.milestoneStatus} />
                       </div>
                       <div className="dispatch-shipment-meta" style={{ marginTop: '4px' }}>
-                        <span>Occurred: {new Date(ev.occurredAtUtc).toLocaleString()}</span>
+                        <span>Occurred: {formatDateTime(ev.occurredAtUtc)}</span>
                         {ev.location && <span>Location: {ev.location}</span>}
                       </div>
                     </li>

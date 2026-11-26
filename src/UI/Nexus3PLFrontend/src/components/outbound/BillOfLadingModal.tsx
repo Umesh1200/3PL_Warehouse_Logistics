@@ -4,6 +4,7 @@ import { BillOfLadingDto, ShipmentDto } from '../../types/outbound';
 import { formatServiceLevelLabel } from './OutboundStatusBadge';
 import { Modal } from '../common/Modal';
 import { AppIcon } from '../common/AppIcon';
+import { formatDateTime } from '../../utils/formatters';
 
 export interface BillOfLadingModalProps {
   isOpen: boolean;
@@ -213,7 +214,7 @@ export const BillOfLadingModal: React.FC<BillOfLadingModalProps> = ({
               <div>
                 <div className="bol-number-title">{bol.bolNumber}</div>
                 <div className="outbound-subtitle">
-                  Issued {new Date(bol.issuedAtUtc).toLocaleString()} &bull; {bol.carrierCode} (
+                  Issued {formatDateTime(bol.issuedAtUtc)} &bull; {bol.carrierCode} (
                   {formatServiceLevelLabel(bol.serviceLevel)})
                 </div>
               </div>

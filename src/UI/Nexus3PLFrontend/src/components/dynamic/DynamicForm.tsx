@@ -261,7 +261,7 @@ export const DynamicForm: React.FC<DynamicFormProps> = ({
             type="text"
             maxLength={3}
             className={`form-input code-font currency-input ${error ? 'input-error' : ''}`}
-            placeholder={field.placeholder || 'USD'}
+            placeholder={field.placeholder || 'ISO 4217 (e.g. USD, NPR)'}
             value={value}
             onChange={(e) => handleFieldChange(field, e.target.value)}
           />

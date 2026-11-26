@@ -86,8 +86,8 @@ export const TEST_CLIENT_SCHEMA_FIXTURE: EntitySchema = {
       label: 'Billing Currency',
       type: 'currency',
       required: true,
-      defaultValue: 'USD',
-      placeholder: 'USD',
+      defaultValue: '',
+      placeholder: 'ISO 4217 (e.g. USD, NPR)',
       icon: 'DollarSign',
       validation: {
         min: 3,

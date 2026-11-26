@@ -3,6 +3,7 @@ import { useFacility } from '../../context/FacilityContext';
 import { useAuth } from '../../context/AuthContext';
 import { inventoryApi } from '../../services/inventoryApi';
 import { StockOnHandDto, StockOnHandQuery } from '../../types/inventory';
+import { formatNumber } from '../../utils/formatters';
 
 export const StockOnHandPage: React.FC = () => {
   const { activeFacility } = useFacility();
@@ -89,18 +90,18 @@ export const StockOnHandPage: React.FC = () => {
         </div>
         <div className="card metric-card">
           <span className="metric-label">Available for Order</span>
-          <span className="metric-value text-success" data-testid="metric-available-qty">{totalAvailable.toLocaleString()}</span>
+          <span className="metric-value text-success" data-testid="metric-available-qty">{formatNumber(totalAvailable, { countryCode: activeFacility?.countryCode })}</span>
           <span className="metric-sub">Unreserved stock</span>
         </div>
         <div className="card metric-card">
           <span className="metric-label">Allocated / Reserved</span>
-          <span className="metric-value text-warning">{totalAllocated.toLocaleString()}</span>
+          <span className="metric-value text-warning">{formatNumber(totalAllocated, { countryCode: activeFacility?.countryCode })}</span>
           <span className="metric-sub">Waves &amp; holds</span>
         </div>
         <div className="card metric-card">
           <span className="metric-label">Quarantine / Damaged</span>
           <span className="metric-value text-danger" data-testid="metric-quarantine-qty">
-            {totalQuarantinedOrDamaged.toLocaleString()}
+            {formatNumber(totalQuarantinedOrDamaged, { countryCode: activeFacility?.countryCode })}
           </span>
           <span className="metric-sub">QC hold &amp; damage</span>
         </div>
