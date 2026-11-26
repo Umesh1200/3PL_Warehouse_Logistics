@@ -6,8 +6,9 @@
 - **Code & Test Remediation Commits:**
   - `a16ebafd91abae850b34213cdc5e31fc7180d59e` (`fix(mdm-1.5): remediate R01-R05 FX/tx/loop/prefix-tracking/Redis pubsub & outbox backoff`)
   - `7245300e09627e0ffeedd017dd255b0a0a61b3fc` (`fix(mdm15): flush policy supersede before approval in live Redis check`)
+  - `b37bf4dbb9201c9da5879449dd669e9694e47a0d` (`fix(mdm15): flush R02 policy supersede before approval deterministically`)
 - **Preserved `main` & `origin/main`:** `a198f02090194ce4d59dec2941c89d519757f4b4`
-- **Passing CI Verification Run (before adding this report):** [GitHub Actions Run `45804291442`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45804291442) on commit `7245300e09627e0ffeedd017dd255b0a0a61b3fc`
+- **Passing CI Verification Run (before final doc commit):** [GitHub Actions Run `45807364080`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45807364080) on commit `b37bf4dbb9201c9da5879449dd669e9694e47a0d`
 
 ---
 
@@ -71,7 +72,7 @@
 
 ## 3. Before vs. After Behavioral Evidence
 
-| Scenario | Before Remediation (`83fba92`) | After Remediation (`a16ebaf` / `7245300`) |
+| Scenario | Before Remediation (`83fba92`) | After Remediation (`b37bf4d`) |
 | :--- | :--- | :--- |
 | **Reversed-window FX lookup** (`Jun -> Feb` on non-overlapping `[Jan, Jun)` / `[Jun, Dec)` pair) | Effective-date cache key / subset risk could mismatch uncached query. | `FxConversionService` caches full published pair history (`fx-pair-history:EUR:NPR:ManualApproved`) and evaluates `[EffectiveFromUtc, EffectiveToUtc)` identically (`14600.00m` and `13900.00m`, matching uncached path). |
 | **Transaction-local config read & rollback** | Reads inside an open transaction could read/populate shared L1/L2 cache with pre-commit or uncommitted rows. | `HasActiveTransaction == true` bypasses L1/L2 read & write completely; callers inside a transaction read DB-local uncommitted changes, and rolled-back changes never poison other instances (`CONFIG_EPOCH_CONTENTION_EXCEEDED` prevents torn snapshots under sustained concurrency). |
@@ -170,7 +171,7 @@ sequenceDiagram
 
 ### 5.1 .NET Unit & Security Tests (`Warehouse3PL.UnitTests`)
 - **Command:** `dotnet test tests/Warehouse3PL.UnitTests/Warehouse3PL.UnitTests.csproj --configuration Release`
-- **CI Job:** [Run `45804291442` / Job `139855317699`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45804291442)
+- **CI Job:** [Run `45807364080` / Job `139866012690`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45807364080)
 - **Observed Result:** `Passed! - Failed: 0, Passed: 1438, Skipped: 0, Total: 1438` (Duration: `49 s`)
 - **MDM-1.5 Tests Executed & Passed in `Mdm15ConfigurationConsistencyTests.cs`:**
   - `TwoInstances_WithoutRedis_DetectPolicyFxCalendarAndLegalEntityMutations_Immediately`
@@ -181,7 +182,7 @@ sequenceDiagram
 
 ### 5.2 Live PostgreSQL 16 + Live Redis 7 Verification (`Phase73PostgresCheck`)
 - **Workflow:** `.github/workflows/phase73-postgres-verification.yml` (`postgres:16-alpine` + `redis:7-alpine`, `PHASE73_REDIS_CONNECTION: 127.0.0.1:6379,abortConnect=false`)
-- **CI Job:** [Run `45804291442` / Job `139855318438` (`rollback-retry`)](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45804291442)
+- **CI Job:** [Run `45807364080` / Job `139866013201` (`rollback-retry`)](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45807364080)
 - **Observed CI Output:**
   - `PASS PostgreSQL MDM-1.1 Migration, btree_gist Exclusion, Idempotent Seed, Concurrent Approval & Supersession Races, Bitemporal Continuity, Rollback & JWT Security verified cleanly.`
   - `PASS PostgreSQL MDM-1.2 Migration, LegalEntity Separation, RBAC R01, Cross-Validation R02, Concurrent Lock R03 & Physical Origin verified cleanly.`
