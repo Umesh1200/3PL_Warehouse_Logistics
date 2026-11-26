@@ -17,11 +17,16 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
 {
     private readonly IApplicationDbContext _db;
     private readonly IDateTimeProvider _dateTime;
+    private readonly IConfigurationConsistencyService? _consistencyService;
 
-    public CountryComplianceEvaluator(IApplicationDbContext db, IDateTimeProvider dateTime)
+    public CountryComplianceEvaluator(
+        IApplicationDbContext db,
+        IDateTimeProvider dateTime,
+        IConfigurationConsistencyService? consistencyService = null)
     {
         _db = db;
         _dateTime = dateTime;
+        _consistencyService = consistencyService;
     }
 
     public async Task<ComplianceEvaluationResult> EvaluateAsync(
@@ -58,17 +63,36 @@ public sealed class CountryComplianceEvaluator : ICountryComplianceEvaluator
         }
 
         // Query published policies (VerifiedApproved or Superseded; NEVER Draft)
-        // whose [EffectiveFromUtc, EffectiveToUtc) interval covers evaluatedAtUtc.
-        var matchingPublished = await _db.CountryCompliancePolicies
-            .AsNoTracking()
-            .Where(p => p.CountryCode == countryCode &&
-                        p.PolicyCode == policyCode &&
-                        (p.ApprovalStatus == CompliancePolicyApprovalStatus.VerifiedApproved ||
-                         p.ApprovalStatus == CompliancePolicyApprovalStatus.Superseded) &&
-                        p.EffectiveFromUtc <= evaluatedAtUtc &&
+        // whose [EffectiveFromUtc, EffectiveToUtc) interval covers evaluatedAtUtc,
+        // validating against authoritative PostgreSQL scope epoch when consistency service is wired.
+        var allPublishedForCode = _consistencyService != null
+            ? await _consistencyService.GetOrLoadVerifiedAsync(
+                ConfigurationScopeType.Country,
+                countryCode,
+                $"compliance-policies:{policyCode}",
+                (db, ct) => db.CountryCompliancePolicies
+                    .AsNoTracking()
+                    .Where(p => p.CountryCode == countryCode &&
+                                p.PolicyCode == policyCode &&
+                                (p.ApprovalStatus == CompliancePolicyApprovalStatus.VerifiedApproved ||
+                                 p.ApprovalStatus == CompliancePolicyApprovalStatus.Superseded))
+                    .OrderByDescending(p => p.Version)
+                    .ToListAsync(ct),
+                cancellationToken: cancellationToken)
+            : await _db.CountryCompliancePolicies
+                .AsNoTracking()
+                .Where(p => p.CountryCode == countryCode &&
+                            p.PolicyCode == policyCode &&
+                            (p.ApprovalStatus == CompliancePolicyApprovalStatus.VerifiedApproved ||
+                             p.ApprovalStatus == CompliancePolicyApprovalStatus.Superseded))
+                .OrderByDescending(p => p.Version)
+                .ToListAsync(cancellationToken);
+
+        var matchingPublished = allPublishedForCode
+            .Where(p => p.EffectiveFromUtc <= evaluatedAtUtc &&
                         (p.EffectiveToUtc == null || evaluatedAtUtc < p.EffectiveToUtc))
             .OrderByDescending(p => p.Version)
-            .ToListAsync(cancellationToken);
+            .ToList();
 
         Warehouse3PL.Domain.Entities.Reference.CountryCompliancePolicy? policy;
         bool evaluatedAgainstHistoricalSuperseded = false;

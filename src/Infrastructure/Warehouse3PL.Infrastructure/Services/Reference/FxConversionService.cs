@@ -12,15 +12,18 @@ public sealed class FxConversionService : IFxConversionService
     private readonly IApplicationDbContext _db;
     private readonly IFxRateProvider _fxRateProvider;
     private readonly IDateTimeProvider _dateTime;
+    private readonly IConfigurationConsistencyService? _consistencyService;
 
     public FxConversionService(
         IApplicationDbContext db,
         IFxRateProvider fxRateProvider,
-        IDateTimeProvider dateTime)
+        IDateTimeProvider dateTime,
+        IConfigurationConsistencyService? consistencyService = null)
     {
         _db = db;
         _fxRateProvider = fxRateProvider;
         _dateTime = dateTime;
+        _consistencyService = consistencyService;
     }
 
     public async Task<FxConversionResultDto> ConvertAmountAsync(
@@ -57,9 +60,16 @@ public sealed class FxConversionService : IFxConversionService
             })
             : _dateTime.UtcNow;
 
-        var targetCurrency = await _db.Currencies
-            .AsNoTracking()
-            .FirstOrDefaultAsync(c => c.CurrencyCode == toNorm && c.IsActive, cancellationToken)
+        var targetCurrency = (_consistencyService != null
+            ? await _consistencyService.GetOrLoadVerifiedAsync(
+                ConfigurationScopeType.Global,
+                "GLOBAL",
+                $"currency:{toNorm}",
+                (db, ct) => db.Currencies.AsNoTracking().FirstOrDefaultAsync(c => c.CurrencyCode == toNorm && c.IsActive, ct),
+                cancellationToken: cancellationToken)
+            : await _db.Currencies
+                .AsNoTracking()
+                .FirstOrDefaultAsync(c => c.CurrencyCode == toNorm && c.IsActive, cancellationToken))
             ?? throw new DomainException(
                 $"Target currency '{toNorm}' is not registered as an active CurrencyMaster entry.",
                 "FX_UNKNOWN_TARGET_CURRENCY");
@@ -87,16 +97,30 @@ public sealed class FxConversionService : IFxConversionService
                 ApprovedAtUtc: evalDateUtc);
         }
 
-        // 1. Unified bitemporal database FX resolution via shared FxDatabaseRateResolver
-        var dbMatch = await FxDatabaseRateResolver.ResolveAsync(
-            _db,
-            fromNorm,
-            toNorm,
-            evalDateUtc,
-            evalAsOfUtc,
-            valuationMode,
-            preferredAuthority,
-            cancellationToken);
+        // 1. Unified bitemporal database FX resolution via shared FxDatabaseRateResolver + epoch-verified cache
+        var dbMatch = _consistencyService != null
+            ? FxDatabaseRateResolver.SelectBestCandidate(
+                (await _consistencyService.GetOrLoadVerifiedAsync(
+                    ConfigurationScopeType.Global,
+                    "GLOBAL",
+                    $"fx-pair:{fromNorm}:{toNorm}:{preferredAuthority?.ToString() ?? "ANY"}",
+                    (db, ct) => FxDatabaseRateResolver
+                        .QueryPublishedEffectiveWindow(db, fromNorm, toNorm, evalDateUtc, preferredAuthority)
+                        .ToListAsync(ct),
+                    cancellationToken: cancellationToken))
+                .Where(r => r.EffectiveFromUtc <= evalDateUtc &&
+                            (r.EffectiveToUtc == null || evalDateUtc < r.EffectiveToUtc)),
+                evalAsOfUtc,
+                valuationMode)
+            : await FxDatabaseRateResolver.ResolveAsync(
+                _db,
+                fromNorm,
+                toNorm,
+                evalDateUtc,
+                evalAsOfUtc,
+                valuationMode,
+                preferredAuthority,
+                cancellationToken);
 
         if (dbMatch != null)
         {

@@ -1,4 +1,6 @@
 using System.Collections.Concurrent;
+using System.Data;
+using System.Data.Common;
 using System.Linq.Expressions;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Storage;
@@ -33,6 +35,9 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryLegalEntityLocks = new();
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryFxRateLocks = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryFacilityCalendarLocks = new();
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryScopeEpochLocks = new(StringComparer.Ordinal);
+    private bool _isInsideConfigurationOutboxSave;
+    private bool? _hasMdm15Schema;
 
     public ApplicationDbContext(
         DbContextOptions<ApplicationDbContext> options,
@@ -57,8 +62,378 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         if(ChangeTracker.Entries<AnalyticsIngestionJournal>().Any(x=>x.State==EntityState.Modified||x.State==EntityState.Deleted))
             throw new InvalidOperationException("Analytics ingestion journal entries are immutable.");
     }
-    public override int SaveChanges(bool acceptAllChangesOnSuccess){EnforceJournalImmutability();return base.SaveChanges(acceptAllChangesOnSuccess);}
-    public override Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess,CancellationToken cancellationToken=default){EnforceJournalImmutability();return base.SaveChangesAsync(acceptAllChangesOnSuccess,cancellationToken);}
+    public override int SaveChanges(bool acceptAllChangesOnSuccess)
+    {
+        EnforceJournalImmutability();
+        if (_isInsideConfigurationOutboxSave)
+        {
+            return base.SaveChanges(acceptAllChangesOnSuccess);
+        }
+
+        var pendingScopes = ConfigurationScopeMapper.ExtractImpactedScopes(ChangeTracker);
+        if (pendingScopes.Count == 0)
+        {
+            return base.SaveChanges(acceptAllChangesOnSuccess);
+        }
+
+        if (!Database.IsRelational())
+        {
+            return SaveWithInMemoryScopeEpochsSync(pendingScopes, acceptAllChangesOnSuccess);
+        }
+
+        return SaveWithRelationalScopeEpochsSync(pendingScopes, acceptAllChangesOnSuccess);
+    }
+
+    public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
+    {
+        EnforceJournalImmutability();
+        if (_isInsideConfigurationOutboxSave)
+        {
+            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        }
+
+        var pendingScopes = ConfigurationScopeMapper.ExtractImpactedScopes(ChangeTracker);
+        if (pendingScopes.Count == 0)
+        {
+            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        }
+
+        if (!Database.IsRelational())
+        {
+            return await SaveWithInMemoryScopeEpochsAsync(pendingScopes, acceptAllChangesOnSuccess, cancellationToken);
+        }
+
+        return await SaveWithRelationalScopeEpochsAsync(pendingScopes, acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    private int SaveWithInMemoryScopeEpochsSync(
+        IReadOnlyList<PendingConfigurationScopeMutation> pendingScopes,
+        bool acceptAllChangesOnSuccess)
+    {
+        var locks = AcquireInMemoryScopeLocksSync(pendingScopes);
+        try
+        {
+            _isInsideConfigurationOutboxSave = true;
+            var utcNow = DateTime.UtcNow;
+
+            foreach (var scope in pendingScopes)
+            {
+                var epoch = ConfigurationScopeEpochs.FirstOrDefault(e => e.ScopeType == scope.ScopeType && e.ScopeKey == scope.ScopeKey);
+                long newEpoch;
+                if (epoch == null)
+                {
+                    epoch = ConfigurationScopeEpoch.Create(scope.ScopeType, scope.ScopeKey, utcNow, 1);
+                    ConfigurationScopeEpochs.Add(epoch);
+                    newEpoch = 1;
+                }
+                else
+                {
+                    newEpoch = epoch.Increment(utcNow);
+                }
+
+                ConfigurationInvalidationEvents.Add(ConfigurationInvalidationEvent.Create(
+                    scope.ScopeType, scope.ScopeKey, newEpoch, scope.EntityType, scope.EntityId, utcNow));
+            }
+
+            return base.SaveChanges(acceptAllChangesOnSuccess);
+        }
+        finally
+        {
+            _isInsideConfigurationOutboxSave = false;
+            for (int i = locks.Count - 1; i >= 0; i--) locks[i].Release();
+        }
+    }
+
+    private async Task<int> SaveWithInMemoryScopeEpochsAsync(
+        IReadOnlyList<PendingConfigurationScopeMutation> pendingScopes,
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken)
+    {
+        var locks = await AcquireInMemoryScopeLocksAsync(pendingScopes, cancellationToken);
+        try
+        {
+            _isInsideConfigurationOutboxSave = true;
+            var utcNow = DateTime.UtcNow;
+
+            foreach (var scope in pendingScopes)
+            {
+                var epoch = await ConfigurationScopeEpochs
+                    .FirstOrDefaultAsync(e => e.ScopeType == scope.ScopeType && e.ScopeKey == scope.ScopeKey, cancellationToken);
+                long newEpoch;
+                if (epoch == null)
+                {
+                    epoch = ConfigurationScopeEpoch.Create(scope.ScopeType, scope.ScopeKey, utcNow, 1);
+                    await ConfigurationScopeEpochs.AddAsync(epoch, cancellationToken);
+                    newEpoch = 1;
+                }
+                else
+                {
+                    newEpoch = epoch.Increment(utcNow);
+                }
+
+                await ConfigurationInvalidationEvents.AddAsync(ConfigurationInvalidationEvent.Create(
+                    scope.ScopeType, scope.ScopeKey, newEpoch, scope.EntityType, scope.EntityId, utcNow), cancellationToken);
+            }
+
+            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        }
+        finally
+        {
+            _isInsideConfigurationOutboxSave = false;
+            for (int i = locks.Count - 1; i >= 0; i--) locks[i].Release();
+        }
+    }
+
+    private int SaveWithRelationalScopeEpochsSync(
+        IReadOnlyList<PendingConfigurationScopeMutation> pendingScopes,
+        bool acceptAllChangesOnSuccess)
+    {
+        if (!CheckHasMdm15SchemaSync())
+        {
+            return base.SaveChanges(acceptAllChangesOnSuccess);
+        }
+
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            var saved = base.SaveChanges(false);
+            ApplyRelationalScopeEpochsSync(pendingScopes);
+            if (acceptAllChangesOnSuccess) ChangeTracker.AcceptAllChanges();
+            return saved;
+        }
+
+        return Database.CreateExecutionStrategy().Execute(() =>
+        {
+            using var tx = Database.BeginTransaction();
+            try
+            {
+                var saved = base.SaveChanges(false);
+                ApplyRelationalScopeEpochsSync(pendingScopes);
+                tx.Commit();
+                if (acceptAllChangesOnSuccess) ChangeTracker.AcceptAllChanges();
+                return saved;
+            }
+            catch
+            {
+                tx.Rollback();
+                throw;
+            }
+        });
+    }
+
+    private async Task<int> SaveWithRelationalScopeEpochsAsync(
+        IReadOnlyList<PendingConfigurationScopeMutation> pendingScopes,
+        bool acceptAllChangesOnSuccess,
+        CancellationToken cancellationToken)
+    {
+        if (!await CheckHasMdm15SchemaAsync(cancellationToken))
+        {
+            return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
+        }
+
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            var saved = await base.SaveChangesAsync(false, cancellationToken);
+            await ApplyRelationalScopeEpochsAsync(pendingScopes, cancellationToken);
+            if (acceptAllChangesOnSuccess) ChangeTracker.AcceptAllChanges();
+            return saved;
+        }
+
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            await using var tx = await Database.BeginTransactionAsync(cancellationToken);
+            try
+            {
+                var saved = await base.SaveChangesAsync(false, cancellationToken);
+                await ApplyRelationalScopeEpochsAsync(pendingScopes, cancellationToken);
+                await tx.CommitAsync(cancellationToken);
+                if (acceptAllChangesOnSuccess) ChangeTracker.AcceptAllChanges();
+                return saved;
+            }
+            catch
+            {
+                await tx.RollbackAsync(cancellationToken);
+                throw;
+            }
+        });
+    }
+
+    private bool CheckHasMdm15SchemaSync()
+    {
+        if (_hasMdm15Schema == true) return true;
+        var conn = Database.GetDbConnection();
+        bool shouldClose = conn.State != ConnectionState.Open;
+        if (shouldClose) conn.Open();
+        try
+        {
+            using var cmd = conn.CreateCommand();
+            cmd.Transaction = Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = "SELECT CASE WHEN to_regclass('configuration_scope_epochs') IS NOT NULL THEN 1 ELSE 0 END;";
+            var exists = Convert.ToInt32(cmd.ExecuteScalar()) == 1;
+            _hasMdm15Schema = exists;
+            return exists;
+        }
+        finally
+        {
+            if (shouldClose && conn.State == ConnectionState.Open) conn.Close();
+        }
+    }
+
+    private async Task<bool> CheckHasMdm15SchemaAsync(CancellationToken cancellationToken)
+    {
+        if (_hasMdm15Schema == true) return true;
+        var conn = Database.GetDbConnection();
+        bool shouldClose = conn.State != ConnectionState.Open;
+        if (shouldClose) await conn.OpenAsync(cancellationToken);
+        try
+        {
+            await using var cmd = conn.CreateCommand();
+            cmd.Transaction = Database.CurrentTransaction?.GetDbTransaction();
+            cmd.CommandText = "SELECT CASE WHEN to_regclass('configuration_scope_epochs') IS NOT NULL THEN 1 ELSE 0 END;";
+            var exists = Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) == 1;
+            _hasMdm15Schema = exists;
+            return exists;
+        }
+        finally
+        {
+            if (shouldClose && conn.State == ConnectionState.Open) await conn.CloseAsync();
+        }
+    }
+
+    private void ApplyRelationalScopeEpochsSync(IReadOnlyList<PendingConfigurationScopeMutation> pendingScopes)
+    {
+        var conn = Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open) conn.Open();
+        var dbTx = Database.CurrentTransaction?.GetDbTransaction();
+        var utcNow = DateTime.UtcNow;
+
+        foreach (var scope in pendingScopes)
+        {
+            long newEpoch;
+            using (var epochCmd = conn.CreateCommand())
+            {
+                epochCmd.Transaction = dbTx;
+                epochCmd.CommandText = """
+                    INSERT INTO configuration_scope_epochs (epoch_id, scope_type, scope_key, current_epoch, updated_at_utc)
+                    VALUES (@epochId, @scopeType, @scopeKey, 1, @updatedAtUtc)
+                    ON CONFLICT (scope_type, scope_key) DO UPDATE
+                    SET current_epoch = configuration_scope_epochs.current_epoch + 1,
+                        updated_at_utc = EXCLUDED.updated_at_utc
+                    RETURNING current_epoch;
+                    """;
+                AddDbParam(epochCmd, "@epochId", Guid.NewGuid());
+                AddDbParam(epochCmd, "@scopeType", scope.ScopeType.ToString());
+                AddDbParam(epochCmd, "@scopeKey", scope.ScopeKey);
+                AddDbParam(epochCmd, "@updatedAtUtc", utcNow);
+                newEpoch = Convert.ToInt64(epochCmd.ExecuteScalar());
+            }
+
+            using var evtCmd = conn.CreateCommand();
+            evtCmd.Transaction = dbTx;
+            evtCmd.CommandText = """
+                INSERT INTO configuration_invalidation_events
+                    (scope_type, scope_key, new_epoch, entity_type, entity_id, created_at_utc, dispatched_to_redis_at_utc, dispatch_attempts, last_dispatch_error)
+                VALUES
+                    (@scopeType, @scopeKey, @newEpoch, @entityType, @entityId, @createdAtUtc, NULL, 0, NULL);
+                """;
+            AddDbParam(evtCmd, "@scopeType", scope.ScopeType.ToString());
+            AddDbParam(evtCmd, "@scopeKey", scope.ScopeKey);
+            AddDbParam(evtCmd, "@newEpoch", newEpoch);
+            AddDbParam(evtCmd, "@entityType", scope.EntityType);
+            AddDbParam(evtCmd, "@entityId", scope.EntityId);
+            AddDbParam(evtCmd, "@createdAtUtc", utcNow);
+            evtCmd.ExecuteNonQuery();
+        }
+    }
+
+    private async Task ApplyRelationalScopeEpochsAsync(
+        IReadOnlyList<PendingConfigurationScopeMutation> pendingScopes,
+        CancellationToken cancellationToken)
+    {
+        var conn = Database.GetDbConnection();
+        if (conn.State != ConnectionState.Open) await conn.OpenAsync(cancellationToken);
+        var dbTx = Database.CurrentTransaction?.GetDbTransaction();
+        var utcNow = DateTime.UtcNow;
+
+        foreach (var scope in pendingScopes)
+        {
+            long newEpoch;
+            await using (var epochCmd = conn.CreateCommand())
+            {
+                epochCmd.Transaction = dbTx;
+                epochCmd.CommandText = """
+                    INSERT INTO configuration_scope_epochs (epoch_id, scope_type, scope_key, current_epoch, updated_at_utc)
+                    VALUES (@epochId, @scopeType, @scopeKey, 1, @updatedAtUtc)
+                    ON CONFLICT (scope_type, scope_key) DO UPDATE
+                    SET current_epoch = configuration_scope_epochs.current_epoch + 1,
+                        updated_at_utc = EXCLUDED.updated_at_utc
+                    RETURNING current_epoch;
+                    """;
+                AddDbParam(epochCmd, "@epochId", Guid.NewGuid());
+                AddDbParam(epochCmd, "@scopeType", scope.ScopeType.ToString());
+                AddDbParam(epochCmd, "@scopeKey", scope.ScopeKey);
+                AddDbParam(epochCmd, "@updatedAtUtc", utcNow);
+                newEpoch = Convert.ToInt64(await epochCmd.ExecuteScalarAsync(cancellationToken));
+            }
+
+            await using var evtCmd = conn.CreateCommand();
+            evtCmd.Transaction = dbTx;
+            evtCmd.CommandText = """
+                INSERT INTO configuration_invalidation_events
+                    (scope_type, scope_key, new_epoch, entity_type, entity_id, created_at_utc, dispatched_to_redis_at_utc, dispatch_attempts, last_dispatch_error)
+                VALUES
+                    (@scopeType, @scopeKey, @newEpoch, @entityType, @entityId, @createdAtUtc, NULL, 0, NULL);
+                """;
+            AddDbParam(evtCmd, "@scopeType", scope.ScopeType.ToString());
+            AddDbParam(evtCmd, "@scopeKey", scope.ScopeKey);
+            AddDbParam(evtCmd, "@newEpoch", newEpoch);
+            AddDbParam(evtCmd, "@entityType", scope.EntityType);
+            AddDbParam(evtCmd, "@entityId", scope.EntityId);
+            AddDbParam(evtCmd, "@createdAtUtc", utcNow);
+            await evtCmd.ExecuteNonQueryAsync(cancellationToken);
+        }
+    }
+
+    private static List<SemaphoreSlim> AcquireInMemoryScopeLocksSync(IReadOnlyList<PendingConfigurationScopeMutation> scopes)
+    {
+        var acquired = new List<SemaphoreSlim>(scopes.Count);
+        foreach (var scope in scopes)
+        {
+            var gate = InMemoryScopeEpochLocks.GetOrAdd($"{scope.ScopeType}:{scope.ScopeKey}", _ => new SemaphoreSlim(1, 1));
+            gate.Wait();
+            acquired.Add(gate);
+        }
+        return acquired;
+    }
+
+    private static async Task<List<SemaphoreSlim>> AcquireInMemoryScopeLocksAsync(
+        IReadOnlyList<PendingConfigurationScopeMutation> scopes,
+        CancellationToken cancellationToken)
+    {
+        var acquired = new List<SemaphoreSlim>(scopes.Count);
+        try
+        {
+            foreach (var scope in scopes)
+            {
+                var gate = InMemoryScopeEpochLocks.GetOrAdd($"{scope.ScopeType}:{scope.ScopeKey}", _ => new SemaphoreSlim(1, 1));
+                await gate.WaitAsync(cancellationToken);
+                acquired.Add(gate);
+            }
+            return acquired;
+        }
+        catch
+        {
+            for (int i = acquired.Count - 1; i >= 0; i--) acquired[i].Release();
+            throw;
+        }
+    }
+
+    private static void AddDbParam(DbCommand cmd, string name, object value)
+    {
+        var p = cmd.CreateParameter();
+        p.ParameterName = name;
+        p.Value = value;
+        cmd.Parameters.Add(p);
+    }
 
     public DbSet<Client> Clients => Set<Client>();
     public DbSet<ClientContact> ClientContacts => Set<ClientContact>();
@@ -242,6 +617,8 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<BikramSambatCalendarMonth> BikramSambatCalendarMonths => Set<BikramSambatCalendarMonth>();
     public DbSet<HolidayCalendar> HolidayCalendars => Set<HolidayCalendar>();
     public DbSet<FacilityCalendar> FacilityCalendars => Set<FacilityCalendar>();
+    public DbSet<ConfigurationScopeEpoch> ConfigurationScopeEpochs => Set<ConfigurationScopeEpoch>();
+    public DbSet<ConfigurationInvalidationEvent> ConfigurationInvalidationEvents => Set<ConfigurationInvalidationEvent>();
 
     public async Task BeginTransactionAsync(CancellationToken cancellationToken = default)
     {

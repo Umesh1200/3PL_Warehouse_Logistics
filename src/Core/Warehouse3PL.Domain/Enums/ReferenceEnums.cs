@@ -70,3 +70,15 @@ public enum HolidayScope
     Regional = 2,
     Facility = 3
 }
+
+/// <summary>
+/// Monotonic configuration epoch partition scope for DB-authoritative multi-instance cache consistency.
+/// </summary>
+public enum ConfigurationScopeType
+{
+    Global = 1,
+    Country = 2,
+    LegalEntity = 3,
+    Facility = 4,
+    Client = 5
+}

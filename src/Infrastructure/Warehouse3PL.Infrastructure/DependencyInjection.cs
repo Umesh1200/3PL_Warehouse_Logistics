@@ -217,6 +217,13 @@ public static class DependencyInjection
         }
 
         services.AddSingleton<ICacheService, RedisCacheService>();
+        services.AddSingleton<IConfigurationInvalidationTransport, RedisConfigurationInvalidationTransport>();
+        services.AddScoped<IConfigurationConsistencyService, ConfigurationConsistencyService>();
+        services.AddScoped<ConfigurationInvalidationProcessor>();
+        if (configuration.GetValue("ConfigurationConsistency:EnableDispatcher", true))
+        {
+            services.AddHostedService<ConfigurationInvalidationDispatcher>();
+        }
 
         // 6. Background Jobs (Hangfire)
         services.AddWarehouseHangfire(configuration);

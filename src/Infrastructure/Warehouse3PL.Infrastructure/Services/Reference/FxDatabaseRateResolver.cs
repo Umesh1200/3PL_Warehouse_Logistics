@@ -66,7 +66,7 @@ internal static class FxDatabaseRateResolver
         return SelectBestCandidate(candidates, asOfUtc, valuationMode);
     }
 
-    private static IQueryable<FxRateRecord> QueryPublishedEffectiveWindow(
+    internal static IQueryable<FxRateRecord> QueryPublishedEffectiveWindow(
         IApplicationDbContext db,
         string baseCurrencyCode,
         string quoteCurrencyCode,
@@ -121,7 +121,7 @@ internal static class FxDatabaseRateResolver
                r.IntegrityHash.Length == "SHA256:".Length + 64;
     }
 
-    private static FxRateRecord? SelectBestCandidate(
+    internal static FxRateRecord? SelectBestCandidate(
         IEnumerable<FxRateRecord> candidates,
         DateTime asOfUtc,
         FxValuationMode valuationMode)

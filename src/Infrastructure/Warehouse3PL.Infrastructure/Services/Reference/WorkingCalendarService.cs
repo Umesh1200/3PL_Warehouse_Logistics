@@ -11,10 +11,14 @@ namespace Warehouse3PL.Infrastructure.Services.Reference;
 public sealed class WorkingCalendarService : IWorkingCalendarService
 {
     private readonly IApplicationDbContext _db;
+    private readonly IConfigurationConsistencyService? _consistencyService;
 
-    public WorkingCalendarService(IApplicationDbContext db)
+    public WorkingCalendarService(
+        IApplicationDbContext db,
+        IConfigurationConsistencyService? consistencyService = null)
     {
         _db = db;
+        _consistencyService = consistencyService;
     }
 
     public async Task<WorkingDayEvaluationResult> EvaluateWorkingDayAsync(
@@ -31,29 +35,78 @@ public sealed class WorkingCalendarService : IWorkingCalendarService
         var localMidday = localDate.ToDateTime(new TimeOnly(12, 0), DateTimeKind.Unspecified);
         var targetUtc = LocalToUtcSafe(localMidday, tz);
 
-        var activeCal = await _db.FacilityCalendars
-            .AsNoTracking()
-            .Where(fc => fc.FacilityId == facilityId &&
-                         fc.IsActive &&
-                         fc.EffectiveFromUtc <= targetUtc &&
+        var activeFacilityCals = _consistencyService != null
+            ? await _consistencyService.GetOrLoadVerifiedAsync(
+                ConfigurationScopeType.Facility,
+                facilityId.ToString("D"),
+                "facility-calendars",
+                (db, ct) => db.FacilityCalendars
+                    .AsNoTracking()
+                    .Where(fc => fc.FacilityId == facilityId && fc.IsActive)
+                    .OrderByDescending(fc => fc.EffectiveFromUtc)
+                    .ToListAsync(ct),
+                facilityId: facilityId,
+                cancellationToken: cancellationToken)
+            : await _db.FacilityCalendars
+                .AsNoTracking()
+                .Where(fc => fc.FacilityId == facilityId && fc.IsActive)
+                .OrderByDescending(fc => fc.EffectiveFromUtc)
+                .ToListAsync(cancellationToken);
+
+        var activeCal = activeFacilityCals
+            .Where(fc => fc.EffectiveFromUtc <= targetUtc &&
                          (fc.EffectiveToUtc == null || targetUtc < fc.EffectiveToUtc))
             .OrderByDescending(fc => fc.EffectiveFromUtc)
-            .FirstOrDefaultAsync(cancellationToken);
+            .FirstOrDefault();
 
         var restDays = ResolveWeeklyRestDays(activeCal, facility.CountryCode);
 
         var normalizedCountry = NormalizeIsoCountryFallback(facility.CountryCode);
         var facilitySub = await ResolveSubdivisionCodeAsync(normalizedCountry, facility.StateOrProvince, cancellationToken);
 
-        var holidays = await _db.HolidayCalendars
-            .AsNoTracking()
-            .Where(h => h.IsActive &&
-                        h.HolidayDate == localDate &&
-                        (h.FacilityId == facilityId ||
-                         (h.CountryCode == normalizedCountry &&
-                          (h.HolidayScope == HolidayScope.National ||
-                           (h.HolidayScope == HolidayScope.Regional && facilitySub != null && h.SubdivisionCode == facilitySub)))))
-            .ToListAsync(cancellationToken);
+        IReadOnlyList<HolidayCalendar> holidays;
+        if (_consistencyService != null)
+        {
+            var facHolidays = await _consistencyService.GetOrLoadVerifiedAsync(
+                ConfigurationScopeType.Facility,
+                facilityId.ToString("D"),
+                "facility-holidays",
+                (db, ct) => db.HolidayCalendars
+                    .AsNoTracking()
+                    .Where(h => h.IsActive && h.FacilityId == facilityId)
+                    .ToListAsync(ct),
+                facilityId: facilityId,
+                cancellationToken: cancellationToken);
+
+            var countryHolidays = await _consistencyService.GetOrLoadVerifiedAsync(
+                ConfigurationScopeType.Country,
+                normalizedCountry,
+                "country-holidays",
+                (db, ct) => db.HolidayCalendars
+                    .AsNoTracking()
+                    .Where(h => h.IsActive && h.CountryCode == normalizedCountry && h.FacilityId == null)
+                    .ToListAsync(ct),
+                cancellationToken: cancellationToken);
+
+            holidays = facHolidays
+                .Concat(countryHolidays.Where(h =>
+                    h.HolidayScope == HolidayScope.National ||
+                    (h.HolidayScope == HolidayScope.Regional && facilitySub != null && h.SubdivisionCode == facilitySub)))
+                .Where(h => h.HolidayDate == localDate)
+                .ToList();
+        }
+        else
+        {
+            holidays = await _db.HolidayCalendars
+                .AsNoTracking()
+                .Where(h => h.IsActive &&
+                            h.HolidayDate == localDate &&
+                            (h.FacilityId == facilityId ||
+                             (h.CountryCode == normalizedCountry &&
+                              (h.HolidayScope == HolidayScope.National ||
+                               (h.HolidayScope == HolidayScope.Regional && facilitySub != null && h.SubdivisionCode == facilitySub)))))
+                .ToListAsync(cancellationToken);
+        }
 
         return EvaluateLocalDate(
             facilityId,

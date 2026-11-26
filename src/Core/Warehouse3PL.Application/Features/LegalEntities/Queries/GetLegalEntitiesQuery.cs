@@ -60,11 +60,16 @@ public sealed class GetLegalEntityByIdQueryHandler
 {
     private readonly IApplicationDbContext _db;
     private readonly CompliancePlatformAuthorization _auth;
+    private readonly IConfigurationConsistencyService? _consistencyService;
 
-    public GetLegalEntityByIdQueryHandler(IApplicationDbContext db, CompliancePlatformAuthorization auth)
+    public GetLegalEntityByIdQueryHandler(
+        IApplicationDbContext db,
+        CompliancePlatformAuthorization auth,
+        IConfigurationConsistencyService? consistencyService = null)
     {
         _db = db;
         _auth = auth;
+        _consistencyService = consistencyService;
     }
 
     public async Task<LegalEntityDto?> Handle(
@@ -76,9 +81,11 @@ public sealed class GetLegalEntityByIdQueryHandler
             Permissions.Global.ViewLegalEntities,
             Permissions.Global.ManageLegalEntities);
 
-        var entity = await _db.LegalEntities
-            .AsNoTracking()
-            .FirstOrDefaultAsync(le => le.Id == request.Id, cancellationToken);
+        var entity = _consistencyService != null
+            ? await _consistencyService.GetVerifiedLegalEntityAsync(request.Id, cancellationToken)
+            : await _db.LegalEntities
+                .AsNoTracking()
+                .FirstOrDefaultAsync(le => le.Id == request.Id, cancellationToken);
 
         return entity?.ToDto();
     }

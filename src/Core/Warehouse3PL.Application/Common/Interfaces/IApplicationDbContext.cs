@@ -197,6 +197,8 @@ public interface IApplicationDbContext
     DbSet<BikramSambatCalendarMonth> BikramSambatCalendarMonths { get; }
     DbSet<HolidayCalendar> HolidayCalendars { get; }
     DbSet<FacilityCalendar> FacilityCalendars { get; }
+    DbSet<ConfigurationScopeEpoch> ConfigurationScopeEpochs { get; }
+    DbSet<ConfigurationInvalidationEvent> ConfigurationInvalidationEvents { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
     Task BeginTransactionAsync(CancellationToken cancellationToken = default);

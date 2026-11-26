@@ -3,6 +3,8 @@ using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Microsoft.EntityFrameworkCore.Diagnostics;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Domain.Common;
+using Warehouse3PL.Domain.Entities.Facilities;
+using Warehouse3PL.Domain.Entities.Reference;
 
 namespace Warehouse3PL.Infrastructure.Persistence.Interceptors;
 
@@ -92,6 +94,8 @@ public class AuditableEntityInterceptor : SaveChangesInterceptor
                     }
                     auditableLong.UpdatedBy ??= userId;
                 }
+
+                IncrementConfigRevisionIfModifiedDirectly(entry);
             }
             else if (entry.State == EntityState.Deleted && entry.Entity is ISoftDeletable softDeletable)
             {
@@ -101,6 +105,28 @@ public class AuditableEntityInterceptor : SaveChangesInterceptor
                 softDeletable.DeletedAt = utcNow;
                 softDeletable.DeletedBy = userId;
             }
+        }
+    }
+
+    private static void IncrementConfigRevisionIfModifiedDirectly(EntityEntry entry)
+    {
+        switch (entry.Entity)
+        {
+            case CountryCompliancePolicy policy when !entry.Property(nameof(CountryCompliancePolicy.ConfigRevision)).IsModified:
+                policy.ConfigRevision++;
+                break;
+            case LegalEntity legalEntity when !entry.Property(nameof(LegalEntity.ConfigRevision)).IsModified:
+                legalEntity.ConfigRevision++;
+                break;
+            case FxRateRecord fxRate when !entry.Property(nameof(FxRateRecord.ConfigRevision)).IsModified:
+                fxRate.ConfigRevision++;
+                break;
+            case FacilityCalendar facilityCalendar when !entry.Property(nameof(FacilityCalendar.ConfigRevision)).IsModified:
+                facilityCalendar.ConfigRevision++;
+                break;
+            case HolidayCalendar holidayCalendar when !entry.Property(nameof(HolidayCalendar.ConfigRevision)).IsModified:
+                holidayCalendar.ConfigRevision++;
+                break;
         }
     }
 }

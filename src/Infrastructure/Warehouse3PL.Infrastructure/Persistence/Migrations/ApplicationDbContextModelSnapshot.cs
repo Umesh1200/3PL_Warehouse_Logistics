@@ -15990,6 +15990,116 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         });
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.ConfigurationInvalidationEvent", b =>
+                {
+                    b.Property<long>("Id")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasColumnName("event_id");
+
+                    NpgsqlPropertyBuilderExtensions.UseIdentityByDefaultColumn(b.Property<long>("Id"));
+
+                    b.Property<DateTime>("CreatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at_utc");
+
+                    b.Property<int>("DispatchAttempts")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(0)
+                        .HasColumnName("dispatch_attempts");
+
+                    b.Property<DateTime?>("DispatchedToRedisAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("dispatched_to_redis_at_utc");
+
+                    b.Property<string>("EntityId")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("entity_id");
+
+                    b.Property<string>("EntityType")
+                        .IsRequired()
+                        .HasMaxLength(80)
+                        .HasColumnType("character varying(80)")
+                        .HasColumnName("entity_type");
+
+                    b.Property<string>("LastDispatchError")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("last_dispatch_error");
+
+                    b.Property<long>("NewEpoch")
+                        .HasColumnType("bigint")
+                        .HasColumnName("new_epoch");
+
+                    b.Property<string>("ScopeKey")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("scope_key");
+
+                    b.Property<string>("ScopeType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("scope_type");
+
+                    b.HasKey("Id")
+                        .HasName("pk_configuration_invalidation_events");
+
+                    b.HasIndex("DispatchedToRedisAtUtc", "Id")
+                        .HasDatabaseName("ix_configuration_invalidation_events_dispatched_to_redis_at_ut");
+
+                    b.HasIndex("ScopeType", "ScopeKey", "NewEpoch")
+                        .HasDatabaseName("ix_configuration_invalidation_events_scope_type_scope_key_new_");
+
+                    b.ToTable("configuration_invalidation_events", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_configuration_invalidation_events_epoch_positive", "new_epoch >= 1");
+                        });
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.ConfigurationScopeEpoch", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("epoch_id");
+
+                    b.Property<long>("CurrentEpoch")
+                        .HasColumnType("bigint")
+                        .HasColumnName("current_epoch");
+
+                    b.Property<string>("ScopeKey")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("scope_key");
+
+                    b.Property<string>("ScopeType")
+                        .IsRequired()
+                        .HasMaxLength(32)
+                        .HasColumnType("character varying(32)")
+                        .HasColumnName("scope_type");
+
+                    b.Property<DateTime>("UpdatedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at_utc");
+
+                    b.HasKey("Id")
+                        .HasName("pk_configuration_scope_epochs");
+
+                    b.HasIndex("ScopeType", "ScopeKey")
+                        .IsUnique()
+                        .HasDatabaseName("ix_configuration_scope_epochs_scope_type_scope_key");
+
+                    b.ToTable("configuration_scope_epochs", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_configuration_scope_epochs_positive", "current_epoch >= 1");
+                        });
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.CountryCompliancePolicy", b =>
                 {
                     b.Property<Guid>("Id")
