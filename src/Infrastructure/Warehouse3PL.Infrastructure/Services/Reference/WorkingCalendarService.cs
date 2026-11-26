@@ -69,35 +69,54 @@ public sealed class WorkingCalendarService : IWorkingCalendarService
         DateTime dispatchUtc,
         CancellationToken cancellationToken = default)
     {
-        var normalizedDispatch = dispatchUtc.Kind == DateTimeKind.Utc
-            ? dispatchUtc
-            : DateTime.SpecifyKind(dispatchUtc, DateTimeKind.Utc);
+        var normalizedDispatch = NormalizeUtcStrict(dispatchUtc);
 
         string tzId = string.IsNullOrWhiteSpace(policy.CutoffTimeZone) ? "UTC" : policy.CutoffTimeZone.Trim();
-        string countryCode = NormalizeIsoCountryFallback(policy.DestinationCountry);
-        string? subdivisionCode = null;
-        IReadOnlyList<FacilityCalendar> facilityCalendars = [];
+        if (!string.Equals(tzId, "UTC", StringComparison.OrdinalIgnoreCase))
+        {
+            // Fail closed early if policy CutoffTimeZone is configured to an invalid ID
+            _ = ResolveTimeZone(tzId);
+        }
+
+        string destinationCountry = NormalizeIsoCountryFallback(policy.DestinationCountry);
+        string? destinationSubdivision = await ResolveSubdivisionCodeAsync(
+            destinationCountry,
+            policy.DestinationStateOrRegion,
+            cancellationToken);
+
+        string? originCountry = null;
+        string? originSubdivision = null;
+        IReadOnlyList<FacilityCalendar> originFacilityCalendars = [];
 
         if (policy.OriginFacilityId.HasValue && policy.OriginFacilityId.Value != Guid.Empty)
         {
-            var facility = await _db.Facilities
+            var originFacility = await _db.Facilities
                 .AsNoTracking()
                 .FirstOrDefaultAsync(f => f.Id == policy.OriginFacilityId.Value, cancellationToken);
 
-            if (facility != null)
+            if (originFacility != null)
             {
+                // Validate configured facility timezone strictly if set
+                if (!string.IsNullOrWhiteSpace(originFacility.Timezone))
+                {
+                    _ = ResolveTimeZone(originFacility.Timezone);
+                }
+
                 if (string.IsNullOrWhiteSpace(policy.CutoffTimeZone) ||
                     string.Equals(policy.CutoffTimeZone, "UTC", StringComparison.OrdinalIgnoreCase))
                 {
-                    tzId = string.IsNullOrWhiteSpace(facility.Timezone) ? "UTC" : facility.Timezone;
+                    tzId = string.IsNullOrWhiteSpace(originFacility.Timezone) ? "UTC" : originFacility.Timezone.Trim();
                 }
 
-                countryCode = NormalizeIsoCountryFallback(facility.CountryCode);
-                subdivisionCode = await ResolveSubdivisionCodeAsync(countryCode, facility.StateOrProvince, cancellationToken);
+                originCountry = NormalizeIsoCountryFallback(originFacility.CountryCode);
+                originSubdivision = await ResolveSubdivisionCodeAsync(
+                    originCountry,
+                    originFacility.StateOrProvince,
+                    cancellationToken);
 
-                facilityCalendars = await _db.FacilityCalendars
+                originFacilityCalendars = await _db.FacilityCalendars
                     .AsNoTracking()
-                    .Where(fc => fc.FacilityId == facility.Id && fc.IsActive)
+                    .Where(fc => fc.FacilityId == originFacility.Id && fc.IsActive)
                     .OrderByDescending(fc => fc.EffectiveFromUtc)
                     .ToListAsync(cancellationToken);
             }
@@ -115,48 +134,97 @@ public sealed class WorkingCalendarService : IWorkingCalendarService
             return LocalToUtcSafe(calTarget.ToDateTime(new TimeOnly(23, 59, 59), DateTimeKind.Unspecified), tz);
         }
 
-        // Batch-load active holidays over generous lookahead window (max 120 calendar days)
+        bool isCrossBorder = !string.IsNullOrEmpty(originCountry) &&
+                             !string.Equals(originCountry, destinationCountry, StringComparison.OrdinalIgnoreCase);
+
+        // Batch-load active holidays over lookahead window
         var maxDate = effectiveLocalDate.AddDays(Math.Max(60, policy.TransitCommitmentDays * 5));
         var facilityId = policy.OriginFacilityId;
 
-        var holidays = await _db.HolidayCalendars
+        var relevantCountries = new HashSet<string>(StringComparer.OrdinalIgnoreCase) { destinationCountry };
+        if (!string.IsNullOrEmpty(originCountry))
+        {
+            relevantCountries.Add(originCountry);
+        }
+
+        var candidateHolidays = await _db.HolidayCalendars
             .AsNoTracking()
             .Where(h => h.IsActive &&
                         h.HolidayDate >= effectiveLocalDate &&
                         h.HolidayDate <= maxDate &&
                         ((facilityId.HasValue && h.FacilityId == facilityId.Value) ||
-                         (h.CountryCode == countryCode &&
-                          (h.HolidayScope == HolidayScope.National ||
-                           (h.HolidayScope == HolidayScope.Regional && subdivisionCode != null && h.SubdivisionCode == subdivisionCode)))))
+                         relevantCountries.Contains(h.CountryCode)))
             .ToListAsync(cancellationToken);
 
-        var holidayLookup = holidays.GroupBy(h => h.HolidayDate).ToDictionary(g => g.Key, g => g.ToList());
+        var originHolidaysByDate = candidateHolidays
+            .Where(h =>
+                (facilityId.HasValue && h.FacilityId == facilityId.Value) ||
+                (!string.IsNullOrEmpty(originCountry) &&
+                 h.CountryCode == originCountry &&
+                 (h.HolidayScope == HolidayScope.National ||
+                  (h.HolidayScope == HolidayScope.Regional && originSubdivision != null && h.SubdivisionCode == originSubdivision))))
+            .GroupBy(h => h.HolidayDate)
+            .ToDictionary(g => g.Key, g => g.ToList());
 
-        bool IsDateWorking(DateOnly date)
+        var destinationHolidaysByDate = candidateHolidays
+            .Where(h =>
+                (!isCrossBorder && facilityId.HasValue && h.FacilityId == facilityId.Value) ||
+                (h.CountryCode == destinationCountry &&
+                 (h.HolidayScope == HolidayScope.National ||
+                  (h.HolidayScope == HolidayScope.Regional && destinationSubdivision != null && h.SubdivisionCode == destinationSubdivision))))
+            .GroupBy(h => h.HolidayDate)
+            .ToDictionary(g => g.Key, g => g.ToList());
+
+        bool IsOriginPickupWorking(DateOnly date)
         {
+            if (string.IsNullOrEmpty(originCountry))
+            {
+                return IsDestinationTransitWorking(date);
+            }
+
             var probeUtc = LocalToUtcSafe(date.ToDateTime(new TimeOnly(12, 0), DateTimeKind.Unspecified), tz);
-            var activeCal = facilityCalendars.FirstOrDefault(fc =>
+            var activeCal = originFacilityCalendars.FirstOrDefault(fc =>
                 fc.EffectiveFromUtc <= probeUtc &&
                 (!fc.EffectiveToUtc.HasValue || probeUtc < fc.EffectiveToUtc.Value));
 
-            var restDays = ResolveWeeklyRestDays(activeCal, countryCode);
-            var dayHolidays = holidayLookup.TryGetValue(date, out var list) ? list : [];
+            var restDays = ResolveWeeklyRestDays(activeCal, originCountry);
+            var dayHolidays = originHolidaysByDate.TryGetValue(date, out var list) ? list : [];
 
             return EvaluateLocalDate(facilityId ?? Guid.Empty, tz.Id, date, restDays, activeCal?.Id, dayHolidays).IsWorkingDay;
         }
 
+        bool IsDestinationTransitWorking(DateOnly date)
+        {
+            FacilityCalendar? boundCal = null;
+            if (!isCrossBorder)
+            {
+                var probeUtc = LocalToUtcSafe(date.ToDateTime(new TimeOnly(12, 0), DateTimeKind.Unspecified), tz);
+                boundCal = originFacilityCalendars.FirstOrDefault(fc =>
+                    fc.EffectiveFromUtc <= probeUtc &&
+                    (!fc.EffectiveToUtc.HasValue || probeUtc < fc.EffectiveToUtc.Value));
+            }
+
+            // Cross-border transit & delivery follow destination country holidays/weekends rather than origin holidays/weekends
+            var restDays = ResolveWeeklyRestDays(boundCal, destinationCountry);
+            var dayHolidays = destinationHolidaysByDate.TryGetValue(date, out var list) ? list : [];
+
+            return EvaluateLocalDate(isCrossBorder ? Guid.Empty : (facilityId ?? Guid.Empty), tz.Id, date, restDays, boundCal?.Id, dayHolidays).IsWorkingDay;
+        }
+
+        // 1. Origin carrier pickup / tender readiness follows Origin Facility calendar
         var currentDate = effectiveLocalDate;
         int safety = 0;
-        while (!IsDateWorking(currentDate) && safety++ < 365)
+        while (!IsOriginPickupWorking(currentDate) && safety++ < 365)
         {
             currentDate = currentDate.AddDays(1);
         }
 
+        // 2. Contractual business-day transit & destination delivery follow Destination calendar
         int remainingDays = policy.TransitCommitmentDays;
         while (remainingDays > 0 && safety++ < 365)
         {
             currentDate = currentDate.AddDays(1);
-            if (IsDateWorking(currentDate))
+            if (IsDestinationTransitWorking(currentDate))
             {
                 remainingDays--;
             }
@@ -280,16 +348,35 @@ public sealed class WorkingCalendarService : IWorkingCalendarService
         };
     }
 
+    private static DateTime NormalizeUtcStrict(DateTime timestamp)
+    {
+        return timestamp.Kind switch
+        {
+            DateTimeKind.Utc => timestamp,
+            DateTimeKind.Local => timestamp.ToUniversalTime(),
+            _ => throw new DomainException(
+                "Timestamp must explicitly specify DateTimeKind.Utc or offset kind; ambiguous Unspecified timestamps are rejected.",
+                "INVALID_TIMESTAMP_KIND")
+        };
+    }
+
     private static TimeZoneInfo ResolveTimeZone(string? timeZoneId)
     {
-        var id = string.IsNullOrWhiteSpace(timeZoneId) ? "UTC" : timeZoneId.Trim();
+        if (string.IsNullOrWhiteSpace(timeZoneId))
+        {
+            return TimeZoneInfo.Utc;
+        }
+
+        var id = timeZoneId.Trim();
         try
         {
             return TimeZoneInfo.FindSystemTimeZoneById(id);
         }
         catch (Exception ex) when (ex is TimeZoneNotFoundException or InvalidTimeZoneException)
         {
-            return TimeZoneInfo.Utc;
+            throw new DomainException(
+                $"Configured timezone '{id}' is not a valid IANA or system timezone.",
+                "INVALID_TIMEZONE");
         }
     }
 

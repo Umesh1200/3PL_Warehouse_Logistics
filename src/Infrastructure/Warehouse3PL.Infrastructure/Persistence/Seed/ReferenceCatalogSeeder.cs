@@ -582,6 +582,19 @@ public static class ReferenceCatalogSeeder
 
     private static async Task SeedBaselineHolidaysAsync(ApplicationDbContext db, CancellationToken cancellationToken)
     {
+        var legacyWrongConstitutionId = CreateDeterministicGuid("HOLIDAY:NP:2026-09-20:CONSTITUTION");
+        var legacyConstitutionRow = await db.HolidayCalendars
+            .FirstOrDefaultAsync(h => h.Id == legacyWrongConstitutionId, cancellationToken);
+        if (legacyConstitutionRow != null &&
+            legacyConstitutionRow.CountryCode == "NP" &&
+            legacyConstitutionRow.HolidayScope == HolidayScope.National &&
+            legacyConstitutionRow.HolidayDate == new DateOnly(2026, 9, 20) &&
+            legacyConstitutionRow.Name == "Nepal Constitution Day (Ashwin 4, 2083)" &&
+            legacyConstitutionRow.IsActive)
+        {
+            legacyConstitutionRow.Deactivate();
+        }
+
         var baselines = new[]
         {
             HolidayCalendar.Create(
@@ -589,9 +602,9 @@ public static class ReferenceCatalogSeeder
                 "Nepali New Year 2083 BS (Baishakh 1)",
                 id: CreateDeterministicGuid("HOLIDAY:NP:2026-04-14:NEWYEAR2083")),
             HolidayCalendar.Create(
-                "NP", HolidayScope.National, new DateOnly(2026, 9, 20),
-                "Nepal Constitution Day (Ashwin 4, 2083)",
-                id: CreateDeterministicGuid("HOLIDAY:NP:2026-09-20:CONSTITUTION")),
+                "NP", HolidayScope.National, new DateOnly(2026, 9, 19),
+                "Nepal Constitution Day (Ashwin 3, 2083)",
+                id: CreateDeterministicGuid("HOLIDAY:NP:2026-09-19:CONSTITUTION")),
             HolidayCalendar.Create(
                 "US", HolidayScope.National, new DateOnly(2026, 7, 4),
                 "US Independence Day",
@@ -602,15 +615,21 @@ public static class ReferenceCatalogSeeder
                 id: CreateDeterministicGuid("HOLIDAY:US:2026-11-26:THANKSGIVING"))
         };
 
-        var existingIds = (await db.HolidayCalendars
+        var existingRows = await db.HolidayCalendars
             .AsNoTracking()
-            .Select(h => h.Id)
-            .ToListAsync(cancellationToken))
-            .ToHashSet();
+            .Select(h => new { h.Id, h.CountryCode, h.HolidayScope, h.HolidayDate, h.IsActive })
+            .ToListAsync(cancellationToken);
+
+        var existingIds = existingRows.Select(h => h.Id).ToHashSet();
+        var activeNaturalKeys = existingRows
+            .Where(h => h.IsActive)
+            .Select(h => $"{h.CountryCode}|{h.HolidayScope}|{h.HolidayDate:yyyy-MM-dd}")
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
 
         foreach (var h in baselines)
         {
-            if (!existingIds.Contains(h.Id))
+            var naturalKey = $"{h.CountryCode}|{h.HolidayScope}|{h.HolidayDate:yyyy-MM-dd}";
+            if (!existingIds.Contains(h.Id) && !activeNaturalKeys.Contains(naturalKey))
             {
                 db.HolidayCalendars.Add(h);
             }

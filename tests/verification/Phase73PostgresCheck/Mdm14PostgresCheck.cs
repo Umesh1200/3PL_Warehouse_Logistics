@@ -28,6 +28,7 @@ using Warehouse3PL.Domain.Entities.Reference;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Events.Transportation;
+using Warehouse3PL.Domain.Exceptions;
 using Warehouse3PL.Infrastructure.Authentication;
 using Warehouse3PL.Infrastructure.Authorization;
 using Warehouse3PL.Infrastructure.Persistence;
@@ -94,10 +95,34 @@ internal static class Mdm14PostgresCheck
 
             await using (var seedDb = CreatePgDb(targetConn, null))
             {
+                // R01 Two-context legacy upgrade check on real PostgreSQL:
+                // Seed the old erroneous Sept 20 Constitution Day row first, then run ReferenceCatalogSeeder in a second DbContext.
+                var legacyConstId = ReferenceCatalogSeeder.CreateDeterministicGuid("HOLIDAY:NP:2026-09-20:CONSTITUTION");
+                var correctConstId = ReferenceCatalogSeeder.CreateDeterministicGuid("HOLIDAY:NP:2026-09-19:CONSTITUTION");
                 await ReferenceCatalogSeeder.SeedAsync(seedDb);
-                await ReferenceCatalogSeeder.SeedAsync(seedDb);
+                var insertedCorrect = await seedDb.HolidayCalendars.FirstAsync(h => h.Id == correctConstId);
+                seedDb.HolidayCalendars.Remove(insertedCorrect);
+                seedDb.HolidayCalendars.Add(HolidayCalendar.Create(
+                    "NP", HolidayScope.National, new DateOnly(2026, 9, 20),
+                    "Nepal Constitution Day (Ashwin 4, 2083)", id: legacyConstId));
+                await seedDb.SaveChangesAsync();
+            }
 
-                var months = await seedDb.BikramSambatCalendarMonths
+            await using (var upgradeSeedDb = CreatePgDb(targetConn, null))
+            {
+                await ReferenceCatalogSeeder.SeedAsync(upgradeSeedDb);
+                await ReferenceCatalogSeeder.SeedAsync(upgradeSeedDb);
+
+                var legacyConstId = ReferenceCatalogSeeder.CreateDeterministicGuid("HOLIDAY:NP:2026-09-20:CONSTITUTION");
+                var correctConstId = ReferenceCatalogSeeder.CreateDeterministicGuid("HOLIDAY:NP:2026-09-19:CONSTITUTION");
+                var oldRow = await upgradeSeedDb.HolidayCalendars.AsNoTracking().SingleAsync(h => h.Id == legacyConstId);
+                var newRow = await upgradeSeedDb.HolidayCalendars.AsNoTracking().SingleAsync(h => h.Id == correctConstId);
+                if (oldRow.IsActive || !newRow.IsActive || newRow.HolidayDate != new DateOnly(2026, 9, 19))
+                {
+                    throw new InvalidOperationException("MDM-1.4 R01 PG holiday seed upgrade did not deactivate Sept 20 and activate Sept 19.");
+                }
+
+                var months = await upgradeSeedDb.BikramSambatCalendarMonths
                     .OrderBy(m => m.BsYear)
                     .ThenBy(m => m.BsMonth)
                     .ToListAsync();
@@ -116,13 +141,16 @@ internal static class Mdm14PostgresCheck
                 }
             }
 
-            // 2. Setup NP + US facilities, Staff & Client users
+            // 2. Setup NP + US facilities, Staff (Assigned, Unassigned, MultiFacility), Client, Driver & SuperAdmin
             var facNpId = Guid.NewGuid();
             var facUsId = Guid.NewGuid();
             var clientId = Guid.NewGuid();
             var clientUserId = Guid.NewGuid();
+            var driverUserId = Guid.NewGuid();
             var npStaffId = Guid.NewGuid();
             var usStaffId = Guid.NewGuid();
+            var unassignedStaffId = Guid.NewGuid();
+            var multiFacStaffId = Guid.NewGuid();
             var superAdminId = Guid.NewGuid();
 
             await using (var setupDb = CreatePgDb(targetConn, null))
@@ -135,18 +163,28 @@ internal static class Mdm14PostgresCheck
 
                 var mgrRole = new Role { RoleName = "PgFacMgr14", Description = "Mgr", IsSystemRole = false };
                 mgrRole.RolePermissions.Add(new RolePermission { Role = mgrRole, PermissionKey = Permissions.Facilities.Manage, AccessLevel = AccessLevel.Admin });
+                var multiRole = new Role { RoleName = "PgMulti14", Description = "Multi", IsSystemRole = false };
+                multiRole.RolePermissions.Add(new RolePermission { Role = multiRole, PermissionKey = Permissions.Analytics.MultiFacilityView, AccessLevel = AccessLevel.Read });
                 var superRole = new Role { RoleName = SystemRoles.SuperAdmin, Description = "Super", IsSystemRole = true };
-                setupDb.Roles.AddRange(mgrRole, superRole);
+                setupDb.Roles.AddRange(mgrRole, multiRole, superRole);
 
                 var uCli = new User { Id = clientUserId, Email = "pgc@m14.test", FirstName = "C", LastName = "U", UserType = UserType.Client, ClientId = clientId, Status = UserStatus.Active, PasswordHash = "x" };
+                var uDrv = new User { Id = driverUserId, Email = "pgd@m14.test", FirstName = "D", LastName = "U", UserType = UserType.Driver, Status = UserStatus.Active, PasswordHash = "x" };
                 var uNp = new User { Id = npStaffId, Email = "pgnp@m14.test", FirstName = "N", LastName = "M", UserType = UserType.Staff, AssignedFacilityId = facNpId, Status = UserStatus.Active, PasswordHash = "x" };
                 var uUs = new User { Id = usStaffId, Email = "pgus@m14.test", FirstName = "U", LastName = "M", UserType = UserType.Staff, AssignedFacilityId = facUsId, Status = UserStatus.Active, PasswordHash = "x" };
+                var uUn = new User { Id = unassignedStaffId, Email = "pgun@m14.test", FirstName = "U", LastName = "N", UserType = UserType.Staff, AssignedFacilityId = null, Status = UserStatus.Active, PasswordHash = "x" };
+                var uMu = new User { Id = multiFacStaffId, Email = "pgmu@m14.test", FirstName = "M", LastName = "U", UserType = UserType.Staff, AssignedFacilityId = null, Status = UserStatus.Active, PasswordHash = "x" };
                 var uSa = new User { Id = superAdminId, Email = "pgsa@m14.test", FirstName = "S", LastName = "A", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" };
-                setupDb.Users.AddRange(uCli, uNp, uUs, uSa);
+                setupDb.Users.AddRange(uCli, uDrv, uNp, uUs, uUn, uMu, uSa);
                 setupDb.UserRoles.AddRange(
                     new UserRole { User = uNp, Role = mgrRole },
                     new UserRole { User = uUs, Role = mgrRole },
+                    new UserRole { User = uUn, Role = mgrRole },
+                    new UserRole { User = uMu, Role = multiRole },
                     new UserRole { User = uSa, Role = superRole });
+                setupDb.HolidayCalendars.AddRange(
+                    HolidayCalendar.Create("NP", HolidayScope.Facility, new DateOnly(2026, 5, 10), "PG NP Facility Holiday", facilityId: facNpId),
+                    HolidayCalendar.Create("US", HolidayScope.Facility, new DateOnly(2026, 5, 11), "PG US Facility Holiday", facilityId: facUsId));
                 await setupDb.SaveChangesAsync();
             }
 
@@ -193,8 +231,11 @@ internal static class Mdm14PostgresCheck
             }
 
             var jwtClient = TokenFor(clientUserId, UserType.Client, clientId, null, [], []);
+            var jwtDriver = TokenFor(driverUserId, UserType.Driver, null, null, [], []);
             var jwtNp = TokenFor(npStaffId, UserType.Staff, null, facNpId, ["PgFacMgr14"], [Permissions.Facilities.Manage]);
             var jwtUs = TokenFor(usStaffId, UserType.Staff, null, facUsId, ["PgFacMgr14"], [Permissions.Facilities.Manage]);
+            var jwtUnassigned = TokenFor(unassignedStaffId, UserType.Staff, null, null, ["PgFacMgr14"], [Permissions.Facilities.Manage]);
+            var jwtMulti = TokenFor(multiFacStaffId, UserType.Staff, null, null, ["PgMulti14"], [Permissions.Analytics.MultiFacilityView]);
             var jwtSuper = TokenFor(superAdminId, UserType.Staff, null, null, [SystemRoles.SuperAdmin], []);
 
             var npBody = new
@@ -272,21 +313,81 @@ internal static class Mdm14PostgresCheck
                     throw new InvalidOperationException($"MDM-1.4 PG SLA EDD mismatch: NP={npSla.EstimatedDeliveryDateUtc:O}, US={usSla.EstimatedDeliveryDateUtc:O}");
                 }
 
-                // Supersede NP calendar to Sat+Sun -> previous NP CarrierSlaComplianceRecord remains untouched!
+                // R03 Unfiltered GET /api/v1/calendars/holidays facility scoping on PostgreSQL
+                var npHolList = (await (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/calendars/holidays", jwtNp))).Content.ReadFromJsonAsync<List<HolidayCalendarDto>>(JsonOptions))!;
+                var unHolList = (await (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/calendars/holidays", jwtUnassigned))).Content.ReadFromJsonAsync<List<HolidayCalendarDto>>(JsonOptions))!;
+                var drHolList = (await (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/calendars/holidays", jwtDriver))).Content.ReadFromJsonAsync<List<HolidayCalendarDto>>(JsonOptions))!;
+                var muHolList = (await (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/calendars/holidays", jwtMulti))).Content.ReadFromJsonAsync<List<HolidayCalendarDto>>(JsonOptions))!;
+                if (!npHolList.Any(h => h.FacilityId == facNpId) || npHolList.Any(h => h.FacilityId == facUsId) ||
+                    unHolList.Any(h => h.HolidayScope == HolidayScope.Facility) ||
+                    drHolList.Any(h => h.HolidayScope == HolidayScope.Facility) ||
+                    !muHolList.Any(h => h.FacilityId == facNpId) || !muHolList.Any(h => h.FacilityId == facUsId))
+                {
+                    throw new InvalidOperationException("MDM-1.4 R03 PG unfiltered /calendars/holidays isolation check failed.");
+                }
+
+                // R04 Cross-border NP -> US around US Thanksgiving (2026-11-26) + strict UTC & TZ validation on PostgreSQL
+                var xbPol = CarrierContractualSlaPolicy.Create(
+                    "PGXB", CarrierServiceLevel.StandardGround, 2, "1.0.0",
+                    TransitDayCalculationType.BusinessDays, clientId, facNpId, "NP", "US",
+                    dailyCutoffTime: new TimeSpan(17, 0, 0), cutoffTimeZone: "Asia/Kathmandu", effectiveFromUtc: eff);
+                var xbEdd = await wc.CalculateCommittedDeliveryDateUtcAsync(xbPol, new DateTime(2026, 11, 24, 6, 15, 0, DateTimeKind.Utc));
+                if (xbEdd != new DateTime(2026, 11, 27, 18, 14, 59, DateTimeKind.Utc))
+                {
+                    throw new InvalidOperationException($"MDM-1.4 R04 PG cross-border US Thanksgiving SLA expected 2026-11-27T18:14:59Z, got {xbEdd:O}");
+                }
+
+                bool badUtcRejected = false;
+                try { await wc.CalculateCommittedDeliveryDateUtcAsync(xbPol, new DateTime(2026, 11, 24, 6, 15, 0, DateTimeKind.Unspecified)); }
+                catch (DomainException ex) when (ex.Code == "INVALID_TIMESTAMP_KIND") { badUtcRejected = true; }
+                if (!badUtcRejected) throw new InvalidOperationException("MDM-1.4 R04 PG Unspecified timestamp was not rejected.");
+
+                // R02 Future-effective calendar supersession MUST reject with 422 rather than creating an uncovered gap
+                var futureCutover = DateTime.UtcNow.AddDays(10);
                 if ((await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/calendars/facilities/{facNpId}", jwtNp, new
                     {
-                        effectiveFromUtc = eff, effectiveToUtc = (DateTime?)null, weeklyRestDaysCsv = "Saturday,Sunday",
+                        effectiveFromUtc = futureCutover, effectiveToUtc = (DateTime?)null, weeklyRestDaysCsv = "Saturday,Sunday",
+                        workdayStartLocalTime = "09:00:00", workdayEndLocalTime = "18:00:00", defaultCutoffLocalTime = "17:00:00",
+                        supersedeOverlapping = true
+                    }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+                {
+                    throw new InvalidOperationException("MDM-1.4 R02 PG future-effective FacilityCalendar supersession should have been rejected (422).");
+                }
+
+                // Mid-stream safe cutover preserves historical [eff, cutoverUtc) schedule while switching future [cutoverUtc, null)
+                var cutoverUtc = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, DateTime.UtcNow.Day, 0, 0, 0, DateTimeKind.Utc).AddDays(-2);
+                if ((await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/calendars/facilities/{facNpId}", jwtNp, new
+                    {
+                        effectiveFromUtc = cutoverUtc, effectiveToUtc = (DateTime?)null, weeklyRestDaysCsv = "Saturday,Sunday",
                         workdayStartLocalTime = "09:00:00", workdayEndLocalTime = "18:00:00", defaultCutoffLocalTime = "17:00:00",
                         supersedeOverlapping = true
                     }))).StatusCode != HttpStatusCode.Created)
                 {
-                    throw new InvalidOperationException("MDM-1.4 PG FacilityCalendar supersession failed.");
+                    throw new InvalidOperationException("MDM-1.4 R02 PG mid-stream FacilityCalendar cutover failed.");
                 }
 
                 var preserved = await slaDb.CarrierSlaComplianceRecords.AsNoTracking().SingleAsync(r => r.ShipmentId == npShip);
                 if (preserved.EstimatedDeliveryDateUtc != new DateTime(2026, 11, 22, 18, 14, 59, DateTimeKind.Utc))
                 {
                     throw new InvalidOperationException("MDM-1.4 PG historical SLA record mutated after calendar supersession!");
+                }
+            }
+
+            // R02 Two-context PostgreSQL historical schedule retention check
+            var histCutover = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, DateTime.UtcNow.Day, 0, 0, 0, DateTimeKind.Utc).AddDays(-2);
+            var histSunday = DateOnly.FromDateTime(histCutover.AddDays(-1));
+            while (histSunday.DayOfWeek != DayOfWeek.Sunday) histSunday = histSunday.AddDays(-1);
+            var postSunday = DateOnly.FromDateTime(histCutover.AddDays(1));
+            while (postSunday.DayOfWeek != DayOfWeek.Sunday) postSunday = postSunday.AddDays(1);
+            await using (var histDb = CreatePgDb(targetConn, null))
+            {
+                var wcHist = new WorkingCalendarService(histDb);
+                if (!(await wcHist.EvaluateWorkingDayAsync(facNpId, histSunday)).IsWorkingDay ||
+                    (await wcHist.EvaluateWorkingDayAsync(facNpId, postSunday)).IsWorkingDay ||
+                    (await wcHist.EvaluateWorkingDayAsync(facNpId, new DateOnly(2026, 9, 19))).IsWorkingDay ||
+                    !(await wcHist.EvaluateWorkingDayAsync(facNpId, new DateOnly(2026, 9, 20))).IsWorkingDay)
+                {
+                    throw new InvalidOperationException("MDM-1.4 PG two-context historical schedule or R01 Constitution Day evaluation failed.");
                 }
             }
 

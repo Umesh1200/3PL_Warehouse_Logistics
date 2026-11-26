@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
+  formatCivilDate,
   formatCurrency,
   formatDate,
   formatDateTime,
   formatDimensions,
   formatNumber,
   formatTime,
+  formatTimestampDate,
   formatWeight,
 } from '../utils/formatters';
 import {
@@ -72,6 +74,27 @@ describe('MDM-1.4 Frontend Localization Formatters & Bikram Sambat Helpers', () 
     expect(chiTime).not.toContain('UTC');
 
     expect(formatNumber(14500, { locale: 'en-US' })).toBe('14,500');
+  });
+
+  it('preserves civil calendar dates across timezones while converting timestamps across Kathmandu and US DST transitions', () => {
+    // Civil date-only ISO string MUST NOT shift backward in negative-offset timezones like America/Chicago
+    const civilDate = '2026-07-17';
+    expect(formatDate(civilDate, { timeZone: 'UTC', locale: 'en-US' })).toContain('Jul 17, 2026');
+    expect(formatDate(civilDate, { timeZone: 'America/Chicago', locale: 'en-US' })).toContain('Jul 17, 2026');
+    expect(formatCivilDate(civilDate, { timeZone: 'America/Chicago', locale: 'en-US' })).toContain('Jul 17, 2026');
+    const npCivil = formatDate(civilDate, { timeZone: 'Asia/Kathmandu', countryCode: 'NP', locale: 'en-NP' });
+    expect(npCivil).toContain('2083-04-01 BS');
+    expect(npCivil).toContain('17');
+
+    // Full UTC timestamps DO convert across US/Nepal timezone boundaries
+    expect(formatTimestampDate('2026-07-17T01:30:00Z', { timeZone: 'America/Chicago', locale: 'en-US' })).toContain('Jul 16, 2026');
+    expect(formatDate('2026-07-17T01:30:00Z', { timeZone: 'America/Chicago', locale: 'en-US' })).toContain('Jul 16, 2026');
+
+    // US Central DST transitions (2026-03-08 spring forward CDT; 2026-11-01 fall back CST)
+    expect(formatDateTime('2026-03-08T07:30:00Z', { timeZone: 'America/Chicago', locale: 'en-US' })).toContain('01:30:00');
+    expect(formatDateTime('2026-03-08T08:30:00Z', { timeZone: 'America/Chicago', locale: 'en-US' })).toContain('03:30:00');
+    expect(formatDateTime('2026-11-01T05:30:00Z', { timeZone: 'America/Chicago', locale: 'en-US' })).toContain('00:30:00');
+    expect(formatDateTime('2026-11-01T07:30:00Z', { timeZone: 'America/Chicago', locale: 'en-US' })).toContain('01:30:00');
   });
 
   it('formats weights and dimensions consistently from canonical metric storage', () => {

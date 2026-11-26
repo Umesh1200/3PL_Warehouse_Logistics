@@ -1,4 +1,4 @@
-import { convertInstantToBsInTimeZone } from './bikramSambat';
+import { convertGregorianYmdToBs, convertInstantToBsInTimeZone } from './bikramSambat';
 
 export type FormatterLocale = 'en-US' | 'en-NP' | 'ne-NP' | string;
 export type WeightUnit = 'KG' | 'LB' | 'G' | 'OZ';
@@ -71,11 +71,67 @@ export function resolveEffectiveTimeZone(ctx?: FormatterContext): string {
   return 'UTC';
 }
 
-export function formatDate(
-  value: Date | string | null | undefined,
+const ISO_DATE_ONLY_PATTERN = /^(\d{4})-(\d{2})-(\d{2})$/;
+
+export function parseCivilDateParts(value: string): { year: number; month: number; day: number } | null {
+  const match = ISO_DATE_ONLY_PATTERN.exec(value.trim());
+  if (!match) return null;
+
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3]);
+  const probe = new Date(Date.UTC(year, month - 1, day));
+  if (
+    probe.getUTCFullYear() !== year ||
+    probe.getUTCMonth() !== month - 1 ||
+    probe.getUTCDate() !== day
+  ) {
+    return null;
+  }
+
+  return { year, month, day };
+}
+
+/**
+ * Formats a calendar date-only ISO string (`YYYY-MM-DD`) as a civil date without
+ * applying UTC-to-local timezone offsets that could shift the calendar day backward or forward.
+ */
+export function formatCivilDate(
+  value: string,
   ctx?: FormatterContext,
 ): string {
-  if (value === null || value === undefined || value === '') return '—';
+  const parts = parseCivilDateParts(value);
+  if (!parts) return String(value);
+
+  const locale = resolveEffectiveLocale(ctx);
+  const timeZone = resolveEffectiveTimeZone(ctx);
+  const utcMidday = new Date(Date.UTC(parts.year, parts.month - 1, parts.day, 12, 0, 0));
+  const formattedAd = new Intl.DateTimeFormat(locale, {
+    timeZone: 'UTC',
+    year: 'numeric',
+    month: 'short',
+    day: '2-digit',
+  }).format(utcMidday);
+
+  const enableBs = ctx?.showDualBsDate ?? (ctx?.countryCode?.toUpperCase() === 'NP' || timeZone === 'Asia/Kathmandu');
+  if (enableBs) {
+    const bs = convertGregorianYmdToBs(parts.year, parts.month, parts.day);
+    if (bs) {
+      return `${formattedAd} (${bs.formatted})`;
+    }
+  }
+
+  return formattedAd;
+}
+
+/**
+ * Formats an instant timestamp (`Date` or ISO timestamp string) into a calendar date
+ * inside the caller's configured IANA timezone.
+ */
+export function formatTimestampDate(
+  value: Date | string,
+  ctx?: FormatterContext,
+): string {
   const date = typeof value === 'string' ? new Date(value) : value;
   if (Number.isNaN(date.getTime())) return String(value);
 
@@ -97,6 +153,17 @@ export function formatDate(
   }
 
   return formattedAd;
+}
+
+export function formatDate(
+  value: Date | string | null | undefined,
+  ctx?: FormatterContext,
+): string {
+  if (value === null || value === undefined || value === '') return '—';
+  if (typeof value === 'string' && ISO_DATE_ONLY_PATTERN.test(value.trim())) {
+    return formatCivilDate(value, ctx);
+  }
+  return formatTimestampDate(value, ctx);
 }
 
 export function formatDateTime(

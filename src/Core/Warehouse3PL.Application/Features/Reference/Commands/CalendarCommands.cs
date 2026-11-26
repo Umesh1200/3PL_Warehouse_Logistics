@@ -243,13 +243,16 @@ public sealed class UpsertFacilityCalendarCommandHandler
 {
     private readonly IApplicationDbContext _db;
     private readonly CompliancePlatformAuthorization _auth;
+    private readonly IDateTimeProvider _dateTime;
 
     public UpsertFacilityCalendarCommandHandler(
         IApplicationDbContext db,
-        CompliancePlatformAuthorization auth)
+        CompliancePlatformAuthorization auth,
+        IDateTimeProvider dateTime)
     {
         _db = db;
         _auth = auth;
+        _dateTime = dateTime;
     }
 
     public async Task<FacilityCalendarDto> Handle(UpsertFacilityCalendarCommand request, CancellationToken cancellationToken)
@@ -300,13 +303,48 @@ public sealed class UpsertFacilityCalendarCommandHandler
                     {
                         throw new ConcurrencyException(
                             "FACILITY_CALENDAR_OVERLAP",
-                            $"An active FacilityCalendar already covers an overlapping window for facility '{request.FacilityId}'. Pass SupersedeOverlapping=true to replace it.");
+                            $"An active FacilityCalendar already covers an overlapping window for facility '{request.FacilityId}'. Pass SupersedeOverlapping=true to intentionally replace it.");
                     }
 
-                    // Deactivate overlapping active rows FIRST and flush so PostgreSQL's non-deferred EXCLUDE USING gist never sees 2 active overlapping rows.
+                    var rawNow = _dateTime.UtcNow;
+                    var now = rawNow.Kind == DateTimeKind.Utc ? rawNow : rawNow.ToUniversalTime();
+
+                    // MDM14-R02 Safe Cutover Continuity Guard (aligned with MDM11-R02 / MDM13-R02):
+                    // Reject future-effective supersessions that would prematurely deactivate applicable coverage
+                    // before candidate.EffectiveFromUtc or leave a trailing uncovered gap.
+                    foreach (var active in overlapping)
+                    {
+                        var continuityAnchorStart = active.EffectiveFromUtc > now ? active.EffectiveFromUtc : now;
+                        if (candidate.EffectiveFromUtc > continuityAnchorStart)
+                        {
+                            throw new DomainException(
+                                $"Cannot supersede active FacilityCalendar (effective {active.EffectiveFromUtc:O}..) with future-effective schedule starting {candidate.EffectiveFromUtc:O}, because interval [{continuityAnchorStart:O}, {candidate.EffectiveFromUtc:O}) would lose active coverage. Use disjoint contiguous effective windows or immediate cutover.",
+                                "FACILITY_CALENDAR_SUPERSESSION_COVERAGE_GAP");
+                        }
+
+                        var activeEnd = active.EffectiveToUtc ?? DateTime.MaxValue;
+                        if (activeEnd > now &&
+                            candidate.EffectiveToUtc.HasValue &&
+                            candidate.EffectiveToUtc.Value < activeEnd)
+                        {
+                            throw new DomainException(
+                                $"Cannot supersede active FacilityCalendar with bounded schedule ending {candidate.EffectiveToUtc.Value:O} earlier than existing coverage end {activeEnd:O}, which would leave a trailing coverage gap.",
+                                "FACILITY_CALENDAR_SUPERSESSION_COVERAGE_GAP");
+                        }
+                    }
+
+                    // Close historical portion cleanly at candidate.EffectiveFromUtc when candidate replaces from a mid-stream cutover,
+                    // or deactivate when candidate replaces from <= active.EffectiveFromUtc. Flush first for non-deferred gist exclusion.
                     foreach (var o in overlapping)
                     {
-                        o.Deactivate();
+                        if (o.EffectiveFromUtc < candidate.EffectiveFromUtc)
+                        {
+                            o.CloseWindowAt(candidate.EffectiveFromUtc);
+                        }
+                        else
+                        {
+                            o.Deactivate();
+                        }
                         o.UpdatedBy = staffUserId;
                     }
 

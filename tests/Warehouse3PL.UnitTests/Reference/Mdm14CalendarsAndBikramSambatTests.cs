@@ -306,11 +306,26 @@ public sealed class Mdm14CalendarsAndBikramSambatTests
         Assert.Equal(new DateTime(2026, 11, 22, 18, 14, 59, DateTimeKind.Utc), originalNpEdd); // 2026-11-22 23:59:59 +05:45
         Assert.Equal(new DateTime(2026, 11, 24, 5, 59, 59, DateTimeKind.Utc), usRec.EstimatedDeliveryDateUtc); // 2026-11-23 23:59:59 -06:00
 
-        // Superseding FacilityCalendar later MUST NOT rewrite previously recorded CarrierSlaComplianceRecord!
+        // R02: Future-effective supersession MUST fail closed (422) rather than leaving an uncovered gap before future EffectiveFromUtc
+        var futureCutover = DateTime.UtcNow.AddDays(10);
+        Assert.Equal(HttpStatusCode.UnprocessableEntity,
+            (await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/calendars/facilities/{facNpId}", jwtNpMgr, new
+            {
+                effectiveFromUtc = futureCutover,
+                effectiveToUtc = (DateTime?)null,
+                weeklyRestDaysCsv = "Saturday,Sunday",
+                workdayStartLocalTime = "09:00:00",
+                workdayEndLocalTime = "18:00:00",
+                defaultCutoffLocalTime = "17:00:00",
+                supersedeOverlapping = true
+            }))).StatusCode);
+
+        // Immediate mid-stream cutover preserves historical [effFrom, cutoverUtc) schedule while switching [cutoverUtc, null)
+        var cutoverUtc = new DateTime(DateTime.UtcNow.Year, DateTime.UtcNow.Month, DateTime.UtcNow.Day, 0, 0, 0, DateTimeKind.Utc).AddDays(-2);
         Assert.Equal(HttpStatusCode.Created,
             (await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/calendars/facilities/{facNpId}", jwtNpMgr, new
             {
-                effectiveFromUtc = effFrom,
+                effectiveFromUtc = cutoverUtc,
                 effectiveToUtc = (DateTime?)null,
                 weeklyRestDaysCsv = "Saturday,Sunday",
                 workdayStartLocalTime = "09:00:00",
@@ -321,6 +336,161 @@ public sealed class Mdm14CalendarsAndBikramSambatTests
 
         var npRecAfter = await db.CarrierSlaComplianceRecords.AsNoTracking().SingleAsync(r => r.ShipmentId == shipNpId);
         Assert.Equal(originalNpEdd, npRecAfter.EstimatedDeliveryDateUtc);
+
+        // Two-context check: historical Sunday before cutover retains v1 (working in NP), post-cutover Sunday observes v2 (rest)
+        var histSunday = DateOnly.FromDateTime(cutoverUtc.AddDays(-1));
+        while (histSunday.DayOfWeek != DayOfWeek.Sunday) histSunday = histSunday.AddDays(-1);
+        var postSunday = DateOnly.FromDateTime(cutoverUtc.AddDays(1));
+        while (postSunday.DayOfWeek != DayOfWeek.Sunday) postSunday = postSunday.AddDays(1);
+
+        await using (var db2 = new ApplicationDbContext(dbOpts, new TestTenantProvider { BypassTenantFilter = true }, workerUser, new AuditableEntityInterceptor(workerUser, new DateTimeProvider())))
+        {
+            var wc2 = new WorkingCalendarService(db2);
+            Assert.True((await wc2.EvaluateWorkingDayAsync(facNpId, histSunday)).IsWorkingDay);
+            Assert.False((await wc2.EvaluateWorkingDayAsync(facNpId, postSunday)).IsWorkingDay);
+        }
+    }
+
+    [Fact]
+    public async Task R01_R03_R04_HolidayUpgrade_FacilityScopedReads_CrossBorderThanksgiving_And_StrictValidation_Work()
+    {
+        var facNpId = Guid.NewGuid();
+        var facUsId = Guid.NewGuid();
+        var clientId = Guid.NewGuid();
+        var clientUserId = Guid.NewGuid();
+        var driverUserId = Guid.NewGuid();
+        var npStaffId = Guid.NewGuid();
+        var unassignedStaffId = Guid.NewGuid();
+        var multiFacStaffId = Guid.NewGuid();
+        var superAdminId = Guid.NewGuid();
+
+        await using var host = await BuildJwtAppAsync(async db =>
+        {
+            await ReferenceCatalogSeeder.SeedAsync(db);
+
+            // Simulate pre-existing buggy NP Constitution Day (2026-09-20) from prior seed in a clean separate DbSet manipulation,
+            // then run ReferenceCatalogSeeder.SeedAsync again to verify safe upgrade repair (R01).
+            db.Facilities.AddRange(
+                new Facility { Id = facNpId, FacilityCode = "FAC-NP-R", Name = "Kathmandu R", CountryCode = "NP", Timezone = "Asia/Kathmandu", IsActive = true },
+                new Facility { Id = facUsId, FacilityCode = "FAC-US-R", Name = "Chicago R", CountryCode = "US", Timezone = "America/Chicago", IsActive = true });
+            db.Clients.Add(new Client { Id = clientId, AccountCode = "CLI-R14", CompanyName = "Client R14", Status = ClientStatus.Active });
+            db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientId, FacilityId = facNpId, Status = FacilityAccessStatus.Active });
+
+            var facMgrRole = new Role { RoleName = "FacMgrR14", Description = "FacMgr", IsSystemRole = false };
+            facMgrRole.RolePermissions.Add(new RolePermission { Role = facMgrRole, PermissionKey = Permissions.Facilities.Manage, AccessLevel = AccessLevel.Admin });
+            var multiRole = new Role { RoleName = "MultiReadR14", Description = "Multi", IsSystemRole = false };
+            multiRole.RolePermissions.Add(new RolePermission { Role = multiRole, PermissionKey = Permissions.Analytics.MultiFacilityView, AccessLevel = AccessLevel.Read });
+            var superRole = new Role { RoleName = SystemRoles.SuperAdmin, Description = "Super", IsSystemRole = true };
+            db.Roles.AddRange(facMgrRole, multiRole, superRole);
+
+            var uClient = new User { Id = clientUserId, Email = "cr@m14.test", FirstName = "C", LastName = "R", UserType = UserType.Client, ClientId = clientId, Status = UserStatus.Active, PasswordHash = "x" };
+            var uDriver = new User { Id = driverUserId, Email = "dr@m14.test", FirstName = "D", LastName = "R", UserType = UserType.Driver, Status = UserStatus.Active, PasswordHash = "x" };
+            var uNp = new User { Id = npStaffId, Email = "npr@m14.test", FirstName = "N", LastName = "R", UserType = UserType.Staff, AssignedFacilityId = facNpId, Status = UserStatus.Active, PasswordHash = "x" };
+            var uUnassigned = new User { Id = unassignedStaffId, Email = "uar@m14.test", FirstName = "U", LastName = "R", UserType = UserType.Staff, AssignedFacilityId = null, Status = UserStatus.Active, PasswordHash = "x" };
+            var uMulti = new User { Id = multiFacStaffId, Email = "mr@m14.test", FirstName = "M", LastName = "R", UserType = UserType.Staff, AssignedFacilityId = null, Status = UserStatus.Active, PasswordHash = "x" };
+            var uSuper = new User { Id = superAdminId, Email = "sar@m14.test", FirstName = "S", LastName = "R", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" };
+            db.Users.AddRange(uClient, uDriver, uNp, uUnassigned, uMulti, uSuper);
+            db.UserRoles.AddRange(
+                new UserRole { User = uNp, Role = facMgrRole },
+                new UserRole { User = uUnassigned, Role = facMgrRole },
+                new UserRole { User = uMulti, Role = multiRole },
+                new UserRole { User = uSuper, Role = superRole });
+
+            // Facility-specific holidays on facNpId & facUsId
+            db.HolidayCalendars.AddRange(
+                HolidayCalendar.Create("NP", HolidayScope.Facility, new DateOnly(2026, 5, 10), "Kathmandu Local Maintenance Day", facilityId: facNpId),
+                HolidayCalendar.Create("US", HolidayScope.Facility, new DateOnly(2026, 5, 11), "Chicago Inventory Audit Day", facilityId: facUsId));
+            await db.SaveChangesAsync();
+        });
+
+        using var scope = host.Services.CreateScope();
+        var dbOpts = scope.ServiceProvider.GetRequiredService<DbContextOptions<ApplicationDbContext>>();
+        var staffCtx = new TestCurrentUserContext { UserType = UserType.Staff };
+
+        // R01 Two-context legacy upgrade simulation: insert old erroneous Sept 20 row & verify SeedAsync fixes it safely
+        var legacyConstId = ReferenceCatalogSeeder.CreateDeterministicGuid("HOLIDAY:NP:2026-09-20:CONSTITUTION");
+        var correctConstId = ReferenceCatalogSeeder.CreateDeterministicGuid("HOLIDAY:NP:2026-09-19:CONSTITUTION");
+        await using (var legacyDb = new ApplicationDbContext(dbOpts, new TestTenantProvider { BypassTenantFilter = true }, staffCtx, new AuditableEntityInterceptor(staffCtx, new DateTimeProvider())))
+        {
+            var cur = await legacyDb.HolidayCalendars.FirstAsync(h => h.Id == correctConstId);
+            legacyDb.HolidayCalendars.Remove(cur);
+            legacyDb.HolidayCalendars.Add(HolidayCalendar.Create(
+                "NP", HolidayScope.National, new DateOnly(2026, 9, 20),
+                "Nepal Constitution Day (Ashwin 4, 2083)", id: legacyConstId));
+            await legacyDb.SaveChangesAsync();
+        }
+        await using (var upgradedDb = new ApplicationDbContext(dbOpts, new TestTenantProvider { BypassTenantFilter = true }, staffCtx, new AuditableEntityInterceptor(staffCtx, new DateTimeProvider())))
+        {
+            await ReferenceCatalogSeeder.SeedAsync(upgradedDb);
+            var legacyAfter = await upgradedDb.HolidayCalendars.AsNoTracking().SingleAsync(h => h.Id == legacyConstId);
+            var correctAfter = await upgradedDb.HolidayCalendars.AsNoTracking().SingleAsync(h => h.Id == correctConstId);
+            Assert.False(legacyAfter.IsActive);
+            Assert.True(correctAfter.IsActive);
+            Assert.Equal(new DateOnly(2026, 9, 19), correctAfter.HolidayDate);
+
+            var wc = new WorkingCalendarService(upgradedDb);
+            Assert.False((await wc.EvaluateWorkingDayAsync(facNpId, new DateOnly(2026, 9, 19))).IsWorkingDay);
+            Assert.True((await wc.EvaluateWorkingDayAsync(facNpId, new DateOnly(2026, 9, 20))).IsWorkingDay);
+
+            // R04: Cross-border NP -> US around US Thanksgiving (2026-11-26) uses destination US holidays & weekends
+            var crossBorderPolicy = CarrierContractualSlaPolicy.Create(
+                "DHL-XB", CarrierServiceLevel.StandardGround, 2, "1.0.0",
+                TransitDayCalculationType.BusinessDays, clientId, facNpId, "NP", "US",
+                dailyCutoffTime: new TimeSpan(17, 0, 0), cutoffTimeZone: "Asia/Kathmandu",
+                effectiveFromUtc: new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+            // Dispatched Tue 2026-11-24 12:00 NST (06:15 UTC): Wed Nov 25 (#1), skips US Thanksgiving Thu Nov 26, Fri Nov 27 (#2)
+            var xbEdd = await wc.CalculateCommittedDeliveryDateUtcAsync(crossBorderPolicy, new DateTime(2026, 11, 24, 6, 15, 0, DateTimeKind.Utc));
+            Assert.Equal(new DateTime(2026, 11, 27, 18, 14, 59, DateTimeKind.Utc), xbEdd); // 2026-11-27 23:59:59 +05:45
+
+            // R04: Ambiguous Unspecified DateTime and invalid configured timezone MUST fail closed
+            var unspecEx = await Assert.ThrowsAsync<DomainException>(() =>
+                wc.CalculateCommittedDeliveryDateUtcAsync(crossBorderPolicy, new DateTime(2026, 11, 24, 6, 15, 0, DateTimeKind.Unspecified)));
+            Assert.Equal("INVALID_TIMESTAMP_KIND", unspecEx.Code);
+
+            var badTzPolicy = CarrierContractualSlaPolicy.Create(
+                "DHL-BADTZ", CarrierServiceLevel.StandardGround, 2, "1.0.0",
+                TransitDayCalculationType.BusinessDays, clientId, null, "US", "US",
+                dailyCutoffTime: new TimeSpan(17, 0, 0), cutoffTimeZone: "Invalid/NonExistent_Zone",
+                effectiveFromUtc: new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc));
+            var tzEx = await Assert.ThrowsAsync<DomainException>(() =>
+                wc.CalculateCommittedDeliveryDateUtcAsync(badTzPolicy, new DateTime(2026, 11, 24, 18, 0, 0, DateTimeKind.Utc)));
+            Assert.Equal("INVALID_TIMEZONE", tzEx.Code);
+        }
+
+        // R03: Unfiltered GET /api/v1/calendars/holidays MUST enforce facility isolation across Staff, Unassigned Staff, MultiFacilityView, Client, Driver & SuperAdmin
+        using var http = host.GetTestClient();
+        var jwtNp = TokenFor(host, npStaffId, UserType.Staff, null, facNpId, ["FacMgrR14"], [Permissions.Facilities.Manage]);
+        var jwtUnassigned = TokenFor(host, unassignedStaffId, UserType.Staff, null, null, ["FacMgrR14"], [Permissions.Facilities.Manage]);
+        var jwtMulti = TokenFor(host, multiFacStaffId, UserType.Staff, null, null, ["MultiReadR14"], [Permissions.Analytics.MultiFacilityView]);
+        var jwtClient = TokenFor(host, clientUserId, UserType.Client, clientId, null, [], []);
+        var jwtDriver = TokenFor(host, driverUserId, UserType.Driver, null, null, [], []);
+        var jwtSuper = TokenFor(host, superAdminId, UserType.Staff, null, null, [SystemRoles.SuperAdmin], []);
+
+        var npList = (await (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/calendars/holidays", jwtNp))).Content.ReadFromJsonAsync<List<HolidayCalendarDto>>(JsonOptions))!;
+        Assert.Contains(npList, h => h.FacilityId == facNpId);
+        Assert.DoesNotContain(npList, h => h.FacilityId == facUsId);
+        Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/calendars/holidays?facilityId={facUsId}", jwtNp))).StatusCode);
+
+        var unassignedList = (await (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/calendars/holidays", jwtUnassigned))).Content.ReadFromJsonAsync<List<HolidayCalendarDto>>(JsonOptions))!;
+        Assert.DoesNotContain(unassignedList, h => h.HolidayScope == HolidayScope.Facility);
+        Assert.Contains(unassignedList, h => h.HolidayScope == HolidayScope.National && h.HolidayDate == new DateOnly(2026, 9, 19));
+        Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/calendars/facilities/{facNpId}", jwtUnassigned))).StatusCode);
+
+        var multiList = (await (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/calendars/holidays", jwtMulti))).Content.ReadFromJsonAsync<List<HolidayCalendarDto>>(JsonOptions))!;
+        Assert.Contains(multiList, h => h.FacilityId == facNpId);
+        Assert.Contains(multiList, h => h.FacilityId == facUsId);
+        Assert.Equal(HttpStatusCode.OK, (await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/calendars/facilities/{facUsId}", jwtMulti))).StatusCode);
+
+        var clientList = (await (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/calendars/holidays", jwtClient))).Content.ReadFromJsonAsync<List<HolidayCalendarDto>>(JsonOptions))!;
+        Assert.Contains(clientList, h => h.FacilityId == facNpId);
+        Assert.DoesNotContain(clientList, h => h.FacilityId == facUsId);
+
+        var driverList = (await (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/calendars/holidays", jwtDriver))).Content.ReadFromJsonAsync<List<HolidayCalendarDto>>(JsonOptions))!;
+        Assert.DoesNotContain(driverList, h => h.HolidayScope == HolidayScope.Facility);
+
+        var superList = (await (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/calendars/holidays", jwtSuper))).Content.ReadFromJsonAsync<List<HolidayCalendarDto>>(JsonOptions))!;
+        Assert.Contains(superList, h => h.FacilityId == facNpId);
+        Assert.Contains(superList, h => h.FacilityId == facUsId);
     }
 
     private static string TokenFor(WebApplication host, Guid id, UserType ut, Guid? cid, Guid? fid, string[] roles, string[] perms)

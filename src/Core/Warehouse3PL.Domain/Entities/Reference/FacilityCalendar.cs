@@ -118,6 +118,22 @@ public class FacilityCalendar : AuditableEntity<Guid>
         ConfigRevision++;
     }
 
+    public void CloseWindowAt(DateTime effectiveToUtc)
+    {
+        if (effectiveToUtc.Kind != DateTimeKind.Utc)
+        {
+            throw new DomainException("EffectiveToUtc must explicitly use DateTimeKind.Utc.", "FACILITY_CALENDAR_INVALID_UTC");
+        }
+
+        if (effectiveToUtc <= EffectiveFromUtc)
+        {
+            throw new DomainException("EffectiveToUtc must be strictly after EffectiveFromUtc.", "FACILITY_CALENDAR_INVALID_WINDOW");
+        }
+
+        EffectiveToUtc = effectiveToUtc;
+        ConfigRevision++;
+    }
+
     public static string NormalizeWeeklyRestDaysCsv(string weeklyRestDaysCsv)
     {
         var days = ParseWeeklyRestDays(weeklyRestDaysCsv);
