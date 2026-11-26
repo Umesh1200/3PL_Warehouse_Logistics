@@ -313,10 +313,12 @@ public sealed class GetHolidayCalendarsQueryHandler
             query = query.Where(h => h.HolidayDate <= request.ToDate.Value);
         }
 
-        var rows = await query
+        var rows = (await query
+            .OrderBy(h => h.HolidayDate)
+            .ToListAsync(cancellationToken))
             .OrderBy(h => h.HolidayDate)
             .ThenByDescending(h => (int)h.HolidayScope)
-            .ToListAsync(cancellationToken);
+            .ToList();
 
         return rows.Select(h => h.ToDto()).ToList();
     }
