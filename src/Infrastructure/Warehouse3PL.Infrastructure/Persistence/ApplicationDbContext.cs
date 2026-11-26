@@ -54,6 +54,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public Guid? CurrentTenantId => _tenantProvider.TenantId;
     public bool BypassTenantFilter => _tenantProvider.BypassTenantFilter || _currentUser.IsStaff;
     public bool IsRelationalDatabase => Database.IsRelational();
+    public bool HasActiveTransaction => Database.CurrentTransaction != null || _currentTransaction != null;
     public bool AllowExplicitAuditTimestamps { get; set; } = false;
     internal bool IsPrivilegedAnalyticsMaintenance => _currentUser.IsAuthenticated && _currentUser.IsSuperAdmin;
     private void EnforceJournalImmutability()
@@ -267,10 +268,33 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         {
             using var cmd = conn.CreateCommand();
             cmd.Transaction = Database.CurrentTransaction?.GetDbTransaction();
-            cmd.CommandText = "SELECT CASE WHEN to_regclass('configuration_scope_epochs') IS NOT NULL THEN 1 ELSE 0 END;";
-            var exists = Convert.ToInt32(cmd.ExecuteScalar()) == 1;
-            _hasMdm15Schema = exists;
-            return exists;
+            cmd.CommandText = """
+                SELECT
+                    CASE WHEN to_regclass('configuration_scope_epochs') IS NOT NULL THEN 1 ELSE 0 END AS has_table,
+                    CASE WHEN to_regclass('"__EFMigrationsHistory"') IS NOT NULL THEN 1 ELSE 0 END AS has_history,
+                    CASE WHEN to_regclass('"__EFMigrationsHistory"') IS NOT NULL
+                              AND EXISTS (SELECT 1 FROM "__EFMigrationsHistory" WHERE migration_id >= '20261126083415')
+                         THEN 1 ELSE 0 END AS has_mdm15_migration;
+                """;
+            using var reader = cmd.ExecuteReader();
+            reader.Read();
+            bool hasTable = reader.GetInt32(0) == 1;
+            bool hasHistory = reader.GetInt32(1) == 1;
+            bool hasMdm15Migration = reader.GetInt32(2) == 1;
+
+            if (hasTable)
+            {
+                _hasMdm15Schema = true;
+                return true;
+            }
+
+            if (!hasHistory || hasMdm15Migration)
+            {
+                throw new InvalidOperationException(
+                    "MDM-1.5 configuration_scope_epochs table is missing while MDM-1.5 or non-migration schema is active; failing closed rather than bypassing epoch tracking.");
+            }
+
+            return false;
         }
         finally
         {
@@ -288,10 +312,33 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         {
             await using var cmd = conn.CreateCommand();
             cmd.Transaction = Database.CurrentTransaction?.GetDbTransaction();
-            cmd.CommandText = "SELECT CASE WHEN to_regclass('configuration_scope_epochs') IS NOT NULL THEN 1 ELSE 0 END;";
-            var exists = Convert.ToInt32(await cmd.ExecuteScalarAsync(cancellationToken)) == 1;
-            _hasMdm15Schema = exists;
-            return exists;
+            cmd.CommandText = """
+                SELECT
+                    CASE WHEN to_regclass('configuration_scope_epochs') IS NOT NULL THEN 1 ELSE 0 END AS has_table,
+                    CASE WHEN to_regclass('"__EFMigrationsHistory"') IS NOT NULL THEN 1 ELSE 0 END AS has_history,
+                    CASE WHEN to_regclass('"__EFMigrationsHistory"') IS NOT NULL
+                              AND EXISTS (SELECT 1 FROM "__EFMigrationsHistory" WHERE migration_id >= '20261126083415')
+                         THEN 1 ELSE 0 END AS has_mdm15_migration;
+                """;
+            await using var reader = await cmd.ExecuteReaderAsync(cancellationToken);
+            await reader.ReadAsync(cancellationToken);
+            bool hasTable = reader.GetInt32(0) == 1;
+            bool hasHistory = reader.GetInt32(1) == 1;
+            bool hasMdm15Migration = reader.GetInt32(2) == 1;
+
+            if (hasTable)
+            {
+                _hasMdm15Schema = true;
+                return true;
+            }
+
+            if (!hasHistory || hasMdm15Migration)
+            {
+                throw new InvalidOperationException(
+                    "MDM-1.5 configuration_scope_epochs table is missing while MDM-1.5 or non-migration schema is active; failing closed rather than bypassing epoch tracking.");
+            }
+
+            return false;
         }
         finally
         {

@@ -20,6 +20,8 @@ public sealed class CachedConfigurationEnvelope<T>
 
 public sealed class ConfigurationConsistencyService : IConfigurationConsistencyService
 {
+    private const int MaxEpochVerificationAttempts = 5;
+
     private readonly IApplicationDbContext _db;
     private readonly ICacheService _cache;
     private readonly IDateTimeProvider _dateTime;
@@ -112,6 +114,39 @@ public sealed class ConfigurationConsistencyService : IConfigurationConsistencyS
         CancellationToken cancellationToken = default)
     {
         var normScope = NormalizeScopeKey(scopeKey);
+
+        // MDM15-R02: Inside an active database transaction, bypass shared L1/L2 caches completely
+        // (neither reading nor publishing) so uncommitted epochs/values cannot leak across transactions or survive rollback.
+        bool hasActiveTx;
+        try
+        {
+            hasActiveTx = _db.HasActiveTransaction;
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (Exception ex)
+        {
+            _logger.LogError(ex, "Database transaction-state check failed for {ScopeType}:{ScopeKey}; failing closed.", scopeType, normScope);
+            throw new DomainException(
+                $"Authoritative configuration verification unavailable for scope '{scopeType}:{normScope}'.",
+                ex,
+                "CONFIG_EPOCH_VERIFICATION_UNAVAILABLE");
+        }
+
+        if (hasActiveTx)
+        {
+            long txEpoch = await GetAuthoritativeEpochAsync(scopeType, normScope, cancellationToken);
+            T txValue = await loader(_db, cancellationToken);
+            return new ConfigurationReadDiagnostics<T>(
+                txValue,
+                txEpoch,
+                ServedFromCache: false,
+                StaleCacheEvicted: false,
+                ScopedCacheKey: string.Empty);
+        }
+
         var (tenantPart, facilityPart) = ResolvePartitions(tenantId, facilityId);
 
         // 1. Always verify PostgreSQL authoritative epoch before trusting any cached bundle.
@@ -168,38 +203,51 @@ public sealed class ConfigurationConsistencyService : IConfigurationConsistencyS
             }
         }
 
-        // 4. Reload authoritatively from PostgreSQL and re-verify epoch did not advance mid-load.
-        T freshValue = await loader(_db, cancellationToken);
-        long postLoadEpoch = await GetAuthoritativeEpochAsync(scopeType, normScope, cancellationToken);
-        if (postLoadEpoch != authoritativeEpoch)
+        // 4. MDM15-R03: Bounded epoch verification loop.
+        // Every loaded configuration snapshot must be confirmed consistent between pre-load and post-load epochs
+        // BEFORE publishing to cache; if concurrent mutations keep shifting the epoch past MaxEpochVerificationAttempts,
+        // fail closed without caching an unverified snapshot.
+        for (int attempt = 1; attempt <= MaxEpochVerificationAttempts; attempt++)
         {
-            // Concurrent commit happened while loading; reload cleanly once at newer epoch.
-            authoritativeEpoch = postLoadEpoch;
-            scopedKey = BuildScopedCacheKey(scopeType, normScope, bundleName, authoritativeEpoch, tenantId, facilityId);
-            freshValue = await loader(_db, cancellationToken);
+            long preLoadEpoch = await GetAuthoritativeEpochAsync(scopeType, normScope, cancellationToken);
+            T freshValue = await loader(_db, cancellationToken);
+            long postLoadEpoch = await GetAuthoritativeEpochAsync(scopeType, normScope, cancellationToken);
+
+            if (preLoadEpoch == postLoadEpoch)
+            {
+                scopedKey = BuildScopedCacheKey(scopeType, normScope, bundleName, postLoadEpoch, tenantId, facilityId);
+
+                var newEnvelope = new CachedConfigurationEnvelope<T>
+                {
+                    ScopeType = scopeType,
+                    ScopeKey = normScope,
+                    Epoch = postLoadEpoch,
+                    TenantPartition = tenantPart,
+                    FacilityPartition = facilityPart,
+                    CachedAtUtc = _dateTime.UtcNow,
+                    Value = freshValue
+                };
+
+                var cappedTtl = TimeSpan.FromSeconds(30);
+                await _cache.SetAsync(scopedKey, newEnvelope, absoluteExpiration: cappedTtl, cancellationToken: cancellationToken);
+                await _cache.SetAsync(pointerKey, newEnvelope, absoluteExpiration: cappedTtl, cancellationToken: cancellationToken);
+
+                return new ConfigurationReadDiagnostics<T>(
+                    freshValue,
+                    postLoadEpoch,
+                    ServedFromCache: false,
+                    StaleCacheEvicted: staleEvicted,
+                    scopedKey);
+            }
+
+            _logger.LogWarning(
+                "Configuration epoch shifted mid-load for {ScopeType}:{ScopeKey} ({PreEpoch} -> {PostEpoch}, attempt {Attempt}/{Max}). Retrying.",
+                scopeType, normScope, preLoadEpoch, postLoadEpoch, attempt, MaxEpochVerificationAttempts);
         }
 
-        var newEnvelope = new CachedConfigurationEnvelope<T>
-        {
-            ScopeType = scopeType,
-            ScopeKey = normScope,
-            Epoch = authoritativeEpoch,
-            TenantPartition = tenantPart,
-            FacilityPartition = facilityPart,
-            CachedAtUtc = _dateTime.UtcNow,
-            Value = freshValue
-        };
-
-        var cappedTtl = TimeSpan.FromSeconds(30);
-        await _cache.SetAsync(scopedKey, newEnvelope, absoluteExpiration: cappedTtl, cancellationToken: cancellationToken);
-        await _cache.SetAsync(pointerKey, newEnvelope, absoluteExpiration: cappedTtl, cancellationToken: cancellationToken);
-
-        return new ConfigurationReadDiagnostics<T>(
-            freshValue,
-            authoritativeEpoch,
-            ServedFromCache: false,
-            StaleCacheEvicted: staleEvicted,
-            scopedKey);
+        throw new DomainException(
+            $"Configuration scope '{scopeType}:{normScope}' experienced concurrent epoch changes across {MaxEpochVerificationAttempts} verification attempts; refusing to publish or serve an unverified configuration snapshot.",
+            "CONFIG_EPOCH_CONTENTION_EXCEEDED");
     }
 
     public Task<LegalEntity?> GetVerifiedLegalEntityAsync(

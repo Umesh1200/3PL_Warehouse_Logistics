@@ -53,10 +53,14 @@ public class ConfigurationInvalidationEventConfiguration : IEntityTypeConfigurat
             .HasDefaultValue(0)
             .IsRequired();
 
+        builder.Property(e => e.NextRetryAtUtc)
+            .HasColumnName("next_retry_at_utc");
+
         builder.Property(e => e.LastDispatchError)
             .HasColumnName("last_dispatch_error")
             .HasMaxLength(500);
 
+        builder.HasIndex(e => new { e.DispatchedToRedisAtUtc, e.NextRetryAtUtc, e.Id });
         builder.HasIndex(e => new { e.DispatchedToRedisAtUtc, e.Id });
         builder.HasIndex(e => new { e.ScopeType, e.ScopeKey, e.NewEpoch });
     }

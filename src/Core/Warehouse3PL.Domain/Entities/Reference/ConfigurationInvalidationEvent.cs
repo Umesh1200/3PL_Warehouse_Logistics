@@ -18,6 +18,7 @@ public class ConfigurationInvalidationEvent
     public DateTime CreatedAtUtc { get; set; }
     public DateTime? DispatchedToRedisAtUtc { get; set; }
     public int DispatchAttempts { get; set; }
+    public DateTime? NextRetryAtUtc { get; set; }
     public string? LastDispatchError { get; set; }
 
     public static ConfigurationInvalidationEvent Create(
@@ -48,6 +49,7 @@ public class ConfigurationInvalidationEvent
             CreatedAtUtc = createdAtUtc.Kind == DateTimeKind.Utc ? createdAtUtc : createdAtUtc.ToUniversalTime(),
             DispatchedToRedisAtUtc = null,
             DispatchAttempts = 0,
+            NextRetryAtUtc = null,
             LastDispatchError = null
         };
     }
@@ -56,16 +58,23 @@ public class ConfigurationInvalidationEvent
     {
         DispatchAttempts++;
         LastDispatchError = null;
+        NextRetryAtUtc = null;
         DispatchedToRedisAtUtc = dispatchedAtUtc.Kind == DateTimeKind.Utc
             ? dispatchedAtUtc
             : dispatchedAtUtc.ToUniversalTime();
     }
 
-    public void RecordDispatchFailure(string errorMessage)
+    public void RecordDispatchFailure(string errorMessage, DateTime? failedAtUtc = null)
     {
         DispatchAttempts++;
         var trimmed = string.IsNullOrWhiteSpace(errorMessage) ? "Unknown dispatch error." : errorMessage.Trim();
         LastDispatchError = trimmed.Length > 500 ? trimmed[..500] : trimmed;
+        var now = failedAtUtc.HasValue
+            ? (failedAtUtc.Value.Kind == DateTimeKind.Utc ? failedAtUtc.Value : failedAtUtc.Value.ToUniversalTime())
+            : DateTime.UtcNow;
+        // Exponential backoff: 5s, 10s, 20s, 40s, 80s, 160s, capped at 300s
+        var backoffSeconds = Math.Min(300d, 5d * Math.Pow(2d, Math.Min(6, DispatchAttempts - 1)));
+        NextRetryAtUtc = now.AddSeconds(backoffSeconds);
         // Never mark DispatchedToRedisAtUtc on failure (prevents false completion / lost invalidations).
     }
 }

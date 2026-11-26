@@ -9,7 +9,7 @@ namespace Warehouse3PL.Infrastructure.Caching;
 
 public sealed class RedisConfigurationInvalidationTransport : IConfigurationInvalidationTransport
 {
-    private const string ChannelName = "nexus3pl:config-invalidations";
+    private const string ChannelName = RedisConfigurationInvalidationSubscriber.ChannelName;
 
     private readonly ICacheService _cache;
     private readonly CacheOptions _options;

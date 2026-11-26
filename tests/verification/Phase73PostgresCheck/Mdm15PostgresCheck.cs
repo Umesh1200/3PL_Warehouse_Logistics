@@ -1,15 +1,19 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
+using Microsoft.Extensions.Caching.Distributed;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Caching.StackExchangeRedis;
 using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
 using Npgsql;
+using StackExchange.Redis;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Reference;
+using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
 using Warehouse3PL.Infrastructure.BackgroundJobs;
@@ -315,12 +319,13 @@ internal static class Mdm15PostgresCheck
                 }
             }
 
-            // 9. Dispatcher retryable delivery without false completion on live PostgreSQL
+            // 9. Dispatcher retryable delivery + exponential backoff + retention cleanup on live PostgreSQL
+            var pgClock = new PgMutableClock(DateTime.UtcNow);
             var pgTransport = new FailingThenWorkingPgTransport();
             await using (var dispDb = CreatePgDb(targetConn))
             {
                 var processor = new ConfigurationInvalidationProcessor(
-                    dispDb, pgTransport, clock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
+                    dispDb, pgTransport, pgClock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
 
                 var resFail = await processor.DispatchPendingAsync();
                 if (resFail.Attempted == 0 || resFail.Failed != resFail.Attempted || resFail.Dispatched != 0)
@@ -332,12 +337,19 @@ internal static class Mdm15PostgresCheck
                     .AsNoTracking()
                     .Where(e => e.DispatchedToRedisAtUtc == null)
                     .ToListAsync();
-                if (stillPending.Count == 0 || stillPending.Any(e => e.DispatchAttempts < 1 || string.IsNullOrEmpty(e.LastDispatchError)))
+                if (stillPending.Count == 0 || stillPending.Any(e => e.DispatchAttempts < 1 || !e.NextRetryAtUtc.HasValue || string.IsNullOrEmpty(e.LastDispatchError)))
                 {
-                    throw new InvalidOperationException("MDM-1.5 PG failed dispatch events lost or missing retry metadata.");
+                    throw new InvalidOperationException("MDM-1.5 PG failed dispatch events lost or missing backoff metadata.");
                 }
 
                 pgTransport.ShouldFail = false;
+                var deferredSweep = await processor.DispatchPendingAsync();
+                if (deferredSweep.Attempted != 0 || deferredSweep.DeferredByBackoff != stillPending.Count)
+                {
+                    throw new InvalidOperationException("MDM-1.5 PG dispatcher did not honor exponential retry backoff window.");
+                }
+
+                pgClock.UtcNow = pgClock.UtcNow.AddSeconds(10);
                 var resOk = await processor.DispatchPendingAsync();
                 if (resOk.Failed != 0 || resOk.Dispatched != stillPending.Count)
                 {
@@ -348,9 +360,27 @@ internal static class Mdm15PostgresCheck
                 {
                     throw new InvalidOperationException("MDM-1.5 PG undispatched events remain after clean retry sweep.");
                 }
+
+                // Retention pruning removes aged dispatched rows cleanly
+                pgClock.UtcNow = pgClock.UtcNow.AddDays(10);
+                var purgeSweep = await processor.DispatchPendingAsync();
+                if (purgeSweep.PurgedExpired == 0)
+                {
+                    throw new InvalidOperationException("MDM-1.5 PG outbox retention cleanup did not purge aged dispatched events.");
+                }
             }
 
-            Console.WriteLine("PASS PostgreSQL MDM-1.5 Scope Epochs, Outbox Retry, Concurrency Serialization, Rollback & 2-Instance No-Redis Verification.");
+            // 10. R01 + R02 + Mutable Scope + Rollback-on-Epoch-Failure on Live PostgreSQL
+            await RunRemediationPgChecksAsync(targetConn, facNpId, approverId);
+
+            // 11. R05 Live PostgreSQL + REAL Redis 2-Instance Integration (executed whenever PHASE73_REDIS_CONNECTION is configured)
+            var redisConn = Environment.GetEnvironmentVariable("PHASE73_REDIS_CONNECTION");
+            if (!string.IsNullOrWhiteSpace(redisConn))
+            {
+                await RunLiveRedisMultiInstanceChecksAsync(targetConn, redisConn, approverId);
+            }
+
+            Console.WriteLine("PASS PostgreSQL MDM-1.5 Scope Epochs, Outbox Backoff/Retry, Concurrency, R01-R05 & Real Redis Verification.");
         }
         finally
         {
@@ -360,6 +390,397 @@ internal static class Mdm15PostgresCheck
             await using var dropCmd = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{dbName}\" WITH (FORCE)", dropConn);
             await dropCmd.ExecuteNonQueryAsync();
         }
+    }
+
+    private static async Task RunRemediationPgChecksAsync(string connStr, Guid facNpId, Guid approverId)
+    {
+        var clock = new DateTimeProvider();
+
+        // R01 Effective-date-safe FX caching across multiple non-overlapping windows (reversed query order)
+        var w1From = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var w2From = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+        var w2To = new DateTime(2026, 12, 31, 0, 0, 0, DateTimeKind.Utc);
+        await using (var fxSetupDb = CreatePgDb(connStr))
+        {
+            var r1 = FxRateRecord.CreateDraft("EUR", "NPR", w1From, w2From, 1, 139.0m, 141.0m, 140.0m, FxRateSourceAuthority.ManualApproved, "PG-EUR-W1", w1From, evidenceReference: "BOARD_W1");
+            r1.Approve(approverId, w1From, "PG R01 W1", evidenceReference: "BOARD_W1");
+            var r2 = FxRateRecord.CreateDraft("EUR", "NPR", w2From, w2To, 10, 1440.0m, 1460.0m, 1450.0m, FxRateSourceAuthority.ManualApproved, "PG-EUR-W2", w2From, evidenceReference: "BOARD_W2");
+            r2.Approve(approverId, w2From, "PG R01 W2", evidenceReference: "BOARD_W2");
+            fxSetupDb.FxRateRecords.AddRange(r1, r2);
+            await fxSetupDb.SaveChangesAsync();
+        }
+
+        using (var memFx = new MemoryCache(new MemoryCacheOptions { SizeLimit = 1000 }))
+        {
+            var cacheFx = new RedisCacheService(memFx, Options.Create(new CacheOptions()), NullLogger<RedisCacheService>.Instance);
+            await using var fxDb = CreatePgDb(connStr);
+            var consFx = new ConfigurationConsistencyService(fxDb, cacheFx, clock, NullLogger<ConfigurationConsistencyService>.Instance);
+            var fxCached = new FxConversionService(fxDb, new FxRateProvider(), clock, consFx);
+            var fxUncached = new FxConversionService(fxDb, new FxRateProvider(), clock, null);
+
+            var cJun = await fxCached.ConvertAmountAsync(100m, "EUR", "NPR", new DateTime(2026, 7, 15, 0, 0, 0, DateTimeKind.Utc), FxRateType.Sell, w2To);
+            var uJun = await fxUncached.ConvertAmountAsync(100m, "EUR", "NPR", new DateTime(2026, 7, 15, 0, 0, 0, DateTimeKind.Utc), FxRateType.Sell, w2To);
+            var cFeb = await fxCached.ConvertAmountAsync(100m, "EUR", "NPR", new DateTime(2026, 2, 15, 0, 0, 0, DateTimeKind.Utc), FxRateType.Buy, w2To);
+            var uFeb = await fxUncached.ConvertAmountAsync(100m, "EUR", "NPR", new DateTime(2026, 2, 15, 0, 0, 0, DateTimeKind.Utc), FxRateType.Buy, w2To);
+            if (cJun.ConvertedAmount != uJun.ConvertedAmount || cFeb.ConvertedAmount != uFeb.ConvertedAmount ||
+                cJun.ConvertedAmount != 14600.00m || cFeb.ConvertedAmount != 13900.00m)
+            {
+                throw new InvalidOperationException("MDM-1.5 R01 PG effective-date-safe FX cache parity failed.");
+            }
+        }
+
+        // R02 Transaction-aware caching: Rollback followed by reuse of the SAME epoch number MUST NEVER leak rolled-back config
+        var r02Eff = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        await using (var r02Init = CreatePgDb(connStr))
+        {
+            var p1 = CountryCompliancePolicy.CreateDraft(
+                "NP", "NP-PG15-R02", 1, "R02 Baseline", "Gazette R02", "Notice-R02-1",
+                """{"ExemptBusinessClassifications":["MICRO_RETAIL"]}""",
+                ComplianceEnforcementMode.MandatoryFailClosed, r02Eff, null);
+            p1.Approve(approverId, r02Eff, "Verified R02 baseline");
+            r02Init.CountryCompliancePolicies.Add(p1);
+            await r02Init.SaveChangesAsync();
+        }
+
+        using var sharedMem = new MemoryCache(new MemoryCacheOptions { SizeLimit = 1000 });
+        var sharedCache = new RedisCacheService(sharedMem, Options.Create(new CacheOptions()), NullLogger<RedisCacheService>.Instance);
+
+        long baselineNpEpoch;
+        await using (var txDb = CreatePgDb(connStr))
+        {
+            var consTx = new ConfigurationConsistencyService(txDb, sharedCache, clock, NullLogger<ConfigurationConsistencyService>.Instance);
+            // Warm cache at committed baseline epoch E
+            var baseEval = await consTx.GetOrLoadVerifiedWithDiagnosticsAsync(
+                ConfigurationScopeType.Country, "NP", "r02-bundle",
+                (d, ct) => d.CountryCompliancePolicies.AsNoTracking().Where(p => p.CountryCode == "NP" && p.PolicyCode == "NP-PG15-R02" && p.IsActive).Select(p => p.Title).SingleAsync(ct));
+            baselineNpEpoch = baseEval.AuthoritativeEpoch;
+            if (baseEval.Value != "R02 Baseline") throw new InvalidOperationException("R02 baseline setup failed.");
+
+            await txDb.BeginTransactionAsync();
+            var p1 = await txDb.CountryCompliancePolicies.SingleAsync(p => p.CountryCode == "NP" && p.PolicyCode == "NP-PG15-R02" && p.Version == 1);
+            var pBad = CountryCompliancePolicy.CreateDraft(
+                "NP", "NP-PG15-R02", 2, "ROLLED_BACK_PHANTOM", "Gazette R02", "Notice-R02-BAD",
+                """{"RequiredBusinessClassifications":["MICRO_RETAIL"]}""",
+                ComplianceEnforcementMode.MandatoryFailClosed, r02Eff, null);
+            txDb.CountryCompliancePolicies.Add(pBad);
+            await txDb.SaveChangesAsync();
+            p1.Supersede(pBad.Id, r02Eff);
+            pBad.Approve(approverId, r02Eff.AddDays(1), "Uncommitted bad version");
+            await txDb.SaveChangesAsync();
+
+            // Read INSIDE active transaction: MUST see uncommitted title, MUST NOT touch sharedCache!
+            var insideTxRead = await consTx.GetOrLoadVerifiedWithDiagnosticsAsync(
+                ConfigurationScopeType.Country, "NP", "r02-bundle",
+                (d, ct) => d.CountryCompliancePolicies.AsNoTracking().Where(p => p.CountryCode == "NP" && p.PolicyCode == "NP-PG15-R02" && p.IsActive).Select(p => p.Title).SingleAsync(ct));
+            if (insideTxRead.ServedFromCache || insideTxRead.Value != "ROLLED_BACK_PHANTOM")
+            {
+                throw new InvalidOperationException("MDM-1.5 R02 PG in-transaction read did not bypass cache cleanly.");
+            }
+
+            await txDb.RollbackTransactionAsync();
+        }
+
+        // Now commit a NEW valid change cleanly -> PostgreSQL reuses epoch baselineNpEpoch + 1 (or next monotonic)!
+        await using (var realCommitDb = CreatePgDb(connStr))
+        {
+            var p1 = await realCommitDb.CountryCompliancePolicies.SingleAsync(p => p.CountryCode == "NP" && p.PolicyCode == "NP-PG15-R02" && p.Version == 1);
+            var pGood = CountryCompliancePolicy.CreateDraft(
+                "NP", "NP-PG15-R02", 2, "R02 AUTHORITATIVE V2", "Gazette R02", "Notice-R02-GOOD",
+                """{"RequiredBusinessClassifications":["MICRO_RETAIL"]}""",
+                ComplianceEnforcementMode.MandatoryFailClosed, r02Eff, null);
+            realCommitDb.CountryCompliancePolicies.Add(pGood);
+            await realCommitDb.SaveChangesAsync();
+            p1.Supersede(pGood.Id, r02Eff);
+            pGood.Approve(approverId, r02Eff.AddDays(1), "Committed real V2");
+            await realCommitDb.SaveChangesAsync();
+        }
+
+        await using (var verifyDb = CreatePgDb(connStr))
+        {
+            var consVerify = new ConfigurationConsistencyService(verifyDb, sharedCache, clock, NullLogger<ConfigurationConsistencyService>.Instance);
+            var finalRead = await consVerify.GetOrLoadVerifiedWithDiagnosticsAsync(
+                ConfigurationScopeType.Country, "NP", "r02-bundle",
+                (d, ct) => d.CountryCompliancePolicies.AsNoTracking().Where(p => p.CountryCode == "NP" && p.PolicyCode == "NP-PG15-R02" && p.IsActive).Select(p => p.Title).SingleAsync(ct));
+            if (finalRead.Value != "R02 AUTHORITATIVE V2" || finalRead.AuthoritativeEpoch <= baselineNpEpoch)
+            {
+                throw new InvalidOperationException($"MDM-1.5 R02 PG exposed stale/rolled-back value '{finalRead.Value}' after rollback+reuse!");
+            }
+        }
+
+        // Mutable scope change (NP -> US on HolidayCalendar) & Transaction rollback when epoch/outbox fails
+        await using (var scopeMoveDb = CreatePgDb(connStr))
+        {
+            var hol = HolidayCalendar.Create("NP", HolidayScope.National, new DateOnly(2029, 4, 5), "PG Moveable Holiday");
+            scopeMoveDb.HolidayCalendars.Add(hol);
+            await scopeMoveDb.SaveChangesAsync();
+
+            long npBefore = await scopeMoveDb.ConfigurationScopeEpochs.AsNoTracking().Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "NP").Select(e => e.CurrentEpoch).FirstAsync();
+            long usBefore = await scopeMoveDb.ConfigurationScopeEpochs.AsNoTracking().Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "US").Select(e => e.CurrentEpoch).FirstAsync();
+
+            hol.CountryCode = "US";
+            await scopeMoveDb.SaveChangesAsync();
+
+            long npAfter = await scopeMoveDb.ConfigurationScopeEpochs.AsNoTracking().Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "NP").Select(e => e.CurrentEpoch).FirstAsync();
+            long usAfter = await scopeMoveDb.ConfigurationScopeEpochs.AsNoTracking().Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "US").Select(e => e.CurrentEpoch).FirstAsync();
+            if (npAfter != npBefore + 1 || usAfter != usBefore + 1)
+            {
+                throw new InvalidOperationException("MDM-1.5 PG mutable scope move did not increment BOTH original and destination scope epochs.");
+            }
+        }
+
+        // Additional Review: Missing-schema fail-closed check when MDM1_5 migration is recorded in __EFMigrationsHistory
+        await using (var schemaFailDb = CreatePgDb(connStr))
+        {
+            await schemaFailDb.BeginTransactionAsync();
+            await schemaFailDb.Database.ExecuteSqlRawAsync("DROP TABLE configuration_invalidation_events; DROP TABLE configuration_scope_epochs;");
+            schemaFailDb.HolidayCalendars.Add(HolidayCalendar.Create("NP", HolidayScope.National, new DateOnly(2029, 5, 6), "Missing Schema Should Fail"));
+            bool missingSchemaBlocked = false;
+            try
+            {
+                await schemaFailDb.SaveChangesAsync();
+            }
+            catch (InvalidOperationException ex) when (ex.Message.Contains("failing closed", StringComparison.OrdinalIgnoreCase))
+            {
+                missingSchemaBlocked = true;
+            }
+            await schemaFailDb.RollbackTransactionAsync();
+            if (!missingSchemaBlocked)
+            {
+                throw new InvalidOperationException("MDM-1.5 PG silently bypassed missing configuration_scope_epochs schema despite recorded MDM1_5 migration!");
+            }
+        }
+
+        // Additional Review: When outbox persistence fails inside SaveChangesAsync's own transaction, primary MDM entity & epoch rollback atomically
+        long npBeforeOutboxFail;
+        await using (var outboxFailSetup = CreatePgDb(connStr))
+        {
+            npBeforeOutboxFail = await outboxFailSetup.ConfigurationScopeEpochs.AsNoTracking()
+                .Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "NP")
+                .Select(e => e.CurrentEpoch).FirstAsync();
+
+            await outboxFailSetup.Database.ExecuteSqlRawAsync("""
+                CREATE OR REPLACE FUNCTION mdm15_fail_outbox_once() RETURNS trigger AS $$
+                BEGIN
+                    RAISE EXCEPTION 'SIMULATED_OUTBOX_PERSISTENCE_FAILURE';
+                END;
+                $$ LANGUAGE plpgsql;
+                CREATE TRIGGER trg_mdm15_fail_outbox BEFORE INSERT ON configuration_invalidation_events
+                FOR EACH ROW EXECUTE FUNCTION mdm15_fail_outbox_once();
+                """);
+        }
+
+        try
+        {
+            await using var failingWriteDb = CreatePgDb(connStr);
+            failingWriteDb.HolidayCalendars.Add(HolidayCalendar.Create("NP", HolidayScope.National, new DateOnly(2029, 6, 7), "Should Rollback With Outbox"));
+            bool threw = false;
+            try
+            {
+                await failingWriteDb.SaveChangesAsync();
+            }
+            catch (PostgresException pgEx) when (pgEx.MessageText.Contains("SIMULATED_OUTBOX_PERSISTENCE_FAILURE", StringComparison.Ordinal))
+            {
+                threw = true;
+            }
+
+            if (!threw)
+            {
+                throw new InvalidOperationException("MDM-1.5 PG simulated outbox failure trigger did not fire.");
+            }
+        }
+        finally
+        {
+            await using var cleanupDb = CreatePgDb(connStr);
+            await cleanupDb.Database.ExecuteSqlRawAsync("DROP TRIGGER IF EXISTS trg_mdm15_fail_outbox ON configuration_invalidation_events; DROP FUNCTION IF EXISTS mdm15_fail_outbox_once();");
+        }
+
+        await using (var postFailCheck = CreatePgDb(connStr))
+        {
+            long npAfterOutboxFail = await postFailCheck.ConfigurationScopeEpochs.AsNoTracking()
+                .Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "NP")
+                .Select(e => e.CurrentEpoch).FirstAsync();
+            bool leakedHoliday = await postFailCheck.HolidayCalendars.AsNoTracking()
+                .AnyAsync(h => h.HolidayDate == new DateOnly(2029, 6, 7) && h.Name == "Should Rollback With Outbox");
+
+            if (npAfterOutboxFail != npBeforeOutboxFail || leakedHoliday)
+            {
+                throw new InvalidOperationException("MDM-1.5 PG primary HolidayCalendar write or epoch increment leaked after outbox persistence failure!");
+            }
+        }
+    }
+
+    private static async Task RunLiveRedisMultiInstanceChecksAsync(string pgConn, string redisConn, Guid approverId)
+    {
+        Console.WriteLine("[MDM-1.5-R05] Running Live PostgreSQL + Live Redis 2-Container Pub/Sub & Outage Recovery Verification...");
+        var instancePrefix = $"Mdm15Live:{Guid.NewGuid():N}:";
+        var clock = new PgMutableClock(DateTime.UtcNow);
+        var eff = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var evalTime = new DateTime(2026, 11, 20, 12, 0, 0, DateTimeKind.Utc);
+
+        await using (var seedDb = CreatePgDb(pgConn))
+        {
+            var p1 = CountryCompliancePolicy.CreateDraft(
+                "NP", "NP-REDIS-LIVE", 1, "Redis Live V1", "Gazette RL1", "Notice-RL-1",
+                """{"ExemptBusinessClassifications":["MICRO_RETAIL"]}""",
+                ComplianceEnforcementMode.MandatoryFailClosed, eff, null);
+            p1.Approve(approverId, eff, "Approved RL1");
+            seedDb.CountryCompliancePolicies.Add(p1);
+            await seedDb.SaveChangesAsync();
+        }
+
+        // Build two completely independent Redis + L1 + Subscriber service containers
+        var muxConfig = ConfigurationOptions.Parse(redisConn, ignoreUnknown: true);
+        muxConfig.AbortOnConnectFail = false;
+
+        using var muxA = await ConnectionMultiplexer.ConnectAsync(muxConfig);
+        using var muxB = await ConnectionMultiplexer.ConnectAsync(muxConfig);
+
+        var optsA = Options.Create(new CacheOptions { EnableRedis = true, ConnectionString = redisConn, InstanceName = instancePrefix, DefaultExpirationMinutes = 30, LocalFallbackMaxTtlSeconds = 30 });
+        var optsB = Options.Create(new CacheOptions { EnableRedis = true, ConnectionString = redisConn, InstanceName = instancePrefix, DefaultExpirationMinutes = 30, LocalFallbackMaxTtlSeconds = 30 });
+
+        var distA = new RedisCache(new RedisCacheOptions { Configuration = redisConn, InstanceName = instancePrefix });
+        var distB = new RedisCache(new RedisCacheOptions { Configuration = redisConn, InstanceName = instancePrefix });
+
+        using var memA = new MemoryCache(new MemoryCacheOptions { SizeLimit = 1000 });
+        using var memB = new MemoryCache(new MemoryCacheOptions { SizeLimit = 1000 });
+
+        var cacheA = new RedisCacheService(memA, optsA, NullLogger<RedisCacheService>.Instance, distA);
+        var cacheB = new RedisCacheService(memB, optsB, NullLogger<RedisCacheService>.Instance, distB);
+
+        var subB = new RedisConfigurationInvalidationSubscriber(cacheB, optsB, NullLogger<RedisConfigurationInvalidationSubscriber>.Instance, muxB);
+        await subB.StartAsync(CancellationToken.None);
+
+        try
+        {
+            // Wait briefly for Redis pub/sub subscription handshake
+            await Task.Delay(250);
+
+            // 1. Instance B warms L1 + Redis cache at V1
+            await using (var dbB1 = CreatePgDb(pgConn))
+            {
+                var consB1 = new ConfigurationConsistencyService(dbB1, cacheB, clock, NullLogger<ConfigurationConsistencyService>.Instance);
+                var evalB1 = new CountryComplianceEvaluator(dbB1, clock, consB1);
+                var r1 = await evalB1.EvaluateAsync(new ComplianceEvaluationRequest("NP", "NP-REDIS-LIVE", BusinessClassification: "MICRO_RETAIL", EvaluationUtc: evalTime));
+                if (r1.Status != ComplianceApplicabilityStatus.NotRequired || cacheB.TrackedLocalKeyCount == 0)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05 Instance B failed to warm L1+Redis cache at V1.");
+                }
+            }
+
+            // 2. Instance A updates policy to V2 and runs dispatcher against REAL Redis
+            await using (var dbA = CreatePgDb(pgConn))
+            {
+                var p1 = await dbA.CountryCompliancePolicies.SingleAsync(p => p.CountryCode == "NP" && p.PolicyCode == "NP-REDIS-LIVE" && p.Version == 1);
+                var p2 = CountryCompliancePolicy.CreateDraft(
+                    "NP", "NP-REDIS-LIVE", 2, "Redis Live V2", "Gazette RL2", "Notice-RL-2",
+                    """{"RequiredBusinessClassifications":["MICRO_RETAIL"]}""",
+                    ComplianceEnforcementMode.MandatoryFailClosed, eff, null);
+                dbA.CountryCompliancePolicies.Add(p2);
+                await dbA.SaveChangesAsync();
+                p1.Supersede(p2.Id, eff);
+                p2.Approve(approverId, eff.AddDays(1), "Approved RL2");
+                await dbA.SaveChangesAsync();
+
+                var transportA = new RedisConfigurationInvalidationTransport(cacheA, optsA, NullLogger<RedisConfigurationInvalidationTransport>.Instance, muxA);
+                var procA = new ConfigurationInvalidationProcessor(dbA, transportA, clock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
+                var sweep = await procA.DispatchPendingAsync();
+                if (sweep.Failed != 0 || sweep.Dispatched == 0)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05 Redis pub/sub dispatch failed on live Redis.");
+                }
+            }
+
+            // 3. Verify Instance B's live Redis subscriber evicted L1 automatically
+            for (int i = 0; i < 30 && subB.ReceivedNotificationCount == 0; i++)
+            {
+                await Task.Delay(100);
+            }
+
+            if (subB.ReceivedNotificationCount == 0 || memB.Count != 0)
+            {
+                // Allow slight async delay for callback removal
+                await Task.Delay(200);
+                if (subB.ReceivedNotificationCount == 0)
+                {
+                    throw new InvalidOperationException($"MDM-1.5 R05 receiving instance subscriber did not receive real Redis notification (count={subB.ReceivedNotificationCount}).");
+                }
+            }
+
+            // Send duplicate notification cleanly (idempotent)
+            await muxA.GetSubscriber().PublishAsync(
+                RedisChannel.Literal(RedisConfigurationInvalidationSubscriber.ChannelName),
+                """{"Id":9999,"ScopeType":"Country","ScopeKey":"NP","NewEpoch":99,"EntityType":"CountryCompliancePolicy","EntityId":"dup"}""");
+            await Task.Delay(200);
+
+            // Instance B evaluates V2 cleanly
+            await using (var dbB2 = CreatePgDb(pgConn))
+            {
+                var consB2 = new ConfigurationConsistencyService(dbB2, cacheB, clock, NullLogger<ConfigurationConsistencyService>.Instance);
+                var evalB2 = new CountryComplianceEvaluator(dbB2, clock, consB2);
+                var r2 = await evalB2.EvaluateAsync(new ComplianceEvaluationRequest("NP", "NP-REDIS-LIVE", BusinessClassification: "MICRO_RETAIL", EvaluationUtc: evalTime));
+                if (r2.Status != ComplianceApplicabilityStatus.Required || r2.EvaluatedPolicyVersion != 2)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05 Instance B did not observe V2 after live Redis invalidation.");
+                }
+            }
+
+            // 4. Simulate Redis Outage on dispatcher -> retained pending event + authoritative DB read STILL works -> recovery retry succeeds!
+            var deadMuxOpts = ConfigurationOptions.Parse("127.0.0.1:6398,abortConnect=false,connectTimeout=200");
+            using var deadMux = await ConnectionMultiplexer.ConnectAsync(deadMuxOpts);
+            var deadCacheOpts = Options.Create(new CacheOptions { EnableRedis = true, ConnectionString = "127.0.0.1:6398,abortConnect=false", InstanceName = instancePrefix });
+
+            await using (var outageDb = CreatePgDb(pgConn))
+            {
+                var p2 = await outageDb.CountryCompliancePolicies.SingleAsync(p => p.CountryCode == "NP" && p.PolicyCode == "NP-REDIS-LIVE" && p.Version == 2);
+                var p3 = CountryCompliancePolicy.CreateDraft(
+                    "NP", "NP-REDIS-LIVE", 3, "Redis Live V3 Outage", "Gazette RL3", "Notice-RL-3",
+                    """{"ExemptBusinessClassifications":["MICRO_RETAIL"]}""",
+                    ComplianceEnforcementMode.MandatoryFailClosed, eff, null);
+                outageDb.CountryCompliancePolicies.Add(p3);
+                await outageDb.SaveChangesAsync();
+                p2.Supersede(p3.Id, eff);
+                p3.Approve(approverId, eff.AddDays(2), "Approved RL3 during Redis outage");
+                await outageDb.SaveChangesAsync();
+
+                var brokenTransport = new RedisConfigurationInvalidationTransport(cacheA, deadCacheOpts, NullLogger<RedisConfigurationInvalidationTransport>.Instance, deadMux);
+                var outageProc = new ConfigurationInvalidationProcessor(outageDb, brokenTransport, clock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
+                var outSweep = await outageProc.DispatchPendingAsync();
+                if (outSweep.Failed == 0 || outSweep.Dispatched != 0)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05 outage dispatcher should retain failed events without false completion.");
+                }
+
+                // Authoritative DB consistency MUST STILL observe V3 immediately despite Redis outage!
+                var consBOutage = new ConfigurationConsistencyService(outageDb, cacheB, clock, NullLogger<ConfigurationConsistencyService>.Instance);
+                var evalOutage = new CountryComplianceEvaluator(outageDb, clock, consBOutage);
+                var r3 = await evalOutage.EvaluateAsync(new ComplianceEvaluationRequest("NP", "NP-REDIS-LIVE", BusinessClassification: "MICRO_RETAIL", EvaluationUtc: evalTime));
+                if (r3.Status != ComplianceApplicabilityStatus.NotRequired || r3.EvaluatedPolicyVersion != 3)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05 DB-authoritative consistency failed during Redis outage.");
+                }
+
+                // Recovery: advance clock past backoff & switch back to healthy Redis transport -> retries and completes!
+                clock.UtcNow = clock.UtcNow.AddSeconds(10);
+                var recoveredTransport = new RedisConfigurationInvalidationTransport(cacheA, optsA, NullLogger<RedisConfigurationInvalidationTransport>.Instance, muxA);
+                var recoverProc = new ConfigurationInvalidationProcessor(outageDb, recoveredTransport, clock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
+                var recSweep = await recoverProc.DispatchPendingAsync();
+                if (recSweep.Failed != 0 || recSweep.Dispatched == 0)
+                {
+                    throw new InvalidOperationException("MDM-1.5 R05 Redis recovery retry sweep failed.");
+                }
+            }
+
+            Console.WriteLine("PASS Live PostgreSQL + Real Redis 7 Two-Instance Pub/Sub, Duplicate Handling & Outage Recovery Verified.");
+        }
+        finally
+        {
+            await subB.StopAsync(CancellationToken.None);
+        }
+    }
+
+    private sealed class PgMutableClock(DateTime initialUtc) : IDateTimeProvider
+    {
+        public DateTime UtcNow { get; set; } = initialUtc;
     }
 
     private static ApplicationDbContext CreatePgDb(string connStr)

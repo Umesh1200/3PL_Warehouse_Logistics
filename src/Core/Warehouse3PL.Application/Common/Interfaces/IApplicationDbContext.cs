@@ -241,6 +241,7 @@ public interface IApplicationDbContext
         Func<Task<TResult>> action,
         CancellationToken cancellationToken = default);
     bool IsRelationalDatabase { get; }
+    bool HasActiveTransaction { get; }
     void ClearChangeTracker();
     bool AllowExplicitAuditTimestamps { get; set; }
 }

@@ -66,11 +66,10 @@ internal static class FxDatabaseRateResolver
         return SelectBestCandidate(candidates, asOfUtc, valuationMode);
     }
 
-    internal static IQueryable<FxRateRecord> QueryPublishedEffectiveWindow(
+    internal static IQueryable<FxRateRecord> QueryAllPublishedForPair(
         IApplicationDbContext db,
         string baseCurrencyCode,
         string quoteCurrencyCode,
-        DateTime effectiveDateUtc,
         FxRateSourceAuthority? preferredAuthority)
     {
         var query = db.FxRateRecords
@@ -88,9 +87,7 @@ internal static class FxDatabaseRateResolver
                          (r.EvidenceReference != "MANUAL_GOVERNANCE_OVERRIDE" &&
                           r.BenchmarkSeriesId != null &&
                           r.IntegrityHash != null &&
-                          r.IntegrityHash.StartsWith("SHA256:"))) &&
-                        r.EffectiveFromUtc <= effectiveDateUtc &&
-                        (r.EffectiveToUtc == null || effectiveDateUtc < r.EffectiveToUtc));
+                          r.IntegrityHash.StartsWith("SHA256:"))));
 
         if (preferredAuthority.HasValue)
         {
@@ -99,6 +96,16 @@ internal static class FxDatabaseRateResolver
 
         return query;
     }
+
+    internal static IQueryable<FxRateRecord> QueryPublishedEffectiveWindow(
+        IApplicationDbContext db,
+        string baseCurrencyCode,
+        string quoteCurrencyCode,
+        DateTime effectiveDateUtc,
+        FxRateSourceAuthority? preferredAuthority)
+        => QueryAllPublishedForPair(db, baseCurrencyCode, quoteCurrencyCode, preferredAuthority)
+            .Where(r => r.EffectiveFromUtc <= effectiveDateUtc &&
+                        (r.EffectiveToUtc == null || effectiveDateUtc < r.EffectiveToUtc));
 
     private static bool HasEligibleProvenance(FxRateRecord r)
     {

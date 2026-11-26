@@ -16,6 +16,8 @@ internal sealed record PendingConfigurationScopeMutation(
 /// <summary>
 /// Maps modified, inserted, or deleted MDM configuration entities in an EF Core ChangeTracker
 /// to deterministic, lock-ordered <see cref="ConfigurationScopeEpoch"/> partitions.
+/// For <see cref="EntityState.Modified"/> entities whose scope keys changed, both original and destination
+/// scopes are invalidated atomically.
 /// </summary>
 internal static class ConfigurationScopeMapper
 {
@@ -34,6 +36,55 @@ internal static class ConfigurationScopeMapper
             map.TryAdd(key, new PendingConfigurationScopeMutation(scopeType, normKey, entityType, entityId));
         }
 
+        void RegisterGuidBothStates(
+            EntityEntry entry,
+            ConfigurationScopeType scopeType,
+            string propName,
+            Guid? currentVal,
+            string entityType,
+            string entityId)
+        {
+            if (currentVal.HasValue && currentVal.Value != Guid.Empty)
+            {
+                Register(scopeType, currentVal.Value.ToString("D"), entityType, entityId);
+            }
+
+            if (entry.State == EntityState.Modified)
+            {
+                var origVal = entry.OriginalValues[propName] as Guid?;
+                if (origVal.HasValue && origVal.Value != Guid.Empty && origVal != currentVal)
+                {
+                    Register(scopeType, origVal.Value.ToString("D"), entityType, entityId);
+                }
+            }
+        }
+
+        void RegisterCountryBothStates(
+            EntityEntry entry,
+            string propName,
+            string? currentVal,
+            string entityType,
+            string entityId)
+        {
+            if (!string.IsNullOrWhiteSpace(currentVal))
+            {
+                Register(ConfigurationScopeType.Country, NormalizeCountry(currentVal), entityType, entityId);
+            }
+
+            if (entry.State == EntityState.Modified)
+            {
+                var origVal = entry.OriginalValues[propName] as string;
+                if (!string.IsNullOrWhiteSpace(origVal))
+                {
+                    var normOrig = NormalizeCountry(origVal);
+                    if (string.IsNullOrWhiteSpace(currentVal) || !string.Equals(normOrig, NormalizeCountry(currentVal), StringComparison.Ordinal))
+                    {
+                        Register(ConfigurationScopeType.Country, normOrig, entityType, entityId);
+                    }
+                }
+            }
+        }
+
         foreach (var entry in changeTracker.Entries())
         {
             if (entry.State is not (EntityState.Added or EntityState.Modified or EntityState.Deleted))
@@ -48,13 +99,13 @@ internal static class ConfigurationScopeMapper
                     continue;
 
                 case CountryCompliancePolicy policy:
-                    Register(ConfigurationScopeType.Country, policy.CountryCode, nameof(CountryCompliancePolicy), policy.Id.ToString("D"));
+                    RegisterCountryBothStates(entry, nameof(CountryCompliancePolicy.CountryCode), policy.CountryCode, nameof(CountryCompliancePolicy), policy.Id.ToString("D"));
                     Register(ConfigurationScopeType.Global, GlobalScopeKey, nameof(CountryCompliancePolicy), policy.Id.ToString("D"));
                     break;
 
                 case LegalEntity legalEntity:
                     Register(ConfigurationScopeType.LegalEntity, legalEntity.Id.ToString("D"), nameof(LegalEntity), legalEntity.Id.ToString("D"));
-                    Register(ConfigurationScopeType.Country, legalEntity.CountryCode, nameof(LegalEntity), legalEntity.Id.ToString("D"));
+                    RegisterCountryBothStates(entry, nameof(LegalEntity.CountryCode), legalEntity.CountryCode, nameof(LegalEntity), legalEntity.Id.ToString("D"));
                     Register(ConfigurationScopeType.Global, GlobalScopeKey, nameof(LegalEntity), legalEntity.Id.ToString("D"));
                     break;
 
@@ -75,37 +126,37 @@ internal static class ConfigurationScopeMapper
                     break;
 
                 case FacilityCalendar facCal:
-                    Register(ConfigurationScopeType.Facility, facCal.FacilityId.ToString("D"), nameof(FacilityCalendar), facCal.Id.ToString("D"));
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(FacilityCalendar.FacilityId), facCal.FacilityId, nameof(FacilityCalendar), facCal.Id.ToString("D"));
                     Register(ConfigurationScopeType.Global, GlobalScopeKey, nameof(FacilityCalendar), facCal.Id.ToString("D"));
                     break;
 
                 case HolidayCalendar holiday:
-                    if (holiday.FacilityId.HasValue && holiday.FacilityId.Value != Guid.Empty)
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(HolidayCalendar.FacilityId), holiday.FacilityId, nameof(HolidayCalendar), holiday.Id.ToString("D"));
+                    // When HolidayScope or CountryCode changes (or is National/Regional), ensure both original and destination Country scopes invalidate
+                    var origHolidayFac = entry.State == EntityState.Modified
+                        ? entry.OriginalValues[nameof(HolidayCalendar.FacilityId)] as Guid?
+                        : null;
+                    bool wasCountryScoped = entry.State == EntityState.Modified && (!origHolidayFac.HasValue || origHolidayFac.Value == Guid.Empty);
+                    if (!holiday.FacilityId.HasValue || holiday.FacilityId.Value == Guid.Empty || wasCountryScoped)
                     {
-                        Register(ConfigurationScopeType.Facility, holiday.FacilityId.Value.ToString("D"), nameof(HolidayCalendar), holiday.Id.ToString("D"));
-                    }
-                    else
-                    {
-                        Register(ConfigurationScopeType.Country, holiday.CountryCode, nameof(HolidayCalendar), holiday.Id.ToString("D"));
+                        RegisterCountryBothStates(entry, nameof(HolidayCalendar.CountryCode), holiday.CountryCode, nameof(HolidayCalendar), holiday.Id.ToString("D"));
                     }
                     Register(ConfigurationScopeType.Global, GlobalScopeKey, nameof(HolidayCalendar), holiday.Id.ToString("D"));
                     break;
 
                 case Facility facility:
                     Register(ConfigurationScopeType.Facility, facility.Id.ToString("D"), nameof(Facility), facility.Id.ToString("D"));
-                    if (!string.IsNullOrWhiteSpace(facility.CountryCode))
-                    {
-                        Register(ConfigurationScopeType.Country, NormalizeCountry(facility.CountryCode), nameof(Facility), facility.Id.ToString("D"));
-                    }
+                    RegisterCountryBothStates(entry, nameof(Facility.CountryCode), facility.CountryCode, nameof(Facility), facility.Id.ToString("D"));
                     Register(ConfigurationScopeType.Global, GlobalScopeKey, nameof(Facility), facility.Id.ToString("D"));
                     break;
 
                 case ClientFacilityAccess access:
-                    Register(ConfigurationScopeType.Client, access.ClientId.ToString("D"), nameof(ClientFacilityAccess), access.Id.ToString("D"));
-                    Register(ConfigurationScopeType.Facility, access.FacilityId.ToString("D"), nameof(ClientFacilityAccess), access.Id.ToString("D"));
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Client, nameof(ClientFacilityAccess.ClientId), access.ClientId, nameof(ClientFacilityAccess), access.Id.ToString("D"));
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(ClientFacilityAccess.FacilityId), access.FacilityId, nameof(ClientFacilityAccess), access.Id.ToString("D"));
                     break;
 
-                case Client client when entry.State == EntityState.Modified:
+                case Client client:
+                    // Handle Added, Modified, and Deleted/Soft-Deleted Client configuration lifecycle uniformly
                     Register(ConfigurationScopeType.Client, client.Id.ToString("D"), nameof(Client), client.Id.ToString("D"));
                     break;
             }

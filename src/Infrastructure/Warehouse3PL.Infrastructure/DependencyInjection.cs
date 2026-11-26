@@ -31,8 +31,16 @@ public static class DependencyInjection
         IConfiguration configuration)
     {
         // 1. Core Services & Contexts
+        var cacheSection = configuration.GetSection(CacheOptions.SectionName);
+        services.Configure<CacheOptions>(cacheSection);
+        var cacheOptions = cacheSection.Get<CacheOptions>() ?? new CacheOptions();
+
         services.AddHttpContextAccessor();
-        services.AddMemoryCache();
+        services.AddMemoryCache(opts =>
+        {
+            opts.SizeLimit = Math.Max(100, cacheOptions.LocalCacheSizeLimit);
+            opts.CompactionPercentage = 0.25;
+        });
         services.AddSingleton<IDateTimeProvider, DateTimeProvider>();
         services.AddSingleton<IPasswordHasher, PasswordHasher>();
         services.AddScoped<ICurrentUserContext, CurrentUserContext>();
@@ -202,18 +210,25 @@ public static class DependencyInjection
         services.AddSingleton<IAuthorizationPolicyProvider, PermissionPolicyProvider>();
         services.AddScoped<IAuthorizationHandler, PermissionAuthorizationHandler>();
 
-        // 5. Caching (Redis + resilient MemoryCache fallback)
-        var cacheSection = configuration.GetSection(CacheOptions.SectionName);
-        services.Configure<CacheOptions>(cacheSection);
-        var cacheOptions = cacheSection.Get<CacheOptions>() ?? new CacheOptions();
-
+        // 5. Caching (Redis + resilient MemoryCache fallback + DB-authoritative consistency)
         if (cacheOptions.EnableRedis && !string.IsNullOrWhiteSpace(cacheOptions.ConnectionString))
         {
+            var redisConnStr = cacheOptions.ConnectionString;
             services.AddStackExchangeRedisCache(options =>
             {
-                options.Configuration = cacheOptions.ConnectionString;
+                options.Configuration = redisConnStr;
                 options.InstanceName = cacheOptions.InstanceName;
             });
+
+            services.AddSingleton<StackExchange.Redis.IConnectionMultiplexer>(_ =>
+            {
+                var config = StackExchange.Redis.ConfigurationOptions.Parse(redisConnStr, ignoreUnknown: true);
+                config.AbortOnConnectFail = false; // Never fail startup or authoritative DB operations if Redis is temporarily unavailable
+                return StackExchange.Redis.ConnectionMultiplexer.Connect(config);
+            });
+
+            services.AddSingleton<RedisConfigurationInvalidationSubscriber>();
+            services.AddHostedService(sp => sp.GetRequiredService<RedisConfigurationInvalidationSubscriber>());
         }
 
         services.AddSingleton<ICacheService, RedisCacheService>();

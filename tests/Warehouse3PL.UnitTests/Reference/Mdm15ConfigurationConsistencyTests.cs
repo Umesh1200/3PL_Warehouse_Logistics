@@ -1,13 +1,19 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Caching.Memory;
+using Microsoft.Extensions.Configuration;
+using Microsoft.Extensions.DependencyInjection;
 using Microsoft.Extensions.Logging.Abstractions;
 using Microsoft.Extensions.Options;
+using StackExchange.Redis;
+using Warehouse3PL.Application;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Reference;
+using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
+using Warehouse3PL.Infrastructure;
 using Warehouse3PL.Infrastructure.BackgroundJobs;
 using Warehouse3PL.Infrastructure.Caching;
 using Warehouse3PL.Infrastructure.Persistence;
@@ -216,10 +222,11 @@ public sealed class Mdm15ConfigurationConsistencyTests
         Assert.Contains($"tenant={tenantA:D}", diagA1.ScopedCacheKey, StringComparison.Ordinal);
         Assert.Contains($"facility={facA:D}", diagA1.ScopedCacheKey, StringComparison.Ordinal);
 
-        // 3. Dispatcher retryable delivery without false completion
+        // 3. Dispatcher retryable delivery without false completion + exponential backoff
+        var controllableClock = new MutableClock(DateTime.UtcNow);
         var transport = new ToggleableInvalidationTransport(shouldFail: true);
         var processor = new ConfigurationInvalidationProcessor(
-            dbA, transport, new DateTimeProvider(), NullLogger<ConfigurationInvalidationProcessor>.Instance);
+            dbA, transport, controllableClock, NullLogger<ConfigurationInvalidationProcessor>.Instance);
 
         var failSweep = await processor.DispatchPendingAsync();
         Assert.True(failSweep.Failed > 0);
@@ -231,9 +238,17 @@ public sealed class Mdm15ConfigurationConsistencyTests
                 Assert.Null(e.DispatchedToRedisAtUtc);
                 Assert.True(e.DispatchAttempts >= 1);
                 Assert.NotNull(e.LastDispatchError);
+                Assert.NotNull(e.NextRetryAtUtc);
             });
 
+        // Before backoff expires, sweep defers rather than hot-looping
         transport.ShouldFail = false;
+        var deferredSweep = await processor.DispatchPendingAsync();
+        Assert.Equal(0, deferredSweep.Attempted);
+        Assert.Equal(failSweep.Attempted, deferredSweep.DeferredByBackoff);
+
+        // Once backoff window passes, sweep delivers cleanly
+        controllableClock.UtcNow = controllableClock.UtcNow.AddSeconds(10);
         var okSweep = await processor.DispatchPendingAsync();
         Assert.Equal(0, okSweep.Failed);
         Assert.Equal(failSweep.Attempted, okSweep.Dispatched);
@@ -243,6 +258,7 @@ public sealed class Mdm15ConfigurationConsistencyTests
             {
                 Assert.NotNull(e.DispatchedToRedisAtUtc);
                 Assert.Null(e.LastDispatchError);
+                Assert.Null(e.NextRetryAtUtc);
             });
 
         // 4. Fail closed when DB epoch verification throws (never serve stale cache during DB outage!)
@@ -258,6 +274,249 @@ public sealed class Mdm15ConfigurationConsistencyTests
         memA.Dispose();
         memB.Dispose();
         await dbB.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task R01_EffectiveDateSafeFxCaching_PreservesWindowParityAcrossReversedRequests()
+    {
+        var dbName = $"mdm15-r01-{Guid.NewGuid():N}";
+        var approverId = Guid.NewGuid();
+        var (db, mem, _, cons) = CreateInstance(dbName);
+        await ReferenceCatalogSeeder.SeedAsync(db);
+
+        var w1Start = new DateTime(2026, 1, 1, 0, 0, 0, DateTimeKind.Utc);
+        var w1End = new DateTime(2026, 6, 1, 0, 0, 0, DateTimeKind.Utc);
+        var w2End = new DateTime(2026, 12, 31, 0, 0, 0, DateTimeKind.Utc);
+
+        var fxW1 = FxRateRecord.CreateDraft(
+            "EUR", "NPR", w1Start, w1End, 1, 139.0m, 141.0m, 140.0m,
+            FxRateSourceAuthority.ManualApproved, "EUR-W1", w1Start, evidenceReference: "BOARD_W1");
+        fxW1.Approve(approverId, w1Start, "Approved W1 EUR/NPR", evidenceReference: "BOARD_W1");
+
+        var fxW2 = FxRateRecord.CreateDraft(
+            "EUR", "NPR", w1End, w2End, 10, 1440.0m, 1460.0m, 1450.0m,
+            FxRateSourceAuthority.ManualApproved, "EUR-W2", w1End, evidenceReference: "BOARD_W2");
+        fxW2.Approve(approverId, w1End, "Approved W2 EUR/NPR", evidenceReference: "BOARD_W2");
+
+        db.FxRateRecords.AddRange(fxW1, fxW2);
+        await db.SaveChangesAsync();
+
+        var clock = new DateTimeProvider();
+        var cachedSvc = new FxConversionService(db, new FxRateProvider(), clock, cons);
+        var uncachedSvc = new FxConversionService(db, new FxRateProvider(), clock, consistencyService: null);
+
+        var juneDate = new DateTime(2026, 7, 15, 12, 0, 0, DateTimeKind.Utc);
+        var febDate = new DateTime(2026, 2, 15, 12, 0, 0, DateTimeKind.Utc);
+
+        // Request later window (June) FIRST to populate FX pair cache, then query earlier window (February) -> MUST match uncached resolver identically!
+        var cachedJun = await cachedSvc.ConvertAmountAsync(100m, "EUR", "NPR", juneDate, FxRateType.Sell, w2End);
+        var uncachedJun = await uncachedSvc.ConvertAmountAsync(100m, "EUR", "NPR", juneDate, FxRateType.Sell, w2End);
+        var cachedFeb = await cachedSvc.ConvertAmountAsync(100m, "EUR", "NPR", febDate, FxRateType.Buy, w2End);
+        var uncachedFeb = await uncachedSvc.ConvertAmountAsync(100m, "EUR", "NPR", febDate, FxRateType.Buy, w2End);
+
+        Assert.Equal(uncachedJun.ConvertedAmount, cachedJun.ConvertedAmount);
+        Assert.Equal(uncachedJun.UnitMultiplier, cachedJun.UnitMultiplier);
+        Assert.Equal(uncachedJun.BulletinVersion, cachedJun.BulletinVersion);
+        Assert.Equal(uncachedFeb.ConvertedAmount, cachedFeb.ConvertedAmount);
+        Assert.Equal(uncachedFeb.UnitMultiplier, cachedFeb.UnitMultiplier);
+        Assert.Equal(uncachedFeb.BulletinVersion, cachedFeb.BulletinVersion);
+        Assert.Equal(14600.00m, cachedJun.ConvertedAmount);
+        Assert.Equal(13900.00m, cachedFeb.ConvertedAmount);
+
+        mem.Dispose();
+        await db.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task R02_R03_TransactionBypass_And_VerifiedReloadLoop_FailClosedUnderContention()
+    {
+        var dbName = $"mdm15-r02-r03-{Guid.NewGuid():N}";
+        var user = new TestCurrentUserContext { UserId = Guid.NewGuid(), UserType = UserType.Staff };
+        var tenant = new TestTenantProvider { BypassTenantFilter = true };
+        var opts = new DbContextOptionsBuilder<ApplicationDbContext>().UseInMemoryDatabase(dbName).Options;
+        var interceptor = new AuditableEntityInterceptor(user, new DateTimeProvider());
+
+        await using var db = new TxSimulatedDbContext(opts, tenant, user, interceptor);
+        using var mem = new MemoryCache(new MemoryCacheOptions());
+        var cache = new RedisCacheService(mem, Options.Create(new CacheOptions()), NullLogger<RedisCacheService>.Instance);
+        var cons = new ConfigurationConsistencyService(db, cache, new DateTimeProvider(), NullLogger<ConfigurationConsistencyService>.Instance, user);
+
+        await ReferenceCatalogSeeder.SeedAsync(db);
+
+        // R02: Simulated active DB transaction MUST bypass cache reads & writes completely
+        var warm = await cons.GetOrLoadVerifiedWithDiagnosticsAsync(
+            ConfigurationScopeType.Country, "NP", "tx-test", (_, _) => Task.FromResult("COMMITTED-V1"));
+        Assert.False(warm.ServedFromCache);
+
+        db.SimulateActiveTransaction = true;
+        var inTx = await cons.GetOrLoadVerifiedWithDiagnosticsAsync(
+            ConfigurationScopeType.Country, "NP", "tx-test", (_, _) => Task.FromResult("UNCOMMITTED-DRAFT"));
+        Assert.False(inTx.ServedFromCache);
+        Assert.Equal(string.Empty, inTx.ScopedCacheKey);
+        Assert.Equal("UNCOMMITTED-DRAFT", inTx.Value);
+        db.SimulateActiveTransaction = false;
+
+        // Shared cache MUST still hold COMMITTED-V1, never polluted by UNCOMMITTED-DRAFT!
+        var afterRollback = await cons.GetOrLoadVerifiedWithDiagnosticsAsync(
+            ConfigurationScopeType.Country, "NP", "tx-test", (_, _) => Task.FromResult("SHOULD-BE-CACHED"));
+        Assert.True(afterRollback.ServedFromCache);
+        Assert.Equal("COMMITTED-V1", afterRollback.Value);
+
+        // R03 Case A: Epoch shifts twice mid-load (attempts 1 & 2), stabilizes on attempt 3 -> succeeds cleanly at latest epoch
+        int loadCount = 0;
+        await cache.RemoveByPrefixAsync("mdm:cfg:Country:US:");
+        var retryRes = await cons.GetOrLoadVerifiedWithDiagnosticsAsync(
+            ConfigurationScopeType.Country, "US", "loop-test",
+            async (d, ct) =>
+            {
+                loadCount++;
+                if (loadCount <= 2)
+                {
+                    d.HolidayCalendars.Add(HolidayCalendar.Create("US", HolidayScope.National, new DateOnly(2028, 1, loadCount), $"MidLoad {loadCount}"));
+                    await d.SaveChangesAsync(ct);
+                    return $"STALE-{loadCount}";
+                }
+                return "STABILIZED-V3";
+            });
+        Assert.Equal(3, loadCount);
+        Assert.Equal("STABILIZED-V3", retryRes.Value);
+
+        // R03 Case B: Exhaustion (>5 consecutive epoch changes) MUST fail closed without publishing to cache!
+        using var mem3 = new MemoryCache(new MemoryCacheOptions());
+        var cache3 = new RedisCacheService(mem3, Options.Create(new CacheOptions()), NullLogger<RedisCacheService>.Instance);
+        var cons3 = new ConfigurationConsistencyService(db, cache3, new DateTimeProvider(), NullLogger<ConfigurationConsistencyService>.Instance, user);
+        int exhaustLoads = 0;
+        var ex = await Assert.ThrowsAsync<DomainException>(() =>
+            cons3.GetOrLoadVerifiedWithDiagnosticsAsync(
+                ConfigurationScopeType.Country, "US", "exhaust-test",
+                async (d, ct) =>
+                {
+                    exhaustLoads++;
+                    d.HolidayCalendars.Add(HolidayCalendar.Create("US", HolidayScope.National, new DateOnly(2028, 2, exhaustLoads), $"Exhaust {exhaustLoads}"));
+                    await d.SaveChangesAsync(ct);
+                    return $"UNVERIFIED-{exhaustLoads}";
+                }));
+        Assert.Equal("CONFIG_EPOCH_CONTENTION_EXCEEDED", ex.Code);
+        Assert.Equal(5, exhaustLoads);
+        Assert.Equal(0, cache3.TrackedLocalKeyCount);
+        Assert.Equal(4, cache.TrackedLocalKeyCount); // NP (2) + US Case A (2) entries remain cleanly isolated
+    }
+
+    [Fact]
+    public async Task R04_R05_GenerationSafePrefixTracking_SubscriberIdempotency_ScopeChanges_And_ProductionDi_Work()
+    {
+        // R04: Concurrent replacements + prefix eviction + bounded 30s TTL
+        using var mem = new MemoryCache(new MemoryCacheOptions { SizeLimit = 1000 });
+        var cache = new RedisCacheService(
+            mem,
+            Options.Create(new CacheOptions { EnableRedis = false, DefaultExpirationMinutes = 60, LocalFallbackMaxTtlSeconds = 180 }),
+            NullLogger<RedisCacheService>.Instance);
+
+        await Task.WhenAll(Enumerable.Range(1, 40).Select(async i =>
+        {
+            await cache.SetAsync("mdm:cfg:Country:NP:hot", $"val-{i}");
+        }));
+
+        // After 40 rapid replacements, replacement eviction callbacks MUST NOT have erased hot key's tracking!
+        Assert.True(cache.TrackedLocalKeyCount >= 1);
+        Assert.NotNull(await cache.GetAsync<string>("mdm:cfg:Country:NP:hot"));
+        await cache.RemoveByPrefixAsync("mdm:cfg:Country:NP:");
+        Assert.Null(await cache.GetAsync<string>("mdm:cfg:Country:NP:hot"));
+        Assert.Equal(0, cache.TrackedLocalKeyCount);
+
+        // R05 Subscriber duplicate/out-of-order idempotency test
+        await cache.SetAsync("mdm:cfg:Country:NP:k1", "v1");
+        await cache.SetAsync("mdm:cfg:Country:US:k1", "v-us");
+        var subscriber = new RedisConfigurationInvalidationSubscriber(
+            cache, Options.Create(new CacheOptions()), NullLogger<RedisConfigurationInvalidationSubscriber>.Instance);
+        var payload = """{"Id":101,"ScopeType":"Country","ScopeKey":"NP","NewEpoch":4,"EntityType":"HolidayCalendar","EntityId":"x"}""";
+        await subscriber.HandleInvalidationPayloadAsync(payload);
+        await subscriber.HandleInvalidationPayloadAsync(payload); // duplicate notification
+        Assert.Equal(2, subscriber.ReceivedNotificationCount);
+        Assert.Null(await cache.GetAsync<string>("mdm:cfg:Country:NP:k1"));
+        Assert.Equal("v-us", await cache.GetAsync<string>("mdm:cfg:Country:US:k1"));
+
+        // Mutable scope migration (NP -> US) & Client Added/Modified/Deleted epoch coverage
+        var dbName = $"mdm15-scopes-{Guid.NewGuid():N}";
+        var (db, scopeMem, _, _) = CreateInstance(dbName);
+        await ReferenceCatalogSeeder.SeedAsync(db);
+
+        var client = new Client { AccountCode = "CL-M15", CompanyName = "Scope Client", Status = ClientStatus.Active };
+        db.Clients.Add(client);
+        await db.SaveChangesAsync();
+        long clientEpochAfterAdd = await db.ConfigurationScopeEpochs.AsNoTracking()
+            .Where(e => e.ScopeType == ConfigurationScopeType.Client && e.ScopeKey == client.Id.ToString("D").ToUpperInvariant())
+            .Select(e => e.CurrentEpoch).SingleAsync();
+        Assert.Equal(1, clientEpochAfterAdd);
+
+        var hol = HolidayCalendar.Create("NP", HolidayScope.National, new DateOnly(2029, 3, 1), "Moveable Holiday");
+        db.HolidayCalendars.Add(hol);
+        await db.SaveChangesAsync();
+
+        long usEpochBefore = await db.ConfigurationScopeEpochs.AsNoTracking()
+            .Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "US")
+            .Select(e => e.CurrentEpoch).FirstAsync();
+        long npEpochBefore = await db.ConfigurationScopeEpochs.AsNoTracking()
+            .Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "NP")
+            .Select(e => e.CurrentEpoch).FirstAsync();
+
+        hol.CountryCode = "US"; // Mutable scope key migration NP -> US!
+        await db.SaveChangesAsync();
+
+        long usEpochAfter = await db.ConfigurationScopeEpochs.AsNoTracking()
+            .Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "US")
+            .Select(e => e.CurrentEpoch).FirstAsync();
+        long npEpochAfter = await db.ConfigurationScopeEpochs.AsNoTracking()
+            .Where(e => e.ScopeType == ConfigurationScopeType.Country && e.ScopeKey == "NP")
+            .Select(e => e.CurrentEpoch).FirstAsync();
+        Assert.Equal(npEpochBefore + 1, npEpochAfter);
+        Assert.Equal(usEpochBefore + 1, usEpochAfter);
+
+        // Mandatory Production DI verification (with EnableRedis = true, abortConnect=false so no Redis instance is required)
+        var config = new ConfigurationBuilder()
+            .AddInMemoryCollection(new Dictionary<string, string?>
+            {
+                ["ConnectionStrings:DefaultConnection"] = "Host=localhost;Database=warehouse3pl_db;Username=postgres;Password=postgres",
+                ["Redis:EnableRedis"] = "true",
+                ["Redis:ConnectionString"] = "127.0.0.1:6399,abortConnect=false",
+                ["Redis:InstanceName"] = "Warehouse3PL:",
+                ["ObjectStorage:SigningSecretKey"] = "ProductionGradeTestSigningSecretKeyForMdm15Verification2026!"
+            })
+            .Build();
+        var services = new ServiceCollection();
+        services.AddLogging();
+        services.AddApplicationServices();
+        services.AddInfrastructureServices(config);
+        await using var sp = services.BuildServiceProvider();
+        await using var diScope = sp.CreateAsyncScope();
+        Assert.NotNull(diScope.ServiceProvider.GetRequiredService<IConfigurationConsistencyService>());
+        Assert.NotNull(diScope.ServiceProvider.GetRequiredService<ICacheService>());
+        Assert.NotNull(diScope.ServiceProvider.GetRequiredService<IConfigurationInvalidationTransport>());
+        Assert.NotNull(diScope.ServiceProvider.GetRequiredService<IConnectionMultiplexer>());
+        Assert.NotNull(diScope.ServiceProvider.GetRequiredService<RedisConfigurationInvalidationSubscriber>());
+        Assert.NotNull(diScope.ServiceProvider.GetRequiredService<ConfigurationInvalidationProcessor>());
+        Assert.NotNull(diScope.ServiceProvider.GetRequiredService<ICountryComplianceEvaluator>());
+        Assert.NotNull(diScope.ServiceProvider.GetRequiredService<IFxConversionService>());
+        Assert.NotNull(diScope.ServiceProvider.GetRequiredService<IWorkingCalendarService>());
+
+        scopeMem.Dispose();
+        await db.DisposeAsync();
+    }
+
+    private sealed class TxSimulatedDbContext(
+        DbContextOptions<ApplicationDbContext> options,
+        ITenantProvider tenantProvider,
+        ICurrentUserContext currentUser,
+        AuditableEntityInterceptor interceptor)
+        : ApplicationDbContext(options, tenantProvider, currentUser, interceptor), IApplicationDbContext
+    {
+        public bool SimulateActiveTransaction { get; set; }
+        bool IApplicationDbContext.HasActiveTransaction => SimulateActiveTransaction || base.HasActiveTransaction;
+    }
+
+    private sealed class MutableClock(DateTime initialUtc) : IDateTimeProvider
+    {
+        public DateTime UtcNow { get; set; } = initialUtc;
     }
 
     private sealed class ToggleableInvalidationTransport(bool shouldFail) : IConfigurationInvalidationTransport

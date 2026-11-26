@@ -16034,6 +16034,10 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("bigint")
                         .HasColumnName("new_epoch");
 
+                    b.Property<DateTime?>("NextRetryAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("next_retry_at_utc");
+
                     b.Property<string>("ScopeKey")
                         .IsRequired()
                         .HasMaxLength(120)
@@ -16051,6 +16055,9 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
                     b.HasIndex("DispatchedToRedisAtUtc", "Id")
                         .HasDatabaseName("ix_configuration_invalidation_events_dispatched_to_redis_at_ut");
+
+                    b.HasIndex("DispatchedToRedisAtUtc", "NextRetryAtUtc", "Id")
+                        .HasDatabaseName("ix_configuration_invalidation_events_dispatched_to_redis_at_ut1");
 
                     b.HasIndex("ScopeType", "ScopeKey", "NewEpoch")
                         .HasDatabaseName("ix_configuration_invalidation_events_scope_type_scope_key_new_");

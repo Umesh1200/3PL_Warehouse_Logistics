@@ -8,6 +8,9 @@ public class CacheOptions
     public string InstanceName { get; set; } = "Warehouse3PL:";
     public int DefaultExpirationMinutes { get; set; } = 30;
     public int LocalFallbackMaxTtlSeconds { get; set; } = 30;
+    public int LocalCacheSizeLimit { get; set; } = 10_000;
+    public int MaxCachedEntrySizeBytes { get; set; } = 262_144;
+    public int OutboxDispatchedRetentionDays { get; set; } = 7;
     public bool EnableRedis { get; set; } = false;
 }
 

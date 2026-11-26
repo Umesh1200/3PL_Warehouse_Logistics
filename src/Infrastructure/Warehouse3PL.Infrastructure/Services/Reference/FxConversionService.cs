@@ -97,15 +97,15 @@ public sealed class FxConversionService : IFxConversionService
                 ApprovedAtUtc: evalDateUtc);
         }
 
-        // 1. Unified bitemporal database FX resolution via shared FxDatabaseRateResolver + epoch-verified cache
+        // 1. Unified bitemporal database FX resolution via shared FxDatabaseRateResolver + effective-date-safe epoch cache
         var dbMatch = _consistencyService != null
             ? FxDatabaseRateResolver.SelectBestCandidate(
                 (await _consistencyService.GetOrLoadVerifiedAsync(
                     ConfigurationScopeType.Global,
                     "GLOBAL",
-                    $"fx-pair:{fromNorm}:{toNorm}:{preferredAuthority?.ToString() ?? "ANY"}",
+                    $"fx-pair-history:{fromNorm}:{toNorm}:{preferredAuthority?.ToString() ?? "ANY"}",
                     (db, ct) => FxDatabaseRateResolver
-                        .QueryPublishedEffectiveWindow(db, fromNorm, toNorm, evalDateUtc, preferredAuthority)
+                        .QueryAllPublishedForPair(db, fromNorm, toNorm, preferredAuthority)
                         .ToListAsync(ct),
                     cancellationToken: cancellationToken))
                 .Where(r => r.EffectiveFromUtc <= evalDateUtc &&
