@@ -115,19 +115,19 @@ public sealed class Mdm15ConfigurationConsistencyTests
         Assert.False(leRes1!.IsCbmsMandated);
 
         // Mutate in Instance A WITHOUT sending any Redis notification or touching memB!
-        pV1.Supersede(Guid.NewGuid(), effFrom);
         var pV2 = CountryCompliancePolicy.CreateDraft(
             "NP", "NP-M15-RULE", 2, "Policy V2", "Nepal Gazette 2083 Rev2", "Notice-V2",
             """{"RequiredBusinessClassifications":["WHOLESALE","MICRO_RETAIL"]}""",
             ComplianceEnforcementMode.MandatoryFailClosed, effFrom, null);
         pV2.Approve(approverId, effFrom.AddDays(1), "Verified V2 mandate update");
+        pV1.Supersede(pV2.Id, effFrom);
         dbA.CountryCompliancePolicies.Add(pV2);
 
-        fxV1.Supersede(Guid.NewGuid(), effFrom.AddDays(1));
         var fxV2 = FxRateRecord.CreateDraft(
             "USD", "NPR", effFrom, null, 1, 135.5m, 136.5m, 136.0m,
             FxRateSourceAuthority.ManualApproved, "BOARD-V2", effFrom.AddDays(1), evidenceReference: "BOARD_MINUTES_V2");
         fxV2.Approve(approverId, effFrom.AddDays(1), "Approved V2 USD/NPR", evidenceReference: "BOARD_MINUTES_V2");
+        fxV1.Supersede(fxV2.Id, effFrom.AddDays(1));
         dbA.FxRateRecords.Add(fxV2);
 
         calV1.Deactivate();

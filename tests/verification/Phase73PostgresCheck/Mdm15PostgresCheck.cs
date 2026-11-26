@@ -151,25 +151,27 @@ internal static class Mdm15PostgresCheck
             await using (var dbA = CreatePgDb(targetConn))
             {
                 var p1 = await dbA.CountryCompliancePolicies.SingleAsync(p => p.CountryCode == "NP" && p.PolicyCode == "NP-PG15-TEST" && p.Version == 1);
-                p1.Supersede(Guid.NewGuid(), effFrom);
                 var p2 = CountryCompliancePolicy.CreateDraft(
                     "NP", "NP-PG15-TEST", 2, "PG15 V2", "Nepal Gazette 2083 Rev2", "Notice-PG15-2",
                     """{"RequiredBusinessClassifications":["WHOLESALE","MICRO_RETAIL"]}""",
                     ComplianceEnforcementMode.MandatoryFailClosed, effFrom, null);
-                p2.Approve(approverId, effFrom.AddDays(1), "Verified V2 mandate");
                 dbA.CountryCompliancePolicies.Add(p2);
 
                 var fx1 = await dbA.FxRateRecords.SingleAsync(r => r.BulletinVersion == "PG15-V1");
-                fx1.Supersede(Guid.NewGuid(), effFrom.AddDays(1));
                 var fx2 = FxRateRecord.CreateDraft(
                     "USD", "NPR", effFrom, null, 1, 135.5m, 136.5m, 136.0m,
                     FxRateSourceAuthority.ManualApproved, "PG15-V2", effFrom.AddDays(1), evidenceReference: "BOARD_V2");
-                fx2.Approve(approverId, effFrom.AddDays(1), "Approved V2", evidenceReference: "BOARD_V2");
                 dbA.FxRateRecords.Add(fx2);
+                await dbA.SaveChangesAsync(); // Persist Draft targets first so self-FK SupersededBy* references real rows
 
+                p1.Supersede(p2.Id, effFrom);
+                fx1.Supersede(fx2.Id, effFrom.AddDays(1));
                 var cal1 = await dbA.FacilityCalendars.SingleAsync(c => c.FacilityId == facNpId && c.IsActive);
                 cal1.Deactivate();
-                await dbA.SaveChangesAsync(); // Flush deactivate before adding replacement (non-deferred EXCLUDE USING gist)
+                await dbA.SaveChangesAsync(); // Flush deactivate/supersede before activating replacements (non-deferred EXCLUDE USING gist)
+
+                p2.Approve(approverId, effFrom.AddDays(1), "Verified V2 mandate");
+                fx2.Approve(approverId, effFrom.AddDays(1), "Approved V2", evidenceReference: "BOARD_V2");
 
                 dbA.FacilityCalendars.Add(FacilityCalendar.Create(
                     facNpId, effFrom, null, "Saturday,Sunday", new TimeSpan(9, 0, 0), new TimeSpan(18, 0, 0), new TimeSpan(17, 0, 0)));
