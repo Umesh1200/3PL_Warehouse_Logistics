@@ -78,7 +78,7 @@ internal static class Mdm13PostgresCheck
             await using (var migDb = CreatePgDb(targetConn, null))
             {
                 var migrator = migDb.GetInfrastructure().GetRequiredService<IMigrator>();
-                await migrator.MigrateAsync("20261125163222_MDM1_3_CurrencyFxAndUomCatalog");
+                await migrator.MigrateAsync("20261125151152_MDM1_3_CurrencyFxAndUomStandards");
             }
 
             await using (var preSeedDb = CreatePgDb(targetConn, null))
