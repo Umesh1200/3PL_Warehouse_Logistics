@@ -57,6 +57,7 @@ public class ReturnShipment : AuditableEntity<Guid>, ITenantEntity
     public string DestinationState { get; set; } = string.Empty;
     public string DestinationPostalCode { get; set; } = string.Empty;
     public string DestinationCountry { get; set; } = "USA";
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
 
     // Return Lifecycle Status
     public ReturnShipmentStatus Status { get; set; } = ReturnShipmentStatus.Authorized;

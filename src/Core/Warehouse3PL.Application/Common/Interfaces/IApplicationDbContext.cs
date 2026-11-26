@@ -199,6 +199,8 @@ public interface IApplicationDbContext
     DbSet<FacilityCalendar> FacilityCalendars { get; }
     DbSet<ConfigurationScopeEpoch> ConfigurationScopeEpochs { get; }
     DbSet<ConfigurationInvalidationEvent> ConfigurationInvalidationEvents { get; }
+    DbSet<CountryNormalizationAlias> CountryNormalizationAliases { get; }
+    DbSet<CountryNormalizationAudit> CountryNormalizationAudits { get; }
 
     Task<int> SaveChangesAsync(CancellationToken cancellationToken = default);
     Task BeginTransactionAsync(CancellationToken cancellationToken = default);

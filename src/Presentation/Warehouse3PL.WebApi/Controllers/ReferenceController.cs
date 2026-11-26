@@ -2,7 +2,9 @@ using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Application.Features.Reference.Queries;
+using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Enums;
+using Warehouse3PL.Infrastructure.Authorization;
 
 namespace Warehouse3PL.WebApi.Controllers;
 
@@ -129,6 +131,47 @@ public sealed class ReferenceController : BaseApiController
                 vatForBsYear,
                 vatForBsMonth),
             cancellationToken);
+        return Ok(result);
+    }
+
+    /// <summary>
+    /// Returns paginated, tenant/facility-scoped diagnostics for country normalization audit and quarantine rows.
+    /// Platform-authorized Staff see all rows; facility-scoped Staff see only records associated with their authorized facilities.
+    /// Client, Driver, and unprivileged Staff callers receive 403 Forbidden.
+    /// </summary>
+    [HttpGet("normalization-quarantine")]
+    [HasAnyPermission(
+        Permissions.Global.NormalizationView,
+        Permissions.Global.ComplianceView,
+        Permissions.Global.ComplianceManage,
+        Permissions.Global.ReferenceView,
+        Permissions.Facilities.Manage)]
+    [ProducesResponseType(typeof(PagedNormalizationQuarantineResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status401Unauthorized)]
+    [ProducesResponseType(StatusCodes.Status403Forbidden)]
+    public async Task<ActionResult<PagedNormalizationQuarantineResponse>> GetNormalizationQuarantine(
+        [FromQuery] CountryNormalizationStatus? status = CountryNormalizationStatus.PendingNormalization,
+        [FromQuery] bool includeAllStatuses = false,
+        [FromQuery] string? entityType = null,
+        [FromQuery] Guid? facilityId = null,
+        [FromQuery] Guid? clientId = null,
+        [FromQuery] string? search = null,
+        [FromQuery] int pageNumber = 1,
+        [FromQuery] int pageSize = 25,
+        CancellationToken cancellationToken = default)
+    {
+        var result = await Mediator.Send(
+            new GetNormalizationQuarantineQuery(
+                status,
+                includeAllStatuses,
+                entityType,
+                facilityId,
+                clientId,
+                search,
+                pageNumber,
+                pageSize),
+            cancellationToken);
+
         return Ok(result);
     }
 }

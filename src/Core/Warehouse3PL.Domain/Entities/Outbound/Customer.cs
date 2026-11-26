@@ -28,6 +28,7 @@ public class Customer : AuditableEntity<Guid>, ITenantEntity, ISoftDeletable
     public string? DefaultStateOrProvince { get; set; }
     public string? DefaultPostalCode { get; set; }
     public string? DefaultCountryCode { get; set; }
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
 
     public bool IsActive { get; set; } = true;
 

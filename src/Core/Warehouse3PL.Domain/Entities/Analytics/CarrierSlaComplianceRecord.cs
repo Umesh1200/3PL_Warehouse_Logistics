@@ -23,6 +23,7 @@ public class CarrierSlaComplianceRecord : AuditableEntity<Guid>, ITenantEntity
     // Geographic Lane
     public string OriginRegion { get; set; } = string.Empty;
     public string DestinationCountry { get; set; } = "US";
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
     public string DestinationStateOrRegion { get; set; } = string.Empty;
     public string DestinationPostalCodePrefix { get; set; } = string.Empty;
 

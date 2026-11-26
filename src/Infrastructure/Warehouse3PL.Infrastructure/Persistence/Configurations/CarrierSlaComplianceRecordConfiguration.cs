@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Warehouse3PL.Domain.Entities.Analytics;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Infrastructure.Persistence.Configurations;
 
@@ -50,6 +51,13 @@ public class CarrierSlaComplianceRecordConfiguration : IEntityTypeConfiguration<
         builder.Property(r => r.DestinationCountry)
             .HasColumnName("destination_country")
             .HasMaxLength(10)
+            .IsRequired();
+
+        builder.Property(r => r.CountryNormalizationStatus)
+            .HasColumnName("country_normalization_status")
+            .HasConversion<string>()
+            .HasMaxLength(30)
+            .HasDefaultValue(CountryNormalizationStatus.PendingNormalization)
             .IsRequired();
 
         builder.Property(r => r.DestinationStateOrRegion)

@@ -1,5 +1,6 @@
 using Warehouse3PL.Domain.Common;
 using Warehouse3PL.Domain.Entities.Security;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Domain.Entities.Facilities;
 
@@ -18,6 +19,7 @@ public class Facility : AuditableEntity<Guid>, ISoftDeletable
     public string? StateOrProvince { get; set; }
     public string? PostalCode { get; set; }
     public string CountryCode { get; set; } = "USA";
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
     public string Timezone { get; set; } = "America/Chicago";
     public Guid? DefaultLegalEntityId { get; set; }
     public string? DefaultCurrencyCode { get; set; }

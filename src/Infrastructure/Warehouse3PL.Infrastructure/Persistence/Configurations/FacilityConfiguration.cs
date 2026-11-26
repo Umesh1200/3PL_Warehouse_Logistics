@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Warehouse3PL.Domain.Entities.Facilities;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Infrastructure.Persistence.Configurations;
 
@@ -52,6 +53,13 @@ public class FacilityConfiguration : IEntityTypeConfiguration<Facility>
             .HasColumnName("country_code")
             .HasMaxLength(3)
             .HasDefaultValue("USA");
+
+        builder.Property(f => f.CountryNormalizationStatus)
+            .HasColumnName("country_normalization_status")
+            .HasConversion<string>()
+            .HasMaxLength(30)
+            .HasDefaultValue(CountryNormalizationStatus.PendingNormalization)
+            .IsRequired();
 
         builder.Property(f => f.ContactEmail)
             .HasColumnName("contact_email")

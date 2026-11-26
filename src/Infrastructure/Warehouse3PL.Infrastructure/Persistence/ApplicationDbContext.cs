@@ -674,6 +674,8 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<FacilityCalendar> FacilityCalendars => Set<FacilityCalendar>();
     public DbSet<ConfigurationScopeEpoch> ConfigurationScopeEpochs => Set<ConfigurationScopeEpoch>();
     public DbSet<ConfigurationInvalidationEvent> ConfigurationInvalidationEvents => Set<ConfigurationInvalidationEvent>();
+    public DbSet<CountryNormalizationAlias> CountryNormalizationAliases => Set<CountryNormalizationAlias>();
+    public DbSet<CountryNormalizationAudit> CountryNormalizationAudits => Set<CountryNormalizationAudit>();
 
     public async Task BeginTransactionAsync(CancellationToken cancellationToken = default)
     {

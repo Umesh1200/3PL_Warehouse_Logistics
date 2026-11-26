@@ -11,6 +11,7 @@ import { UsersPage } from './pages/admin/UsersPage';
 import { RolesPage } from './pages/admin/RolesPage';
 import { ClientsPage } from './pages/admin/ClientsPage';
 import { FacilitiesPage } from './pages/admin/FacilitiesPage';
+import { NormalizationQuarantinePage } from './pages/admin/NormalizationQuarantinePage';
 import { ReceivingPage } from './pages/inbound/ReceivingPage';
 import { PutawayPage } from './pages/inbound/PutawayPage';
 import { StockOnHandPage } from './pages/inventory/StockOnHandPage';
@@ -54,6 +55,10 @@ const AppRoutes: React.FC = () => {
       content = <FacilitiesPage />;
       pageTitle = 'Authorized Warehouse Facilities';
       breadcrumb = 'ADMINISTRATION & RBAC / FACILITIES';
+    } else if (path === '/app/admin/normalization-quarantine') {
+      content = <NormalizationQuarantinePage />;
+      pageTitle = 'Country Normalization & Quarantine Diagnostics';
+      breadcrumb = 'ADMINISTRATION & RBAC / COUNTRY QUARANTINE';
     } else if (path === '/app/inbound' || path === '/app/inbound/receiving') {
       content = <ReceivingPage />;
       pageTitle = 'Inbound Goods Receiving';

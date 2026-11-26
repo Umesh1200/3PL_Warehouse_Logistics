@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Warehouse3PL.Domain.Entities.Outbound;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Infrastructure.Persistence.Configurations;
 
@@ -22,6 +23,12 @@ public class ShippingAddressConfiguration : IEntityTypeConfiguration<ShippingAdd
         builder.Property(s => s.StateOrProvince).HasColumnName("state_or_province").HasMaxLength(100).IsRequired();
         builder.Property(s => s.PostalCode).HasColumnName("postal_code").HasMaxLength(30).IsRequired();
         builder.Property(s => s.CountryCode).HasColumnName("country_code").HasMaxLength(10).IsRequired();
+        builder.Property(s => s.CountryNormalizationStatus)
+            .HasColumnName("country_normalization_status")
+            .HasConversion<string>()
+            .HasMaxLength(30)
+            .HasDefaultValue(CountryNormalizationStatus.PendingNormalization)
+            .IsRequired();
         builder.Property(s => s.PhoneNumber).HasColumnName("phone_number").HasMaxLength(50);
         builder.Property(s => s.DeliveryInstructions).HasColumnName("delivery_instructions").HasMaxLength(500);
 

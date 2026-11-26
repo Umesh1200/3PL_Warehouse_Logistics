@@ -1,4 +1,5 @@
 using Warehouse3PL.Domain.Common;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Domain.Entities.Outbound;
 
@@ -19,6 +20,7 @@ public class ShippingAddress : BaseEntity<Guid>, ISoftDeletable
     public string StateOrProvince { get; set; } = string.Empty;
     public string PostalCode { get; set; } = string.Empty;
     public string CountryCode { get; set; } = "USA";
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
     public string? PhoneNumber { get; set; }
     public string? DeliveryInstructions { get; set; }
 

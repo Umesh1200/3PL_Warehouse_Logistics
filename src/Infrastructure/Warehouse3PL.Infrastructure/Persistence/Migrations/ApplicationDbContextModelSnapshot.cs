@@ -358,6 +358,14 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("client_id");
 
+                    b.Property<string>("CountryNormalizationStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("PendingNormalization")
+                        .HasColumnName("country_normalization_status");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -851,6 +859,14 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Property<int>("ContractualTransitDays")
                         .HasColumnType("integer")
                         .HasColumnName("contractual_transit_days");
+
+                    b.Property<string>("CountryNormalizationStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("PendingNormalization")
+                        .HasColumnName("country_normalization_status");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -8772,6 +8788,14 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasDefaultValue("USA")
                         .HasColumnName("country_code");
 
+                    b.Property<string>("CountryNormalizationStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("PendingNormalization")
+                        .HasColumnName("country_normalization_status");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -10134,6 +10158,14 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)")
                         .HasColumnName("country");
+
+                    b.Property<string>("CountryNormalizationStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("PendingNormalization")
+                        .HasColumnName("country_normalization_status");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -11682,6 +11714,14 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)")
                         .HasColumnName("contact_name");
+
+                    b.Property<string>("CountryNormalizationStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("PendingNormalization")
+                        .HasColumnName("country_normalization_status");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -14594,6 +14634,14 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("client_id");
 
+                    b.Property<string>("CountryNormalizationStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("PendingNormalization")
+                        .HasColumnName("country_normalization_status");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -15667,6 +15715,14 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(10)")
                         .HasColumnName("country_code");
 
+                    b.Property<string>("CountryNormalizationStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("PendingNormalization")
+                        .HasColumnName("country_normalization_status");
+
                     b.Property<DateTime>("CreatedAtUtc")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at_utc");
@@ -16241,6 +16297,144 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
                             t.HasCheckConstraint("ck_country_compliance_policies_window", "effective_to_utc IS NULL OR effective_to_utc > effective_from_utc");
                         });
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.CountryNormalizationAlias", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("alias_id");
+
+                    b.Property<string>("AliasKey")
+                        .IsRequired()
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("alias_key");
+
+                    b.Property<string>("CountryCode")
+                        .IsRequired()
+                        .HasMaxLength(2)
+                        .HasColumnType("character varying(2)")
+                        .HasColumnName("country_code");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<string>("SourceStandard")
+                        .IsRequired()
+                        .HasMaxLength(60)
+                        .HasColumnType("character varying(60)")
+                        .HasColumnName("source_standard");
+
+                    b.HasKey("Id")
+                        .HasName("pk_country_normalization_aliases");
+
+                    b.HasIndex("AliasKey")
+                        .IsUnique()
+                        .HasDatabaseName("ux_country_normalization_aliases_key");
+
+                    b.HasIndex("CountryCode", "IsActive")
+                        .HasDatabaseName("ix_country_normalization_aliases_code_active");
+
+                    b.ToTable("country_normalization_aliases", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.CountryNormalizationAudit", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("audit_id");
+
+                    b.Property<Guid?>("ClientId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("client_id");
+
+                    b.Property<string>("CorrelationBatchId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("correlation_batch_id");
+
+                    b.Property<Guid>("EntityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("entity_id");
+
+                    b.Property<string>("EntityType")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("entity_type");
+
+                    b.Property<Guid?>("FacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_id");
+
+                    b.Property<string>("FieldName")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("field_name");
+
+                    b.Property<string>("InferenceSource")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("inference_source");
+
+                    b.Property<string>("NormalizationStatus")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("normalization_status");
+
+                    b.Property<string>("NormalizedCountryCode")
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("normalized_country_code");
+
+                    b.Property<string>("OriginalCountryValue")
+                        .HasMaxLength(120)
+                        .HasColumnType("character varying(120)")
+                        .HasColumnName("original_country_value");
+
+                    b.Property<bool>("PreservedHistoricalValue")
+                        .HasColumnType("boolean")
+                        .HasColumnName("preserved_historical_value");
+
+                    b.Property<string>("Reason")
+                        .IsRequired()
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("reason");
+
+                    b.Property<DateTime>("RecordedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("recorded_at_utc");
+
+                    b.Property<bool>("WasInferredFromParent")
+                        .HasColumnType("boolean")
+                        .HasColumnName("was_inferred_from_parent");
+
+                    b.HasKey("Id")
+                        .HasName("pk_country_normalization_audits");
+
+                    b.HasIndex("ClientId", "NormalizationStatus")
+                        .HasDatabaseName("ix_country_normalization_audits_client_status");
+
+                    b.HasIndex("EntityType", "EntityId", "FieldName")
+                        .IsUnique()
+                        .HasDatabaseName("ux_country_normalization_audits_entity_field");
+
+                    b.HasIndex("NormalizationStatus", "FacilityId", "EntityType")
+                        .HasDatabaseName("ix_country_normalization_audits_status_facility_type");
+
+                    b.ToTable("country_normalization_audits", (string)null);
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.CountryProfile", b =>
@@ -20965,6 +21159,18 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("CountryProfile");
 
                     b.Navigation("SupersededByPolicy");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.CountryNormalizationAlias", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Reference.CountryProfile", "CountryProfile")
+                        .WithMany()
+                        .HasForeignKey("CountryCode")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_country_normalization_aliases_country_profiles_country_code");
+
+                    b.Navigation("CountryProfile");
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Reference.FacilityCalendar", b =>

@@ -95,13 +95,16 @@ internal static class Mdm12PostgresCheck
             await using (var postMigDb = CreatePgDb(targetConn, null))
             {
                 var migrator = postMigDb.GetInfrastructure().GetRequiredService<IMigrator>();
-                await migrator.MigrateAsync();
+                await migrator.MigrateAsync("20261125134640_MDM1_2_LegalEntitiesAndFacilityBinding");
 
                 var legacyAfter = await postMigDb.Facilities.AsNoTracking().SingleAsync(f => f.Id == legacyFacId);
                 if (legacyAfter.CountryCode != "USA" || legacyAfter.DefaultLegalEntityId != null || legacyAfter.DefaultCurrencyCode != null)
                 {
                     throw new InvalidOperationException("MDM-1.2 PostgreSQL migration mutated legacy facility defaults unexpectedly.");
                 }
+
+                // Upgrade remaining MDM migrations so live HTTP checks run on current full schema
+                await migrator.MigrateAsync();
             }
 
             // 2. Real JWT HTTP checks + LegalEntity creation + Facility binding + Restrict FK + Rollback

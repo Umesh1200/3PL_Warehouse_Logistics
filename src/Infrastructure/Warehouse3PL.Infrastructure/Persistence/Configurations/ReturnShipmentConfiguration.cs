@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Warehouse3PL.Domain.Entities.Outbound;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Infrastructure.Persistence.Configurations;
 
@@ -175,6 +176,13 @@ public class ReturnShipmentConfiguration : IEntityTypeConfiguration<ReturnShipme
         builder.Property(r => r.DestinationCountry)
             .HasColumnName("destination_country")
             .HasMaxLength(50)
+            .IsRequired();
+
+        builder.Property(r => r.CountryNormalizationStatus)
+            .HasColumnName("country_normalization_status")
+            .HasConversion<string>()
+            .HasMaxLength(30)
+            .HasDefaultValue(CountryNormalizationStatus.PendingNormalization)
             .IsRequired();
 
         // Status

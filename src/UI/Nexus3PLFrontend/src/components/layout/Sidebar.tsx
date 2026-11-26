@@ -154,6 +154,19 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => 
           permission: 'facilities:view',
           icon: 'Building2',
         },
+        {
+          label: 'Country Quarantine',
+          path: '/app/admin/normalization-quarantine',
+          permissions: [
+            'global:normalization:view',
+            'global:compliance:view',
+            'global:compliance:manage',
+            'global:reference:view',
+            'facilities:manage',
+          ],
+          allowedUserTypes: [UserType.Staff],
+          icon: 'AlertTriangle',
+        },
       ],
     },
   ];

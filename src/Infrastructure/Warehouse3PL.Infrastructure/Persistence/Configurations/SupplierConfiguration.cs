@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Warehouse3PL.Domain.Entities.Inbound;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Infrastructure.Persistence.Configurations;
 
@@ -68,6 +69,13 @@ public class SupplierConfiguration : IEntityTypeConfiguration<Supplier>
         builder.Property(s => s.Country)
             .HasColumnName("country")
             .HasMaxLength(100);
+
+        builder.Property(s => s.CountryNormalizationStatus)
+            .HasColumnName("country_normalization_status")
+            .HasConversion<string>()
+            .HasMaxLength(30)
+            .HasDefaultValue(CountryNormalizationStatus.PendingNormalization)
+            .IsRequired();
 
         builder.Property(s => s.IsActive)
             .HasColumnName("is_active")

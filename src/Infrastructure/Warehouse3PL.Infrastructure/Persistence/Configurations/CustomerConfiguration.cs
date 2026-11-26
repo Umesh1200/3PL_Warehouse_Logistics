@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Warehouse3PL.Domain.Entities.Outbound;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Infrastructure.Persistence.Configurations;
 
@@ -28,6 +29,12 @@ public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
         builder.Property(c => c.DefaultStateOrProvince).HasColumnName("default_state_or_province").HasMaxLength(100);
         builder.Property(c => c.DefaultPostalCode).HasColumnName("default_postal_code").HasMaxLength(30);
         builder.Property(c => c.DefaultCountryCode).HasColumnName("default_country_code").HasMaxLength(10);
+        builder.Property(c => c.CountryNormalizationStatus)
+            .HasColumnName("country_normalization_status")
+            .HasConversion<string>()
+            .HasMaxLength(30)
+            .HasDefaultValue(CountryNormalizationStatus.PendingNormalization)
+            .IsRequired();
 
         builder.Property(c => c.IsActive).HasColumnName("is_active").IsRequired();
         builder.Property(c => c.Version).HasColumnName("version").IsConcurrencyToken();

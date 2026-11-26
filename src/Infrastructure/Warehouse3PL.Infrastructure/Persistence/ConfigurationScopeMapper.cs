@@ -125,6 +125,16 @@ internal static class ConfigurationScopeMapper
                     Register(ConfigurationScopeType.Global, GlobalScopeKey, nameof(UomConversion), $"{uomConv.FromUomCode}->{uomConv.ToUomCode}");
                     break;
 
+                case CountryProfile countryProfile:
+                    RegisterCountryBothStates(entry, nameof(CountryProfile.CountryCode), countryProfile.CountryCode, nameof(CountryProfile), countryProfile.CountryCode);
+                    Register(ConfigurationScopeType.Global, GlobalScopeKey, nameof(CountryProfile), countryProfile.CountryCode);
+                    break;
+
+                case CountryNormalizationAlias alias:
+                    RegisterCountryBothStates(entry, nameof(CountryNormalizationAlias.CountryCode), alias.CountryCode, nameof(CountryNormalizationAlias), alias.AliasKey);
+                    Register(ConfigurationScopeType.Global, GlobalScopeKey, nameof(CountryNormalizationAlias), alias.AliasKey);
+                    break;
+
                 case FacilityCalendar facCal:
                     RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(FacilityCalendar.FacilityId), facCal.FacilityId, nameof(FacilityCalendar), facCal.Id.ToString("D"));
                     Register(ConfigurationScopeType.Global, GlobalScopeKey, nameof(FacilityCalendar), facCal.Id.ToString("D"));

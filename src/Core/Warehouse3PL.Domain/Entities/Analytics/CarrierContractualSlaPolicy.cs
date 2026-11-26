@@ -28,6 +28,7 @@ public class CarrierContractualSlaPolicy : AuditableEntity<Guid>
 
     // Destination Geographic Scope
     public string DestinationCountry { get; set; } = "US";
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
     public string DestinationStateOrRegion { get; set; } = string.Empty;
     public string DestinationPostalCodePrefix { get; set; } = string.Empty;
 

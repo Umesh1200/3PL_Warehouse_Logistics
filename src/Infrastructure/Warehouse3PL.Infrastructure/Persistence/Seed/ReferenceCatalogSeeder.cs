@@ -25,12 +25,14 @@ public static class ReferenceCatalogSeeder
 
         bool hasMdm13Schema = !db.Database.IsRelational();
         bool hasMdm14Schema = !db.Database.IsRelational();
+        bool hasMdm16Schema = !db.Database.IsRelational();
         if (db.Database.IsRelational())
         {
             var applied = await db.Database.GetAppliedMigrationsAsync(cancellationToken);
             var appliedList = applied.ToList();
             hasMdm13Schema = appliedList.Any(m => m.Contains("MDM1_3", StringComparison.OrdinalIgnoreCase));
             hasMdm14Schema = appliedList.Any(m => m.Contains("MDM1_4", StringComparison.OrdinalIgnoreCase));
+            hasMdm16Schema = appliedList.Any(m => m.Contains("MDM1_6", StringComparison.OrdinalIgnoreCase));
         }
 
         if (hasMdm13Schema)
@@ -44,6 +46,11 @@ public static class ReferenceCatalogSeeder
         {
             await SeedBikramSambatCalendarAsync(db, cancellationToken);
             await SeedBaselineHolidaysAsync(db, cancellationToken);
+        }
+
+        if (hasMdm16Schema)
+        {
+            await SeedCountryNormalizationAliasesAsync(db, cancellationToken);
         }
     }
 
@@ -633,6 +640,84 @@ public static class ReferenceCatalogSeeder
             {
                 db.HolidayCalendars.Add(h);
             }
+        }
+
+        await db.SaveChangesAsync(cancellationToken);
+    }
+
+    public static async Task SeedCountryNormalizationAliasesAsync(ApplicationDbContext db, CancellationToken cancellationToken = default)
+    {
+        var activeProfiles = await db.CountryProfiles
+            .AsNoTracking()
+            .Where(c => c.IsActive)
+            .Select(c => new { c.CountryCode, c.IsoAlpha3Code, c.Name })
+            .ToListAsync(cancellationToken);
+
+        var profileCodes = activeProfiles
+            .Select(c => c.CountryCode.ToUpperInvariant())
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        if (profileCodes.Count == 0)
+        {
+            return;
+        }
+
+        var existingKeys = (await db.CountryNormalizationAliases
+            .AsNoTracking()
+            .Select(a => a.AliasKey)
+            .ToListAsync(cancellationToken))
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        var candidates = new List<(string RawAlias, string TargetCode, string Standard)>();
+
+        foreach (var profile in activeProfiles)
+        {
+            candidates.Add((profile.IsoAlpha3Code, profile.CountryCode, "ISO-3166-1-Alpha3"));
+            candidates.Add((profile.Name, profile.CountryCode, "ISO-3166-1-ShortName"));
+        }
+
+        var verifiedOfficialAliases = new (string RawAlias, string TargetCode, string Standard)[]
+        {
+            ("U.S.A.", "US", "ISO-3166-1-DottedAlias"),
+            ("U.S.", "US", "ISO-3166-1-DottedAlias"),
+            ("UNITED STATES OF AMERICA", "US", "ISO-3166-1-OfficialName"),
+            ("THE UNITED STATES", "US", "VerifiedAlias"),
+            ("THE UNITED STATES OF AMERICA", "US", "VerifiedAlias"),
+            ("FEDERAL DEMOCRATIC REPUBLIC OF NEPAL", "NP", "ISO-3166-1-OfficialName"),
+            ("KINGDOM OF NEPAL", "NP", "VerifiedHistoricalName"),
+            ("UK", "GB", "ISO-3166-1-ExceptionalReservation"),
+            ("U.K.", "GB", "ISO-3166-1-DottedAlias"),
+            ("GREAT BRITAIN", "GB", "VerifiedAlias"),
+            ("UNITED KINGDOM", "GB", "ISO-3166-1-ShortName"),
+            ("UNITED KINGDOM OF GREAT BRITAIN AND NORTHERN IRELAND", "GB", "ISO-3166-1-OfficialName"),
+            ("REPUBLIC OF INDIA", "IN", "ISO-3166-1-OfficialName"),
+            ("FEDERAL REPUBLIC OF GERMANY", "DE", "ISO-3166-1-OfficialName"),
+            ("COMMONWEALTH OF AUSTRALIA", "AU", "ISO-3166-1-OfficialName"),
+            ("REPUBLIC OF SINGAPORE", "SG", "ISO-3166-1-OfficialName")
+        };
+
+        candidates.AddRange(verifiedOfficialAliases);
+
+        foreach (var (rawAlias, targetCode, standard) in candidates)
+        {
+            var upperTarget = targetCode.Trim().ToUpperInvariant();
+            if (!profileCodes.Contains(upperTarget))
+            {
+                continue;
+            }
+
+            var normKey = CountryNormalizationAlias.NormalizeLookupKey(rawAlias);
+            if (string.IsNullOrWhiteSpace(normKey) || existingKeys.Contains(normKey))
+            {
+                continue;
+            }
+
+            existingKeys.Add(normKey);
+            db.CountryNormalizationAliases.Add(CountryNormalizationAlias.Create(
+                normKey,
+                upperTarget,
+                standard,
+                CreateDeterministicGuid($"ALIAS:{normKey}")));
         }
 
         await db.SaveChangesAsync(cancellationToken);
