@@ -19,6 +19,7 @@ public sealed class OfficialFxBulletinVerifier : IOfficialFxBulletinVerifier
 {
     private sealed record PinnedNrbBulletinEntry(
         string BulletinVersion,
+        string ExpectedApiDate,
         string ArtifactFileName,
         string ExpectedSha256Digest,
         int ExpectedByteCount,
@@ -33,7 +34,8 @@ public sealed class OfficialFxBulletinVerifier : IOfficialFxBulletinVerifier
         int UnitMultiplier,
         decimal BuyRate,
         decimal SellRate,
-        decimal MidRate);
+        decimal MidRate,
+        string TransformationTrace);
 
     private sealed record VerifiedBulletinEntry(
         string BulletinVersion,
@@ -44,24 +46,30 @@ public sealed class OfficialFxBulletinVerifier : IOfficialFxBulletinVerifier
         DateTime PublishedAtUtc,
         IReadOnlyList<ParsedBulletinRate> Rates);
 
+    private static readonly TimeSpan NepalStandardOffset = TimeSpan.FromMinutes(345); // UTC+05:45
+
     private static readonly PinnedNrbBulletinEntry[] PinnedNrbEntries =
     [
         new(
             BulletinVersion: "NRB-20261120",
-            ArtifactFileName: "NRB_FX_20261120.json",
-            ExpectedSha256Digest: "SHA256:549552d081529155bc6724e37b18ca18ba68fbb6c1e3f87a4f3190f5cdf51acb",
-            ExpectedByteCount: 739,
-            SourceUrl: "https://www.nrb.org.np/api/forex/v1/rates?from=2026-11-20&to=2026-11-20",
-            BenchmarkSeriesId: "NRB-FX-DAILY-2026-11-20",
-            PublishedAtUtc: new DateTime(2026, 11, 19, 10, 0, 0, DateTimeKind.Utc)),
+            ExpectedApiDate: "2026-11-20",
+            ArtifactFileName: "NRB_API_V1_20261120.json",
+            ExpectedSha256Digest: "SHA256:7f80df741991c96937167f852c5e3654418777cf871159a5233869f25483b0ad",
+            ExpectedByteCount: 2388,
+            SourceUrl: "https://www.nrb.org.np/api/forex/v1/rates?from=2026-11-20&to=2026-11-20&per_page=10&page=1",
+            BenchmarkSeriesId: "NRB-FOREX-V1-2026-11-20",
+            // Derived directly from raw data.payload[0].modified_on = "2026-11-19 15:56:57" (Asia/Kathmandu +05:45 -> UTC)
+            PublishedAtUtc: new DateTime(2026, 11, 19, 10, 11, 57, DateTimeKind.Utc)),
         new(
             BulletinVersion: "NRB-20261121",
-            ArtifactFileName: "NRB_FX_20261121.json",
-            ExpectedSha256Digest: "SHA256:06c2f260ae6efd2208e19bc672734062eee1b962069d64ab9a635a0afe3862de",
-            ExpectedByteCount: 739,
-            SourceUrl: "https://www.nrb.org.np/api/forex/v1/rates?from=2026-11-21&to=2026-11-21",
-            BenchmarkSeriesId: "NRB-FX-DAILY-2026-11-21",
-            PublishedAtUtc: new DateTime(2026, 11, 20, 10, 0, 0, DateTimeKind.Utc))
+            ExpectedApiDate: "2026-11-21",
+            ArtifactFileName: "NRB_API_V1_20261121.json",
+            ExpectedSha256Digest: "SHA256:12c1e0c2b3a111eb8d2d03196815afe41dce743d052725a3594e07e266081d1c",
+            ExpectedByteCount: 2387,
+            SourceUrl: "https://www.nrb.org.np/api/forex/v1/rates?from=2026-11-21&to=2026-11-21&per_page=10&page=1",
+            BenchmarkSeriesId: "NRB-FOREX-V1-2026-11-21",
+            // Derived directly from raw data.payload[0].modified_on = "2026-11-20 15:54:20" (Asia/Kathmandu +05:45 -> UTC)
+            PublishedAtUtc: new DateTime(2026, 11, 20, 10, 9, 20, DateTimeKind.Utc))
     ];
 
     private static readonly IReadOnlyDictionary<string, VerifiedBulletinEntry> Registry = BuildVerifiedRegistry();
@@ -166,25 +174,31 @@ public sealed class OfficialFxBulletinVerifier : IOfficialFxBulletinVerifier
             entry.BenchmarkSeriesId,
             entry.VerifiedSha256Digest,
             entry.EvidenceReference,
-            entry.PublishedAtUtc);
+            entry.PublishedAtUtc,
+            matchedQuote.TransformationTrace);
     }
 
     private static IReadOnlyDictionary<string, VerifiedBulletinEntry> BuildVerifiedRegistry()
     {
         var map = new Dictionary<string, VerifiedBulletinEntry>(StringComparer.OrdinalIgnoreCase);
 
-        // 1. Pinned NRB JSON official daily circulars
+        // 1. Pinned verbatim raw NRB /api/forex/v1/rates official daily JSON responses
         foreach (var nrb in PinnedNrbEntries)
         {
             var rawBytes = LoadArtifactBytes(nrb.ArtifactFileName);
-            var computed = ComputeNormalizedArtifactDigest(rawBytes);
+            var computed = ComputeDigest(rawBytes);
+            if (!string.Equals(computed, nrb.ExpectedSha256Digest, StringComparison.OrdinalIgnoreCase))
+            {
+                computed = ComputeNormalizedArtifactDigest(rawBytes);
+            }
+
             if (!string.Equals(computed, nrb.ExpectedSha256Digest, StringComparison.OrdinalIgnoreCase))
             {
                 throw new CryptographicException(
                     $"NRB bulletin integrity failure for '{nrb.BulletinVersion}': computed '{computed}', expected '{nrb.ExpectedSha256Digest}'.");
             }
 
-            var rates = ParseNrbJsonArtifact(rawBytes, nrb);
+            var rates = ParseNrbRawApiArtifact(rawBytes, nrb);
             map[nrb.BulletinVersion] = new VerifiedBulletinEntry(
                 nrb.BulletinVersion,
                 FxRateSourceAuthority.NRB,
@@ -232,30 +246,66 @@ public sealed class OfficialFxBulletinVerifier : IOfficialFxBulletinVerifier
         throw new InvalidOperationException($"Unsupported central bank authority '{centralBankAuthority}'.");
     }
 
-    private static IReadOnlyList<ParsedBulletinRate> ParseNrbJsonArtifact(byte[] rawBytes, PinnedNrbBulletinEntry meta)
+    private static IReadOnlyList<ParsedBulletinRate> ParseNrbRawApiArtifact(byte[] rawBytes, PinnedNrbBulletinEntry meta)
     {
         using var doc = JsonDocument.Parse(rawBytes);
         var root = doc.RootElement;
-        var fileVersion = root.GetProperty("bulletinVersion").GetString();
-        var fileSeries = root.GetProperty("benchmarkSeriesId").GetString();
-        if (!string.Equals(fileVersion, meta.BulletinVersion, StringComparison.Ordinal) ||
-            !string.Equals(fileSeries, meta.BenchmarkSeriesId, StringComparison.Ordinal))
+        var statusCode = root.GetProperty("status").GetProperty("code").GetInt32();
+        if (statusCode != 200)
         {
-            throw new InvalidOperationException($"Metadata mismatch in '{meta.ArtifactFileName}'.");
+            throw new InvalidOperationException($"Unexpected NRB API status {statusCode} in '{meta.ArtifactFileName}'.");
+        }
+
+        var payloadArr = root.GetProperty("data").GetProperty("payload");
+        if (payloadArr.GetArrayLength() == 0)
+        {
+            throw new InvalidOperationException($"Empty NRB payload array in '{meta.ArtifactFileName}'.");
+        }
+
+        var dayObj = payloadArr[0];
+        var apiDate = dayObj.GetProperty("date").GetString();
+        var modifiedOnRaw = dayObj.GetProperty("modified_on").GetString()
+            ?? throw new InvalidOperationException($"Missing modified_on in '{meta.ArtifactFileName}'.");
+
+        if (!string.Equals(apiDate, meta.ExpectedApiDate, StringComparison.Ordinal))
+        {
+            throw new InvalidOperationException($"NRB API payload date '{apiDate}' does not match '{meta.ExpectedApiDate}'.");
+        }
+
+        var parsedNst = DateTime.ParseExact(modifiedOnRaw, "yyyy-MM-dd HH:mm:ss", CultureInfo.InvariantCulture);
+        var derivedPublishedUtc = DateTime.SpecifyKind(parsedNst - NepalStandardOffset, DateTimeKind.Utc);
+        if (derivedPublishedUtc != meta.PublishedAtUtc)
+        {
+            throw new InvalidOperationException(
+                $"NRB modified_on '{modifiedOnRaw}' (+05:45 -> {derivedPublishedUtc:O}) does not match expected '{meta.PublishedAtUtc:O}'.");
         }
 
         var list = new List<ParsedBulletinRate>();
-        foreach (var r in root.GetProperty("rates").EnumerateArray())
+        foreach (var r in dayObj.GetProperty("rates").EnumerateArray())
         {
+            var cur = r.GetProperty("currency");
+            var iso3 = cur.GetProperty("iso3").GetString()!.Trim().ToUpperInvariant();
+            var unit = cur.GetProperty("unit").GetInt32();
+            var buyRaw = decimal.Parse(r.GetProperty("buy").GetString()!, NumberStyles.Number, CultureInfo.InvariantCulture);
+            var sellRaw = decimal.Parse(r.GetProperty("sell").GetString()!, NumberStyles.Number, CultureInfo.InvariantCulture);
+
+            var buy = decimal.Round(buyRaw, 6, MidpointRounding.AwayFromZero);
+            var sell = decimal.Round(sellRaw, 6, MidpointRounding.AwayFromZero);
+            // Documented derivation rule: MidRate = arithmetic mean of official BuyRate and SellRate, rounded to 6 d.p. AwayFromZero
+            var mid = decimal.Round((buy + sell) / 2m, 6, MidpointRounding.AwayFromZero);
+            var trace = $"raw={meta.ArtifactFileName}(data.payload[0].rates[{iso3}]); nst_mod={modifiedOnRaw}(+05:45)->{derivedPublishedUtc:O}; unit={unit}; buy={buy:G}; sell={sell:G}; mid=round((buy+sell)/2,6)={mid:G}";
+
             list.Add(new ParsedBulletinRate(
-                r.GetProperty("baseCurrencyCode").GetString()!,
-                r.GetProperty("quoteCurrencyCode").GetString()!,
-                Enum.Parse<FxRateDirection>(r.GetProperty("rateDirection").GetString()!),
-                r.GetProperty("unitMultiplier").GetInt32(),
-                decimal.Round(r.GetProperty("buyRate").GetDecimal(), 6, MidpointRounding.AwayFromZero),
-                decimal.Round(r.GetProperty("sellRate").GetDecimal(), 6, MidpointRounding.AwayFromZero),
-                decimal.Round(r.GetProperty("midRate").GetDecimal(), 6, MidpointRounding.AwayFromZero)));
+                iso3,
+                "NPR",
+                FxRateDirection.QuotePerUnitBase,
+                unit,
+                buy,
+                sell,
+                mid,
+                trace));
         }
+
         return list;
     }
 
@@ -274,7 +324,8 @@ public sealed class OfficialFxBulletinVerifier : IOfficialFxBulletinVerifier
                 if (decimal.TryParse(obs.Attribute("OBS_VALUE")?.Value, NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
                 {
                     var rounded = decimal.Round(val, 6, MidpointRounding.AwayFromZero);
-                    list.Add(new ParsedBulletinRate("EUR", "USD", FxRateDirection.QuotePerUnitBase, 1, rounded, rounded, rounded));
+                    var trace = $"raw={entry.ArtifactFileName}(Obs/@OBS_VALUE); unit=1; spot={rounded:G}->buy=sell=mid";
+                    list.Add(new ParsedBulletinRate("EUR", "USD", FxRateDirection.QuotePerUnitBase, 1, rounded, rounded, rounded, trace));
                 }
             }
         }
@@ -287,7 +338,8 @@ public sealed class OfficialFxBulletinVerifier : IOfficialFxBulletinVerifier
                 if (parts.Length >= 3 && decimal.TryParse(parts[2].Trim(), NumberStyles.Any, CultureInfo.InvariantCulture, out var val))
                 {
                     var rounded = decimal.Round(val, 6, MidpointRounding.AwayFromZero);
-                    list.Add(new ParsedBulletinRate("GBP", "USD", FxRateDirection.QuotePerUnitBase, 1, rounded, rounded, rounded));
+                    var trace = $"raw={entry.ArtifactFileName}(col[2]); unit=1; spot={rounded:G}->buy=sell=mid";
+                    list.Add(new ParsedBulletinRate("GBP", "USD", FxRateDirection.QuotePerUnitBase, 1, rounded, rounded, rounded, trace));
                 }
             }
         }
@@ -297,8 +349,8 @@ public sealed class OfficialFxBulletinVerifier : IOfficialFxBulletinVerifier
             {
                 var direct = decimal.Round(obs, 6, MidpointRounding.AwayFromZero);
                 var inverse = decimal.Round(1.0m / obs, 4, MidpointRounding.AwayFromZero);
-                list.Add(new ParsedBulletinRate("USD", "CAD", FxRateDirection.QuotePerUnitBase, 1, direct, direct, direct));
-                list.Add(new ParsedBulletinRate("CAD", "USD", FxRateDirection.QuotePerUnitBase, 1, inverse, inverse, inverse));
+                list.Add(new ParsedBulletinRate("USD", "CAD", FxRateDirection.QuotePerUnitBase, 1, direct, direct, direct, $"raw={entry.ArtifactFileName}(OBS); unit=1; spot={direct:G}->buy=sell=mid"));
+                list.Add(new ParsedBulletinRate("CAD", "USD", FxRateDirection.QuotePerUnitBase, 1, inverse, inverse, inverse, $"raw={entry.ArtifactFileName}(1/OBS); unit=1; inv={inverse:G}->buy=sell=mid"));
             }
         }
         return list;

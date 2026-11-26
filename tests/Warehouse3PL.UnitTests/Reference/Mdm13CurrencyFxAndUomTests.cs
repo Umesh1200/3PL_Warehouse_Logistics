@@ -116,8 +116,8 @@ public sealed class Mdm13CurrencyFxAndUomTests
 
         // 2. FX rate RBAC: Client/Driver/spoofed Staff denied 403
         var effStart = new DateTime(2026, 11, 20, 0, 0, 0, DateTimeKind.Utc);
-        var pubAt = new DateTime(2026, 11, 19, 10, 0, 0, DateTimeKind.Utc);
-        var nrbPayload1 = ReadEmbeddedFxArtifact("NRB_FX_20261120.json");
+        var pubAt = new DateTime(2026, 11, 19, 10, 11, 57, DateTimeKind.Utc);
+        var nrbPayload1 = ReadEmbeddedFxArtifact("NRB_API_V1_20261120.json");
         var draftBody = new
         {
             baseCurrencyCode = "INR",
@@ -131,7 +131,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
             sourceAuthority = FxRateSourceAuthority.NRB,
             bulletinVersion = "NRB-20261120",
             publishedAtUtc = pubAt,
-            benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
+            benchmarkSeriesId = "NRB-FOREX-V1-2026-11-20",
             sourceArtifactPayload = nrbPayload1
         };
 
@@ -151,7 +151,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
                 effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
                 sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-FABRICATED-999",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-20",
                 integrityHash = fakeSha256,
                 sourceArtifactPayload = fakePayload
             }))).StatusCode);
@@ -162,7 +162,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
                 effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 165.000m,
                 sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-20",
                 sourceArtifactPayload = nrbPayload1
             }))).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
@@ -172,7 +172,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
                 effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 1, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
                 sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20"
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-20"
             }))).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
             (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
@@ -181,7 +181,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
                 effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
                 sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-20",
                 integrityHash = "SHA256:0000000000000000000000000000000000000000000000000000000000000000"
             }))).StatusCode);
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
@@ -191,7 +191,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
                 effectiveFromUtc = effStart, effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
                 sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
-                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
+                publishedAtUtc = pubAt, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-20",
                 integrityHash = "SHA256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
                 sourceArtifactPayload = nrbPayload1
             }))).StatusCode);
@@ -202,7 +202,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
         var nrbDraft = (await createNrb.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
         Assert.Equal(FxRateApprovalStatus.Draft, nrbDraft.ApprovalStatus);
         Assert.False(nrbDraft.IsActive);
-        Assert.Equal("https://www.nrb.org.np/api/forex/v1/rates?from=2026-11-20&to=2026-11-20#NRB_FX_20261120.json", nrbDraft.EvidenceReference);
+        Assert.Equal("https://www.nrb.org.np/api/forex/v1/rates?from=2026-11-20&to=2026-11-20&per_page=10&page=1#NRB_API_V1_20261120.json", nrbDraft.EvidenceReference);
 
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
             (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
@@ -239,9 +239,10 @@ public sealed class Mdm13CurrencyFxAndUomTests
         Assert.Equal(FxRateApprovalStatus.VerifiedApproved, nrbApproved.ApprovalStatus);
         Assert.True(nrbApproved.IsActive);
         Assert.Equal(1.60075m, nrbApproved.EffectiveMidUnitRate);
-        Assert.Equal("NRB-FX-DAILY-2026-11-20", nrbApproved.BenchmarkSeriesId);
-        Assert.Equal("SHA256:549552d081529155bc6724e37b18ca18ba68fbb6c1e3f87a4f3190f5cdf51acb", nrbApproved.IntegrityHash);
-        Assert.Equal("https://www.nrb.org.np/api/forex/v1/rates?from=2026-11-20&to=2026-11-20#NRB_FX_20261120.json", nrbApproved.EvidenceReference);
+        Assert.Equal("NRB-FOREX-V1-2026-11-20", nrbApproved.BenchmarkSeriesId);
+        Assert.Equal("SHA256:7f80df741991c96937167f852c5e3654418777cf871159a5233869f25483b0ad", nrbApproved.IntegrityHash);
+        Assert.Equal("https://www.nrb.org.np/api/forex/v1/rates?from=2026-11-20&to=2026-11-20&per_page=10&page=1#NRB_API_V1_20261120.json", nrbApproved.EvidenceReference);
+        Assert.Contains("raw=NRB_API_V1_20261120.json(data.payload[0].rates[INR])", nrbApproved.TransformationTrace);
 
         // 4. UnitMultiplier=100 conversion (1000 INR -> 1600.75 Mid / 1600.00 Buy / 1601.50 Sell NPR)
         var convMidResp = await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
@@ -317,15 +318,15 @@ public sealed class Mdm13CurrencyFxAndUomTests
         Assert.Equal(HttpStatusCode.Conflict, (await http.SendAsync(Authed(HttpMethod.Delete, $"/api/v1/fx-rates/{nrbApproved.Id}", jwtFin))).StatusCode);
         Assert.Equal(HttpStatusCode.Forbidden, (await http.SendAsync(Authed(HttpMethod.Delete, $"/api/v1/fx-rates/{nrbApproved.Id}", jwtPlainSpoof))).StatusCode);
 
-        var nrbPub2 = new DateTime(2026, 11, 20, 10, 0, 0, DateTimeKind.Utc);
-        var nrbPayload2 = ReadEmbeddedFxArtifact("NRB_FX_20261121.json");
+        var nrbPub2 = new DateTime(2026, 11, 20, 10, 9, 20, DateTimeKind.Utc);
+        var nrbPayload2 = ReadEmbeddedFxArtifact("NRB_API_V1_20261121.json");
         var futureDraft = await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
         {
             baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
             effectiveFromUtc = DateTime.UtcNow.AddDays(10), effectiveToUtc = (DateTime?)null,
-            unitMultiplier = 100, buyRate = 160.10m, sellRate = 160.25m, midRate = 160.175m,
+            unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
             sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261121",
-            publishedAtUtc = nrbPub2, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-21", sourceArtifactPayload = nrbPayload2
+            publishedAtUtc = nrbPub2, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-21", sourceArtifactPayload = nrbPayload2
         }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions);
         Assert.Equal(HttpStatusCode.UnprocessableEntity,
             (await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{futureDraft!.Id}/approve", jwtFin, new
@@ -339,9 +340,9 @@ public sealed class Mdm13CurrencyFxAndUomTests
         {
             baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
             effectiveFromUtc = effStart.AddDays(1), effectiveToUtc = (DateTime?)null,
-            unitMultiplier = 100, buyRate = 160.10m, sellRate = 160.25m, midRate = 160.175m,
+            unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
             sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261121",
-            publishedAtUtc = nrbPub2, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-21", sourceArtifactPayload = nrbPayload2
+            publishedAtUtc = nrbPub2, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-21", sourceArtifactPayload = nrbPayload2
         }));
         Assert.Equal(HttpStatusCode.Created, draft2Resp.StatusCode);
         var nrbDraft2 = (await draft2Resp.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
@@ -401,6 +402,7 @@ public sealed class Mdm13CurrencyFxAndUomTests
         Assert.Equal(HttpStatusCode.OK, jpyAppResp.StatusCode);
         var jpyApproved = (await jpyAppResp.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
         Assert.Equal("MANUAL_GOVERNANCE_OVERRIDE", jpyApproved.EvidenceReference);
+        Assert.Contains("MANUAL_GOVERNANCE_OVERRIDE", jpyApproved.TransformationTrace);
 
         // Trusted ECB embedded XML bulletin (ECB-20261113) verifies without caller supplying any hash/payload!
         var ecbMeta = FxBulletinManifest.Entries["ECB-20261113"];
@@ -477,29 +479,38 @@ public sealed class Mdm13CurrencyFxAndUomTests
         await ReferenceCatalogSeeder.SeedAsync(db);
 
         var approverId = Guid.NewGuid();
+        var verifier = new OfficialFxBulletinVerifier();
+        var vNrb20Inr = verifier.VerifyOfficialQuotation(
+            FxRateSourceAuthority.NRB, "NRB-20261120", "INR", "NPR", FxRateDirection.QuotePerUnitBase,
+            100, 160.00m, 160.15m, 160.075m, new DateTime(2026, 11, 19, 10, 11, 57, DateTimeKind.Utc));
         var nrbRate = FxRateRecord.CreateDraft(
             "INR", "NPR",
-            new DateTime(2026, 11, 25, 0, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 11, 20, 0, 0, 0, DateTimeKind.Utc),
             null,
             100,
             160.00m, 160.15m, 160.075m,
             FxRateSourceAuthority.NRB,
-            "NRB-20261125",
-            new DateTime(2026, 11, 25, 4, 0, 0, DateTimeKind.Utc),
-            "NRB-INR-NPR");
-        nrbRate.Approve(approverId, new DateTime(2026, 11, 25, 4, 5, 0, DateTimeKind.Utc), "Verified NRB circular.");
+            "NRB-20261120",
+            vNrb20Inr.PublishedAtUtc,
+            vNrb20Inr.BenchmarkSeriesId,
+            vNrb20Inr.VerifiedIntegrityHash,
+            FxRateDirection.QuotePerUnitBase,
+            id: null,
+            evidenceReference: vNrb20Inr.EvidenceReference,
+            transformationTrace: vNrb20Inr.TransformationTrace);
+        nrbRate.Approve(approverId, new DateTime(2026, 11, 19, 10, 15, 0, DateTimeKind.Utc), "Verified authentic NRB Nov 20 API payload.");
         db.FxRateRecords.Add(nrbRate);
         await db.SaveChangesAsync();
 
         var fxProvider = FxRateProvider.ForDbContext(db);
         var effectiveInrNpr = fxProvider.GetHistoricalExchangeRate(
             "INR", "NPR",
-            new DateTime(2026, 11, 25, 10, 0, 0, DateTimeKind.Utc),
-            new DateTime(2026, 11, 25, 10, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 11, 20, 10, 0, 0, DateTimeKind.Utc),
+            new DateTime(2026, 11, 20, 10, 0, 0, DateTimeKind.Utc),
             out var src, out var ver, out _, out _, out _);
         Assert.Equal(1.60075m, effectiveInrNpr);
         Assert.Equal("NRB", src);
-        Assert.Equal("NRB-20261125", ver);
+        Assert.Equal("NRB-20261120", ver);
 
         // Historical embedded fallback still returns ECB verified rate cleanly
         var ecbRate = fxProvider.GetHistoricalExchangeRate(
@@ -533,79 +544,101 @@ public sealed class Mdm13CurrencyFxAndUomTests
         await ReferenceCatalogSeeder.SeedAsync(db);
 
         var approverId = Guid.NewGuid();
-        var nov18 = new DateTime(2026, 11, 18, 0, 0, 0, DateTimeKind.Utc);
-        var nov19 = new DateTime(2026, 11, 19, 0, 0, 0, DateTimeKind.Utc);
+        var verifier = new OfficialFxBulletinVerifier();
+        var nov19 = new DateTime(2026, 11, 19, 8, 0, 0, DateTimeKind.Utc);
         var nov20 = new DateTime(2026, 11, 20, 0, 0, 0, DateTimeKind.Utc);
-        var nov21 = new DateTime(2026, 11, 21, 12, 0, 0, DateTimeKind.Utc);
+        var nov20Early = new DateTime(2026, 11, 20, 9, 0, 0, DateTimeKind.Utc);
         var nov23 = new DateTime(2026, 11, 23, 0, 0, 0, DateTimeKind.Utc);
         var nov25 = new DateTime(2026, 11, 25, 0, 0, 0, DateTimeKind.Utc);
 
-        // Authority A (ManualApproved): effective Nov 19, published Nov 19, approved Nov 19 -> 135.50
+        // Authority A (ManualApproved override, synthetic test value): effective Nov 19, published Nov 19 08:00Z, approved Nov 19 -> 148.50
         var authA = FxRateRecord.CreateDraft(
-            "USD", "NPR", nov19, null, 1, 135.20m, 135.80m, 135.50m,
-            FxRateSourceAuthority.ManualApproved, "MAN-NOV19", nov19);
-        authA.Approve(approverId, nov19, "Manual FX rate verified on Nov 19.");
+            "USD", "NPR", nov19, null, 1, 148.20m, 148.80m, 148.50m,
+            FxRateSourceAuthority.ManualApproved, "MAN-NOV19", nov19,
+            evidenceReference: "MANUAL_GOVERNANCE_OVERRIDE",
+            transformationTrace: "MANUAL_GOVERNANCE_OVERRIDE: treasury override test fixture");
+        authA.Approve(approverId, nov19, "Manual FX override verified on Nov 19.", evidenceReference: "MANUAL_GOVERNANCE_OVERRIDE");
 
-        // Authority B (NRB): effective Nov 20, published Nov 23 (future relative to Nov 21!), approved Nov 23 -> 136.20
+        // Authority B (Authentic NRB-20261121 USD/NPR 147.98/148.58 -> 148.28): published Nov 20 10:09:20Z (> nov20Early), approved Nov 23
+        var vNrb21 = verifier.VerifyOfficialQuotation(
+            FxRateSourceAuthority.NRB, "NRB-20261121", "USD", "NPR", FxRateDirection.QuotePerUnitBase,
+            1, 147.98m, 148.58m, 148.280000m, new DateTime(2026, 11, 20, 10, 9, 20, DateTimeKind.Utc));
         var authB = FxRateRecord.CreateDraft(
-            "USD", "NPR", nov20, null, 1, 135.90m, 136.50m, 136.20m,
-            FxRateSourceAuthority.NRB, "NRB-NOV23", nov23, "NRB-USD-NPR",
-            "SHA256:1234567890abcdef1234567890abcdef1234567890abcdef1234567890abcdef");
-        authB.Approve(approverId, nov23, "NRB circular published and approved Nov 23.");
+            "USD", "NPR", nov20, null, 1, 147.98m, 148.58m, 148.280000m,
+            FxRateSourceAuthority.NRB, "NRB-20261121", vNrb21.PublishedAtUtc, vNrb21.BenchmarkSeriesId, vNrb21.VerifiedIntegrityHash,
+            FxRateDirection.QuotePerUnitBase, null, vNrb21.EvidenceReference, vNrb21.TransformationTrace);
+        authB.Approve(approverId, nov23, "Verified authentic NRB Nov 21 API payload.");
 
-        // Authority C (ECB, higher effective Nov 20, published Nov 18, BUT internal ApprovedAtUtc = Nov 25!)
+        // Authority C (Authentic NRB-20261120 USD/NPR 148.97/149.57 -> 149.27): published Nov 19 10:11:57Z (<= nov20Early), BUT approved Nov 25!
+        var vNrb20 = verifier.VerifyOfficialQuotation(
+            FxRateSourceAuthority.NRB, "NRB-20261120", "USD", "NPR", FxRateDirection.QuotePerUnitBase,
+            1, 148.97m, 149.57m, 149.270000m, new DateTime(2026, 11, 19, 10, 11, 57, DateTimeKind.Utc));
         var authC = FxRateRecord.CreateDraft(
-            "USD", "NPR", nov20, null, 1, 136.70m, 137.30m, 137.00m,
-            FxRateSourceAuthority.ECB, "ECB-LATE-APP", nov18, "ECB-USD-NPR",
-            "SHA256:abcdef1234567890abcdef1234567890abcdef1234567890abcdef1234567890");
-        authC.Approve(approverId, nov25, "Late internal verification on Nov 25.");
+            "USD", "NPR", nov20, null, 1, 148.97m, 149.57m, 149.270000m,
+            FxRateSourceAuthority.NRB, "NRB-20261120", vNrb20.PublishedAtUtc, vNrb20.BenchmarkSeriesId, vNrb20.VerifiedIntegrityHash,
+            FxRateDirection.QuotePerUnitBase, null, vNrb20.EvidenceReference, vNrb20.TransformationTrace);
+        authC.Approve(approverId, nov25, "Late internal verification of authentic NRB Nov 20 API payload.");
 
-        db.FxRateRecords.AddRange(authA, authB, authC);
+        // MDM13-R03-F02: Unverified legacy official row lacking EvidenceReference MUST NEVER be resolved by FxDatabaseRateResolver!
+        var legacyUnverifiedNrb = FxRateRecord.CreateDraft(
+            "EUR", "NPR", nov20, null, 1, 160.00m, 161.00m, 160.50m,
+            FxRateSourceAuthority.NRB, "NRB-LEGACY-UNVERIFIED", nov19);
+        legacyUnverifiedNrb.Approve(approverId, nov19, "Pre-R03 unverified official entry.");
+
+        db.FxRateRecords.AddRange(authA, authB, authC, legacyUnverifiedNrb);
         await db.SaveChangesAsync();
 
         var fxProvider = FxRateProvider.ForDbContext(db);
         var convSvc = new FxConversionService(db, fxProvider, new DateTimeProvider());
 
-        // 1) At AsOfUtc = Nov 21 (HistoricalAsKnown):
-        //    Auth B (Published Nov 23 > Nov 21) and Auth C (Approved Nov 25 > Nov 21) MUST BOTH be filtered out BEFORE selection,
-        //    so BOTH interfaces select Authority A (135.50)!
+        // 1) At AsOfUtc = Nov 20 09:00Z (HistoricalAsKnown):
+        //    Auth B (Published Nov 20 10:09:20Z > 09:00Z) and Auth C (Approved Nov 25 > Nov 20) MUST BOTH be filtered out BEFORE selection,
+        //    so BOTH interfaces select Authority A (148.50)!
         var asKnownConv = await convSvc.ConvertAmountAsync(
-            10m, "USD", "NPR", nov21, FxRateType.Mid, nov21, valuationMode: FxValuationMode.HistoricalAsKnown);
+            10m, "USD", "NPR", nov20Early, FxRateType.Mid, nov20Early, valuationMode: FxValuationMode.HistoricalAsKnown);
         var asKnownProviderRate = fxProvider.GetHistoricalExchangeRate(
-            "USD", "NPR", nov21, nov21, FxValuationMode.HistoricalAsKnown, null,
+            "USD", "NPR", nov20Early, nov20Early, FxValuationMode.HistoricalAsKnown, null,
             out var pSrc, out var pVer, out _, out _, out _);
 
-        Assert.Equal(1355.00m, asKnownConv.ConvertedAmount);
+        Assert.Equal(1485.00m, asKnownConv.ConvertedAmount);
         Assert.Equal("ManualApproved", asKnownConv.SourceAuthority);
-        Assert.Equal(135.50m, asKnownProviderRate);
+        Assert.Equal(148.50m, asKnownProviderRate);
         Assert.Equal(asKnownConv.SourceAuthority, pSrc);
         Assert.Equal(asKnownConv.BulletinVersion, pVer);
 
-        // 2) At AsOfUtc = Nov 21 (Retrospective):
-        //    Auth C was published Nov 18 (<= Nov 21) and later verified -> Retrospective selects Auth C (137.00) identically in both interfaces!
+        // 2) At AsOfUtc = Nov 20 09:00Z (Retrospective):
+        //    Auth C (NRB-20261120) was published Nov 19 10:11:57Z (<= nov20Early) and later verified -> Retrospective selects Auth C (149.27) cleanly!
         var retroConv = await convSvc.ConvertAmountAsync(
-            10m, "USD", "NPR", nov21, FxRateType.Mid, nov21, valuationMode: FxValuationMode.Retrospective);
+            10m, "USD", "NPR", nov20Early, FxRateType.Mid, nov20Early, valuationMode: FxValuationMode.Retrospective);
         var retroProviderRate = fxProvider.GetHistoricalExchangeRate(
-            "USD", "NPR", nov21, nov21, FxValuationMode.Retrospective, null,
+            "USD", "NPR", nov20Early, nov20Early, FxValuationMode.Retrospective, null,
             out var rSrc, out var rVer, out _, out _, out _);
 
-        Assert.Equal(1370.00m, retroConv.ConvertedAmount);
-        Assert.Equal("ECB", retroConv.SourceAuthority);
-        Assert.Equal(137.00m, retroProviderRate);
+        Assert.Equal(1492.70m, retroConv.ConvertedAmount);
+        Assert.Equal("NRB", retroConv.SourceAuthority);
+        Assert.Equal("NRB-20261120", retroConv.BulletinVersion);
+        Assert.Equal(149.27m, retroProviderRate);
         Assert.Equal(retroConv.SourceAuthority, rSrc);
         Assert.Equal(retroConv.BulletinVersion, rVer);
 
-        // 3) At AsOfUtc = Nov 24 (after Nov 23, before Nov 25) HistoricalAsKnown sees NRB (136.20), whereas explicit ManualApproved sees Auth A (135.50)
+        // 3) At AsOfUtc = Nov 24 (after Nov 23, before Nov 25) HistoricalAsKnown sees NRB-20261121 (148.28), whereas explicit ManualApproved sees Auth A (148.50)
         var nov24 = new DateTime(2026, 11, 24, 12, 0, 0, DateTimeKind.Utc);
         var nrbWinsConv = await convSvc.ConvertAmountAsync(
-            10m, "USD", "NPR", nov21, FxRateType.Mid, nov24, valuationMode: FxValuationMode.HistoricalAsKnown);
-        Assert.Equal(1362.00m, nrbWinsConv.ConvertedAmount);
+            10m, "USD", "NPR", nov24, FxRateType.Mid, nov24, valuationMode: FxValuationMode.HistoricalAsKnown);
+        Assert.Equal(1482.80m, nrbWinsConv.ConvertedAmount);
         Assert.Equal("NRB", nrbWinsConv.SourceAuthority);
+        Assert.Equal("NRB-20261121", nrbWinsConv.BulletinVersion);
 
         var explicitManConv = await convSvc.ConvertAmountAsync(
-            10m, "USD", "NPR", nov21, FxRateType.Mid, nov24, preferredAuthority: FxRateSourceAuthority.ManualApproved, valuationMode: FxValuationMode.HistoricalAsKnown);
-        Assert.Equal(1355.00m, explicitManConv.ConvertedAmount);
+            10m, "USD", "NPR", nov24, FxRateType.Mid, nov24, preferredAuthority: FxRateSourceAuthority.ManualApproved, valuationMode: FxValuationMode.HistoricalAsKnown);
+        Assert.Equal(1485.00m, explicitManConv.ConvertedAmount);
         Assert.Equal("ManualApproved", explicitManConv.SourceAuthority);
+
+        // 4) MDM13-R03-F02 Defense-in-Depth: EUR/NPR legacy row lacking EvidenceReference MUST NOT be resolved in either mode!
+        await Assert.ThrowsAsync<DomainException>(() =>
+            convSvc.ConvertAmountAsync(10m, "EUR", "NPR", nov24, FxRateType.Mid, nov24, valuationMode: FxValuationMode.HistoricalAsKnown));
+        await Assert.ThrowsAsync<DomainException>(() =>
+            convSvc.ConvertAmountAsync(10m, "EUR", "NPR", nov24, FxRateType.Mid, nov24, valuationMode: FxValuationMode.Retrospective));
     }
 
     private static string ReadEmbeddedFxArtifact(string fileName)

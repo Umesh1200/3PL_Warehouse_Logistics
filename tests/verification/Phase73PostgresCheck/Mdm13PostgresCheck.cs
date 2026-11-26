@@ -70,11 +70,36 @@ internal static class Mdm13PostgresCheck
 
         try
         {
-            // 1. Clean upgrade MDM1_2 -> MDM1_3 + verify excl_fx_rates_active_window + idempotent seed
+            // 1. Clean upgrade MDM1_2 -> pre-R03 MDM1_3 with seeded legacy VerifiedApproved rows -> upgrade to latest ->
+            //    verify historical preservation + safe quarantine of unverified legacy official FX + ManualApproved backfill
+            var legacyApproverId = Guid.NewGuid();
+            var legacyNrbId = Guid.NewGuid();
+            var legacyManualId = Guid.NewGuid();
             await using (var migDb = CreatePgDb(targetConn, null))
             {
                 var migrator = migDb.GetInfrastructure().GetRequiredService<IMigrator>();
-                await migrator.MigrateAsync("20261125134640_MDM1_2_LegalEntitiesAndFacilityBinding");
+                await migrator.MigrateAsync("20261125163222_MDM1_3_CurrencyFxAndUomCatalog");
+            }
+
+            await using (var preSeedDb = CreatePgDb(targetConn, null))
+            {
+                await ReferenceCatalogSeeder.SeedAsync(preSeedDb);
+            }
+
+            await using (var legacyConn = new NpgsqlConnection(targetConn))
+            {
+                await legacyConn.OpenAsync();
+                await using var insLegacy = new NpgsqlCommand(
+                    $"INSERT INTO fx_rates (fx_rate_id, base_currency_code, quote_currency_code, effective_from_utc, unit_multiplier, buy_rate, sell_rate, mid_rate, rate_direction, source_authority, bulletin_version, benchmark_series_id, integrity_hash, published_at_utc, approval_status, approved_by_user_id, approved_at_utc, verification_notes, config_revision, is_active, created_at) VALUES " +
+                    $"('{legacyNrbId}', 'USD', 'NPR', '2026-11-20T00:00:00Z', 1, 135.20, 135.80, 135.50, 'QuotePerUnitBase', 'NRB', 'NRB-PRE-R03-LEGACY', 'LEGACY-SERIES', NULL, '2026-11-19T10:00:00Z', 'VerifiedApproved', '{legacyApproverId}', '2026-11-19T10:05:00Z', 'Pre-R03 official entry lacking artifact verification.', 1, true, NOW()), " +
+                    $"('{legacyManualId}', 'AUD', 'NPR', '2026-11-20T00:00:00Z', 1, 96.00, 97.00, 96.50, 'QuotePerUnitBase', 'ManualApproved', 'MAN-PRE-R03-LEGACY', NULL, NULL, '2026-11-19T10:00:00Z', 'VerifiedApproved', '{legacyApproverId}', '2026-11-19T10:05:00Z', 'Pre-R03 treasury desk manual override approved.', 1, true, NOW());",
+                    legacyConn);
+                await insLegacy.ExecuteNonQueryAsync();
+            }
+
+            await using (var migUpDb = CreatePgDb(targetConn, null))
+            {
+                var migrator = migUpDb.GetInfrastructure().GetRequiredService<IMigrator>();
                 await migrator.MigrateAsync();
             }
 
@@ -90,6 +115,32 @@ internal static class Mdm13PostgresCheck
                     !def.Contains("VerifiedApproved", StringComparison.Ordinal))
                 {
                     throw new InvalidOperationException($"Unexpected FX exclusion constraint definition: {def}");
+                }
+
+                // Verify F02 legacy quarantine preserved historical NRB record without deletion & freed active window
+                await using var qChk = new NpgsqlCommand(
+                    $"SELECT approval_status, is_active, evidence_reference, verification_notes FROM fx_rates WHERE fx_rate_id = '{legacyNrbId}';",
+                    sqlConn);
+                await using (var reader = await qChk.ExecuteReaderAsync())
+                {
+                    if (!await reader.ReadAsync())
+                        throw new InvalidOperationException("MDM13-R03-F02 upgrade deleted legacy NRB row instead of preserving it!");
+                    var qStatus = reader.GetString(0);
+                    var qActive = reader.GetBoolean(1);
+                    var qEvid = reader.IsDBNull(2) ? null : reader.GetString(2);
+                    var qNotes = reader.IsDBNull(3) ? "" : reader.GetString(3);
+                    if (qStatus != "Quarantined" || qActive || qEvid != "QUARANTINED_UNVERIFIED_LEGACY" || !qNotes.Contains("QUARANTINED_LEGACY_UNVERIFIED", StringComparison.Ordinal))
+                        throw new InvalidOperationException($"MDM13-R03-F02 quarantine state mismatch: status={qStatus}, active={qActive}, evidence={qEvid}, notes={qNotes}");
+                }
+
+                // Verify legacy ManualApproved row retained explicit MANUAL_GOVERNANCE_OVERRIDE labeling
+                await using var mChk = new NpgsqlCommand(
+                    $"SELECT approval_status, evidence_reference FROM fx_rates WHERE fx_rate_id = '{legacyManualId}';",
+                    sqlConn);
+                await using (var reader = await mChk.ExecuteReaderAsync())
+                {
+                    if (!await reader.ReadAsync() || reader.GetString(0) != "VerifiedApproved" || reader.GetString(1) != "MANUAL_GOVERNANCE_OVERRIDE")
+                        throw new InvalidOperationException("MDM13-R03-F02 legacy ManualApproved upgrade preservation check failed.");
                 }
             }
 
@@ -150,6 +201,9 @@ internal static class Mdm13PostgresCheck
                 }
                 if (!exclRejected)
                     throw new InvalidOperationException("MDM-1.3 PostgreSQL EXCLUDE USING gist did not block overlapping active FxRateRecord.");
+
+                await using var cleanupExcl = new NpgsqlCommand("DELETE FROM fx_rates WHERE bulletin_version = 'PG-EXCL-1';", rawConn);
+                await cleanupExcl.ExecuteNonQueryAsync();
             }
 
             // 3. Real JWT HTTP checks + NRB 100 INR -> NPR + 1 USD -> NPR + Concurrent Approval Race + Rollback + UOM
@@ -197,10 +251,20 @@ internal static class Mdm13PostgresCheck
             var jwtFin = TokenFor(finStaffId, UserType.Staff, null, facilityId, ["PgFinanceFxMgr"], [Permissions.Global.ManageFxRates, Permissions.Billing.ManageRates]);
 
             var effFrom = new DateTime(2026, 11, 20, 0, 0, 0, DateTimeKind.Utc);
-            var pubAt1 = new DateTime(2026, 11, 19, 10, 0, 0, DateTimeKind.Utc);
-            var pubAt2 = new DateTime(2026, 11, 20, 10, 0, 0, DateTimeKind.Utc);
-            var pgNrbPayloadA = ReadEmbeddedFxArtifact("NRB_FX_20261120.json");
-            var pgNrbPayloadB = ReadEmbeddedFxArtifact("NRB_FX_20261121.json");
+            var pubAt1 = new DateTime(2026, 11, 19, 10, 11, 57, DateTimeKind.Utc);
+            var pubAt2 = new DateTime(2026, 11, 20, 10, 9, 20, DateTimeKind.Utc);
+            var pgNrbPayloadA = ReadEmbeddedFxArtifact("NRB_API_V1_20261120.json");
+            var pgNrbPayloadB = ReadEmbeddedFxArtifact("NRB_API_V1_20261121.json");
+
+            // F02 confirmation before authentic USD/NPR onboarding: quarantined legacy USD/NPR row MUST fail closed 422!
+            if ((await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
+                {
+                    amount = 10m, fromCurrencyCode = "USD", toCurrencyCode = "NPR",
+                    effectiveDateUtc = effFrom.AddHours(6), valuationMode = FxValuationMode.Retrospective
+                }))).StatusCode != HttpStatusCode.UnprocessableEntity)
+            {
+                throw new InvalidOperationException("MDM13-R03-F02 quarantined legacy NRB row leaked into conversion resolution!");
+            }
 
             // RBAC + R03 provenance checks
             var raceBodyA = new
@@ -209,7 +273,7 @@ internal static class Mdm13PostgresCheck
                 effectiveFromUtc = effFrom, effectiveToUtc = (DateTime?)null,
                 unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
                 sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
-                publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20", sourceArtifactPayload = pgNrbPayloadA
+                publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-20", sourceArtifactPayload = pgNrbPayloadA
             };
             if ((await http.PostAsJsonAsync("/api/v1/fx-rates", raceBodyA)).StatusCode != HttpStatusCode.Unauthorized ||
                 (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtClient, raceBodyA))).StatusCode != HttpStatusCode.Forbidden ||
@@ -227,7 +291,7 @@ internal static class Mdm13PostgresCheck
                     effectiveFromUtc = effFrom, effectiveToUtc = (DateTime?)null,
                     unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
                     sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-PG-FABRICATED",
-                    publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20",
+                    publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-20",
                     integrityHash = fakePgSha, sourceArtifactPayload = fakePgPayload
                 }))).StatusCode != HttpStatusCode.UnprocessableEntity ||
                 (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
@@ -236,7 +300,7 @@ internal static class Mdm13PostgresCheck
                     effectiveFromUtc = effFrom, effectiveToUtc = (DateTime?)null,
                     unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 188.888m,
                     sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
-                    publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20"
+                    publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-20"
                 }))).StatusCode != HttpStatusCode.UnprocessableEntity)
             {
                 throw new InvalidOperationException("MDM13-R03 PostgreSQL official authority authenticity check did not fail closed.");
@@ -249,9 +313,9 @@ internal static class Mdm13PostgresCheck
             {
                 baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effFrom.AddHours(2), effectiveToUtc = (DateTime?)null,
-                unitMultiplier = 100, buyRate = 160.10m, sellRate = 160.25m, midRate = 160.175m,
+                unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
                 sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261121",
-                publishedAtUtc = pubAt2, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-21", sourceArtifactPayload = pgNrbPayloadB
+                publishedAtUtc = pubAt2, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-21", sourceArtifactPayload = pgNrbPayloadB
             }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
 
             var raceStatuses = await Task.WhenAll(
@@ -270,10 +334,10 @@ internal static class Mdm13PostgresCheck
             {
                 var winner = await chkDb.FxRateRecords
                     .Where(r => r.BaseCurrencyCode == "INR" && r.QuoteCurrencyCode == "NPR" && r.SourceAuthority == FxRateSourceAuthority.NRB && r.ApprovalStatus == FxRateApprovalStatus.VerifiedApproved && r.IsActive)
-                    .Select(r => new { r.Id, r.BulletinVersion, r.EvidenceReference })
+                    .Select(r => new { r.Id, r.BulletinVersion, r.EvidenceReference, r.TransformationTrace })
                     .SingleAsync();
-                if (string.IsNullOrWhiteSpace(winner.EvidenceReference))
-                    throw new InvalidOperationException("MDM13-R03 PostgreSQL official rate missing persisted EvidenceReference.");
+                if (string.IsNullOrWhiteSpace(winner.EvidenceReference) || string.IsNullOrWhiteSpace(winner.TransformationTrace))
+                    throw new InvalidOperationException("MDM13-R03 PostgreSQL official rate missing persisted EvidenceReference or TransformationTrace.");
                 winningRateId = winner.Id;
                 winningBulletinVersion = winner.BulletinVersion;
             }
@@ -284,14 +348,11 @@ internal static class Mdm13PostgresCheck
             {
                 baseCurrencyCode = "INR", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effFrom.AddDays(1), effectiveToUtc = (DateTime?)null,
-                unitMultiplier = 100,
-                buyRate = useSecondForRollback ? 160.10m : 160.00m,
-                sellRate = useSecondForRollback ? 160.25m : 160.15m,
-                midRate = useSecondForRollback ? 160.175m : 160.075m,
+                unitMultiplier = 100, buyRate = 160.00m, sellRate = 160.15m, midRate = 160.075m,
                 sourceAuthority = FxRateSourceAuthority.NRB,
                 bulletinVersion = useSecondForRollback ? "NRB-20261121" : "NRB-20261120",
                 publishedAtUtc = useSecondForRollback ? pubAt2 : pubAt1,
-                benchmarkSeriesId = useSecondForRollback ? "NRB-FX-DAILY-2026-11-21" : "NRB-FX-DAILY-2026-11-20",
+                benchmarkSeriesId = useSecondForRollback ? "NRB-FOREX-V1-2026-11-21" : "NRB-FOREX-V1-2026-11-20",
                 sourceArtifactPayload = useSecondForRollback ? pgNrbPayloadB : pgNrbPayloadA
             }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
 
@@ -312,18 +373,18 @@ internal static class Mdm13PostgresCheck
                 }
             }
 
-            // MDM13-R02 PostgreSQL: Future-effective supersession coverage gap MUST be rejected 422 while preserving USD/NPR active v1!
+            // MDM13-R02 PostgreSQL: Future-effective supersession coverage gap MUST be rejected 422 while preserving authentic USD/NPR active v1 (148.97/149.57 -> 149.27)!
             var usdNprDraft = (await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
             {
                 baseCurrencyCode = "USD", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effFrom, effectiveToUtc = (DateTime?)null,
-                unitMultiplier = 1, buyRate = 135.20m, sellRate = 135.80m, midRate = 135.50m,
+                unitMultiplier = 1, buyRate = 148.97m, sellRate = 149.57m, midRate = 149.27m,
                 sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261120",
-                publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-20", sourceArtifactPayload = pgNrbPayloadA
+                publishedAtUtc = pubAt1, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-20", sourceArtifactPayload = pgNrbPayloadA
             }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
             if ((await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{usdNprDraft.Id}/approve", jwtFin, new
             {
-                evidenceVerified = true, verificationNotes = "Approve USD/NPR official fixing."
+                evidenceVerified = true, verificationNotes = "Approve authentic NRB Nov 20 USD/NPR fixing."
             }))).StatusCode != HttpStatusCode.OK)
                 throw new InvalidOperationException("Failed approving PG USD/NPR rate.");
 
@@ -331,9 +392,9 @@ internal static class Mdm13PostgresCheck
             {
                 baseCurrencyCode = "USD", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = DateTime.UtcNow.AddDays(15), effectiveToUtc = (DateTime?)null,
-                unitMultiplier = 1, buyRate = 136.10m, sellRate = 136.70m, midRate = 136.40m,
+                unitMultiplier = 1, buyRate = 147.98m, sellRate = 148.58m, midRate = 148.28m,
                 sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261121",
-                publishedAtUtc = pubAt2, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-21", sourceArtifactPayload = pgNrbPayloadB
+                publishedAtUtc = pubAt2, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-21", sourceArtifactPayload = pgNrbPayloadB
             }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
             if ((await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{usdNprFuture.Id}/approve", jwtFin, new
             {
@@ -341,16 +402,16 @@ internal static class Mdm13PostgresCheck
             }))).StatusCode != HttpStatusCode.UnprocessableEntity)
                 throw new InvalidOperationException("MDM13-R02 PostgreSQL future-effective FX supersession did not fail closed.");
 
-            // Immediate USD/NPR supersession (v2 = 136.40) -> HistoricalAsKnown before v2 recovers v1 (1355.00), current recovers v2 (1364.00)!
+            // Immediate USD/NPR supersession with authentic NRB Nov 21 (147.98/148.58 -> 148.28) -> HistoricalAsKnown before v2 recovers v1 (1492.70), current recovers v2 (1482.80)!
             var usdNprV1 = (await (await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/fx-rates/{usdNprDraft.Id}", jwtClient))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
             await Task.Delay(30);
             var usdNprSup2 = (await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates", jwtFin, new
             {
                 baseCurrencyCode = "USD", quoteCurrencyCode = "NPR",
                 effectiveFromUtc = effFrom.AddDays(1), effectiveToUtc = (DateTime?)null,
-                unitMultiplier = 1, buyRate = 136.10m, sellRate = 136.70m, midRate = 136.40m,
+                unitMultiplier = 1, buyRate = 147.98m, sellRate = 148.58m, midRate = 148.28m,
                 sourceAuthority = FxRateSourceAuthority.NRB, bulletinVersion = "NRB-20261121",
-                publishedAtUtc = pubAt2, benchmarkSeriesId = "NRB-FX-DAILY-2026-11-21", sourceArtifactPayload = pgNrbPayloadB
+                publishedAtUtc = pubAt2, benchmarkSeriesId = "NRB-FOREX-V1-2026-11-21", sourceArtifactPayload = pgNrbPayloadB
             }))).Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
             var sup2Approve = await http.SendAsync(Authed(HttpMethod.Post, $"/api/v1/fx-rates/{usdNprSup2.Id}/approve", jwtFin, new
             {
@@ -359,8 +420,9 @@ internal static class Mdm13PostgresCheck
             if (sup2Approve.StatusCode != HttpStatusCode.OK)
                 throw new InvalidOperationException($"PG USD/NPR v2 supersession failed: {sup2Approve.StatusCode}");
             var sup2Dto = (await sup2Approve.Content.ReadFromJsonAsync<FxRateRecordDto>(JsonOptions))!;
-            if (string.IsNullOrWhiteSpace(sup2Dto.EvidenceReference) || !sup2Dto.EvidenceReference.Contains("NRB_FX_20261121.json", StringComparison.Ordinal))
-                throw new InvalidOperationException($"PG USD/NPR v2 missing expected EvidenceReference: {sup2Dto.EvidenceReference}");
+            if (string.IsNullOrWhiteSpace(sup2Dto.EvidenceReference) || !sup2Dto.EvidenceReference.Contains("NRB_API_V1_20261121.json", StringComparison.Ordinal) ||
+                string.IsNullOrWhiteSpace(sup2Dto.TransformationTrace) || !sup2Dto.TransformationTrace.Contains("NRB_API_V1_20261121.json", StringComparison.Ordinal))
+                throw new InvalidOperationException($"PG USD/NPR v2 missing expected EvidenceReference/TransformationTrace: {sup2Dto.EvidenceReference}");
 
             var asKnownBeforeSup = await (await http.SendAsync(Authed(HttpMethod.Post, "/api/v1/fx-rates/convert", jwtClient, new
             {
@@ -376,14 +438,15 @@ internal static class Mdm13PostgresCheck
                 effectiveDateUtc = effFrom.AddDays(2),
                 rateType = FxRateType.Mid
             }))).Content.ReadFromJsonAsync<FxConversionResultDto>(JsonOptions);
-            if (asKnownBeforeSup?.ConvertedAmount != 1355.00m || usdNprConv?.ConvertedAmount != 1364.00m || !usdNprConv.ResolvedFromDatabase)
+            if (asKnownBeforeSup?.ConvertedAmount != 1492.70m || usdNprConv?.ConvertedAmount != 1482.80m || !usdNprConv.ResolvedFromDatabase)
                 throw new InvalidOperationException($"MDM13-R01/R02 PG historical continuity check failed: before={asKnownBeforeSup?.ConvertedAmount}, current={usdNprConv?.ConvertedAmount}");
 
             // MDM13-R01 PG check: Future-published ManualApproved (published+approved in future) cannot shadow already-published rate!
             var lateManual = FxRateRecord.CreateDraft(
-                "USD", "NPR", effFrom.AddDays(3), null, 1, 140.00m, 141.00m, 140.50m,
-                FxRateSourceAuthority.ManualApproved, "PG-MAN-LATE", DateTime.UtcNow.AddDays(2));
-            lateManual.Approve(finStaffId, DateTime.UtcNow, "Manual override pre-staged for future publication.");
+                "USD", "NPR", effFrom.AddDays(3), null, 1, 150.00m, 151.00m, 150.50m,
+                FxRateSourceAuthority.ManualApproved, "PG-MAN-LATE", DateTime.UtcNow.AddDays(2),
+                evidenceReference: "MANUAL_GOVERNANCE_OVERRIDE");
+            lateManual.Approve(finStaffId, DateTime.UtcNow, "Manual override pre-staged for future publication.", evidenceReference: "MANUAL_GOVERNANCE_OVERRIDE");
             await using (var extraDb = CreatePgDb(targetConn, null))
             {
                 extraDb.FxRateRecords.Add(lateManual);
@@ -395,7 +458,7 @@ internal static class Mdm13PostgresCheck
                 effectiveDateUtc = effFrom.AddDays(4),
                 valuationMode = FxValuationMode.HistoricalAsKnown
             }))).Content.ReadFromJsonAsync<FxConversionResultDto>(JsonOptions);
-            if (shadowCheck!.ConvertedAmount != 1364.00m || shadowCheck.SourceAuthority != "NRB")
+            if (shadowCheck!.ConvertedAmount != 1482.80m || shadowCheck.SourceAuthority != "NRB")
                 throw new InvalidOperationException($"MDM13-R01 PG future-published authority shadowed NRB: {shadowCheck.SourceAuthority}={shadowCheck.ConvertedAmount}");
 
             // Missing FX pair fails closed 422; retroactive PUT/DELETE return 409; UOM canonical + cross-dim checks

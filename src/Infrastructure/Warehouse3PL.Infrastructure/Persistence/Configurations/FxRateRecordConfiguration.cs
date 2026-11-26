@@ -96,6 +96,10 @@ public class FxRateRecordConfiguration : IEntityTypeConfiguration<FxRateRecord>
             .HasColumnName("evidence_reference")
             .HasMaxLength(400);
 
+        builder.Property(r => r.TransformationTrace)
+            .HasColumnName("transformation_trace")
+            .HasMaxLength(400);
+
         builder.Property(r => r.PublishedAtUtc)
             .HasColumnName("published_at_utc")
             .IsRequired();

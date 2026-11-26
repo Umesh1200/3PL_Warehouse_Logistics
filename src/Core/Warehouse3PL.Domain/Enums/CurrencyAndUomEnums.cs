@@ -21,7 +21,8 @@ public enum FxRateApprovalStatus
     Draft = 1,
     VerifiedApproved = 2,
     Superseded = 3,
-    Voided = 4
+    Voided = 4,
+    Quarantined = 5
 }
 
 /// <summary>

@@ -8,7 +8,8 @@ public sealed record OfficialBulletinVerificationResult(
     string BenchmarkSeriesId,
     string VerifiedIntegrityHash,
     string EvidenceReference,
-    DateTime PublishedAtUtc);
+    DateTime PublishedAtUtc,
+    string TransformationTrace);
 
 /// <summary>
 /// Independently verifies official central-bank FX bulletins (NRB, FRB, ECB, BOE) against retained/pinned

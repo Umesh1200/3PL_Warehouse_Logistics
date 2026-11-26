@@ -15,6 +15,7 @@ namespace Warehouse3PL.Application.Features.Reference.Commands;
 internal static class FxProvenanceValidationHelper
 {
     public const string ManualGovernanceOverrideEvidence = "MANUAL_GOVERNANCE_OVERRIDE";
+    public const string ManualGovernanceOverrideTrace = "MANUAL_GOVERNANCE_OVERRIDE: operator-submitted Buy/Sell/Mid rates governed outside external central-bank fixture registry";
 
     private static readonly string[] PlaceholderTokens =
     [
@@ -128,6 +129,7 @@ public sealed class CreateFxRateDraftCommandHandler : IRequestHandler<CreateFxRa
         string? resolvedBenchmarkSeriesId = request.BenchmarkSeriesId;
         string? resolvedIntegrityHash = request.IntegrityHash;
         string evidenceReference = FxProvenanceValidationHelper.ManualGovernanceOverrideEvidence;
+        string transformationTrace = FxProvenanceValidationHelper.ManualGovernanceOverrideTrace;
 
         if (FxProvenanceValidationHelper.IsOfficialAuthority(request.SourceAuthority))
         {
@@ -149,6 +151,7 @@ public sealed class CreateFxRateDraftCommandHandler : IRequestHandler<CreateFxRa
             resolvedBenchmarkSeriesId = verification.BenchmarkSeriesId;
             resolvedIntegrityHash = verification.VerifiedIntegrityHash;
             evidenceReference = verification.EvidenceReference;
+            transformationTrace = verification.TransformationTrace;
         }
 
         var record = FxRateRecord.CreateDraft(
@@ -167,7 +170,8 @@ public sealed class CreateFxRateDraftCommandHandler : IRequestHandler<CreateFxRa
             resolvedIntegrityHash,
             FxRateDirection.QuotePerUnitBase,
             id: null,
-            evidenceReference: evidenceReference);
+            evidenceReference: evidenceReference,
+            transformationTrace: transformationTrace);
 
         record.CreatedBy = staffUserId;
         _db.FxRateRecords.Add(record);
@@ -267,6 +271,7 @@ public sealed class ApproveFxRateCommandHandler : IRequestHandler<ApproveFxRateC
                 string? verifiedBenchmarkSeriesId = null;
                 string? verifiedIntegrityHash = null;
                 string evidenceReference = FxProvenanceValidationHelper.ManualGovernanceOverrideEvidence;
+                string transformationTrace = FxProvenanceValidationHelper.ManualGovernanceOverrideTrace;
 
                 if (FxProvenanceValidationHelper.IsOfficialAuthority(rate.SourceAuthority))
                 {
@@ -288,6 +293,7 @@ public sealed class ApproveFxRateCommandHandler : IRequestHandler<ApproveFxRateC
                     verifiedBenchmarkSeriesId = verification.BenchmarkSeriesId;
                     verifiedIntegrityHash = verification.VerifiedIntegrityHash;
                     evidenceReference = verification.EvidenceReference;
+                    transformationTrace = verification.TransformationTrace;
                 }
 
                 var now = _dateTime.UtcNow;
@@ -363,7 +369,8 @@ public sealed class ApproveFxRateCommandHandler : IRequestHandler<ApproveFxRateC
                     request.VerificationNotes,
                     verifiedBenchmarkSeriesId,
                     verifiedIntegrityHash,
-                    evidenceReference);
+                    evidenceReference,
+                    transformationTrace);
                 rate.UpdatedBy = staffUserId;
 
                 await _db.SaveChangesAsync(cancellationToken);

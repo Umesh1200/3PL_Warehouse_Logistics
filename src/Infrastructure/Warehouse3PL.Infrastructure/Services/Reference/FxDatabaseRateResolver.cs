@@ -8,8 +8,8 @@ namespace Warehouse3PL.Infrastructure.Services.Reference;
 /// <summary>
 /// Shared bitemporal FX rate selector used identically by <see cref="FxConversionService"/>
 /// and <see cref="Analytics.FxRateProvider"/> so both interfaces produce identical historical decisions:
-/// 1) Never resolves Draft or Voided rates (Voided records are retracted/erroneous bulletins;
-///    previously posted financial documents retain immutable persisted snapshots rather than reading Voided rows).
+/// 1) Never resolves Draft, Voided, or Quarantined rates (Voided records are retracted/erroneous bulletins;
+///    and Quarantined/unverified legacy official records lack authenticated source evidence).
 /// 2) Filters candidate rows by temporal availability timestamps BEFORE selecting a winner, preventing
 ///    a future-published authority from shadowing an already-published eligible authority.
 /// 3) Distinguishes:
@@ -79,6 +79,16 @@ internal static class FxDatabaseRateResolver
                         r.QuoteCurrencyCode == quoteCurrencyCode &&
                         (r.ApprovalStatus == FxRateApprovalStatus.VerifiedApproved ||
                          r.ApprovalStatus == FxRateApprovalStatus.Superseded) &&
+                        r.ApprovedByUserId != null &&
+                        r.VerificationNotes != null &&
+                        r.EvidenceReference != null &&
+                        r.EvidenceReference != "" &&
+                        r.EvidenceReference != "QUARANTINED_UNVERIFIED_LEGACY" &&
+                        (r.SourceAuthority == FxRateSourceAuthority.ManualApproved ||
+                         (r.EvidenceReference != "MANUAL_GOVERNANCE_OVERRIDE" &&
+                          r.BenchmarkSeriesId != null &&
+                          r.IntegrityHash != null &&
+                          r.IntegrityHash.StartsWith("SHA256:"))) &&
                         r.EffectiveFromUtc <= effectiveDateUtc &&
                         (r.EffectiveToUtc == null || effectiveDateUtc < r.EffectiveToUtc));
 
@@ -90,18 +100,41 @@ internal static class FxDatabaseRateResolver
         return query;
     }
 
+    private static bool HasEligibleProvenance(FxRateRecord r)
+    {
+        if (!r.ApprovedByUserId.HasValue || string.IsNullOrWhiteSpace(r.VerificationNotes))
+            return false;
+
+        if (string.IsNullOrWhiteSpace(r.EvidenceReference) ||
+            string.Equals(r.EvidenceReference, "QUARANTINED_UNVERIFIED_LEGACY", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (r.SourceAuthority == FxRateSourceAuthority.ManualApproved)
+            return true;
+
+        return !string.Equals(r.EvidenceReference, "MANUAL_GOVERNANCE_OVERRIDE", StringComparison.OrdinalIgnoreCase) &&
+               !string.IsNullOrWhiteSpace(r.BenchmarkSeriesId) &&
+               !string.IsNullOrWhiteSpace(r.IntegrityHash) &&
+               r.IntegrityHash.StartsWith("SHA256:", StringComparison.OrdinalIgnoreCase) &&
+               r.IntegrityHash.Length == "SHA256:".Length + 64;
+    }
+
     private static FxRateRecord? SelectBestCandidate(
         IEnumerable<FxRateRecord> candidates,
         DateTime asOfUtc,
         FxValuationMode valuationMode)
     {
+        var provenanceEligible = candidates.Where(HasEligibleProvenance);
+
         IEnumerable<FxRateRecord> eligible = valuationMode == FxValuationMode.HistoricalAsKnown
-            ? candidates.Where(r =>
+            ? provenanceEligible.Where(r =>
                 r.PublishedAtUtc <= asOfUtc &&
                 r.ApprovedAtUtc.HasValue &&
                 r.ApprovedAtUtc.Value <= asOfUtc &&
                 (!r.SupersededAtUtc.HasValue || asOfUtc < r.SupersededAtUtc.Value))
-            : candidates.Where(r => r.PublishedAtUtc <= asOfUtc);
+            : provenanceEligible.Where(r => r.PublishedAtUtc <= asOfUtc);
 
         return eligible
             .OrderByDescending(r => valuationMode == FxValuationMode.Retrospective &&

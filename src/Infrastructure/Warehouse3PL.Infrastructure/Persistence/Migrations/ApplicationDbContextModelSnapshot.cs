@@ -16336,6 +16336,11 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("superseded_by_rate_id");
 
+                    b.Property<string>("TransformationTrace")
+                        .HasMaxLength(400)
+                        .HasColumnType("character varying(400)")
+                        .HasColumnName("transformation_trace");
+
                     b.Property<int>("UnitMultiplier")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("integer")

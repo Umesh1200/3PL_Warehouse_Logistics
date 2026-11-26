@@ -36,6 +36,7 @@ public class FxRateRecord : AuditableEntity<Guid>
     public string? BenchmarkSeriesId { get; set; }
     public string? IntegrityHash { get; set; }
     public string? EvidenceReference { get; set; }
+    public string? TransformationTrace { get; set; }
     public DateTime PublishedAtUtc { get; set; }
 
     public FxRateApprovalStatus ApprovalStatus { get; set; } = FxRateApprovalStatus.Draft;
@@ -78,7 +79,8 @@ public class FxRateRecord : AuditableEntity<Guid>
         string? integrityHash = null,
         FxRateDirection rateDirection = FxRateDirection.QuotePerUnitBase,
         Guid? id = null,
-        string? evidenceReference = null)
+        string? evidenceReference = null,
+        string? transformationTrace = null)
     {
         var normalizedBase = ValidateIsoCurrency(baseCurrencyCode, nameof(baseCurrencyCode));
         var normalizedQuote = ValidateIsoCurrency(quoteCurrencyCode, nameof(quoteCurrencyCode));
@@ -149,6 +151,7 @@ public class FxRateRecord : AuditableEntity<Guid>
             BenchmarkSeriesId = string.IsNullOrWhiteSpace(benchmarkSeriesId) ? null : benchmarkSeriesId.Trim(),
             IntegrityHash = string.IsNullOrWhiteSpace(integrityHash) ? null : integrityHash.Trim(),
             EvidenceReference = string.IsNullOrWhiteSpace(evidenceReference) ? null : evidenceReference.Trim(),
+            TransformationTrace = string.IsNullOrWhiteSpace(transformationTrace) ? null : transformationTrace.Trim(),
             PublishedAtUtc = publishedAtUtc,
             ApprovalStatus = FxRateApprovalStatus.Draft,
             ConfigRevision = 1,
@@ -169,7 +172,8 @@ public class FxRateRecord : AuditableEntity<Guid>
         string verificationNotes,
         string? verifiedBenchmarkSeriesId = null,
         string? verifiedIntegrityHash = null,
-        string? evidenceReference = null)
+        string? evidenceReference = null,
+        string? transformationTrace = null)
     {
         if (ApprovalStatus != FxRateApprovalStatus.Draft || IsActive)
         {
@@ -203,11 +207,31 @@ public class FxRateRecord : AuditableEntity<Guid>
             EvidenceReference = evidenceReference.Trim();
         }
 
+        if (!string.IsNullOrWhiteSpace(transformationTrace))
+        {
+            TransformationTrace = transformationTrace.Trim();
+        }
+
         ApprovalStatus = FxRateApprovalStatus.VerifiedApproved;
         ApprovedByUserId = approvedByUserId;
         ApprovedAtUtc = approvedAtUtc;
         VerificationNotes = verificationNotes.Trim();
         IsActive = true;
+        ConfigRevision++;
+    }
+
+    public void QuarantineUnverified(string reason)
+    {
+        if (string.IsNullOrWhiteSpace(reason))
+        {
+            throw new DomainException("Quarantine reason is required.", "FX_RATE_MISSING_QUARANTINE_REASON");
+        }
+
+        var priorStatus = ApprovalStatus;
+        ApprovalStatus = FxRateApprovalStatus.Quarantined;
+        IsActive = false;
+        EvidenceReference = "QUARANTINED_UNVERIFIED_LEGACY";
+        VerificationNotes = $"[QUARANTINED({priorStatus}): {reason.Trim()}] {VerificationNotes}".Trim();
         ConfigRevision++;
     }
 
