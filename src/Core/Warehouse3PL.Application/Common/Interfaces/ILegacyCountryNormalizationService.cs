@@ -15,4 +15,10 @@ public interface ILegacyCountryNormalizationService
     Task<LegacyCountryBackfillSummary> BackfillAllAsync(
         string? correlationBatchId = null,
         CancellationToken cancellationToken = default);
+
+    /// <summary>
+    /// Exports sanitized provenance and quarantine audit snapshots in deterministic JSON format
+    /// to support retention and pre-downgrade audit preservation workflows.
+    /// </summary>
+    Task<string> ExportProvenanceSnapshotJsonAsync(CancellationToken cancellationToken = default);
 }

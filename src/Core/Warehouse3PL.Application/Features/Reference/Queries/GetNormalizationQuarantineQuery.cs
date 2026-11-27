@@ -3,6 +3,10 @@ using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Domain.Constants;
+using Warehouse3PL.Domain.Entities.Facilities;
+using Warehouse3PL.Domain.Entities.Inbound;
+using Warehouse3PL.Domain.Entities.Outbound;
+using Warehouse3PL.Domain.Entities.Reference;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -36,72 +40,161 @@ public sealed class GetNormalizationQuarantineQueryHandler
         GetNormalizationQuarantineQuery request,
         CancellationToken cancellationToken)
     {
-        if (!_currentUser.IsAuthenticated)
+        if (!_currentUser.IsAuthenticated ||
+            !_currentUser.UserId.HasValue ||
+            _currentUser.UserId.Value == Guid.Empty)
         {
             throw new UnauthorizedException("Authentication is required to access normalization quarantine diagnostics.");
         }
 
-        if (_currentUser.UserType != UserType.Staff)
+        if (_currentUser.UserType != UserType.Staff || !_currentUser.IsStaff)
         {
             throw new ForbiddenException("Normalization quarantine diagnostics are restricted to authorized warehouse Staff.");
         }
 
-        bool isVerifiedSuperAdmin = _currentUser.IsSuperAdmin;
-        bool hasAllowedPermission = isVerifiedSuperAdmin ||
-            _currentUser.HasPermission(Permissions.Global.NormalizationView) ||
-            _currentUser.HasPermission(Permissions.Global.ComplianceView) ||
-            _currentUser.HasPermission(Permissions.Global.ComplianceManage) ||
-            _currentUser.HasPermission(Permissions.Global.ReferenceView) ||
-            _currentUser.HasPermission(Permissions.Facilities.Manage);
-
-        if (!hasAllowedPermission)
+        if (request.PageNumber < 1)
         {
-            throw new ForbiddenException("Caller lacks permission to inspect country normalization quarantine diagnostics.");
+            throw new ValidationException(nameof(request.PageNumber), "PageNumber must be at least 1.");
         }
 
-        bool hasGlobalScopePerm =
-            _currentUser.HasPermission(Permissions.Global.NormalizationView) ||
-            _currentUser.HasPermission(Permissions.Global.ComplianceView) ||
-            _currentUser.HasPermission(Permissions.Global.ComplianceManage);
+        if (request.PageSize < 1 || request.PageSize > 100)
+        {
+            throw new ValidationException(nameof(request.PageSize), "PageSize must be between 1 and 100.");
+        }
+
+        long skipLong = (long)(request.PageNumber - 1) * request.PageSize;
+        if (skipLong > int.MaxValue - request.PageSize)
+        {
+            throw new ValidationException(nameof(request.PageNumber), "Requested pagination offset exceeds maximum allowed bounds.");
+        }
+
+        var userId = _currentUser.UserId.Value;
+        var dbUser = await _db.Users
+            .AsNoTracking()
+            .Where(u => u.Id == userId)
+            .Select(u => new
+            {
+                u.Id,
+                u.IsDeleted,
+                u.Status,
+                u.UserType,
+                u.AssignedFacilityId,
+                Roles = u.UserRoles.Select(ur => new
+                {
+                    ur.Role.RoleName,
+                    Permissions = ur.Role.RolePermissions.Select(rp => rp.PermissionKey).ToList()
+                }).ToList()
+            })
+            .FirstOrDefaultAsync(cancellationToken);
+
+        if (dbUser == null || dbUser.IsDeleted || dbUser.Status != UserStatus.Active || dbUser.UserType != UserType.Staff)
+        {
+            throw new ForbiddenException("Caller is not an active database-verified Staff account.");
+        }
+
+        var dbRoleNames = dbUser.Roles.Select(r => r.RoleName).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        if (_currentUser.IsInRole(SystemRoles.SuperAdmin) && !dbRoleNames.Contains(SystemRoles.SuperAdmin))
+        {
+            throw new ForbiddenException("Claimed SuperAdmin role is not backed by an authoritative database role assignment.");
+        }
+
+        var dbPermissions = dbUser.Roles.SelectMany(r => r.Permissions).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        bool isVerifiedSuperAdmin = dbRoleNames.Contains(SystemRoles.SuperAdmin);
+        bool hasNormalizationPerm = dbPermissions.Contains(Permissions.Global.NormalizationView) &&
+                                    _currentUser.HasPermission(Permissions.Global.NormalizationView);
+        bool hasFacilityManagePerm = dbPermissions.Contains(Permissions.Facilities.Manage) &&
+                                     _currentUser.HasPermission(Permissions.Facilities.Manage);
+        bool hasMultiFacilityPerm = dbPermissions.Contains(Permissions.Analytics.MultiFacilityView) &&
+                                    _currentUser.HasPermission(Permissions.Analytics.MultiFacilityView);
+
+        if (!isVerifiedSuperAdmin && !hasNormalizationPerm && !hasFacilityManagePerm)
+        {
+            throw new ForbiddenException("Caller lacks database-verified permission to inspect country normalization quarantine diagnostics.");
+        }
 
         bool isPlatformAuthorized =
             isVerifiedSuperAdmin ||
-            _currentUser.HasPermission(Permissions.Analytics.MultiFacilityView) ||
-            (hasGlobalScopePerm && !_currentUser.FacilityId.HasValue);
+            (hasNormalizationPerm && (hasMultiFacilityPerm || !dbUser.AssignedFacilityId.HasValue));
+
+        if (request.FacilityId.HasValue &&
+            _currentUser.RequestedFacilityId.HasValue &&
+            request.FacilityId.Value != _currentUser.RequestedFacilityId.Value)
+        {
+            throw new ValidationException(
+                nameof(request.FacilityId),
+                "Conflicting facility scope selectors between query parameter 'facilityId' and 'X-Facility-Id' header.");
+        }
 
         Guid? requestedFacility = request.FacilityId ?? _currentUser.RequestedFacilityId;
         Guid? scopedFacilityId = null;
 
         if (!isPlatformAuthorized)
         {
-            if (!_currentUser.FacilityId.HasValue || _currentUser.FacilityId.Value == Guid.Empty)
+            if (!dbUser.AssignedFacilityId.HasValue || dbUser.AssignedFacilityId.Value == Guid.Empty)
             {
                 throw new ForbiddenException(
                     "Facility-scoped Staff without platform multi-facility authorization must have an assigned facility.");
             }
 
-            if (requestedFacility.HasValue && requestedFacility.Value != _currentUser.FacilityId.Value)
+            if (requestedFacility.HasValue && requestedFacility.Value != dbUser.AssignedFacilityId.Value)
             {
                 throw new ForbiddenException(
                     $"Facility-scoped Staff cannot query normalization diagnostics for facility '{requestedFacility.Value}'.");
             }
 
-            scopedFacilityId = _currentUser.FacilityId.Value;
+            var assignedFacActive = await _db.Facilities
+                .AsNoTracking()
+                .AnyAsync(f => f.Id == dbUser.AssignedFacilityId.Value && !f.IsDeleted && f.IsActive, cancellationToken);
+
+            if (!assignedFacActive)
+            {
+                throw new ForbiddenException("Assigned warehouse facility is inactive or deleted.");
+            }
+
+            scopedFacilityId = dbUser.AssignedFacilityId.Value;
+
+            // Reject unauthorized explicit ?clientId= filters that lack active ClientFacilityAccess for this facility
+            if (request.ClientId.HasValue)
+            {
+                var clientAuthorized = await _db.ClientFacilityAccesses
+                    .IgnoreQueryFilters()
+                    .AsNoTracking()
+                    .AnyAsync(cfa =>
+                        cfa.ClientId == request.ClientId.Value &&
+                        cfa.FacilityId == scopedFacilityId.Value &&
+                        cfa.Status == FacilityAccessStatus.Active &&
+                        _db.Clients.IgnoreQueryFilters().Any(c => c.Id == cfa.ClientId && !c.IsDeleted && c.Status == ClientStatus.Active),
+                        cancellationToken);
+
+                if (!clientAuthorized)
+                {
+                    throw new ForbiddenException(
+                        $"Facility-scoped Staff cannot query diagnostics for client '{request.ClientId.Value}' without active facility access.");
+                }
+            }
         }
 
-        var pageNumber = Math.Max(1, request.PageNumber);
-        var pageSize = Math.Clamp(request.PageSize, 1, 100);
+        var pageNumber = request.PageNumber;
+        var pageSize = request.PageSize;
+        var skip = (int)skipLong;
 
-        var baseQuery = _db.CountryNormalizationAudits.AsNoTracking();
+        var baseQuery = _db.CountryNormalizationAudits.AsNoTracking()
+            .Where(a =>
+                (a.EntityType != nameof(Facility) || _db.Facilities.IgnoreQueryFilters().Any(f => f.Id == a.EntityId && !f.IsDeleted)) &&
+                (a.EntityType != nameof(Customer) || _db.Customers.IgnoreQueryFilters().Any(c => c.Id == a.EntityId && !c.IsDeleted)) &&
+                (a.EntityType != nameof(Supplier) || _db.Suppliers.IgnoreQueryFilters().Any(s => s.Id == a.EntityId && !s.IsDeleted)) &&
+                (a.EntityType != nameof(ShippingAddress) || _db.ShippingAddresses.IgnoreQueryFilters().Any(sa => sa.Id == a.EntityId && !sa.IsDeleted)));
 
         if (scopedFacilityId.HasValue)
         {
             var authFacId = scopedFacilityId.Value;
+            // R05: Prevent stale audit.FacilityId from granting continued access after ClientFacilityAccess revocation or client deactivation
             baseQuery = baseQuery.Where(a =>
-                a.FacilityId == authFacId ||
-                (a.FacilityId == null &&
-                 a.ClientId.HasValue &&
-                 _db.ClientFacilityAccesses.Any(cfa =>
+                (!a.ClientId.HasValue && a.FacilityId == authFacId) ||
+                (a.ClientId.HasValue &&
+                 (a.FacilityId == null || a.FacilityId == authFacId) &&
+                 _db.Clients.IgnoreQueryFilters().Any(c => c.Id == a.ClientId.Value && !c.IsDeleted && c.Status == ClientStatus.Active) &&
+                 _db.ClientFacilityAccesses.IgnoreQueryFilters().Any(cfa =>
                      cfa.ClientId == a.ClientId.Value &&
                      cfa.FacilityId == authFacId &&
                      cfa.Status == FacilityAccessStatus.Active)));
@@ -109,7 +202,15 @@ public sealed class GetNormalizationQuarantineQueryHandler
         else if (requestedFacility.HasValue)
         {
             var reqFac = requestedFacility.Value;
-            baseQuery = baseQuery.Where(a => a.FacilityId == reqFac);
+            baseQuery = baseQuery.Where(a =>
+                (!a.ClientId.HasValue && a.FacilityId == reqFac) ||
+                (a.ClientId.HasValue &&
+                 (a.FacilityId == reqFac ||
+                  (a.FacilityId == null &&
+                   _db.ClientFacilityAccesses.IgnoreQueryFilters().Any(cfa =>
+                       cfa.ClientId == a.ClientId.Value &&
+                       cfa.FacilityId == reqFac &&
+                       cfa.Status == FacilityAccessStatus.Active)))));
         }
 
         if (request.ClientId.HasValue)
@@ -130,12 +231,14 @@ public sealed class GetNormalizationQuarantineQueryHandler
             baseQuery = baseQuery.Where(a =>
                 a.EntityType.ToLower().Contains(term) ||
                 a.FieldName.ToLower().Contains(term) ||
-                (a.OriginalCountryValue != null && a.OriginalCountryValue.ToLower().Contains(term)) ||
+                (a.OriginalCountryValue != null &&
+                 a.OriginalCountryValue != CountryDiagnosticSanitizer.RedactedPlaceholder &&
+                 a.OriginalCountryValue.ToLower().Contains(term)) ||
                 (a.NormalizedCountryCode != null && a.NormalizedCountryCode.ToLower().Contains(term)) ||
                 a.Reason.ToLower().Contains(term));
         }
 
-        // Compute scoped counts before status filter (no cross-tenant/cross-facility leakage)
+        // Apply identical security predicates to counts, status filters, results and pagination
         var pendingCount = await baseQuery.CountAsync(
             a => a.NormalizationStatus == CountryNormalizationStatus.PendingNormalization,
             cancellationToken);
@@ -157,7 +260,7 @@ public sealed class GetNormalizationQuarantineQueryHandler
             .OrderByDescending(a => a.RecordedAtUtc)
             .ThenBy(a => a.EntityType)
             .ThenBy(a => a.EntityId)
-            .Skip((pageNumber - 1) * pageSize)
+            .Skip(skip)
             .Take(pageSize)
             .ToListAsync(cancellationToken);
 
@@ -170,6 +273,7 @@ public sealed class GetNormalizationQuarantineQueryHandler
         var facilityCodeMap = facilityIds.Count == 0
             ? new Dictionary<Guid, string>()
             : await _db.Facilities
+                .IgnoreQueryFilters()
                 .AsNoTracking()
                 .Where(f => facilityIds.Contains(f.Id))
                 .ToDictionaryAsync(f => f.Id, f => f.FacilityCode, cancellationToken);
@@ -179,13 +283,13 @@ public sealed class GetNormalizationQuarantineQueryHandler
             r.EntityType,
             r.EntityId,
             r.FieldName,
-            r.OriginalCountryValue,
+            CountryDiagnosticSanitizer.SanitizeRawValue(r.OriginalCountryValue),
             r.NormalizedCountryCode,
             r.NormalizationStatus,
             r.PreservedHistoricalValue,
             r.WasInferredFromParent,
             r.InferenceSource,
-            r.Reason,
+            CountryDiagnosticSanitizer.SanitizeReason(r.Reason),
             r.FacilityId,
             r.FacilityId.HasValue && facilityCodeMap.TryGetValue(r.FacilityId.Value, out var code) ? code : null,
             r.ClientId,

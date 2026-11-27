@@ -19,8 +19,8 @@ public class ShippingAddress : BaseEntity<Guid>, ISoftDeletable
     public string City { get; set; } = string.Empty;
     public string StateOrProvince { get; set; } = string.Empty;
     public string PostalCode { get; set; } = string.Empty;
-    public string CountryCode { get; set; } = "USA";
-    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
+    public string CountryCode { get; set; } = string.Empty;
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.PendingNormalization;
     public string? PhoneNumber { get; set; }
     public string? DeliveryInstructions { get; set; }
 
@@ -76,7 +76,8 @@ public class ShippingAddress : BaseEntity<Guid>, ISoftDeletable
         City = city;
         StateOrProvince = stateOrProvince;
         PostalCode = postalCode;
-        CountryCode = countryCode;
+        CountryCode = (countryCode ?? string.Empty).Trim();
+        CountryNormalizationStatus = CountryNormalizationStatus.PendingNormalization;
         PhoneNumber = phoneNumber;
         DeliveryInstructions = deliveryInstructions;
 

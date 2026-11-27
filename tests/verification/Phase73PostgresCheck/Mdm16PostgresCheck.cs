@@ -41,6 +41,7 @@ internal static class Mdm16PostgresCheck
 {
     private const string Mdm15Migration = "20261126100927_MDM1_5_R01_OutboxBackoffAndRetention";
     private const string Mdm16Migration = "20261126143014_MDM1_6_LegacyCountryNormalization";
+    private const string Mdm16R04Migration = "20261127051434_MDM1_6_R04_NormalizationRemediationLifecycle";
     private const string JwtSecret = "Nexus3PL-Mdm16-PostgreSql-Verification-Key-2026!";
     private const string JwtIssuer = "nexus3pl-mdm16-pg-auth";
     private const string JwtAudience = "nexus3pl-mdm16-pg-api";
@@ -53,7 +54,10 @@ internal static class Mdm16PostgresCheck
 
     public static async Task RunAsync(string baseConnectionString)
     {
-        Console.WriteLine("\n[MDM-1.6] Running Live PostgreSQL Legacy Country Normalization, Precheck, Quarantine, Historical Immutability, Epoch Outbox, RBAC & Down/Up Tests...");
+        Console.WriteLine("\n[MDM-1.6] Running Live PostgreSQL Legacy Country Normalization, R01-R05 Remediation, Precheck, Quarantine, Historical Immutability, Epoch Outbox, RBAC & Down/Up Tests...");
+
+        // R04 Precheck: Empty DB without catalogs succeeds; Populated DB without catalogs FAILS CLOSED cleanly
+        await VerifyR04EmptyAndMissingCatalogGuardsAsync(baseConnectionString);
 
         var adminBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = "postgres" };
         var dbName = $"mdm16_pg_{Guid.NewGuid():N}";
@@ -100,21 +104,32 @@ internal static class Mdm16PostgresCheck
             var facCaId = Guid.NewGuid();
             var facOrphanId = Guid.NewGuid();
             var facConflictId = Guid.NewGuid();
+            var facUnresolvedId = Guid.NewGuid();
 
             var clientNpId = Guid.NewGuid();
             var clientUsId = Guid.NewGuid();
+            var clientMixedId = Guid.NewGuid();
 
             var custInferNpId = Guid.NewGuid();
             var custUnknownId = Guid.NewGuid();
+            var custMixedBlankId = Guid.NewGuid();
+            var custPiiId = Guid.NewGuid();
             var supInferUsId = Guid.NewGuid();
 
             var draftOrderUsId = Guid.NewGuid();
             var completedOrderNpId = Guid.NewGuid();
             var xbrdOrderId = Guid.NewGuid();
+            var noCustOrderId = Guid.NewGuid();
+            var packedOrderId = Guid.NewGuid();
 
             var draftAddrId = Guid.NewGuid();
             var completedAddrId = Guid.NewGuid();
             var xbrdAddrId = Guid.NewGuid();
+            var noCustAddrId = Guid.NewGuid();
+            var packedAddrId = Guid.NewGuid();
+            var closedShipmentId = Guid.NewGuid();
+            var closedBolId = Guid.NewGuid();
+            var closedInvoiceId = Guid.NewGuid();
 
             var activeSlaId = Guid.NewGuid();
             var inactiveSlaId = Guid.NewGuid();
@@ -144,14 +159,16 @@ internal static class Mdm16PostgresCheck
                 await ExecAsync(insertFacSql, ("@id", facCaId), ("@code", "PG16-CA"), ("@name", "PG16 CA"), ("@cc", "CAN"), ("@st", "Ontario"), ("@zip", "M5V 2T6"), ("@tz", "America/Toronto"));
                 await ExecAsync(insertFacSql, ("@id", facOrphanId), ("@code", "PG16-ORP"), ("@name", "PG16 Orphan"), ("@cc", ""), ("@st", ""), ("@zip", ""), ("@tz", "UTC"));
                 await ExecAsync(insertFacSql, ("@id", facConflictId), ("@code", "PG16-CNF"), ("@name", "PG16 Conflict"), ("@cc", "US"), ("@st", "Bagmati"), ("@zip", "44600"), ("@tz", "Asia/Kathmandu"));
+                await ExecAsync(insertFacSql, ("@id", facUnresolvedId), ("@code", "PG16-UNR"), ("@name", "PG16 Unresolved"), ("@cc", "ZZZ"), ("@st", ""), ("@zip", ""), ("@tz", "UTC"));
 
-                // Clients + single-facility access bindings
+                // Clients + facility access bindings
                 const string insertClientSql = """
                     INSERT INTO clients (client_id, account_code, company_name, status, sla_tier, currency, is_deleted, created_at)
                     VALUES (@id, @code, @name, 'Active', 'Standard', 'USD', false, NOW());
                     """;
                 await ExecAsync(insertClientSql, ("@id", clientNpId), ("@code", "PG16-CLNP"), ("@name", "PG16 Nepal Client"));
                 await ExecAsync(insertClientSql, ("@id", clientUsId), ("@code", "PG16-CLUS"), ("@name", "PG16 US Client"));
+                await ExecAsync(insertClientSql, ("@id", clientMixedId), ("@code", "PG16-CLMX"), ("@name", "PG16 Mixed Resolved/Unresolved Client"));
 
                 const string insertCfaSql = """
                     INSERT INTO client_facility_access (client_id, facility_id, effective_date, status, primary_operating_facility, created_at)
@@ -159,14 +176,18 @@ internal static class Mdm16PostgresCheck
                     """;
                 await ExecAsync(insertCfaSql, ("@cid", clientNpId), ("@fid", facNpId));
                 await ExecAsync(insertCfaSql, ("@cid", clientUsId), ("@fid", facUsId));
+                await ExecAsync(insertCfaSql, ("@cid", clientMixedId), ("@fid", facUsId));
+                await ExecAsync(insertCfaSql, ("@cid", clientMixedId), ("@fid", facUnresolvedId));
 
-                // Customers
+                // Customers (including unresolved-network customer & synthetic PII token)
                 const string insertCustSql = """
                     INSERT INTO customers (customer_id, client_id, customer_code, customer_name, customer_type, email, default_state_or_province, default_postal_code, default_country_code, is_active, version, is_deleted, created_at)
                     VALUES (@id, @cid, @code, @name, 'RetailCustomer', @email, @st, @zip, @cc, true, 1, false, NOW());
                     """;
                 await ExecAsync(insertCustSql, ("@id", custInferNpId), ("@cid", clientNpId), ("@code", "C16-NP"), ("@name", "PII Hidden Name"), ("@email", "pii-cust@pg16.test"), ("@st", "Bagmati"), ("@zip", "44600"), ("@cc", ""));
                 await ExecAsync(insertCustSql, ("@id", custUnknownId), ("@cid", clientUsId), ("@code", "C16-ZZ"), ("@name", "Unknown Cust"), ("@email", "unk@pg16.test"), ("@st", "Illinois"), ("@zip", "60601"), ("@cc", "ZZZ"));
+                await ExecAsync(insertCustSql, ("@id", custMixedBlankId), ("@cid", clientMixedId), ("@code", "C16-MX"), ("@name", "Mixed Blank Cust"), ("@email", "mix@pg16.test"), ("@st", "Illinois"), ("@zip", "60601"), ("@cc", ""));
+                await ExecAsync(insertCustSql, ("@id", custPiiId), ("@cid", clientNpId), ("@code", "C16-PII"), ("@name", "PII Cust"), ("@email", "p@pg16.test"), ("@st", "Bagmati"), ("@zip", "44600"), ("@cc", "alice.smith@corp.test"));
 
                 // Supplier (blank -> infer US)
                 await ExecAsync("""
@@ -174,7 +195,7 @@ internal static class Mdm16PostgresCheck
                     VALUES (@id, @cid, 'S16-US', 'PG16 Supplier', 'Illinois', '60601', NULL, true, false, NOW());
                     """, ("@id", supInferUsId), ("@cid", clientUsId));
 
-                // Outbound orders + ShippingAddresses (Draft vs Historical Completed vs Cross-border blank)
+                // Outbound orders + ShippingAddresses (Draft vs Historical Completed vs Cross-border blank vs No-Customer blank vs Packed package historical)
                 const string insertOrderSql = """
                     INSERT INTO outbound_orders (order_id, client_id, facility_id, customer_id, order_number, order_type, status, delivery_status, priority, service_level, customer_name, order_date_utc, version, is_deleted, created_at)
                     VALUES (@id, @cid, @fid, @custid, @num, 'B2BSalesOrder', @st, 'PendingShipment', 1, 'StandardGround', 'PII Order Cust', NOW(), 1, false, NOW());
@@ -182,6 +203,8 @@ internal static class Mdm16PostgresCheck
                 await ExecAsync(insertOrderSql, ("@id", draftOrderUsId), ("@cid", clientUsId), ("@fid", facUsId), ("@custid", custUnknownId), ("@num", "PG16-ORD-DRAFT"), ("@st", "Draft"));
                 await ExecAsync(insertOrderSql, ("@id", completedOrderNpId), ("@cid", clientNpId), ("@fid", facNpId), ("@custid", custInferNpId), ("@num", "PG16-ORD-COMP"), ("@st", "Completed"));
                 await ExecAsync(insertOrderSql, ("@id", xbrdOrderId), ("@cid", clientNpId), ("@fid", facUsId), ("@custid", custInferNpId), ("@num", "PG16-ORD-XBRD"), ("@st", "Draft"));
+                await ExecAsync(insertOrderSql, ("@id", noCustOrderId), ("@cid", clientUsId), ("@fid", facUsId), ("@custid", null), ("@num", "PG16-ORD-NOCUST"), ("@st", "Draft"));
+                await ExecAsync(insertOrderSql, ("@id", packedOrderId), ("@cid", clientUsId), ("@fid", facUsId), ("@custid", custUnknownId), ("@num", "PG16-ORD-PACK"), ("@st", "Draft"));
 
                 const string insertAddrSql = """
                     INSERT INTO shipping_addresses (shipping_address_id, order_id, recipient_name, address_line1, city, state_or_province, postal_code, country_code, is_amended, created_at_utc, is_deleted)
@@ -190,6 +213,26 @@ internal static class Mdm16PostgresCheck
                 await ExecAsync(insertAddrSql, ("@id", draftAddrId), ("@oid", draftOrderUsId), ("@st", "Illinois"), ("@zip", "60601"), ("@cc", "USA"));
                 await ExecAsync(insertAddrSql, ("@id", completedAddrId), ("@oid", completedOrderNpId), ("@st", "Bagmati"), ("@zip", "44600"), ("@cc", "NPL"));
                 await ExecAsync(insertAddrSql, ("@id", xbrdAddrId), ("@oid", xbrdOrderId), ("@st", "Illinois"), ("@zip", "60601"), ("@cc", ""));
+                await ExecAsync(insertAddrSql, ("@id", noCustAddrId), ("@oid", noCustOrderId), ("@st", "Illinois"), ("@zip", "60601"), ("@cc", ""));
+                await ExecAsync(insertAddrSql, ("@id", packedAddrId), ("@oid", packedOrderId), ("@st", "Illinois"), ("@zip", "60601"), ("@cc", "USA"));
+
+                // Closed Shipment, BillOfLading, Packed Package, & Issued Invoice snapshots
+                await ExecAsync("""
+                    INSERT INTO shipments (shipment_id, client_id, facility_id, shipment_number, carrier_code, carrier_service_level, status, delivery_status, total_packages_count, total_weight_kg, total_volume_cm3, custody_status, bill_of_lading_number, version, is_deleted, created_at)
+                    VALUES (@sid, @cid, @fid, 'PG16-SHP-1', 'UPS', 'StandardGround', 'Dispatched', 'PendingHandover', 1, 1.0, 100.0, 'Unassigned', 'PG16-BOL-1', 1, false, NOW());
+                    INSERT INTO bills_of_lading (bol_id, client_id, facility_id, shipment_id, bol_number, revision_number, carrier_code, carrier_name, service_level, total_package_count, total_gross_weight_kg, total_volume_cm3, shipper_name, shipper_address_snapshot, consignee_name, consignee_address_snapshot, package_tracking_numbers, document_snapshot_json, prepared_by_user_id, is_deleted, created_at)
+                    VALUES (@bid, @cid, @fid, @sid, 'PG16-BOL-1', 1, 'UPS', 'UPS', 'StandardGround', 1, 1.0, 100.0, 'Shipper', 'Chicago, USA', 'Consignee', '999 Legacy Way, Chicago IL, USA', 'TRK1', '{"country":"USA"}', @uid, false, NOW());
+                    INSERT INTO packages (package_id, client_id, facility_id, outbound_order_id, shipment_id, package_number, status, total_weight_kg, length_cm, width_cm, height_cm, version, is_deleted, created_at)
+                    VALUES (@pid, @cid, @fid, @oid, NULL, 'PG16-PKG-1', 'Packed', 1.0, 10, 10, 10, 1, false, NOW());
+                    """, ("@sid", closedShipmentId), ("@bid", closedBolId), ("@pid", Guid.NewGuid()), ("@oid", packedOrderId), ("@cid", clientUsId), ("@fid", facUsId), ("@uid", Guid.Empty));
+
+                var bpId = Guid.NewGuid();
+                await ExecAsync("""
+                    INSERT INTO billing_periods (billing_period_id, client_id, period_code, period_type, start_date, end_date, status, total_billable_amount, created_at)
+                    VALUES (@bpid, @cid, '2026-11-PG16', 'Monthly', '2026-11-01', '2026-11-30', 'Closed', 100.0, NOW());
+                    INSERT INTO invoices (invoice_id, client_id, facility_id, billing_period_id, invoice_number, status, invoice_date, due_date, payment_terms_days, currency, subtotal_amount, tax_rate, tax_amount, total_amount, paid_amount, credited_amount, outstanding_balance, created_at)
+                    VALUES (@iid, @cid, @fid, @bpid, 'PG16-INV-1', 'Issued', NOW(), NOW() + INTERVAL '30 days', 30, 'USD', 100, 0, 0, 100, 0, 0, 100, NOW());
+                    """, ("@bpid", bpId), ("@iid", closedInvoiceId), ("@cid", clientUsId), ("@fid", facUsId));
 
                 // CarrierContractualSlaPolicies & Historical CarrierSlaComplianceRecord
                 const string insertSlaSql = """
@@ -248,11 +291,12 @@ internal static class Mdm16PostgresCheck
                 await ExecAsync("DELETE FROM configuration_scope_epochs WHERE scope_key IN ('MDM16PRECHECK', 'mdm16precheck');");
             }
 
-            // 4. Clean upgrade MDM1_5 -> MDM1_6 against realistic PG rows
+            // 4. Clean upgrade MDM1_5 -> MDM1_6 -> MDM1_6_R04 against realistic PG rows
             await using (var upDb = CreatePgDb(targetConn))
             {
                 var migrator = upDb.GetInfrastructure().GetRequiredService<IMigrator>();
                 await migrator.MigrateAsync(Mdm16Migration);
+                await migrator.MigrateAsync();
                 await ReferenceCatalogSeeder.SeedAsync(upDb);
 
                 // Verify facilities
@@ -267,22 +311,40 @@ internal static class Mdm16PostgresCheck
                     fCnf.CountryNormalizationStatus != CountryNormalizationStatus.PendingNormalization)
                     throw new InvalidOperationException("PG orphan/conflict facility was not quarantined to PendingNormalization.");
 
-                // Verify inferred + quarantined Customers & Suppliers
+                // Verify inferred + quarantined Customers & Suppliers (including R02 unresolved multi-facility network & R05 PII redaction)
                 var cInf = await upDb.Customers.IgnoreQueryFilters().SingleAsync(c => c.Id == custInferNpId);
                 var cUnk = await upDb.Customers.IgnoreQueryFilters().SingleAsync(c => c.Id == custUnknownId);
+                var cMix = await upDb.Customers.IgnoreQueryFilters().SingleAsync(c => c.Id == custMixedBlankId);
+                var cPii = await upDb.Customers.IgnoreQueryFilters().SingleAsync(c => c.Id == custPiiId);
                 var sInf = await upDb.Suppliers.IgnoreQueryFilters().SingleAsync(s => s.Id == supInferUsId);
                 if (cInf.DefaultCountryCode != "NP" || cUnk.DefaultCountryCode != "ZZZ" ||
-                    cUnk.CountryNormalizationStatus != CountryNormalizationStatus.PendingNormalization || sInf.Country != "US")
+                    cUnk.CountryNormalizationStatus != CountryNormalizationStatus.PendingNormalization ||
+                    cMix.DefaultCountryCode != "" || cMix.CountryNormalizationStatus != CountryNormalizationStatus.PendingNormalization ||
+                    cPii.CountryNormalizationStatus != CountryNormalizationStatus.PendingNormalization || sInf.Country != "US")
                     throw new InvalidOperationException("PG Customer/Supplier deterministic backfill mismatch.");
 
-                // Verify historical immutability vs mutable draft vs cross-border quarantine
+                var piiAudit = await upDb.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "Customer" && a.EntityId == custPiiId);
+                if (piiAudit.OriginalCountryValue != CountryDiagnosticSanitizer.RedactedPlaceholder ||
+                    piiAudit.Reason.Contains("alice.smith@corp.test", StringComparison.OrdinalIgnoreCase) ||
+                    string.IsNullOrWhiteSpace(piiAudit.InitialCorrelationBatchId))
+                    throw new InvalidOperationException("PG SQL PII redaction or initial provenance tracking failed.");
+
+                // Verify historical immutability vs mutable draft vs cross-border quarantine vs no-origin-inference vs packed package/BOL/invoice snapshot
                 var aDraft = await upDb.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == draftAddrId);
                 var aComp = await upDb.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == completedAddrId);
                 var aXbrd = await upDb.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == xbrdAddrId);
+                var aNoCust = await upDb.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == noCustAddrId);
+                var aPacked = await upDb.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == packedAddrId);
+                var bolRow = await upDb.BillsOfLading.IgnoreQueryFilters().SingleAsync(b => b.Id == closedBolId);
+                var invRow = await upDb.Invoices.IgnoreQueryFilters().SingleAsync(i => i.Id == closedInvoiceId);
                 if (aDraft.CountryCode != "US" || aComp.CountryCode != "NPL" ||
                     aComp.CountryNormalizationStatus != CountryNormalizationStatus.Normalized ||
-                    aXbrd.CountryNormalizationStatus != CountryNormalizationStatus.PendingNormalization)
-                    throw new InvalidOperationException("PG ShippingAddress immutability/cross-border check failed.");
+                    aXbrd.CountryNormalizationStatus != CountryNormalizationStatus.PendingNormalization ||
+                    aNoCust.CountryCode != "" || aNoCust.CountryNormalizationStatus != CountryNormalizationStatus.PendingNormalization ||
+                    aPacked.CountryCode != "USA" || aPacked.CountryNormalizationStatus != CountryNormalizationStatus.Normalized ||
+                    bolRow.ConsigneeAddressSnapshot != "999 Legacy Way, Chicago IL, USA" ||
+                    invRow.Currency != "USD")
+                    throw new InvalidOperationException("PG ShippingAddress/BOL/Invoice immutability or R02 inference check failed.");
 
                 var pAct = await upDb.CarrierContractualSlaPolicies.IgnoreQueryFilters().SingleAsync(p => p.Id == activeSlaId);
                 var pInact = await upDb.CarrierContractualSlaPolicies.IgnoreQueryFilters().SingleAsync(p => p.Id == inactiveSlaId);
@@ -303,8 +365,35 @@ internal static class Mdm16PostgresCheck
                     throw new InvalidOperationException($"Expected 0 mutations on idempotent PG rerun, got {rerun.NormalizedMutatedCount}.");
 
                 var auditFacUs = await upDb.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "Facility" && a.EntityId == facUsId);
+                var initialBatchBefore = auditFacUs.InitialCorrelationBatchId;
                 if (auditFacUs.OriginalCountryValue != "USA" || auditFacUs.NormalizedCountryCode != "US")
                     throw new InvalidOperationException("PG audit provenance OriginalCountryValue was overwritten on rerun.");
+
+                // 5a-bis. R03 Audit lifecycle transition (Pending -> Normalized) & Deleted entity audit cleanup on PG
+                var facOrphEntity = await upDb.Facilities.SingleAsync(f => f.Id == facOrphanId);
+                facOrphEntity.CountryCode = "NP";
+                facOrphEntity.StateOrProvince = "Bagmati";
+                facOrphEntity.PostalCode = "44600";
+                facOrphEntity.Timezone = "Asia/Kathmandu";
+                var custPiiEntity = await upDb.Customers.SingleAsync(c => c.Id == custPiiId);
+                custPiiEntity.IsDeleted = true;
+                await upDb.SaveChangesAsync();
+
+                await svc.BackfillAllAsync("PG16-R03-RECONCILE");
+                var orphAudit = await upDb.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "Facility" && a.EntityId == facOrphanId);
+                if (orphAudit.NormalizationStatus != CountryNormalizationStatus.Normalized ||
+                    orphAudit.NormalizedCountryCode != "NP" ||
+                    orphAudit.CorrelationBatchId != "PG16-R03-RECONCILE" ||
+                    orphAudit.InitialCorrelationBatchId == "PG16-R03-RECONCILE")
+                    throw new InvalidOperationException("PG R03 Pending->Normalized audit reconciliation or initial provenance failed.");
+                if (await upDb.CountryNormalizationAudits.AnyAsync(a => a.EntityType == "Customer" && a.EntityId == custPiiId))
+                    throw new InvalidOperationException("PG R03 soft-deleted entity audit cleanup failed.");
+
+                // Restore facOrphan back to PendingNormalization for remaining checks
+                facOrphEntity.CountryCode = "";
+                facOrphEntity.Timezone = "UTC";
+                await upDb.SaveChangesAsync();
+                await svc.BackfillAllAsync("PG16-R03-RESTORE");
 
                 // 5b. Transactional rollback safety check for caller-controlled RollbackAsync
                 await using (var tx = await upDb.Database.BeginTransactionAsync())
@@ -370,9 +459,17 @@ internal static class Mdm16PostgresCheck
                 if ((await http.GetAsync("/api/v1/reference/normalization-quarantine")).StatusCode != HttpStatusCode.Unauthorized ||
                     (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/reference/normalization-quarantine", jwtCli))).StatusCode != HttpStatusCode.Forbidden ||
                     (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/reference/normalization-quarantine", jwtDrv))).StatusCode != HttpStatusCode.Forbidden ||
-                    (await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/reference/normalization-quarantine?facilityId={facUsId}", jwtFacNp))).StatusCode != HttpStatusCode.Forbidden)
+                    (await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/reference/normalization-quarantine?facilityId={facUsId}", jwtFacNp))).StatusCode != HttpStatusCode.Forbidden ||
+                    (await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/reference/normalization-quarantine?pageNumber=2147483647&pageSize=20", jwtPlat))).StatusCode != HttpStatusCode.BadRequest)
                 {
-                    throw new InvalidOperationException("PG MDM-1.6 RBAC or facility-isolation guard failed.");
+                    throw new InvalidOperationException("PG MDM-1.6 RBAC, facility-isolation, or pagination guard failed.");
+                }
+
+                var hdrConflictReq = Authed(HttpMethod.Get, $"/api/v1/reference/normalization-quarantine?facilityId={facNpId}", jwtPlat);
+                hdrConflictReq.Headers.Add("X-Facility-Id", facUsId.ToString());
+                if ((await http.SendAsync(hdrConflictReq)).StatusCode != HttpStatusCode.BadRequest)
+                {
+                    throw new InvalidOperationException("PG MDM-1.6 conflicting facilityId/header guard failed.");
                 }
 
                 var facResp = await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/reference/normalization-quarantine?includeAllStatuses=true&pageSize=100", jwtFacNp));
@@ -509,6 +606,85 @@ internal static class Mdm16PostgresCheck
         app.MapControllers();
         await app.StartAsync();
         return app;
+    }
+
+    private static async Task VerifyR04EmptyAndMissingCatalogGuardsAsync(string baseConnectionString)
+    {
+        var adminBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = "postgres" };
+        var emptyDbName = $"mdm16_r04_empty_{Guid.NewGuid():N}";
+        var noCatDbName = $"mdm16_r04_nocat_{Guid.NewGuid():N}";
+
+        async Task CreateTempDbAsync(string name)
+        {
+            await using var adminConn = new NpgsqlConnection(adminBuilder.ConnectionString);
+            await adminConn.OpenAsync();
+            await using var cmd = new NpgsqlCommand($"CREATE DATABASE \"{name}\"", adminConn);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        async Task DropTempDbAsync(string name)
+        {
+            NpgsqlConnection.ClearAllPools();
+            try
+            {
+                await using var adminConn = new NpgsqlConnection(adminBuilder.ConnectionString);
+                await adminConn.OpenAsync();
+                await using var term = new NpgsqlCommand($"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{name}' AND pid <> pg_backend_pid();", adminConn);
+                await term.ExecuteNonQueryAsync();
+                await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\";", adminConn);
+                await drop.ExecuteNonQueryAsync();
+            }
+            catch
+            {
+            }
+        }
+
+        try
+        {
+            // 1. Fresh empty DB with NO CountryProfile catalog rows MUST succeed cleanly through Mdm16R04Migration
+            await CreateTempDbAsync(emptyDbName);
+            var emptyConn = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = emptyDbName }.ConnectionString;
+            await using (var emptyDb = CreatePgDb(emptyConn))
+            {
+                var emptyMigrator = emptyDb.GetInfrastructure().GetRequiredService<IMigrator>();
+                await emptyMigrator.MigrateAsync();
+            }
+
+            // 2. Populated DB (has a Facility) without CountryProfile catalog MUST fail closed on Mdm16R04Migration
+            await CreateTempDbAsync(noCatDbName);
+            var noCatConn = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = noCatDbName }.ConnectionString;
+            await using (var noCatDb = CreatePgDb(noCatConn))
+            {
+                var noCatMigrator = noCatDb.GetInfrastructure().GetRequiredService<IMigrator>();
+                await noCatMigrator.MigrateAsync(Mdm15Migration);
+                await using var conn = new NpgsqlConnection(noCatConn);
+                await conn.OpenAsync();
+                await using var ins = new NpgsqlCommand("INSERT INTO facilities (facility_id, facility_code, name, country_code, timezone, is_active, is_deleted, created_at) VALUES (@id, 'NOCAT-PG', 'No Catalog PG', 'USA', 'America/Chicago', true, false, NOW());", conn);
+                ins.Parameters.AddWithValue("@id", Guid.NewGuid());
+                await ins.ExecuteNonQueryAsync();
+
+                bool blocked = false;
+                try
+                {
+                    await noCatMigrator.MigrateAsync(Mdm16R04Migration);
+                }
+                catch (Exception ex) when (ex.Message.Contains("CountryProfile", StringComparison.OrdinalIgnoreCase) ||
+                                           (ex.InnerException?.Message.Contains("CountryProfile", StringComparison.OrdinalIgnoreCase) ?? false))
+                {
+                    blocked = true;
+                }
+
+                if (!blocked)
+                {
+                    throw new InvalidOperationException("R04 migration failed to abort on populated PostgreSQL DB missing CountryProfile/AdministrativeDivision catalogs.");
+                }
+            }
+        }
+        finally
+        {
+            await DropTempDbAsync(emptyDbName);
+            await DropTempDbAsync(noCatDbName);
+        }
     }
 
     private sealed class PgAdminTenantProvider : ITenantProvider

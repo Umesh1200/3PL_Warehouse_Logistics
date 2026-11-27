@@ -15,6 +15,8 @@ public class SupplierDto
     public string? State { get; set; }
     public string? PostalCode { get; set; }
     public string? Country { get; set; }
+    [System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
+    public Warehouse3PL.Domain.Enums.CountryNormalizationStatus CountryNormalizationStatus { get; set; } = Warehouse3PL.Domain.Enums.CountryNormalizationStatus.PendingNormalization;
     public bool IsActive { get; set; }
     public DateTime CreatedAt { get; set; }
 }

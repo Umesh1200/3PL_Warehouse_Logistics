@@ -30,6 +30,8 @@ public sealed class CountryNormalizationAuditConfiguration : IEntityTypeConfigur
         builder.Property(a => a.ClientId).HasColumnName("client_id");
         builder.Property(a => a.CorrelationBatchId).HasColumnName("correlation_batch_id").HasMaxLength(64).IsRequired();
         builder.Property(a => a.RecordedAtUtc).HasColumnName("recorded_at_utc").IsRequired();
+        builder.Property(a => a.InitialCorrelationBatchId).HasColumnName("initial_correlation_batch_id").HasMaxLength(64).IsRequired();
+        builder.Property(a => a.InitialRecordedAtUtc).HasColumnName("initial_recorded_at_utc").IsRequired();
 
         builder.HasIndex(a => new { a.EntityType, a.EntityId, a.FieldName })
             .IsUnique()

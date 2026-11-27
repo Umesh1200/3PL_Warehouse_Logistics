@@ -71,6 +71,7 @@ public class GetSuppliersQueryHandler : IRequestHandler<GetSuppliersQuery, Paged
                 State = s.State,
                 PostalCode = s.PostalCode,
                 Country = s.Country,
+                CountryNormalizationStatus = s.CountryNormalizationStatus,
                 IsActive = s.IsActive,
                 CreatedAt = s.CreatedAt
             })

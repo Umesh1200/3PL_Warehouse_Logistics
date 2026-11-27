@@ -52,7 +52,7 @@ public class FacilityConfiguration : IEntityTypeConfiguration<Facility>
         builder.Property(f => f.CountryCode)
             .HasColumnName("country_code")
             .HasMaxLength(3)
-            .HasDefaultValue("USA");
+            .HasDefaultValue(string.Empty);
 
         builder.Property(f => f.CountryNormalizationStatus)
             .HasColumnName("country_normalization_status")

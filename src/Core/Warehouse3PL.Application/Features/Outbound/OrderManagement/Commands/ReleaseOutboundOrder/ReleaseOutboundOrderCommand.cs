@@ -107,6 +107,7 @@ public class ReleaseOutboundOrderCommandHandler : IRequestHandler<ReleaseOutboun
                 StateOrProvince = order.ShippingAddress.StateOrProvince,
                 PostalCode = order.ShippingAddress.PostalCode,
                 CountryCode = order.ShippingAddress.CountryCode,
+                CountryNormalizationStatus = order.ShippingAddress.CountryNormalizationStatus,
                 PhoneNumber = order.ShippingAddress.PhoneNumber,
                 DeliveryInstructions = order.ShippingAddress.DeliveryInstructions,
                 IsAmended = order.ShippingAddress.IsAmended,

@@ -77,7 +77,9 @@ public class ShippingAddressDto
     public string City { get; set; } = string.Empty;
     public string StateOrProvince { get; set; } = string.Empty;
     public string PostalCode { get; set; } = string.Empty;
-    public string CountryCode { get; set; } = "USA";
+    public string CountryCode { get; set; } = string.Empty;
+    [System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
+    public Warehouse3PL.Domain.Enums.CountryNormalizationStatus CountryNormalizationStatus { get; set; } = Warehouse3PL.Domain.Enums.CountryNormalizationStatus.PendingNormalization;
     public string? PhoneNumber { get; set; }
     public string? DeliveryInstructions { get; set; }
 

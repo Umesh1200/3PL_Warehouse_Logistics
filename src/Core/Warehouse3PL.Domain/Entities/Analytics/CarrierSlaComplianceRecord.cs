@@ -22,8 +22,8 @@ public class CarrierSlaComplianceRecord : AuditableEntity<Guid>, ITenantEntity
 
     // Geographic Lane
     public string OriginRegion { get; set; } = string.Empty;
-    public string DestinationCountry { get; set; } = "US";
-    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
+    public string DestinationCountry { get; set; } = string.Empty;
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.PendingNormalization;
     public string DestinationStateOrRegion { get; set; } = string.Empty;
     public string DestinationPostalCodePrefix { get; set; } = string.Empty;
 
@@ -71,7 +71,7 @@ public class CarrierSlaComplianceRecord : AuditableEntity<Guid>, ITenantEntity
         string slaPolicyVersion,
         Guid? slaPolicyId = null,
         string originRegion = "",
-        string destinationCountry = "US",
+        string destinationCountry = "",
         string destinationStateOrRegion = "",
         string destinationPostalCodePrefix = "")
     {
@@ -96,7 +96,8 @@ public class CarrierSlaComplianceRecord : AuditableEntity<Guid>, ITenantEntity
             SlaPolicyVersion = string.IsNullOrWhiteSpace(slaPolicyVersion) ? "Default" : slaPolicyVersion.Trim(),
             SlaPolicyId = slaPolicyId,
             OriginRegion = originRegion?.Trim().ToUpperInvariant() ?? string.Empty,
-            DestinationCountry = string.IsNullOrWhiteSpace(destinationCountry) ? "US" : destinationCountry.Trim().ToUpperInvariant(),
+            DestinationCountry = string.IsNullOrWhiteSpace(destinationCountry) ? string.Empty : destinationCountry.Trim().ToUpperInvariant(),
+            CountryNormalizationStatus = CountryNormalizationStatus.PendingNormalization,
             DestinationStateOrRegion = destinationStateOrRegion?.Trim().ToUpperInvariant() ?? string.Empty,
             DestinationPostalCodePrefix = destinationPostalCodePrefix?.Trim() ?? string.Empty,
             AttemptCount = 0,

@@ -27,8 +27,8 @@ public class CarrierContractualSlaPolicy : AuditableEntity<Guid>
     public string OriginRegion { get; set; } = string.Empty;
 
     // Destination Geographic Scope
-    public string DestinationCountry { get; set; } = "US";
-    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
+    public string DestinationCountry { get; set; } = string.Empty;
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.PendingNormalization;
     public string DestinationStateOrRegion { get; set; } = string.Empty;
     public string DestinationPostalCodePrefix { get; set; } = string.Empty;
 
@@ -70,7 +70,7 @@ public class CarrierContractualSlaPolicy : AuditableEntity<Guid>
         Guid? clientId = null,
         Guid? originFacilityId = null,
         string originRegion = "",
-        string destinationCountry = "US",
+        string destinationCountry = "",
         string destinationStateOrRegion = "",
         string destinationPostalCodePrefix = "",
         TimeSpan? dailyCutoffTime = null,
@@ -98,7 +98,8 @@ public class CarrierContractualSlaPolicy : AuditableEntity<Guid>
             ClientId = clientId,
             OriginFacilityId = originFacilityId,
             OriginRegion = originRegion?.Trim().ToUpperInvariant() ?? string.Empty,
-            DestinationCountry = string.IsNullOrWhiteSpace(destinationCountry) ? "US" : destinationCountry.Trim().ToUpperInvariant(),
+            DestinationCountry = string.IsNullOrWhiteSpace(destinationCountry) ? string.Empty : destinationCountry.Trim().ToUpperInvariant(),
+            CountryNormalizationStatus = CountryNormalizationStatus.PendingNormalization,
             DestinationStateOrRegion = destinationStateOrRegion?.Trim().ToUpperInvariant() ?? string.Empty,
             DestinationPostalCodePrefix = destinationPostalCodePrefix?.Trim() ?? string.Empty,
             DailyCutoffTime = dailyCutoffTime ?? new TimeSpan(17, 0, 0),

@@ -122,6 +122,7 @@ public sealed class UpdateFacilityCommandHandler : IRequestHandler<UpdateFacilit
             facility.StateOrProvince = string.IsNullOrWhiteSpace(request.StateOrProvince) ? null : request.StateOrProvince.Trim();
             facility.PostalCode = string.IsNullOrWhiteSpace(request.PostalCode) ? null : request.PostalCode.Trim();
             facility.CountryCode = normalizedCountry;
+            facility.CountryNormalizationStatus = Domain.Enums.CountryNormalizationStatus.Normalized;
             facility.Timezone = normalizedTz;
             facility.DefaultLegalEntityId = request.DefaultLegalEntityId;
             facility.DefaultCurrencyCode = normalizedCurrency;

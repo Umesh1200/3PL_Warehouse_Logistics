@@ -13,9 +13,6 @@ import {
 
 const QUARANTINE_PERMISSIONS = [
   'global:normalization:view',
-  'global:compliance:view',
-  'global:compliance:manage',
-  'global:reference:view',
   'facilities:manage',
 ];
 
@@ -47,10 +44,9 @@ export const NormalizationQuarantinePage: React.FC = () => {
   const isStaff = normalizedType === UserType.Staff;
   const isPlatformScope =
     isSuperAdmin ||
-    hasPermission('analytics:multi-facility:view') ||
     hasPermission('global:normalization:view') ||
-    hasPermission('global:compliance:view') ||
-    hasPermission('global:compliance:manage');
+    hasPermission('analytics:multi-facility:view');
+  const scopedFacilityIdParam = !isPlatformScope ? activeFacility?.id : undefined;
 
   const loadDiagnostics = useCallback(
     async (signal?: AbortSignal) => {
@@ -66,7 +62,7 @@ export const NormalizationQuarantinePage: React.FC = () => {
           {
             status: statusFilter,
             entityType: entityType || undefined,
-            facilityId: !isPlatformScope ? activeFacility?.id : undefined,
+            facilityId: scopedFacilityIdParam,
             search: search || undefined,
             pageNumber,
             pageSize,
@@ -81,7 +77,7 @@ export const NormalizationQuarantinePage: React.FC = () => {
         setIsLoading(false);
       }
     },
-    [isStaff, statusFilter, entityType, isPlatformScope, activeFacility?.id, search, pageNumber, pageSize]
+    [isStaff, statusFilter, entityType, scopedFacilityIdParam, search, pageNumber, pageSize]
   );
 
   useEffect(() => {
@@ -330,17 +326,18 @@ export const NormalizationQuarantinePage: React.FC = () => {
         </div>
 
         <style>{`
-          .quarantine-page { display: flex; flex-direction: column; gap: 16px; }
-          .quarantine-kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; }
-          .kpi-card { background: #ffffff; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; }
+          .quarantine-page { display: flex; flex-direction: column; gap: 16px; min-width: 0; max-width: 100%; }
+          .quarantine-kpi-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(200px, 100%), 1fr)); gap: 12px; }
+          .kpi-card { background: #ffffff; border: 1px solid var(--border-subtle); border-radius: var(--radius-md); padding: 14px 16px; display: flex; flex-direction: column; gap: 4px; min-width: 0; }
           .kpi-label { font-size: 12px; color: var(--text-muted); font-weight: 600; text-transform: uppercase; letter-spacing: 0.04em; }
           .kpi-value { font-size: 24px; font-weight: 700; }
           .kpi-warn { color: #b45309; }
           .kpi-ok { color: #15803d; }
-          .kpi-scope { font-size: 15px; font-weight: 600; color: var(--text-main); }
-          .quarantine-filters { display: flex; flex-wrap: wrap; gap: 12px; padding: 14px 20px; border-bottom: 1px solid var(--border-subtle); background: #f8fafc; }
-          .quarantine-filters .form-field { min-width: 210px; }
-          .quarantine-search-field { flex: 1; min-width: 220px; }
+          .kpi-scope { font-size: 15px; font-weight: 600; color: var(--text-main); word-break: break-word; }
+          .quarantine-filters { display: flex; flex-wrap: wrap; gap: 12px; padding: 14px 16px; border-bottom: 1px solid var(--border-subtle); background: #f8fafc; }
+          .quarantine-filters .form-field { flex: 1 1 180px; min-width: 0; max-width: 100%; }
+          .quarantine-search-field { flex: 2 1 200px; min-width: 0; max-width: 100%; }
+          .table-responsive { width: 100%; max-width: 100%; overflow-x: auto; -webkit-overflow-scrolling: touch; }
           .entity-cell { display: flex; flex-direction: column; gap: 2px; }
           .entity-type-label { font-weight: 600; color: var(--text-main); }
           .entity-meta { font-size: 12px; color: var(--text-muted); }
@@ -349,10 +346,10 @@ export const NormalizationQuarantinePage: React.FC = () => {
           .flag-list { display: flex; flex-wrap: wrap; gap: 4px; }
           .flag-pill { background: #e0e7ff; color: #3730a3; padding: 2px 6px; border-radius: 4px; font-size: 11px; font-weight: 600; }
           .reason-cell { max-width: 320px; font-size: 13px; color: var(--text-main); }
-          .error-banner { margin: 16px 20px; padding: 12px 16px; border-radius: var(--radius-sm); background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; display: flex; align-items: center; gap: 10px; justify-content: space-between; }
-          .quarantine-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 20px; border-top: 1px solid var(--border-subtle); }
+          .error-banner { margin: 16px; padding: 12px 16px; border-radius: var(--radius-sm); background: #fef2f2; color: #991b1b; border: 1px solid #fecaca; display: flex; flex-wrap: wrap; align-items: center; gap: 10px; justify-content: space-between; }
+          .quarantine-pagination { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; padding: 12px 16px; border-top: 1px solid var(--border-subtle); }
           .pagination-meta { font-size: 13px; color: var(--text-muted); }
-          .pagination-actions { display: flex; gap: 8px; }
+          .pagination-actions { display: flex; gap: 8px; flex-wrap: wrap; }
         `}</style>
       </div>
     </PermissionGuard>

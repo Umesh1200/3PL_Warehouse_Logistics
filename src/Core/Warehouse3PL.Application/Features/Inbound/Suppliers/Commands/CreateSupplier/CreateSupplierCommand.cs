@@ -1,6 +1,7 @@
 using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Warehouse3PL.Application.Common.Helpers;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Domain.Entities.Inbound;
@@ -80,6 +81,11 @@ public class CreateSupplierCommandHandler : IRequestHandler<CreateSupplierComman
             throw new ValidationException(nameof(request.SupplierCode), $"Supplier code '{request.SupplierCode}' already exists for this client.");
         }
 
+        var (resolvedCountry, resolvedStatus) = await CountryNormalizationWriteHelper.ResolveForWriteAsync(
+            _context,
+            request.Country,
+            cancellationToken);
+
         var supplier = new Supplier
         {
             ClientId = targetClientId,
@@ -93,7 +99,8 @@ public class CreateSupplierCommandHandler : IRequestHandler<CreateSupplierComman
             City = request.City?.Trim(),
             State = request.State?.Trim(),
             PostalCode = request.PostalCode?.Trim(),
-            Country = request.Country?.Trim(),
+            Country = resolvedCountry,
+            CountryNormalizationStatus = resolvedStatus,
             IsActive = true
         };
 
@@ -115,6 +122,7 @@ public class CreateSupplierCommandHandler : IRequestHandler<CreateSupplierComman
             State = supplier.State,
             PostalCode = supplier.PostalCode,
             Country = supplier.Country,
+            CountryNormalizationStatus = supplier.CountryNormalizationStatus,
             IsActive = supplier.IsActive,
             CreatedAt = supplier.CreatedAt
         };

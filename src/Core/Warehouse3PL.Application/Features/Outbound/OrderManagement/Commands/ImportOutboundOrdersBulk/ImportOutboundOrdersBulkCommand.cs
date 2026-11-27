@@ -2,6 +2,7 @@ using System.Text.Json;
 using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Warehouse3PL.Application.Common.Helpers;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Application.Common.Security;
@@ -258,6 +259,11 @@ public class ImportOutboundOrdersBulkCommandHandler : IRequestHandler<ImportOutb
                     Notes = orderCmd.Notes
                 };
 
+                var (resolvedCountry, resolvedStatus) = await CountryNormalizationWriteHelper.ResolveForWriteAsync(
+                    _context,
+                    orderCmd.ShippingAddress?.CountryCode,
+                    cancellationToken);
+
                 var shippingAddress = new ShippingAddress
                 {
                     OutboundOrderId = order.Id,
@@ -268,7 +274,8 @@ public class ImportOutboundOrdersBulkCommandHandler : IRequestHandler<ImportOutb
                     City = orderCmd.ShippingAddress?.City ?? "City",
                     StateOrProvince = orderCmd.ShippingAddress?.StateOrProvince ?? "State",
                     PostalCode = orderCmd.ShippingAddress?.PostalCode ?? "00000",
-                    CountryCode = orderCmd.ShippingAddress?.CountryCode ?? "USA",
+                    CountryCode = resolvedCountry ?? string.Empty,
+                    CountryNormalizationStatus = resolvedStatus,
                     PhoneNumber = orderCmd.ShippingAddress?.PhoneNumber,
                     DeliveryInstructions = orderCmd.ShippingAddress?.DeliveryInstructions
                 };

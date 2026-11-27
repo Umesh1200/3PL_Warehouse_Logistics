@@ -159,9 +159,6 @@ export const Sidebar: React.FC<SidebarProps> = ({ isOpen = false, onClose }) => 
           path: '/app/admin/normalization-quarantine',
           permissions: [
             'global:normalization:view',
-            'global:compliance:view',
-            'global:compliance:manage',
-            'global:reference:view',
             'facilities:manage',
           ],
           allowedUserTypes: [UserType.Staff],

@@ -335,6 +335,9 @@ public class DbInitializer
                 Name = "Chicago Central Fulfillment Hub",
                 AddressLine1 = "1000 Logistics Parkway",
                 City = "Chicago",
+                StateOrProvince = "IL",
+                PostalCode = "60601",
+                CountryCode = "US",
                 Timezone = "America/Chicago",
                 IsActive = true
             };
@@ -1267,7 +1270,7 @@ public class DbInitializer
                         DefaultCity = "Chicago",
                         DefaultStateOrProvince = "IL",
                         DefaultPostalCode = "60601",
-                        DefaultCountryCode = "USA",
+                        DefaultCountryCode = "US",
                         IsActive = true
                     };
                     _context.Customers.Add(customer);
@@ -1300,7 +1303,7 @@ public class DbInitializer
                     City = "Chicago",
                     StateOrProvince = "IL",
                     PostalCode = "60601",
-                    CountryCode = "USA",
+                    CountryCode = "US",
                     PhoneNumber = "312-555-0199",
                     DeliveryInstructions = "Call dock coordinator 30 min before arrival"
                 };

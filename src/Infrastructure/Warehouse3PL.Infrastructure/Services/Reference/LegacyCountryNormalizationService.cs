@@ -12,6 +12,7 @@ namespace Warehouse3PL.Infrastructure.Services.Reference;
 
 public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizationService
 {
+    private static readonly SemaphoreSlim InMemoryBackfillGate = new(1, 1);
     private readonly IApplicationDbContext _db;
 
     public LegacyCountryNormalizationService(IApplicationDbContext db)
@@ -27,6 +28,44 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
         return catalog.ResolveExplicit(rawCountry);
     }
 
+    public async Task<string> ExportProvenanceSnapshotJsonAsync(CancellationToken cancellationToken = default)
+    {
+        var audits = await _db.CountryNormalizationAudits
+            .AsNoTracking()
+            .OrderBy(a => a.InitialRecordedAtUtc)
+            .ThenBy(a => a.EntityType)
+            .ThenBy(a => a.EntityId)
+            .Select(a => new
+            {
+                a.Id,
+                a.EntityType,
+                a.EntityId,
+                a.FieldName,
+                OriginalCountryValue = CountryDiagnosticSanitizer.SanitizeRawValue(a.OriginalCountryValue),
+                a.NormalizedCountryCode,
+                NormalizationStatus = a.NormalizationStatus.ToString(),
+                a.PreservedHistoricalValue,
+                a.WasInferredFromParent,
+                a.InferenceSource,
+                Reason = CountryDiagnosticSanitizer.SanitizeReason(a.Reason),
+                a.FacilityId,
+                a.ClientId,
+                a.InitialCorrelationBatchId,
+                a.InitialRecordedAtUtc,
+                a.CorrelationBatchId,
+                a.RecordedAtUtc
+            })
+            .ToListAsync(cancellationToken);
+
+        return System.Text.Json.JsonSerializer.Serialize(new
+        {
+            ExportedAtUtc = DateTime.UtcNow,
+            SchemaMigration = "20261126143014_MDM1_6_LegacyCountryNormalization",
+            TotalAuditRecords = audits.Count,
+            Records = audits
+        });
+    }
+
     public async Task<LegacyCountryBackfillSummary> BackfillAllAsync(
         string? correlationBatchId = null,
         CancellationToken cancellationToken = default)
@@ -35,44 +74,122 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             ? $"MDM16-BACKFILL-{DateTime.UtcNow:yyyyMMddHHmmss}"
             : correlationBatchId.Trim();
 
+        if (_db.IsRelationalDatabase && _db is DbContext relationalCtx && relationalCtx.Database.CurrentTransaction != null &&
+            relationalCtx.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            await relationalCtx.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(hashtextextended('MDM16_COUNTRY_BACKFILL', 0::bigint))",
+                cancellationToken);
+            return await ExecuteBackfillCoreAsync(batchId, cancellationToken);
+        }
+
+        await InMemoryBackfillGate.WaitAsync(cancellationToken);
+        try
+        {
+            return await ExecuteBackfillCoreAsync(batchId, cancellationToken);
+        }
+        finally
+        {
+            InMemoryBackfillGate.Release();
+        }
+    }
+
+    private async Task<LegacyCountryBackfillSummary> ExecuteBackfillCoreAsync(
+        string batchId,
+        CancellationToken cancellationToken)
+    {
         var utcNow = DateTime.UtcNow;
         var catalog = await CatalogIndex.LoadAsync(_db, cancellationToken);
 
-        var existingAudits = await _db.CountryNormalizationAudits
+        var allFacilities = await _db.Facilities.IgnoreQueryFilters().ToListAsync(cancellationToken);
+        var allCustomers = await _db.Customers.IgnoreQueryFilters().ToListAsync(cancellationToken);
+        var allSuppliers = await _db.Suppliers.IgnoreQueryFilters().ToListAsync(cancellationToken);
+        var allOrders = await _db.OutboundOrders.IgnoreQueryFilters()
+            .Select(o => new { o.Id, o.FacilityId, o.DestinationFacilityId, o.OrderType, o.ClientId, o.CustomerId, o.Status, o.IsDeleted })
             .ToListAsync(cancellationToken);
+        var allShippingAddresses = await _db.ShippingAddresses.IgnoreQueryFilters().ToListAsync(cancellationToken);
+        var allReturnShipments = await _db.ReturnShipments.IgnoreQueryFilters().ToListAsync(cancellationToken);
+        var allSlaPolicies = await _db.CarrierContractualSlaPolicies.IgnoreQueryFilters().ToListAsync(cancellationToken);
+        var allSlaRecords = await _db.CarrierSlaComplianceRecords.IgnoreQueryFilters().ToListAsync(cancellationToken);
+
+        int totalRowsAcrossTargets =
+            allFacilities.Count(f => !f.IsDeleted) +
+            allCustomers.Count(c => !c.IsDeleted) +
+            allSuppliers.Count(s => !s.IsDeleted) +
+            allShippingAddresses.Count(sa => !sa.IsDeleted) +
+            allReturnShipments.Count +
+            allSlaPolicies.Count +
+            allSlaRecords.Count;
+
+        if (!catalog.HasActiveProfiles)
+        {
+            if (totalRowsAcrossTargets == 0)
+            {
+                return new LegacyCountryBackfillSummary(batchId, 0, 0, 0, 0, 0, 0);
+            }
+
+            throw new InvalidOperationException(
+                "Country normalization backfill blocked: active CountryProfile reference catalog rows are required before normalizing populated records.");
+        }
+
+        var existingAudits = await _db.CountryNormalizationAudits.ToListAsync(cancellationToken);
+
+        // R03: Reconcile and remove stale diagnostics for soft-deleted entities
+        var deletedFacilityIds = allFacilities.Where(f => f.IsDeleted).Select(f => f.Id).ToHashSet();
+        var deletedCustomerIds = allCustomers.Where(c => c.IsDeleted).Select(c => c.Id).ToHashSet();
+        var deletedSupplierIds = allSuppliers.Where(s => s.IsDeleted).Select(s => s.Id).ToHashSet();
+        var deletedOrderIds = allOrders.Where(o => o.IsDeleted).Select(o => o.Id).ToHashSet();
+        var deletedAddrIds = allShippingAddresses
+            .Where(sa => sa.IsDeleted || deletedOrderIds.Contains(sa.OutboundOrderId))
+            .Select(sa => sa.Id)
+            .ToHashSet();
+
+        var auditsToRemove = existingAudits.Where(a =>
+            (a.EntityType == nameof(Facility) && deletedFacilityIds.Contains(a.EntityId)) ||
+            (a.EntityType == nameof(Customer) && deletedCustomerIds.Contains(a.EntityId)) ||
+            (a.EntityType == nameof(Supplier) && deletedSupplierIds.Contains(a.EntityId)) ||
+            (a.EntityType == nameof(ShippingAddress) && deletedAddrIds.Contains(a.EntityId)))
+            .ToList();
+
+        foreach (var staleAudit in auditsToRemove)
+        {
+            _db.CountryNormalizationAudits.Remove(staleAudit);
+            existingAudits.Remove(staleAudit);
+        }
+
         var auditByKey = existingAudits.ToDictionary(
             a => (a.EntityType, a.EntityId, a.FieldName),
             a => a);
 
-        var activeAccesses = await _db.ClientFacilityAccesses
+        var facilities = allFacilities.Where(f => !f.IsDeleted).ToList();
+        var facilityMap = facilities.ToDictionary(f => f.Id, f => f);
+
+        var activeClientIds = await _db.Clients
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .Where(c => !c.IsDeleted && c.Status == ClientStatus.Active)
+            .Select(c => c.Id)
+            .ToHashSetAsync(cancellationToken);
+
+        var activeAccesses = (await _db.ClientFacilityAccesses
             .IgnoreQueryFilters()
             .AsNoTracking()
             .Where(cfa => cfa.Status == FacilityAccessStatus.Active)
             .Select(cfa => new { cfa.ClientId, cfa.FacilityId })
-            .ToListAsync(cancellationToken);
+            .ToListAsync(cancellationToken))
+            .Where(x => activeClientIds.Contains(x.ClientId) &&
+                        facilityMap.TryGetValue(x.FacilityId, out var fac) &&
+                        fac.IsActive)
+            .ToList();
 
         var singleFacilityByClient = activeAccesses
             .GroupBy(x => x.ClientId)
             .Where(g => g.Select(x => x.FacilityId).Distinct().Count() == 1)
             .ToDictionary(g => g.Key, g => (Guid?)g.First().FacilityId);
 
-        var facilities = await _db.Facilities.IgnoreQueryFilters().Where(f => !f.IsDeleted).ToListAsync(cancellationToken);
-        var facilityMap = facilities.ToDictionary(f => f.Id, f => f);
-
-        var clientCountries = activeAccesses
-            .Where(x => facilityMap.TryGetValue(x.FacilityId, out var fac) &&
-                        catalog.TryGetCanonicalCountry(fac.CountryCode, out _, out _))
-            .GroupBy(x => x.ClientId)
-            .ToDictionary(
-                g => g.Key,
-                g => g.Select(x => catalog.TryGetCanonicalCountry(facilityMap[x.FacilityId].CountryCode, out var c, out _) ? c! : string.Empty)
-                    .Where(c => !string.IsNullOrEmpty(c))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList());
-
         int totalEvaluated = 0, mutated = 0, unchanged = 0, preservedHistorical = 0, inferredCount = 0, quarantined = 0;
 
-        void RecordAudit(
+        void ReconcileAudit(
             string entityType,
             Guid entityId,
             string fieldName,
@@ -84,50 +201,86 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             string? inferenceSource,
             string reason,
             Guid? facilityId,
-            Guid? clientId)
+            Guid? clientId,
+            bool forceAuditWrite)
         {
+            var sanitizedReason = CountryDiagnosticSanitizer.SanitizeReason(reason);
             var key = (entityType, entityId, fieldName);
             if (auditByKey.TryGetValue(key, out var existing))
             {
-                // Preserve initial raw pre-normalization value across idempotent re-runs
+                // Semantic idempotency: when already Normalized with the exact same resolved code, historical flag, and tenant/facility scope,
+                // preserve the normalizing run's InferenceSource/WasInferredFromParent/Reason/CorrelationBatchId/RecordedAtUtc.
+                if (existing.NormalizationStatus == CountryNormalizationStatus.Normalized &&
+                    status == CountryNormalizationStatus.Normalized &&
+                    string.Equals(existing.NormalizedCountryCode, resolvedCode, StringComparison.Ordinal) &&
+                    existing.PreservedHistoricalValue == preservedHistoricalVal &&
+                    existing.FacilityId == facilityId &&
+                    existing.ClientId == clientId)
+                {
+                    return;
+                }
+
+                // Semantic idempotency: skip update unless diagnostic state, association, or reason actually changed
+                bool stateChanged =
+                    !string.Equals(existing.NormalizedCountryCode, resolvedCode, StringComparison.Ordinal) ||
+                    existing.NormalizationStatus != status ||
+                    existing.PreservedHistoricalValue != preservedHistoricalVal ||
+                    existing.WasInferredFromParent != wasInferred ||
+                    !string.Equals(existing.InferenceSource, inferenceSource, StringComparison.Ordinal) ||
+                    existing.FacilityId != facilityId ||
+                    existing.ClientId != clientId ||
+                    !string.Equals(existing.Reason, sanitizedReason, StringComparison.Ordinal);
+
+                if (!stateChanged)
+                {
+                    return;
+                }
+
+                // R03: Preserve immutable initial provenance (OriginalCountryValue, InitialRecordedAtUtc, InitialCorrelationBatchId)
                 existing.NormalizedCountryCode = resolvedCode;
                 existing.NormalizationStatus = status;
                 existing.PreservedHistoricalValue = preservedHistoricalVal;
                 existing.WasInferredFromParent = wasInferred;
                 existing.InferenceSource = inferenceSource;
-                existing.Reason = reason.Length > 500 ? reason[..500] : reason;
+                existing.Reason = sanitizedReason;
                 existing.FacilityId = facilityId;
                 existing.ClientId = clientId;
                 existing.CorrelationBatchId = batchId;
                 existing.RecordedAtUtc = utcNow;
+                return;
             }
-            else
+
+            if (!forceAuditWrite)
             {
-                var audit = new CountryNormalizationAudit
-                {
-                    Id = Guid.NewGuid(),
-                    EntityType = entityType,
-                    EntityId = entityId,
-                    FieldName = fieldName,
-                    OriginalCountryValue = rawValue,
-                    NormalizedCountryCode = resolvedCode,
-                    NormalizationStatus = status,
-                    PreservedHistoricalValue = preservedHistoricalVal,
-                    WasInferredFromParent = wasInferred,
-                    InferenceSource = inferenceSource,
-                    Reason = reason.Length > 500 ? reason[..500] : reason,
-                    FacilityId = facilityId,
-                    ClientId = clientId,
-                    CorrelationBatchId = batchId,
-                    RecordedAtUtc = utcNow
-                };
-                auditByKey[key] = audit;
-                _db.CountryNormalizationAudits.Add(audit);
+                return;
             }
+
+            var audit = new CountryNormalizationAudit
+            {
+                Id = Guid.NewGuid(),
+                EntityType = entityType,
+                EntityId = entityId,
+                FieldName = fieldName,
+                OriginalCountryValue = CountryDiagnosticSanitizer.SanitizeRawValue(rawValue),
+                NormalizedCountryCode = resolvedCode,
+                NormalizationStatus = status,
+                PreservedHistoricalValue = preservedHistoricalVal,
+                WasInferredFromParent = wasInferred,
+                InferenceSource = inferenceSource,
+                Reason = sanitizedReason,
+                FacilityId = facilityId,
+                ClientId = clientId,
+                CorrelationBatchId = batchId,
+                RecordedAtUtc = utcNow,
+                InitialCorrelationBatchId = batchId,
+                InitialRecordedAtUtc = utcNow
+            };
+            auditByKey[key] = audit;
+            _db.CountryNormalizationAudits.Add(audit);
         }
 
-        // Helper for single-field evaluation + audit decision
-        (bool IsResolved, string? TargetCode, CountryNormalizationStatus Status, bool WasInferred, bool ShouldWriteAudit) EvaluateField(
+        // Single-field evaluation returning resolution + whether initial write is needed
+        (bool IsResolved, string? TargetCode, CountryNormalizationStatus Status, bool WasInferred, bool NeedsInitialAudit) EvaluateField(
             string? rawValue,
             string? state,
             string? postal,
@@ -158,7 +311,7 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
                 bool differsFromExactCanonical = !string.Equals(rawValue?.Trim(), eval.CanonicalCountryCode, StringComparison.Ordinal);
                 if (differsFromExactCanonical)
                 {
-                    reason = $"Immutable historical record preserved untouched ('{rawValue ?? "NULL"}'); {eval.Reason}";
+                    reason = $"Immutable historical record preserved untouched; {eval.Reason}";
                 }
                 return (true, eval.CanonicalCountryCode, CountryNormalizationStatus.Normalized, eval.WasInferredFromParent, differsFromExactCanonical);
             }
@@ -191,32 +344,44 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             }
             else quarantined++;
 
-            if (res.ShouldWriteAudit)
-            {
-                RecordAudit(nameof(Facility), fac.Id, nameof(Facility.CountryCode), origRaw, res.TargetCode,
-                    res.Status, false, res.WasInferred, src, reason, fac.Id, null);
-            }
+            ReconcileAudit(nameof(Facility), fac.Id, nameof(Facility.CountryCode), origRaw, res.TargetCode,
+                res.Status, false, res.WasInferred, src, reason, fac.Id, null, res.NeedsInitialAudit);
         }
 
-        // Refresh client countries map after Facilities pass
-        clientCountries = activeAccesses
-            .Where(x => facilityMap.TryGetValue(x.FacilityId, out var fac) &&
-                        catalog.TryGetCanonicalCountry(fac.CountryCode, out _, out _))
-            .GroupBy(x => x.ClientId)
-            .ToDictionary(
-                g => g.Key,
-                g => g.Select(x => catalog.TryGetCanonicalCountry(facilityMap[x.FacilityId].CountryCode, out var c, out _) ? c! : string.Empty)
-                    .Where(c => !string.IsNullOrEmpty(c))
-                    .Distinct(StringComparer.OrdinalIgnoreCase)
-                    .ToList());
+        // R02: Build verified client network map WITHOUT discarding unresolved facilities.
+        // If ANY active linked facility is unresolved or fails canonical verification, clientSingleVerifiedCountry is null.
+        var clientVerifiedSingleCountry = new Dictionary<Guid, string?>();
+        foreach (var group in activeAccesses.GroupBy(x => x.ClientId))
+        {
+            var resolvedCodes = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            bool anyUnresolved = false;
+
+            foreach (var link in group)
+            {
+                if (!facilityMap.TryGetValue(link.FacilityId, out var fac) ||
+                    fac.CountryNormalizationStatus != CountryNormalizationStatus.Normalized ||
+                    !catalog.TryGetCanonicalCountry(fac.CountryCode, out var facIso, out _) ||
+                    string.IsNullOrWhiteSpace(facIso))
+                {
+                    anyUnresolved = true;
+                    break;
+                }
+
+                resolvedCodes.Add(facIso);
+            }
+
+            clientVerifiedSingleCountry[group.Key] = !anyUnresolved && resolvedCodes.Count == 1
+                ? resolvedCodes.First()
+                : null;
+        }
 
         // 2. Customers (Mutable Master Data)
-        var customers = await _db.Customers.IgnoreQueryFilters().Where(c => !c.IsDeleted).ToListAsync(cancellationToken);
+        var customers = allCustomers.Where(c => !c.IsDeleted).ToList();
         var customerMap = customers.ToDictionary(c => c.Id, c => c);
         foreach (var cust in customers)
         {
             totalEvaluated++;
-            string? singleClientCountry = clientCountries.TryGetValue(cust.ClientId, out var cc) && cc.Count == 1 ? cc[0] : null;
+            clientVerifiedSingleCountry.TryGetValue(cust.ClientId, out var singleClientCountry);
             var res = EvaluateField(
                 cust.DefaultCountryCode, cust.DefaultStateOrProvince, cust.DefaultPostalCode,
                 verifiedParentCountry: singleClientCountry, parentHintSource: "ClientDomesticAccess",
@@ -237,20 +402,17 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             }
             else quarantined++;
 
-            if (res.ShouldWriteAudit)
-            {
-                singleFacilityByClient.TryGetValue(cust.ClientId, out var custFacId);
-                RecordAudit(nameof(Customer), cust.Id, nameof(Customer.DefaultCountryCode), origRaw, res.TargetCode,
-                    res.Status, false, res.WasInferred, src, reason, custFacId, cust.ClientId);
-            }
+            singleFacilityByClient.TryGetValue(cust.ClientId, out var custFacId);
+            ReconcileAudit(nameof(Customer), cust.Id, nameof(Customer.DefaultCountryCode), origRaw, res.TargetCode,
+                res.Status, false, res.WasInferred, src, reason, custFacId, cust.ClientId, res.NeedsInitialAudit);
         }
 
         // 3. Suppliers (Mutable Master Data)
-        var suppliers = await _db.Suppliers.IgnoreQueryFilters().Where(s => !s.IsDeleted).ToListAsync(cancellationToken);
+        var suppliers = allSuppliers.Where(s => !s.IsDeleted).ToList();
         foreach (var sup in suppliers)
         {
             totalEvaluated++;
-            string? singleClientCountry = clientCountries.TryGetValue(sup.ClientId, out var sc) && sc.Count == 1 ? sc[0] : null;
+            clientVerifiedSingleCountry.TryGetValue(sup.ClientId, out var singleClientCountry);
             var res = EvaluateField(
                 sup.Country, sup.State, sup.PostalCode,
                 verifiedParentCountry: singleClientCountry, parentHintSource: "ClientDomesticAccess",
@@ -271,92 +433,95 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             }
             else quarantined++;
 
-            if (res.ShouldWriteAudit)
-            {
-                singleFacilityByClient.TryGetValue(sup.ClientId, out var supFacId);
-                RecordAudit(nameof(Supplier), sup.Id, nameof(Supplier.Country), origRaw, res.TargetCode,
-                    res.Status, false, res.WasInferred, src, reason, supFacId, sup.ClientId);
-            }
+            singleFacilityByClient.TryGetValue(sup.ClientId, out var supFacId);
+            ReconcileAudit(nameof(Supplier), sup.Id, nameof(Supplier.Country), origRaw, res.TargetCode,
+                res.Status, false, res.WasInferred, src, reason, supFacId, sup.ClientId, res.NeedsInitialAudit);
         }
 
         // 4. ShippingAddresses (Mutable pre-fulfillment vs Immutable historical snapshot)
-        var orderIdsWithShipments = (await _db.Packages
+        var bolShipmentIds = (await _db.BillsOfLading
             .IgnoreQueryFilters()
-            .Where(p => p.ShipmentId != null)
+            .Where(b => !b.IsDeleted)
+            .Select(b => b.ShipmentId)
+            .Distinct()
+            .ToListAsync(cancellationToken))
+            .ToHashSet();
+
+        var orderIdsWithFulfillment = (await _db.Packages
+            .IgnoreQueryFilters()
+            .Where(p => !p.IsDeleted &&
+                        (p.ShipmentId != null ||
+                         p.Status != PackageStatus.Open ||
+                         (p.ShipmentId.HasValue && bolShipmentIds.Contains(p.ShipmentId.Value))))
             .Select(p => p.OutboundOrderId)
             .Distinct()
             .ToListAsync(cancellationToken))
             .ToHashSet();
 
-        var orders = await _db.OutboundOrders
-            .IgnoreQueryFilters()
-            .Where(o => !o.IsDeleted)
-            .Select(o => new
-            {
-                o.Id,
-                o.FacilityId,
-                o.ClientId,
-                o.CustomerId,
-                o.Status
-            })
-            .ToDictionaryAsync(o => o.Id, cancellationToken);
+        var orderMap = allOrders.Where(o => !o.IsDeleted).ToDictionary(o => o.Id);
+        var shippingAddresses = allShippingAddresses.Where(sa => !sa.IsDeleted).ToList();
 
-        var shippingAddresses = await _db.ShippingAddresses.IgnoreQueryFilters().Where(s => !s.IsDeleted).ToListAsync(cancellationToken);
         foreach (var addr in shippingAddresses)
         {
             totalEvaluated++;
-            orders.TryGetValue(addr.OutboundOrderId, out var ord);
-            bool hasShipment = ord != null && orderIdsWithShipments.Contains(ord.Id);
+            orderMap.TryGetValue(addr.OutboundOrderId, out var ord);
+            bool hasFulfillment = ord != null && orderIdsWithFulfillment.Contains(ord.Id);
             bool isHistorical = ord == null ||
-                hasShipment ||
+                hasFulfillment ||
                 ord.Status is OutboundOrderStatus.Allocated or OutboundOrderStatus.PartiallyAllocated or OutboundOrderStatus.InProgress or OutboundOrderStatus.Completed or OutboundOrderStatus.Cancelled;
 
-            string? customerCountry = ord?.CustomerId != null && customerMap.TryGetValue(ord.CustomerId.Value, out var cust) &&
-                                      catalog.TryGetCanonicalCountry(cust.DefaultCountryCode, out var ccNorm, out _)
+            // R02: Parent country MUST have Verified Normalized status & active non-deleted parent entity
+            Customer? linkedCust = ord?.CustomerId != null && customerMap.TryGetValue(ord.CustomerId.Value, out var cEntity)
+                ? cEntity
+                : null;
+            string? verifiedCustomerCountry = linkedCust != null &&
+                                              !linkedCust.IsDeleted &&
+                                              linkedCust.IsActive &&
+                                              linkedCust.CountryNormalizationStatus == CountryNormalizationStatus.Normalized &&
+                                              catalog.TryGetCanonicalCountry(linkedCust.DefaultCountryCode, out var ccNorm, out _)
                 ? ccNorm
                 : null;
-            string? facilityCountry = ord != null && facilityMap.TryGetValue(ord.FacilityId, out var fac) &&
-                                      catalog.TryGetCanonicalCountry(fac.CountryCode, out var fcNorm, out _)
+
+            string? verifiedOriginFacCountry = ord != null &&
+                                               facilityMap.TryGetValue(ord.FacilityId, out var oFac) &&
+                                               oFac.IsActive &&
+                                               oFac.CountryNormalizationStatus == CountryNormalizationStatus.Normalized &&
+                                               catalog.TryGetCanonicalCountry(oFac.CountryCode, out var fcNorm, out _)
                 ? fcNorm
                 : null;
 
-            // Cross-border conflict if verified Customer default differs from Facility country when ShippingAddress is blank
-            string? parentHint;
-            string hintSource;
-            bool crossBorderConflict = !string.IsNullOrEmpty(customerCountry) &&
-                                       !string.IsNullOrEmpty(facilityCountry) &&
-                                       !string.Equals(customerCountry, facilityCountry, StringComparison.OrdinalIgnoreCase);
+            string? verifiedDestFacCountry = ord?.OrderType == OutboundOrderType.StockTransferOrder &&
+                                             ord.DestinationFacilityId.HasValue &&
+                                             facilityMap.TryGetValue(ord.DestinationFacilityId.Value, out var dFac) &&
+                                             dFac.IsActive &&
+                                             dFac.CountryNormalizationStatus == CountryNormalizationStatus.Normalized &&
+                                             catalog.TryGetCanonicalCountry(dFac.CountryCode, out var dfNorm, out _)
+                ? dfNorm
+                : null;
 
-            if (crossBorderConflict && string.IsNullOrWhiteSpace(addr.CountryCode))
-            {
-                parentHint = "__CONFLICT__";
-                hintSource = "CrossBorderConflict";
-            }
-            else if (!string.IsNullOrEmpty(customerCountry))
-            {
-                parentHint = customerCountry;
-                hintSource = "CustomerDefault";
-            }
-            else
-            {
-                parentHint = facilityCountry;
-                hintSource = "OrderFacility";
-            }
-
-            (bool IsResolved, string? TargetCode, CountryNormalizationStatus Status, bool WasInferred, bool ShouldWriteAudit) res;
+            (bool IsResolved, string? TargetCode, CountryNormalizationStatus Status, bool WasInferred, bool NeedsInitialAudit) res;
             bool changed;
             string? src;
             string reason;
 
-            if (parentHint == "__CONFLICT__")
+            if (string.IsNullOrWhiteSpace(addr.CountryCode) && linkedCust != null && verifiedCustomerCountry == null)
             {
                 changed = false;
-                src = "CrossBorderOrderContext";
-                reason = $"Cross-border order context (Customer='{customerCountry}', Facility='{facilityCountry}') with blank shipping country cannot inherit a country safely.";
+                src = "QuarantinedCustomerParent";
+                reason = "Quarantined or unverified customer master cannot verify child shipping address country.";
                 res = (false, null, CountryNormalizationStatus.PendingNormalization, false, true);
             }
             else
             {
+                // Never infer ShippingAddress destination solely from origin warehouse facility;
+                // only verified CustomerDefault or verified StockTransfer DestinationFacility may verify parent context.
+                string? parentHint = ord?.OrderType == OutboundOrderType.StockTransferOrder
+                    ? verifiedDestFacCountry
+                    : verifiedCustomerCountry;
+                string hintSource = ord?.OrderType == OutboundOrderType.StockTransferOrder
+                    ? "TransferDestinationFacility"
+                    : "CustomerDefault";
+
                 res = EvaluateField(
                     addr.CountryCode, addr.StateOrProvince, addr.PostalCode,
                     verifiedParentCountry: parentHint, parentHintSource: hintSource,
@@ -369,10 +534,7 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
 
             if (res.IsResolved && res.TargetCode != null)
             {
-                if (isHistorical)
-                {
-                    preservedHistorical++;
-                }
+                if (isHistorical) preservedHistorical++;
                 else if (changed)
                 {
                     addr.CountryCode = res.TargetCode;
@@ -384,60 +546,70 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             }
             else quarantined++;
 
-            if (res.ShouldWriteAudit)
-            {
-                RecordAudit(nameof(ShippingAddress), addr.Id, nameof(ShippingAddress.CountryCode), origRaw, res.TargetCode,
-                    res.Status, isHistorical, res.WasInferred, src, reason, ord?.FacilityId, ord?.ClientId);
-            }
+            ReconcileAudit(nameof(ShippingAddress), addr.Id, nameof(ShippingAddress.CountryCode), origRaw, res.TargetCode,
+                res.Status, isHistorical, res.WasInferred, src, reason, ord?.FacilityId, ord?.ClientId, res.NeedsInitialAudit);
         }
 
         // 5. ReturnShipments (Dual origin & destination; mutable ONLY while Authorized & pre-label/pre-handover)
-        var returnShipments = await _db.ReturnShipments.IgnoreQueryFilters().ToListAsync(cancellationToken);
-        var orderAddrMap = shippingAddresses
+        var activeAddrByOrder = shippingAddresses
             .GroupBy(sa => sa.OutboundOrderId)
             .ToDictionary(g => g.Key, g => g.First());
 
-        foreach (var ret in returnShipments)
+        foreach (var ret in allReturnShipments)
         {
             bool isHistorical = ret.Status != ReturnShipmentStatus.Authorized ||
                                 ret.LabelGeneratedAtUtc.HasValue ||
                                 ret.CarrierHandoverAtUtc.HasValue;
 
             string? origFacCountry = facilityMap.TryGetValue(ret.OriginFacilityId, out var oFac) &&
+                                     oFac.IsActive &&
+                                     oFac.CountryNormalizationStatus == CountryNormalizationStatus.Normalized &&
                                      catalog.TryGetCanonicalCountry(oFac.CountryCode, out var ofNorm, out _)
                 ? ofNorm
                 : null;
             string? destFacCountry = facilityMap.TryGetValue(ret.DestinationFacilityId, out var dFac) &&
+                                     dFac.IsActive &&
+                                     dFac.CountryNormalizationStatus == CountryNormalizationStatus.Normalized &&
                                      catalog.TryGetCanonicalCountry(dFac.CountryCode, out var dfNorm, out _)
                 ? dfNorm
                 : null;
 
-            string? orderDestCountry = orderAddrMap.TryGetValue(ret.OrderId, out var origAddr) &&
+            string? orderDestCountry = activeAddrByOrder.TryGetValue(ret.OrderId, out var origAddr) &&
+                                       !origAddr.IsDeleted &&
+                                       origAddr.CountryNormalizationStatus == CountryNormalizationStatus.Normalized &&
                                        catalog.TryGetCanonicalCountry(origAddr.CountryCode, out var oaNorm, out _)
                 ? oaNorm
                 : null;
 
-            bool retCrossFacility = ret.OriginFacilityId != ret.DestinationFacilityId &&
-                                    !string.Equals(origFacCountry, destFacCountry, StringComparison.OrdinalIgnoreCase);
+            bool retCrossBorder = ret.OriginFacilityId != ret.DestinationFacilityId &&
+                                  origFacCountry != null && destFacCountry != null &&
+                                  !string.Equals(origFacCountry, destFacCountry, StringComparison.OrdinalIgnoreCase);
 
             // OriginCountry (never inherit DestinationFacility country!)
             totalEvaluated++;
-            string? originParentHint = retCrossFacility && string.IsNullOrWhiteSpace(ret.OriginCountry) ? "__CROSS_BORDER__" : orderDestCountry;
-            (bool IsResolved, string? TargetCode, CountryNormalizationStatus Status, bool WasInferred, bool ShouldWriteAudit) origRes;
+            (bool IsResolved, string? TargetCode, CountryNormalizationStatus Status, bool WasInferred, bool NeedsInitialAudit) origRes;
             bool origChanged = false;
-            string? origSrc = null;
+            string? origSrc;
             string origReason;
 
-            if (originParentHint == "__CROSS_BORDER__")
+            if (retCrossBorder && string.IsNullOrWhiteSpace(ret.OriginCountry))
             {
+                origSrc = "CrossBorderReturnContext";
                 origReason = "Cross-border return shipment with blank OriginCountry cannot inherit DestinationFacility country.";
+                origRes = (false, null, CountryNormalizationStatus.PendingNormalization, false, true);
+            }
+            else if (string.IsNullOrWhiteSpace(ret.OriginCountry) && activeAddrByOrder.TryGetValue(ret.OrderId, out var unverifiedOrig) &&
+                     unverifiedOrig.CountryNormalizationStatus != CountryNormalizationStatus.Normalized)
+            {
+                origSrc = "QuarantinedOrderAddress";
+                origReason = "Quarantined original order shipping address cannot verify return OriginCountry.";
                 origRes = (false, null, CountryNormalizationStatus.PendingNormalization, false, true);
             }
             else
             {
                 origRes = EvaluateField(
                     ret.OriginCountry, ret.OriginState, ret.OriginPostalCode,
-                    verifiedParentCountry: originParentHint, parentHintSource: "OriginalOrderShippingAddress",
+                    verifiedParentCountry: orderDestCountry, parentHintSource: "OriginalOrderShippingAddress",
                     timeZoneHint: null, allowTimeZoneInference: false, requireVerifiedParentForInference: true,
                     isHistoricalImmutable: isHistorical, out origChanged, out origSrc, out origReason);
             }
@@ -456,11 +628,8 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             }
             else quarantined++;
 
-            if (origRes.ShouldWriteAudit)
-            {
-                RecordAudit(nameof(ReturnShipment), ret.Id, nameof(ReturnShipment.OriginCountry), rawOrigin, origRes.TargetCode,
-                    origRes.Status, isHistorical, origRes.WasInferred, origSrc, origReason, ret.OriginFacilityId, ret.ClientId);
-            }
+            ReconcileAudit(nameof(ReturnShipment), ret.Id, nameof(ReturnShipment.OriginCountry), rawOrigin, origRes.TargetCode,
+                origRes.Status, isHistorical, origRes.WasInferred, origSrc, origReason, ret.OriginFacilityId, ret.ClientId, origRes.NeedsInitialAudit);
 
             // DestinationCountry
             totalEvaluated++;
@@ -484,11 +653,8 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             }
             else quarantined++;
 
-            if (destRes.ShouldWriteAudit)
-            {
-                RecordAudit(nameof(ReturnShipment), ret.Id, nameof(ReturnShipment.DestinationCountry), rawDest, destRes.TargetCode,
-                    destRes.Status, isHistorical, destRes.WasInferred, destSrc, destReason, ret.DestinationFacilityId, ret.ClientId);
-            }
+            ReconcileAudit(nameof(ReturnShipment), ret.Id, nameof(ReturnShipment.DestinationCountry), rawDest, destRes.TargetCode,
+                destRes.Status, isHistorical, destRes.WasInferred, destSrc, destReason, ret.DestinationFacilityId, ret.ClientId, destRes.NeedsInitialAudit);
 
             ret.CountryNormalizationStatus =
                 origRes.Status == CountryNormalizationStatus.Normalized && destRes.Status == CountryNormalizationStatus.Normalized
@@ -497,8 +663,7 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
         }
 
         // 6. CarrierContractualSlaPolicy (Mutable when IsActive, historical when !IsActive; never infer destination from OriginFacility)
-        var slaPolicies = await _db.CarrierContractualSlaPolicies.IgnoreQueryFilters().ToListAsync(cancellationToken);
-        foreach (var pol in slaPolicies)
+        foreach (var pol in allSlaPolicies)
         {
             totalEvaluated++;
             bool isHistorical = !pol.IsActive;
@@ -523,16 +688,12 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             }
             else quarantined++;
 
-            if (res.ShouldWriteAudit)
-            {
-                RecordAudit(nameof(CarrierContractualSlaPolicy), pol.Id, nameof(CarrierContractualSlaPolicy.DestinationCountry),
-                    rawPol, res.TargetCode, res.Status, isHistorical, res.WasInferred, src, reason, pol.OriginFacilityId, pol.ClientId);
-            }
+            ReconcileAudit(nameof(CarrierContractualSlaPolicy), pol.Id, nameof(CarrierContractualSlaPolicy.DestinationCountry),
+                rawPol, res.TargetCode, res.Status, isHistorical, res.WasInferred, src, reason, pol.OriginFacilityId, pol.ClientId, res.NeedsInitialAudit);
         }
 
         // 7. CarrierSlaComplianceRecord (Always Immutable Historical Shipment Evidence)
-        var slaRecords = await _db.CarrierSlaComplianceRecords.IgnoreQueryFilters().ToListAsync(cancellationToken);
-        foreach (var rec in slaRecords)
+        foreach (var rec in allSlaRecords)
         {
             totalEvaluated++;
             var res = EvaluateField(
@@ -549,11 +710,8 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             }
             else quarantined++;
 
-            if (res.ShouldWriteAudit)
-            {
-                RecordAudit(nameof(CarrierSlaComplianceRecord), rec.Id, nameof(CarrierSlaComplianceRecord.DestinationCountry),
-                    rec.DestinationCountry, res.TargetCode, res.Status, true, res.WasInferred, src, reason, rec.FacilityId, rec.ClientId);
-            }
+            ReconcileAudit(nameof(CarrierSlaComplianceRecord), rec.Id, nameof(CarrierSlaComplianceRecord.DestinationCountry),
+                rec.DestinationCountry, res.TargetCode, res.Status, true, res.WasInferred, src, reason, rec.FacilityId, rec.ClientId, res.NeedsInitialAudit);
         }
 
         await _db.SaveChangesAsync(cancellationToken);
@@ -576,6 +734,8 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
         private readonly Dictionary<string, CountryNormalizationAlias> _aliasesByKey;
         private readonly Dictionary<string, HashSet<string>> _divisionCountriesByToken;
         private readonly Dictionary<string, string> _timeZoneCountries;
+
+        public bool HasActiveProfiles => _profilesByCode.Count > 0;
 
         private CatalogIndex(
             Dictionary<string, CountryProfile> profilesByCode,
@@ -699,11 +859,11 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             if (TryGetCanonicalCountry(rawCountry, out var code, out var source))
             {
                 return new CountryNormalizationResolution(true, code, CountryNormalizationStatus.Normalized, false, source,
-                    $"Resolved '{rawCountry.Trim()}' -> '{code}' via {source}.");
+                    $"Resolved to '{code}' via {source}.");
             }
 
             return new CountryNormalizationResolution(false, null, CountryNormalizationStatus.PendingNormalization, false, null,
-                $"Unrecognized country value '{rawCountry.Trim()}' not found in active CountryProfile or CountryNormalizationAlias catalog.");
+                "Unrecognized country token not found in active CountryProfile or CountryNormalizationAlias catalog.");
         }
 
         public CountryNormalizationResolution EvaluateWithGeoAndParent(
@@ -716,16 +876,28 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             bool allowTimeZoneInference,
             bool requireVerifiedParentForInference)
         {
+            string? tzCountry = allowTimeZoneInference && !string.IsNullOrWhiteSpace(timeZoneHint) &&
+                                _timeZoneCountries.TryGetValue(timeZoneHint.Trim(), out var tzc)
+                ? tzc
+                : null;
+
             // Explicit country value branch
             if (!string.IsNullOrWhiteSpace(rawCountry))
             {
                 if (!TryGetCanonicalCountry(rawCountry, out var code, out var source) || code == null)
                 {
                     return new CountryNormalizationResolution(false, null, CountryNormalizationStatus.PendingNormalization, false, null,
-                        $"Unrecognized country value '{rawCountry.Trim()}' not found in active CountryProfile or CountryNormalizationAlias catalog.");
+                        "Unrecognized country token not found in active CountryProfile or CountryNormalizationAlias catalog.");
                 }
 
-                // Detect direct geographic conflict when subdivision exclusively matches another active country AND postal fails claimed country
+                // R02: Timezone conflict on Facility when TimeZoneProfile is country-bound
+                if (allowTimeZoneInference && tzCountry != null && !string.Equals(tzCountry, code, StringComparison.OrdinalIgnoreCase))
+                {
+                    return new CountryNormalizationResolution(false, null, CountryNormalizationStatus.PendingNormalization, false, null,
+                        $"Conflicting timezone evidence: configured timezone maps to '{tzCountry}' while country indicates '{code}'.");
+                }
+
+                // Detect geographic conflict when subdivision exclusively matches another active country AND postal fails claimed country or matches division country
                 var divCountry = ResolveUniqueDivisionCountry(stateOrProvince, out _);
                 if (divCountry != null && !string.Equals(divCountry, code, StringComparison.OrdinalIgnoreCase))
                 {
@@ -735,32 +907,27 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
                     if (!claimedPostalValid || divPostalValid)
                     {
                         return new CountryNormalizationResolution(false, null, CountryNormalizationStatus.PendingNormalization, false, null,
-                            $"Conflicting geographic evidence: state/province '{stateOrProvince?.Trim()}' matches '{divCountry}' while country indicates '{code}'.");
+                            $"Conflicting geographic evidence: subdivision matches '{divCountry}' while country indicates '{code}'.");
                     }
                 }
 
                 return new CountryNormalizationResolution(true, code, CountryNormalizationStatus.Normalized, false, source,
-                    $"Mapped '{rawCountry.Trim()}' -> '{code}' via {source}.");
+                    $"Normalized to canonical '{code}' via {source}.");
             }
 
-            // Blank/null country branch — strictly requires deterministic domestic geo + non-facility parent context
+            // Blank/null country branch — strictly requires deterministic domestic geo + non-facility verified parent context
             if (string.IsNullOrWhiteSpace(stateOrProvince) || string.IsNullOrWhiteSpace(postalCode))
             {
                 return new CountryNormalizationResolution(false, null, CountryNormalizationStatus.PendingNormalization, false, null,
-                    "Blank/null country lacks both domestic subdivision and postal code evidence; parent warehouse facility is never inherited blindly.");
+                    "Blank/null country lacks both verified domestic subdivision and postal code evidence.");
             }
 
             var divResolved = ResolveUniqueDivisionCountry(stateOrProvince, out var divMatches);
             if (divMatches.Count > 1)
             {
                 return new CountryNormalizationResolution(false, null, CountryNormalizationStatus.PendingNormalization, false, null,
-                    $"Ambiguous subdivision '{stateOrProvince.Trim()}' matches multiple countries ({string.Join(",", divMatches)}).");
+                    $"Ambiguous subdivision matches multiple active countries ({string.Join(",", divMatches)}).");
             }
-
-            string? tzCountry = allowTimeZoneInference && !string.IsNullOrWhiteSpace(timeZoneHint) &&
-                                _timeZoneCountries.TryGetValue(timeZoneHint.Trim(), out var tzc)
-                ? tzc
-                : null;
 
             string? candidate = null;
             string? effectiveSource = null;
@@ -770,13 +937,13 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
                 if (divResolved != null && !string.Equals(divResolved, verifiedParentCountry, StringComparison.OrdinalIgnoreCase))
                 {
                     return new CountryNormalizationResolution(false, null, CountryNormalizationStatus.PendingNormalization, false, null,
-                        $"Conflicting evidence: subdivision '{stateOrProvince.Trim()}' belongs to '{divResolved}' while parent context '{parentHintSource}' indicates '{verifiedParentCountry}'.");
+                        $"Conflicting evidence: subdivision belongs to '{divResolved}' while verified parent '{parentHintSource}' indicates '{verifiedParentCountry}'.");
                 }
 
                 if (divResolved == null)
                 {
                     return new CountryNormalizationResolution(false, null, CountryNormalizationStatus.PendingNormalization, false, null,
-                        $"Unverified subdivision '{stateOrProvince.Trim()}' prevents safe parent-context country inference.");
+                        "Unverified subdivision prevents deterministic parent-context country inference.");
                 }
 
                 candidate = divResolved;
@@ -787,7 +954,7 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
                 if (tzCountry != null && !string.Equals(tzCountry, divResolved, StringComparison.OrdinalIgnoreCase))
                 {
                     return new CountryNormalizationResolution(false, null, CountryNormalizationStatus.PendingNormalization, false, null,
-                        $"Conflicting evidence: timezone '{timeZoneHint}' indicates '{tzCountry}' while subdivision '{stateOrProvince.Trim()}' belongs to '{divResolved}'.");
+                        $"Conflicting timezone evidence: configured timezone maps to '{tzCountry}' while subdivision belongs to '{divResolved}'.");
                 }
 
                 candidate = divResolved;
@@ -799,16 +966,15 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             if (candidate == null || !_profilesByCode.TryGetValue(candidate, out var profile))
             {
                 return new CountryNormalizationResolution(false, null, CountryNormalizationStatus.PendingNormalization, false, null,
-                    "Orphan or unverified blank country without deterministic parent and domestic geographic evidence.");
+                    "Orphan or unverified blank country without verified parent and domestic geographic evidence.");
             }
 
             if (!profile.IsSyntacticallyValidPostalCode(postalCode, out _))
             {
                 return new CountryNormalizationResolution(false, null, CountryNormalizationStatus.PendingNormalization, false, null,
-                    $"Unsupported or conflicting postal code '{postalCode.Trim()}' for inferred country '{candidate}'.");
+                    $"Unsupported or conflicting postal code syntax for inferred country '{candidate}'.");
             }
 
-            // Reject postal codes matching a different active country when candidate is ambiguous vs postal format
             return new CountryNormalizationResolution(true, candidate, CountryNormalizationStatus.Normalized, true, effectiveSource,
                 $"Deterministically inferred '{candidate}' via {effectiveSource}.");
         }

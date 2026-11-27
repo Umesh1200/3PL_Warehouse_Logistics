@@ -22,7 +22,7 @@ public class Supplier : AuditableEntity<Guid>, ITenantEntity, ISoftDeletable
     public string? State { get; set; }
     public string? PostalCode { get; set; }
     public string? Country { get; set; }
-    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.PendingNormalization;
     public bool IsActive { get; set; } = true;
 
     // Soft delete

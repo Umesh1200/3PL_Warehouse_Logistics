@@ -201,9 +201,13 @@ public class TransportationProjectionService : ITransportationProjectionService
                     estimatedDeliveryDateUtc: committedEdd,
                     contractualTransitDays: transitCommitmentDays,
                     slaPolicyVersion: policyVersion,
-                    slaPolicyId: policyId);
+                    slaPolicyId: policyId,
+                    destinationCountry: policy?.DestinationCountry ?? string.Empty);
 
                 compliance.EvaluationStatus = evalStatus;
+                compliance.CountryNormalizationStatus = policy != null && policy.CountryNormalizationStatus == CountryNormalizationStatus.Normalized
+                    ? CountryNormalizationStatus.Normalized
+                    : CountryNormalizationStatus.PendingNormalization;
                 await _dbContext.CarrierSlaComplianceRecords.AddAsync(compliance, cancellationToken);
             }
         }

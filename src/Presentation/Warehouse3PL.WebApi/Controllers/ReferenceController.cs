@@ -142,11 +142,9 @@ public sealed class ReferenceController : BaseApiController
     [HttpGet("normalization-quarantine")]
     [HasAnyPermission(
         Permissions.Global.NormalizationView,
-        Permissions.Global.ComplianceView,
-        Permissions.Global.ComplianceManage,
-        Permissions.Global.ReferenceView,
         Permissions.Facilities.Manage)]
     [ProducesResponseType(typeof(PagedNormalizationQuarantineResponse), StatusCodes.Status200OK)]
+    [ProducesResponseType(StatusCodes.Status400BadRequest)]
     [ProducesResponseType(StatusCodes.Status401Unauthorized)]
     [ProducesResponseType(StatusCodes.Status403Forbidden)]
     public async Task<ActionResult<PagedNormalizationQuarantineResponse>> GetNormalizationQuarantine(

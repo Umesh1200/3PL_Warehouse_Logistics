@@ -23,4 +23,6 @@ public class CountryNormalizationAudit
     public Guid? ClientId { get; set; }
     public string CorrelationBatchId { get; set; } = string.Empty;
     public DateTime RecordedAtUtc { get; set; } = DateTime.UtcNow;
+    public string InitialCorrelationBatchId { get; set; } = string.Empty;
+    public DateTime InitialRecordedAtUtc { get; set; } = DateTime.UtcNow;
 }

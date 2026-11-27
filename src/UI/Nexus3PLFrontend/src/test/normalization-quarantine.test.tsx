@@ -204,4 +204,140 @@ describe('MDM-1.6: Country Normalization Quarantine Diagnostics Page', () => {
       expect(screen.getByText('Staff Authorization Required')).toBeDefined();
     });
   });
+
+  it('scopes facilities:manage callers to activeFacility, renders PII redaction and pagination, and blocks unprivileged Staff', async () => {
+    tokenManager.setTokens('fac-mgr-jwt', 'fac-mgr-ref');
+
+    const mockFacMgrProfile = {
+      userId: 'fac-mgr-1',
+      email: 'facmgr@nexus3pl.local',
+      firstName: 'Hub',
+      lastName: 'Manager',
+      userType: UserType.Staff,
+      status: UserStatus.Active,
+      tenantId: null,
+      companyName: null,
+      roles: ['OperationsManager'],
+      permissions: ['facilities:manage', 'facilities:view'],
+    };
+
+    const requestedUrls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input.toString();
+        requestedUrls.push(url);
+        if (url.endsWith('/api/v1/auth/me')) {
+          return { ok: true, status: 200, json: async () => mockFacMgrProfile } as Response;
+        }
+        if (url.endsWith('/api/v1/facilities')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => [
+              { id: 'fac-ord-1', facilityCode: 'FAC-ORD', name: 'Chicago Hub', countryCode: 'US', timezone: 'America/Chicago', isActive: true },
+            ],
+          } as Response;
+        }
+        if (url.includes('/api/v1/reference/normalization-quarantine')) {
+          const isPage2 = url.includes('pageNumber=2');
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              items: [
+                {
+                  auditId: isPage2 ? 'aud-p2' : 'aud-p1',
+                  entityType: 'Customer',
+                  entityId: isPage2 ? '33333333-3333-3333-3333-333333333333' : '44444444-4444-4444-4444-444444444444',
+                  fieldName: 'DefaultCountryCode',
+                  originalCountryValue: '[REDACTED_POTENTIAL_PII]',
+                  normalizedCountryCode: null,
+                  normalizationStatus: 'PendingNormalization',
+                  preservedHistoricalValue: false,
+                  wasInferredFromParent: false,
+                  inferenceSource: null,
+                  reason: 'Unrecognized value in Customer.DefaultCountryCode (potential PII redacted).',
+                  facilityId: 'fac-ord-1',
+                  facilityCode: 'FAC-ORD',
+                  clientId: 'cli-1',
+                  correlationBatchId: 'R05-BATCH',
+                  recordedAtUtc: '2026-11-27T10:00:00Z',
+                },
+              ],
+              totalCount: 25,
+              pageNumber: isPage2 ? 2 : 1,
+              pageSize: 20,
+              totalPages: 2,
+              pendingCount: 25,
+              normalizedCount: 0,
+            }),
+          } as Response;
+        }
+        return { ok: true, status: 200, json: async () => ({}) } as Response;
+      })
+    );
+
+    const { unmount } = render(
+      <RouterProvider initialPath="/app/admin/normalization-quarantine">
+        <AuthProvider>
+          <FacilityProvider>
+            <NormalizationQuarantinePage />
+          </FacilityProvider>
+        </AuthProvider>
+      </RouterProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.getByText('[REDACTED_POTENTIAL_PII]')).toBeDefined();
+      expect(screen.getAllByText('FAC-ORD').length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByText(/Showing page 1 of 2/)).toBeDefined();
+    });
+
+    expect(requestedUrls.some((u) => u.includes('/api/v1/reference/normalization-quarantine') && u.includes('facilityId=fac-ord-1'))).toBe(true);
+
+    fireEvent.click(screen.getByRole('button', { name: 'Next' }));
+    await waitFor(() => {
+      expect(screen.getByText(/Showing page 2 of 2/)).toBeDefined();
+    });
+    unmount();
+
+    // Unprivileged staff without global:normalization:view or facilities:manage is blocked client-side before querying API
+    tokenManager.setTokens('unpriv-staff-jwt', 'unpriv-ref');
+    const unprivCalls: string[] = [];
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async (input: RequestInfo | URL) => {
+        const url = input.toString();
+        unprivCalls.push(url);
+        if (url.endsWith('/api/v1/auth/me')) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({
+              ...mockFacMgrProfile,
+              roles: ['WarehouseOperator'],
+              permissions: ['inventory:view'],
+            }),
+          } as Response;
+        }
+        return { ok: true, status: 200, json: async () => [] } as Response;
+      })
+    );
+
+    render(
+      <RouterProvider initialPath="/app/admin/normalization-quarantine">
+        <AuthProvider>
+          <FacilityProvider>
+            <NormalizationQuarantinePage />
+          </FacilityProvider>
+        </AuthProvider>
+      </RouterProvider>
+    );
+
+    await waitFor(() => {
+      expect(screen.queryByText('Country Normalization & Quarantine Diagnostics')).toBeNull();
+    });
+    expect(unprivCalls.some((u) => u.includes('/api/v1/reference/normalization-quarantine'))).toBe(false);
+  });
 });

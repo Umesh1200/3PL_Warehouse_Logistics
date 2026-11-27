@@ -15,6 +15,8 @@ public record FacilityDto
     public string? StateOrProvince { get; init; }
     public string? PostalCode { get; init; }
     public string CountryCode { get; init; } = string.Empty;
+    [System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
+    public Warehouse3PL.Domain.Enums.CountryNormalizationStatus CountryNormalizationStatus { get; init; } = Warehouse3PL.Domain.Enums.CountryNormalizationStatus.PendingNormalization;
     public string Timezone { get; init; } = "UTC";
     public Guid? DefaultLegalEntityId { get; init; }
     public string? DefaultCurrencyCode { get; init; }

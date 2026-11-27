@@ -18,8 +18,8 @@ public class Facility : AuditableEntity<Guid>, ISoftDeletable
     public string? City { get; set; }
     public string? StateOrProvince { get; set; }
     public string? PostalCode { get; set; }
-    public string CountryCode { get; set; } = "USA";
-    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
+    public string CountryCode { get; set; } = string.Empty;
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.PendingNormalization;
     public string Timezone { get; set; } = "America/Chicago";
     public Guid? DefaultLegalEntityId { get; set; }
     public string? DefaultCurrencyCode { get; set; }

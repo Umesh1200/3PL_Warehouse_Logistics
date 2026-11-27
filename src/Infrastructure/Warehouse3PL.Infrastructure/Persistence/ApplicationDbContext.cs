@@ -17,6 +17,8 @@ using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Entities.Reference;
 using Warehouse3PL.Domain.Entities.Security;
+using Warehouse3PL.Domain.Enums;
+using Warehouse3PL.Domain.Exceptions;
 using Warehouse3PL.Infrastructure.Persistence.Interceptors;
 
 namespace Warehouse3PL.Infrastructure.Persistence;
@@ -71,6 +73,8 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             return base.SaveChanges(acceptAllChangesOnSuccess);
         }
 
+        ReconcileCountryNormalizationLifecycleSync();
+
         var pendingScopes = ConfigurationScopeMapper.ExtractImpactedScopes(ChangeTracker);
         if (pendingScopes.Count == 0)
         {
@@ -93,6 +97,8 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
         }
 
+        await ReconcileCountryNormalizationLifecycleAsync(cancellationToken);
+
         var pendingScopes = ConfigurationScopeMapper.ExtractImpactedScopes(ChangeTracker);
         if (pendingScopes.Count == 0)
         {
@@ -105,6 +111,199 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         }
 
         return await SaveWithRelationalScopeEpochsAsync(pendingScopes, acceptAllChangesOnSuccess, cancellationToken);
+    }
+
+    private static bool IsCountryLifecycleTarget(object entity) =>
+        entity is Facility or Customer or Supplier or ShippingAddress or ReturnShipment
+            or CarrierContractualSlaPolicy or CarrierSlaComplianceRecord;
+
+    private void ReconcileCountryNormalizationLifecycleSync()
+    {
+        var targets = ChangeTracker.Entries()
+            .Where(e => e.State is EntityState.Added or EntityState.Modified && IsCountryLifecycleTarget(e.Entity))
+            .ToList();
+        if (targets.Count == 0) return;
+
+        var activeCodes = CountryProfiles.AsNoTracking()
+            .Where(c => c.IsActive)
+            .Select(c => c.CountryCode)
+            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var localCp in ChangeTracker.Entries<CountryProfile>().Where(e => e.State != EntityState.Deleted))
+        {
+            if (localCp.Entity.IsActive) activeCodes.Add(localCp.Entity.CountryCode.Trim());
+            else activeCodes.Remove(localCp.Entity.CountryCode.Trim());
+        }
+
+        var localPreserved = CountryNormalizationAudits.Local
+            .Where(a => a.PreservedHistoricalValue && a.NormalizationStatus == CountryNormalizationStatus.Normalized)
+            .GroupBy(a => (a.EntityType, a.EntityId, a.FieldName))
+            .ToDictionary(g => g.Key, g => g.First().OriginalCountryValue);
+
+        var modifiedIds = targets
+            .Where(t => t.State == EntityState.Modified)
+            .Select(t => ((BaseEntity<Guid>)t.Entity).Id)
+            .Distinct()
+            .ToList();
+
+        if (modifiedIds.Count > 0)
+        {
+            foreach (var row in CountryNormalizationAudits.AsNoTracking()
+                .Where(a => modifiedIds.Contains(a.EntityId) && a.PreservedHistoricalValue && a.NormalizationStatus == CountryNormalizationStatus.Normalized)
+                .Select(a => new { a.EntityType, a.EntityId, a.FieldName, a.OriginalCountryValue })
+                .ToList())
+            {
+                localPreserved.TryAdd((row.EntityType, row.EntityId, row.FieldName), row.OriginalCountryValue);
+            }
+        }
+
+        ReconcileCountryEntries(targets, activeCodes, localPreserved);
+    }
+
+    private async Task ReconcileCountryNormalizationLifecycleAsync(CancellationToken cancellationToken)
+    {
+        var targets = ChangeTracker.Entries()
+            .Where(e => e.State is EntityState.Added or EntityState.Modified && IsCountryLifecycleTarget(e.Entity))
+            .ToList();
+        if (targets.Count == 0) return;
+
+        var dbCodes = await CountryProfiles.AsNoTracking()
+            .Where(c => c.IsActive)
+            .Select(c => c.CountryCode)
+            .ToListAsync(cancellationToken);
+        var activeCodes = dbCodes.ToHashSet(StringComparer.OrdinalIgnoreCase);
+
+        foreach (var localCp in ChangeTracker.Entries<CountryProfile>().Where(e => e.State != EntityState.Deleted))
+        {
+            if (localCp.Entity.IsActive) activeCodes.Add(localCp.Entity.CountryCode.Trim());
+            else activeCodes.Remove(localCp.Entity.CountryCode.Trim());
+        }
+
+        var localPreserved = CountryNormalizationAudits.Local
+            .Where(a => a.PreservedHistoricalValue && a.NormalizationStatus == CountryNormalizationStatus.Normalized)
+            .GroupBy(a => (a.EntityType, a.EntityId, a.FieldName))
+            .ToDictionary(g => g.Key, g => g.First().OriginalCountryValue);
+
+        var modifiedIds = targets
+            .Where(t => t.State == EntityState.Modified)
+            .Select(t => ((BaseEntity<Guid>)t.Entity).Id)
+            .Distinct()
+            .ToList();
+
+        if (modifiedIds.Count > 0)
+        {
+            var dbPreserved = await CountryNormalizationAudits.AsNoTracking()
+                .Where(a => modifiedIds.Contains(a.EntityId) && a.PreservedHistoricalValue && a.NormalizationStatus == CountryNormalizationStatus.Normalized)
+                .Select(a => new { a.EntityType, a.EntityId, a.FieldName, a.OriginalCountryValue })
+                .ToListAsync(cancellationToken);
+            foreach (var row in dbPreserved)
+            {
+                localPreserved.TryAdd((row.EntityType, row.EntityId, row.FieldName), row.OriginalCountryValue);
+            }
+        }
+
+        ReconcileCountryEntries(targets, activeCodes, localPreserved);
+    }
+
+    private static bool IsValidCatalogCanonicalCode(string? raw, HashSet<string> activeCodes)
+    {
+        if (string.IsNullOrWhiteSpace(raw) || activeCodes.Count == 0)
+        {
+            return false;
+        }
+
+        var trimmed = raw.Trim();
+        return trimmed.Length == 2
+            && trimmed == trimmed.ToUpperInvariant()
+            && trimmed.All(char.IsAsciiLetterUpper)
+            && activeCodes.Contains(trimmed);
+    }
+
+    private static void ReconcileCountryEntries(
+        IReadOnlyList<Microsoft.EntityFrameworkCore.ChangeTracking.EntityEntry> targets,
+        HashSet<string> activeCodes,
+        IReadOnlyDictionary<(string EntityType, Guid EntityId, string FieldName), string?> preservedHistoricalValues)
+    {
+        foreach (var entry in targets)
+        {
+            var entityId = ((BaseEntity<Guid>)entry.Entity).Id;
+            var statusProp = entry.Property(nameof(Facility.CountryNormalizationStatus));
+            var currentStatus = (CountryNormalizationStatus)(statusProp.CurrentValue ?? CountryNormalizationStatus.PendingNormalization);
+            bool statusExplicitlyClaimedNormalized = currentStatus == CountryNormalizationStatus.Normalized
+                && (entry.State == EntityState.Added || statusProp.IsModified);
+
+            string entityName = entry.Entity.GetType().Name;
+            bool allCanonical = true;
+            bool allHistoricalPreserved = true;
+            bool anyCountryFieldModified = entry.State == EntityState.Added;
+            string? firstNonCanonicalRaw = null;
+
+            void EvaluateField(string fieldName, string? val, bool isFieldModified)
+            {
+                if (isFieldModified) anyCountryFieldModified = true;
+                if (IsValidCatalogCanonicalCode(val, activeCodes)) return;
+
+                allCanonical = false;
+                firstNonCanonicalRaw ??= val;
+                if (!preservedHistoricalValues.TryGetValue((entityName, entityId, fieldName), out var origHistVal) ||
+                    !string.Equals((origHistVal ?? string.Empty).Trim(), (val ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase))
+                {
+                    allHistoricalPreserved = false;
+                }
+            }
+
+            switch (entry.Entity)
+            {
+                case Facility f:
+                    EvaluateField(nameof(Facility.CountryCode), f.CountryCode, entry.Property(nameof(Facility.CountryCode)).IsModified);
+                    break;
+                case Customer c:
+                    EvaluateField(nameof(Customer.DefaultCountryCode), c.DefaultCountryCode, entry.Property(nameof(Customer.DefaultCountryCode)).IsModified);
+                    break;
+                case Supplier s:
+                    EvaluateField(nameof(Supplier.Country), s.Country, entry.Property(nameof(Supplier.Country)).IsModified);
+                    break;
+                case ShippingAddress sa:
+                    EvaluateField(nameof(ShippingAddress.CountryCode), sa.CountryCode, entry.Property(nameof(ShippingAddress.CountryCode)).IsModified);
+                    break;
+                case ReturnShipment rs:
+                    EvaluateField(nameof(ReturnShipment.OriginCountry), rs.OriginCountry, entry.Property(nameof(ReturnShipment.OriginCountry)).IsModified);
+                    EvaluateField(nameof(ReturnShipment.DestinationCountry), rs.DestinationCountry, entry.Property(nameof(ReturnShipment.DestinationCountry)).IsModified);
+                    break;
+                case CarrierContractualSlaPolicy p:
+                    EvaluateField(nameof(CarrierContractualSlaPolicy.DestinationCountry), p.DestinationCountry, entry.Property(nameof(CarrierContractualSlaPolicy.DestinationCountry)).IsModified);
+                    break;
+                case CarrierSlaComplianceRecord r:
+                    EvaluateField(nameof(CarrierSlaComplianceRecord.DestinationCountry), r.DestinationCountry, entry.Property(nameof(CarrierSlaComplianceRecord.DestinationCountry)).IsModified);
+                    break;
+            }
+
+            if (allCanonical)
+            {
+                if (currentStatus != CountryNormalizationStatus.Normalized && anyCountryFieldModified)
+                {
+                    statusProp.CurrentValue = CountryNormalizationStatus.Normalized;
+                }
+                continue;
+            }
+
+            if (allHistoricalPreserved && entry.State == EntityState.Modified && !anyCountryFieldModified)
+            {
+                continue;
+            }
+
+            if (statusExplicitlyClaimedNormalized)
+            {
+                throw new ValidationException(
+                    nameof(Facility.CountryNormalizationStatus),
+                    $"{entityName} cannot declare CountryNormalizationStatus='Normalized' for unnormalized, blank, or unverified country value '{firstNonCanonicalRaw ?? "<blank>"}'.");
+            }
+
+            if (currentStatus != CountryNormalizationStatus.PendingNormalization)
+            {
+                statusProp.CurrentValue = CountryNormalizationStatus.PendingNormalization;
+            }
+        }
     }
 
     private int SaveWithInMemoryScopeEpochsSync(

@@ -31,6 +31,8 @@ public class ReturnShipmentResult
     public decimal? RateCharged { get; set; }
     public string Currency { get; set; } = "USD";
     public ReturnShipmentStatus Status { get; set; }
+    [System.Text.Json.Serialization.JsonConverter(typeof(System.Text.Json.Serialization.JsonStringEnumConverter))]
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.PendingNormalization;
     public bool IsDuplicate { get; set; }
     public bool? CarrierCancellationConfirmed { get; set; }
     public string? CarrierCancellationNotes { get; set; }

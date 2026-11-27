@@ -48,7 +48,7 @@ public class ReturnShipment : AuditableEntity<Guid>, ITenantEntity
     public string OriginCity { get; set; } = string.Empty;
     public string OriginState { get; set; } = string.Empty;
     public string OriginPostalCode { get; set; } = string.Empty;
-    public string OriginCountry { get; set; } = "USA";
+    public string OriginCountry { get; set; } = string.Empty;
 
     // Destination Address (receiving warehouse facility)
     public string DestinationAddressLine1 { get; set; } = string.Empty;
@@ -56,8 +56,8 @@ public class ReturnShipment : AuditableEntity<Guid>, ITenantEntity
     public string DestinationCity { get; set; } = string.Empty;
     public string DestinationState { get; set; } = string.Empty;
     public string DestinationPostalCode { get; set; } = string.Empty;
-    public string DestinationCountry { get; set; } = "USA";
-    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.Normalized;
+    public string DestinationCountry { get; set; } = string.Empty;
+    public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.PendingNormalization;
 
     // Return Lifecycle Status
     public ReturnShipmentStatus Status { get; set; } = ReturnShipmentStatus.Authorized;

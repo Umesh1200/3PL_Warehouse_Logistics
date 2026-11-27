@@ -2,6 +2,7 @@ using System.Security.Cryptography;
 using System.Text;
 using Microsoft.EntityFrameworkCore;
 using Microsoft.Extensions.Logging;
+using Warehouse3PL.Application.Common.Helpers;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Outbound;
@@ -235,7 +236,16 @@ public class ReturnShipmentService : IReturnShipmentService
 
         var labelObjectKey = $"tenants/{authorization.ClientId}/returns/{authorization.Id:N}/labels/{carrierResponse.TrackingNumber}.{labelFormat.ToLowerInvariant()}";
 
-        // 11. Create ReturnShipment Aggregate
+        // 11. Create ReturnShipment Aggregate with catalog-validated country normalization status
+        var (normOriginCountry, origStatus) = await CountryNormalizationWriteHelper.ResolveForWriteAsync(
+            _context,
+            originAddress.CountryCode,
+            cancellationToken);
+        var (normDestCountry, destStatus) = await CountryNormalizationWriteHelper.ResolveForWriteAsync(
+            _context,
+            destinationAddress.CountryCode,
+            cancellationToken);
+
         var returnShipment = new ReturnShipment
         {
             Id = Guid.NewGuid(),
@@ -267,13 +277,16 @@ public class ReturnShipmentService : IReturnShipmentService
             OriginCity = originAddress.City,
             OriginState = originAddress.StateOrProvince,
             OriginPostalCode = originAddress.PostalCode,
-            OriginCountry = originAddress.CountryCode,
+            OriginCountry = normOriginCountry ?? string.Empty,
             DestinationAddressLine1 = destinationAddress.StreetLine1,
             DestinationAddressLine2 = destinationAddress.StreetLine2,
             DestinationCity = destinationAddress.City,
             DestinationState = destinationAddress.StateOrProvince,
             DestinationPostalCode = destinationAddress.PostalCode,
-            DestinationCountry = destinationAddress.CountryCode,
+            DestinationCountry = normDestCountry ?? string.Empty,
+            CountryNormalizationStatus = origStatus == CountryNormalizationStatus.Normalized && destStatus == CountryNormalizationStatus.Normalized
+                ? CountryNormalizationStatus.Normalized
+                : CountryNormalizationStatus.PendingNormalization,
             Status = ReturnShipmentStatus.Authorized
         };
 
@@ -366,7 +379,7 @@ public class ReturnShipmentService : IReturnShipmentService
                 City = authorization.Order?.ShippingAddress?.City ?? "OriginCity",
                 StateOrProvince = authorization.Order?.ShippingAddress?.StateOrProvince ?? "KY",
                 PostalCode = authorization.Order?.ShippingAddress?.PostalCode ?? "40202",
-                CountryCode = authorization.Order?.ShippingAddress?.CountryCode ?? "US"
+                CountryCode = authorization.Order?.ShippingAddress?.CountryCode ?? string.Empty
             };
         }
         else if (authorization.DeliveryException != null &&
@@ -379,7 +392,7 @@ public class ReturnShipmentService : IReturnShipmentService
                 City = authorization.Order?.ShippingAddress?.City ?? "DepotCity",
                 StateOrProvince = authorization.Order?.ShippingAddress?.StateOrProvince ?? "KY",
                 PostalCode = authorization.Order?.ShippingAddress?.PostalCode ?? "40202",
-                CountryCode = "US"
+                CountryCode = authorization.Order?.ShippingAddress?.CountryCode ?? string.Empty
             };
         }
         else if (authorization.Order?.ShippingAddress != null)
@@ -407,7 +420,7 @@ public class ReturnShipmentService : IReturnShipmentService
                 City = "Louisville",
                 StateOrProvince = "KY",
                 PostalCode = "40202",
-                CountryCode = "US"
+                CountryCode = string.Empty
             };
         }
 
@@ -428,7 +441,7 @@ public class ReturnShipmentService : IReturnShipmentService
                 City = !string.IsNullOrWhiteSpace(df.City) ? df.City : "Lexington",
                 StateOrProvince = !string.IsNullOrWhiteSpace(df.StateOrProvince) ? df.StateOrProvince : "KY",
                 PostalCode = !string.IsNullOrWhiteSpace(df.PostalCode) ? df.PostalCode : "40509",
-                CountryCode = !string.IsNullOrWhiteSpace(df.CountryCode) ? df.CountryCode : "US"
+                CountryCode = !string.IsNullOrWhiteSpace(df.CountryCode) ? df.CountryCode : string.Empty
             };
         }
         else
@@ -440,7 +453,7 @@ public class ReturnShipmentService : IReturnShipmentService
                 City = "Lexington",
                 StateOrProvince = "KY",
                 PostalCode = "40509",
-                CountryCode = "US"
+                CountryCode = string.Empty
             };
         }
 
@@ -496,6 +509,7 @@ public class ReturnShipmentService : IReturnShipmentService
             RateCharged = shipment.RateCharged,
             Currency = shipment.Currency,
             Status = shipment.Status,
+            CountryNormalizationStatus = shipment.CountryNormalizationStatus,
             IsDuplicate = isDuplicate,
             CarrierCancellationConfirmed = shipment.CarrierCancellationConfirmed,
             CarrierCancellationNotes = shipment.CarrierCancellationNotes,

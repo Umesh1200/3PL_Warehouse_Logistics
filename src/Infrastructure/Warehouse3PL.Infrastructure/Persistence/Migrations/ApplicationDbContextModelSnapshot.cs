@@ -8785,7 +8785,7 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .ValueGeneratedOnAdd()
                         .HasMaxLength(3)
                         .HasColumnType("character varying(3)")
-                        .HasDefaultValue("USA")
+                        .HasDefaultValue("")
                         .HasColumnName("country_code");
 
                     b.Property<string>("CountryNormalizationStatus")
@@ -16386,6 +16386,16 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasMaxLength(120)
                         .HasColumnType("character varying(120)")
                         .HasColumnName("inference_source");
+
+                    b.Property<string>("InitialCorrelationBatchId")
+                        .IsRequired()
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("initial_correlation_batch_id");
+
+                    b.Property<DateTime>("InitialRecordedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("initial_recorded_at_utc");
 
                     b.Property<string>("NormalizationStatus")
                         .IsRequired()

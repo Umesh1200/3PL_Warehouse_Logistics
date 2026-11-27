@@ -1,6 +1,7 @@
 using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Warehouse3PL.Application.Common.Helpers;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Application.Common.Security;
@@ -43,7 +44,7 @@ public record CreateShippingAddressDto
     public string City { get; init; } = string.Empty;
     public string StateOrProvince { get; init; } = string.Empty;
     public string PostalCode { get; init; } = string.Empty;
-    public string CountryCode { get; init; } = "USA";
+    public string CountryCode { get; init; } = string.Empty;
     public string? PhoneNumber { get; init; }
     public string? DeliveryInstructions { get; init; }
 }
@@ -254,6 +255,11 @@ public class CreateOutboundOrderCommandHandler : IRequestHandler<CreateOutboundO
             Notes = request.Notes
         };
 
+        var (resolvedCountry, resolvedStatus) = await CountryNormalizationWriteHelper.ResolveForWriteAsync(
+            _context,
+            request.ShippingAddress.CountryCode,
+            cancellationToken);
+
         var shippingAddress = new ShippingAddress
         {
             OutboundOrderId = order.Id,
@@ -264,7 +270,8 @@ public class CreateOutboundOrderCommandHandler : IRequestHandler<CreateOutboundO
             City = request.ShippingAddress.City.Trim(),
             StateOrProvince = request.ShippingAddress.StateOrProvince.Trim(),
             PostalCode = request.ShippingAddress.PostalCode.Trim(),
-            CountryCode = request.ShippingAddress.CountryCode.Trim(),
+            CountryCode = resolvedCountry ?? string.Empty,
+            CountryNormalizationStatus = resolvedStatus,
             PhoneNumber = request.ShippingAddress.PhoneNumber?.Trim(),
             DeliveryInstructions = request.ShippingAddress.DeliveryInstructions?.Trim()
         };
@@ -340,6 +347,7 @@ public class CreateOutboundOrderCommandHandler : IRequestHandler<CreateOutboundO
                 StateOrProvince = shippingAddress.StateOrProvince,
                 PostalCode = shippingAddress.PostalCode,
                 CountryCode = shippingAddress.CountryCode,
+                CountryNormalizationStatus = shippingAddress.CountryNormalizationStatus,
                 PhoneNumber = shippingAddress.PhoneNumber,
                 DeliveryInstructions = shippingAddress.DeliveryInstructions
             },

@@ -99,6 +99,7 @@ public sealed class CreateFacilityCommandHandler : IRequestHandler<CreateFacilit
                 StateOrProvince = string.IsNullOrWhiteSpace(request.StateOrProvince) ? null : request.StateOrProvince.Trim(),
                 PostalCode = string.IsNullOrWhiteSpace(request.PostalCode) ? null : request.PostalCode.Trim(),
                 CountryCode = normalizedCountry,
+                CountryNormalizationStatus = Domain.Enums.CountryNormalizationStatus.Normalized,
                 Timezone = normalizedTz,
                 DefaultLegalEntityId = request.DefaultLegalEntityId,
                 DefaultCurrencyCode = normalizedCurrency,
