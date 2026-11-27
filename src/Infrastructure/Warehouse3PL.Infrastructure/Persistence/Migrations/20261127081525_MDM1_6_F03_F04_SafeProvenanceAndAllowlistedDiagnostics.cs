@@ -182,7 +182,7 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         WHERE sa.is_deleted = false AND o.is_deleted = false
                     LOOP
                         -- Case 4: Historically immutable blank country previously inferred -> preserve current value untouched, never guess/fabricate
-                        IF r.was_inferred_from_parent = true
+                        IF (r.was_inferred_from_parent = true OR COALESCE(BTRIM(r.country_code), '') <> '')
                            AND COALESCE(BTRIM(r.original_country_value), '') = ''
                            AND (r.order_status IN ('Allocated', 'PartiallyAllocated', 'InProgress', 'Completed', 'Cancelled')
                                 OR EXISTS (SELECT 1 FROM packages p WHERE p.outbound_order_id = r.order_id AND p.is_deleted = false AND (p.status <> 'Open' OR p.shipment_id IS NOT NULL))) THEN
