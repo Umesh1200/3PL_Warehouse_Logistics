@@ -434,15 +434,23 @@ internal static class Mdm16PostgresCheck
                 custPiiEntity.IsDeleted = true;
                 await upDb.SaveChangesAsync();
 
+                // F01: Runtime SaveChangesAsync must atomically reconcile Pending->Normalized and clean up soft-deleted audits without waiting for BackfillAllAsync
+                var orphRuntimeAudit = await upDb.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "Facility" && a.EntityId == facOrphanId);
+                if (orphRuntimeAudit.NormalizationStatus != CountryNormalizationStatus.Normalized ||
+                    orphRuntimeAudit.NormalizedCountryCode != "NP" ||
+                    orphRuntimeAudit.CorrelationBatchId != "RUNTIME-WRITE" ||
+                    orphRuntimeAudit.InitialCorrelationBatchId == "RUNTIME-WRITE")
+                    throw new InvalidOperationException($"PG F01 runtime Pending->Normalized audit reconciliation or initial provenance failed: Status={orphRuntimeAudit.NormalizationStatus}, Code={orphRuntimeAudit.NormalizedCountryCode}, Batch={orphRuntimeAudit.CorrelationBatchId}, Initial={orphRuntimeAudit.InitialCorrelationBatchId}");
+                if (await upDb.CountryNormalizationAudits.AnyAsync(a => a.EntityType == "Customer" && a.EntityId == custPiiId))
+                    throw new InvalidOperationException("PG F01 runtime soft-deleted entity audit cleanup failed.");
+
                 await svc.BackfillAllAsync("PG16-R03-RECONCILE");
                 var orphAudit = await upDb.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "Facility" && a.EntityId == facOrphanId);
                 if (orphAudit.NormalizationStatus != CountryNormalizationStatus.Normalized ||
                     orphAudit.NormalizedCountryCode != "NP" ||
-                    orphAudit.CorrelationBatchId != "PG16-R03-RECONCILE" ||
-                    orphAudit.InitialCorrelationBatchId == "PG16-R03-RECONCILE")
+                    orphAudit.InitialCorrelationBatchId == "PG16-R03-RECONCILE" ||
+                    orphAudit.InitialCorrelationBatchId == "RUNTIME-WRITE")
                     throw new InvalidOperationException("PG R03 Pending->Normalized audit reconciliation or initial provenance failed.");
-                if (await upDb.CountryNormalizationAudits.AnyAsync(a => a.EntityType == "Customer" && a.EntityId == custPiiId))
-                    throw new InvalidOperationException("PG R03 soft-deleted entity audit cleanup failed.");
 
                 // Restore facOrphan back to PendingNormalization for remaining checks
                 facOrphEntity.CountryCode = "";
