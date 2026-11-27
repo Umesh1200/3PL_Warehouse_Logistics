@@ -10,11 +10,13 @@ Following independent acceptance review of baseline commit `0b9f2cfa553887ab4a4b
 | **Feature Branch** | `feature/phase-7-enterprise-frontend` |
 | **R01–R05 Remediation Baseline SHA** | `0b9f2cfa553887ab4a4b4350f8fddb8dd5b43458` |
 | **R01–R05 Accepted Core Baseline SHA** | `d9f220ad914a4866052b08d40d67cc9ac0c4e058` |
-| **F01–F04 Code, Migration, Tests & Screenshots Verified SHA** | `446d66831207f5f367ccd548443093ec2db3ccff` |
+| **F01–F04 Submitted Baseline SHA** | `9d33c65af32300b17def07dbac4fd42baf51bd6d` |
+| **F03-R01 & F04-R01 Code, Migration, Tests & Screenshots Verified SHA** | `8fc2bbdcbc8f5a1edfd3492cffda6f3f177084b3` |
 | **Preserved `main` / `origin/main` SHA** | `a198f02090194ce4d59dec2941c89d519757f4b4` |
 | **Additive R04 EF Core Migration ID** | `20261127051434_MDM1_6_R04_NormalizationRemediationLifecycle` (original `20261126143014_MDM1_6_LegacyCountryNormalization` left unedited) |
 | **Additive F03/F04 EF Core Migration ID** | `20261127081525_MDM1_6_F03_F04_SafeProvenanceAndAllowlistedDiagnostics` (`20261126143014` and `20261127051434` left unedited) |
-| **GitHub Actions CI (F01–F04 Code + Tests + Live PG 16 & Redis 7)** | [Run `45972220279`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45972220279) (`success` on attempt 1) |
+| **Additive F03-R01/F04-R01 EF Core Migration ID** | `20261127103000_MDM1_6_F03R01_F04R01_SafeUpgradeAndStructuredReasons` (all earlier migrations left unedited) |
+| **GitHub Actions CI (F03-R01/F04-R01 Code + Tests + Live PG 16 & Redis 7)** | [Run `45988011092`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45988011092) (`success` on attempt 1) |
 | **Acceptance Scope Boundary** | Stops cleanly at MDM-1.6 independent acceptance gate; no MDM-2 or subsequent stage started |
 
 ---
@@ -130,14 +132,45 @@ Following independent re-review of baseline `d9f220ad914a4866052b08d40d67cc9ac0c
 
 ---
 
-## 5. Verification Matrix & Observed Results
+## 5. Targeted Closure Corrections (F03-R01 & F04-R01)
+
+Following independent acceptance of **F01** and **F02** at baseline `9d33c65af32300b17def07dbac4fd42baf51bd6d`, the two remaining blockers (**F03-R01** and **F04-R01**) were closed without rewriting any existing migration files or redesigning accepted runtime, locking, RBAC, Redis, or frontend architecture.
+
+### 5.1 F03-R01 — Safe Upgrade Boundary Across the Complete Migration Chain
+- **Migration Compatibility Strategy (Zero Rewritten Migrations):** `20261126143014`, `20261127051434` (`R04`), and `20261127081525` (`F03`) remain completely unedited.
+  - Added [`Mdm16UpgradePreflightService`](../src/Infrastructure/Warehouse3PL.Infrastructure/Services/Reference/Mdm16UpgradePreflightService.cs) (`ExecuteSafeUpgradeAsync` / `CaptureProtectedPreR04SnapshotAsync`) to establish an enforced upgrade boundary **before** `20261127051434` (`R04`) executes on databases where `20261126143014` is already applied.
+  - Before `R04` runs, the preflight validates active `CountryProfile`/`AdministrativeDivision` catalogs on populated DBs and captures a durable protected snapshot (`mdm16_r04_preflight_shipping_snapshots`) of every `shipping_addresses` row's pre-R04 country code, amendment state, and **strict** pre-migration package immutability proof (`p.packed_at_utc <= cna.recorded_at_utc` or `(p.packed_at_utc IS NULL AND p.updated_at IS NULL AND p.created_at <= cna.recorded_at_utc)` or pre-migration `Shipment`/`BillOfLading` — **never** `Package.CreatedAt` alone).
+  - Added additive migration [`20261127103000_MDM1_6_F03R01_F04R01_SafeUpgradeAndStructuredReasons`](../src/Infrastructure/Warehouse3PL.Infrastructure/Persistence/Migrations/20261127103000_MDM1_6_F03R01_F04R01_SafeUpgradeAndStructuredReasons.cs):
+    - **Branch A (Protected Staged Upgrade via Preflight):** Deterministically preserves legitimate post-MDM-1.6 amendments even when subsequently packed/fulfilled (e.g. `USA -> US -> NP -> Packed` remains `NP`), preserves `US` on packages created `Open` before MDM-1.6 and transitioned to `Packed` afterward, and cleans up the temporary preflight table.
+    - **Branch B (Already-R04-Applied Previously Damaged DB):** Never guesses or fabricates lost amended values; preserves authoritative DB evidence and flags `PendingNormalization` + `HISTORICAL_PROVENANCE_REVIEW` for steward review, while safely restoring unamended `Open -> Packed` records to canonical `US` using strict `packed_at_utc`/`updated_at` timestamps.
+
+| Scenario | Before F03-R01 | After F03-R01 |
+| :--- | :--- | :--- |
+| Same order: Draft `USA` -> MDM-1.6 `US` -> Amend `NP` -> Pack/Ship/BOL/Invoice -> Upgrade | `R04` overwrote `NP` back to `USA` before `F03` ran | Preflight snapshot + `20261127103000` preserve final country `NP` (`Normalized`); Shipment, BOL & Invoice snapshots untouched |
+| Package created `Open` before MDM-1.6 -> transitioned `Packed` after MDM-1.6 | `F03` checked `p.created_at <= initial_recorded_at_utc`, falsely keeping `USA` | Strict `packed_at_utc`/`updated_at` proof rejects `CreatedAt`-only evidence; final country remains `US` (`Normalized`) on both staged and already-R04-applied DBs |
+| Previously damaged DB where `R04` already overwrote an amended+packed order without preflight | Left silently `Normalized` with damaged value | Preserves current value without guessing; marks `PendingNormalization` + `HISTORICAL_PROVENANCE_REVIEW` for steward review |
+
+### 5.2 F04-R01 — Closed Structured Diagnostic Reason Codes & Safe Search
+- **Replaced Prefix Passthrough with Closed Reason Registry:** [`CountryDiagnosticSanitizer`](../src/Core/Warehouse3PL.Domain/Entities/Reference/CountryDiagnosticSanitizer.cs) now maps all runtime and legacy persisted reasons strictly to 20 predefined `CountryDiagnosticReason(Code, Description)` entries via `ClassifyReason`. Arbitrary suffix text after approved prefixes, raw country strings, names, postal values, or confidential notes can **never** pass through in SQL (`pg_temp.mdm16_f04r01_sanitize_reason`), C# runtime/backfill, HTTP DTOs (`ReasonCode` + controlled `Reason`), JSON exports, or UI.
+- **Removed Unrestricted `Reason.Contains` Search:** [`GetNormalizationQuarantineQueryHandler`](../src/Core/Warehouse3PL.Application/Features/Reference/Queries/GetNormalizationQuarantineQuery.cs) searches only safe persisted fields (`EntityType`, `FieldName`, `NormalizedCountryCode`, `CorrelationBatchId`), currently active-profile-verified catalog `OriginalCountryValue` tokens (excluding aliases targeting inactive country profiles), and exact controlled descriptions matched from `CountryDiagnosticSanitizer.Catalog`.
+- **SQL/C# Reason Parity:** `20261127103000` maps legacy `20261126143014` `'Mapped ...'` reasons to `NORMALIZED_CANONICAL`, verified end-to-end across two independent PostgreSQL databases including `a.Reason` equality.
+
+| Defect Surface | Before F04-R01 | After F04-R01 |
+| :--- | :--- | :--- |
+| Legacy `Reason` with suffix PII after approved prefix (e.g. `"Unrecognized country token — Johnathan Vance (Confidential VIP)"`) | Passed prefix check and echoed verbatim in DTO/Export | Conservatively mapped to `UNRECOGNIZED_COUNTRY` (`"Unrecognized or unverified country value quarantined for steward review."`); zero suffix text echoed |
+| `?search=Confidential` / `?search=Johnathan` against raw persisted `Reason` | Matched via `a.Reason.ToLower().Contains(term)`, leaking existence via counts | Returns `0` items, `TotalCount = 0`, `PendingCount = 0`, `NormalizedCount = 0` |
+| Alias targeting inactive `CountryProfile` (`XX` -> `INACTIVEALIAS`) | Included in searchable `matchingCatalogTokens` | Excluded from verified displayable/searchable token set |
+
+---
+
+## 6. Verification Matrix & Observed Results
 
 | Verification Check | Command / CI Reference | Observed Result |
 | :--- | :--- | :--- |
-| `.NET Unit & Security Regression Suite` | `dotnet test tests/Warehouse3PL.UnitTests/Warehouse3PL.UnitTests.csproj --configuration Release` + CI Job [`140415136758`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45972220279) | `1,448 / 1,448 Passed` (`0 Failed, 0 Skipped`, includes `Mdm16LegacyCountryNormalizationTests` & 6 `Mdm16RemediationR01ToR05Tests` covering R01–R05 & F01–F04) |
+| `.NET Unit & Security Regression Suite` | `dotnet test tests/Warehouse3PL.UnitTests/Warehouse3PL.UnitTests.csproj --configuration Release` + CI Job [`140468449495`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45988011092) | `1,449 / 1,449 Passed` (`0 Failed, 0 Skipped`, includes `F04R01_StructuredDiagnosticReasons_RejectArbitrarySuffixAfterApprovedPrefix_AndPreventRawReasonSearchLeak`) |
 | `Phase73PostgresCheck` Build | `dotnet build tests/verification/Phase73PostgresCheck/Phase73PostgresCheck.csproj --configuration Release` | `0 Warning(s), 0 Error(s)` |
-| Live PostgreSQL 16 + Real Redis 7 (`MDM-0`..`MDM-1.6 F01–F04`) | GitHub Actions Run [`45972220279`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45972220279) / Job `140415136228` (`attempt 1`) | `success` (`F02` concurrent backfill/lifecycle/parent/rollback + `F03` 5 historical restoration fixtures + `F04` allowlist privacy + independent SQL vs C# parity across two PG databases) |
+| Live PostgreSQL 16 + Real Redis 7 (`MDM-0`..`MDM-1.6 F03-R01/F04-R01`) | GitHub Actions Run [`45988011092`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45988011092) / Job `140468449890` (`attempt 1`) | `success` (Same-order amend+fulfill, `Open->Packed`, damaged-DB steward review, suffix-PII zero-leak search/export, and SQL vs C# parity including `Reason`) |
 | Frontend Vitest | `npx vitest run --maxWorkers=1` (in `src/UI/Nexus3PLFrontend`) | `13` test files, `111 / 111 Passed` |
 | Frontend TypeScript Check | `npx tsc --noEmit` (in `src/UI/Nexus3PLFrontend`) | Exit code `0` |
 | Frontend Vite Production Build | `npm run build` (in `src/UI/Nexus3PLFrontend`) | Exit code `0` |
-| Playwright Chromium E2E | `npm run test:e2e` (in `src/UI/Nexus3PLFrontend`) | `34 / 34 Passed` (including `e2e/normalization-quarantine.spec.ts` zero-call unprivileged Staff check + 4 responsive screenshots with zero horizontal overflow) |
+| Playwright Chromium E2E | `npm run test:e2e` (in `src/UI/Nexus3PLFrontend`) | `34 / 34 Passed` (including `e2e/normalization-quarantine.spec.ts` + 4 responsive screenshots with zero horizontal overflow) |
