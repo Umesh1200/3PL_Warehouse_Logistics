@@ -181,9 +181,12 @@ try
         }
     }
 
-    // Step 3: Apply migrations to latest (including Phase73RemoveLegacyPutawayTargetShadow and Phase73PutawayTaskReceiptLineUniqueIndex)
+    // Step 3: Upgrade populated legacy DB through MDM-1.5, seed reference catalogs per R04 cutover contract, then migrate to latest
     await using (var db = CreateDb(migrationConn, verifier))
     {
+        var migrator = db.GetInfrastructure().GetRequiredService<IMigrator>();
+        await migrator.MigrateAsync("20261126100927_MDM1_5_R01_OutboxBackoffAndRetention");
+        await ReferenceCatalogSeeder.SeedAsync(db);
         await db.Database.MigrateAsync();
     }
 
@@ -4750,9 +4753,12 @@ try
             await resolveCmd.ExecuteNonQueryAsync();
         }
 
-        // Re-running MigrateAsync() now succeeds, normalizes remaining keys, creates unique index, and preserves all 3 PODs
+        // Re-running MigrateAsync() now succeeds, normalizes remaining keys, creates unique index, seeds reference catalogs before MDM-1.6 R04 cutover, and preserves all 3 PODs
         await using (var passDb = CreateDb(p745MigConn, migVerifier))
         {
+            var migrator = passDb.GetInfrastructure().GetRequiredService<IMigrator>();
+            await migrator.MigrateAsync("20261126100927_MDM1_5_R01_OutboxBackoffAndRetention");
+            await ReferenceCatalogSeeder.SeedAsync(passDb);
             await passDb.Database.MigrateAsync();
         }
 
