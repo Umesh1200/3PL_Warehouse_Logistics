@@ -10,13 +10,13 @@ Following independent acceptance review of baseline commit `0b9f2cfa553887ab4a4b
 | **Feature Branch** | `feature/phase-7-enterprise-frontend` |
 | **R01–R05 Remediation Baseline SHA** | `0b9f2cfa553887ab4a4b4350f8fddb8dd5b43458` |
 | **R01–R05 Accepted Core Baseline SHA** | `d9f220ad914a4866052b08d40d67cc9ac0c4e058` |
-| **F01–F04 Submitted Baseline SHA** | `9d33c65af32300b17def07dbac4fd42baf51bd6d` |
-| **F03-R01 & F04-R01 Code, Migration, Tests & Screenshots Verified SHA** | `8fc2bbdcbc8f5a1edfd3492cffda6f3f177084b3` |
+| **F03-R01/F04-R01 Submitted Baseline SHA** | `e6aa65b67c869d47a3c234f2c7d7b8f7587c8f70` |
+| **Migration Entry-Point Enforcement Verified SHA** | `ddf16b7fa3b42ca1393374854b4cb9527677dfc8` |
 | **Preserved `main` / `origin/main` SHA** | `a198f02090194ce4d59dec2941c89d519757f4b4` |
 | **Additive R04 EF Core Migration ID** | `20261127051434_MDM1_6_R04_NormalizationRemediationLifecycle` (original `20261126143014_MDM1_6_LegacyCountryNormalization` left unedited) |
 | **Additive F03/F04 EF Core Migration ID** | `20261127081525_MDM1_6_F03_F04_SafeProvenanceAndAllowlistedDiagnostics` (`20261126143014` and `20261127051434` left unedited) |
 | **Additive F03-R01/F04-R01 EF Core Migration ID** | `20261127103000_MDM1_6_F03R01_F04R01_SafeUpgradeAndStructuredReasons` (all earlier migrations left unedited) |
-| **GitHub Actions CI (F03-R01/F04-R01 Code + Tests + Live PG 16 & Redis 7)** | [Run `45988011092`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45988011092) (`success` on attempt 1) |
+| **GitHub Actions CI (Migration Entry-Point + Live PG 16 & Redis 7)** | [Run `45994588375`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45994588375) (`success` on attempt 1) |
 | **Acceptance Scope Boundary** | Stops cleanly at MDM-1.6 independent acceptance gate; no MDM-2 or subsequent stage started |
 
 ---
@@ -161,15 +161,30 @@ Following independent acceptance of **F01** and **F02** at baseline `9d33c65af32
 | `?search=Confidential` / `?search=Johnathan` against raw persisted `Reason` | Matched via `a.Reason.ToLower().Contains(term)`, leaking existence via counts | Returns `0` items, `TotalCount = 0`, `PendingCount = 0`, `NormalizedCount = 0` |
 | Alias targeting inactive `CountryProfile` (`XX` -> `INACTIVEALIAS`) | Included in searchable `matchingCatalogTokens` | Excluded from verified displayable/searchable token set |
 
+### 5.3 Supported Migration Entry Point, Bypass Enforcement & Retry Semantics
+- **Supported Executable Migration Command** ([`Program.cs`](../src/Presentation/Warehouse3PL.WebApi/Program.cs)):
+  ```bash
+  dotnet run --project src/Presentation/Warehouse3PL.WebApi -- --migrate-db [--target <MigrationId>] [--seed-catalogs] [--connection <ConnStr>]
+  ```
+  (Or against the published binary: `dotnet Warehouse3PL.WebApi.dll --migrate-db [--seed-catalogs] [--connection <ConnStr>]`, or via `ConnectionStrings__DefaultConnection`.)
+  - Runs as a dedicated maintenance CLI mode without starting Kestrel, Hangfire, or Redis subscribers, invoking [`Mdm16UpgradePreflightService.ExecuteSafeUpgradeAsync`](../src/Infrastructure/Warehouse3PL.Infrastructure/Services/Reference/Mdm16UpgradePreflightService.cs) under a PostgreSQL session-level maintenance advisory lock (`pg_advisory_lock(hashtextextended('MDM16_SAFE_UPGRADE_ENTRY', 0::bigint))`).
+- **Enforced Bypass Guard** ([`Mdm16GuardedMigrator.cs`](../src/Infrastructure/Warehouse3PL.Infrastructure/Persistence/Mdm16GuardedMigrator.cs), registered via `ReplaceService<IMigrator, Mdm16GuardedMigrator>()` in [`ApplicationDbContext.cs`](../src/Infrastructure/Warehouse3PL.Infrastructure/Persistence/ApplicationDbContext.cs)):
+  - Rejects direct unsafe `MigrateAsync()` / `dotnet ef database update` execution of `20261127051434` (`R04`) on populated databases already at `20261126143014` (`InvalidOperationException` directing operators to `--migrate-db`).
+  - Allows fresh installations, pre-MDM-1.6 upgrades, downgrades, and already-R04-applied databases (which stay on the accepted steward-review path).
+- **Interrupted-Migration & Stale-Snapshot Retry Semantics:**
+  - `CaptureProtectedPreR04SnapshotAsync` scopes snapshots strictly to historical (`Allocated`..`Cancelled` or `Packed`/shipped) non-blank `ShippingAddresses` so unfulfilled Draft blank-inferred rows remain subject to R02 re-evaluation.
+  - Whenever `R04` is **not yet applied** (`!applied.Contains(Mdm16R04MigrationId)`), any prior snapshot rows are atomically replaced (`DELETE` + `INSERT`) with the live `shipping_addresses` state, and any pre-R04 failure drops `mdm16_r04_preflight_shipping_snapshots` in `catch` — guaranteeing stale snapshots from interrupted runs can never be restored on retry.
+  - If an interruption occurs **after** `R04` commits (`applied.Contains(Mdm16R04MigrationId)`), retry skips recapture and preserves the authoritative pre-R04 snapshot so `20261127103000` completes restoration cleanly.
+
 ---
 
 ## 6. Verification Matrix & Observed Results
 
 | Verification Check | Command / CI Reference | Observed Result |
 | :--- | :--- | :--- |
-| `.NET Unit & Security Regression Suite` | `dotnet test tests/Warehouse3PL.UnitTests/Warehouse3PL.UnitTests.csproj --configuration Release` + CI Job [`140468449495`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45988011092) | `1,449 / 1,449 Passed` (`0 Failed, 0 Skipped`, includes `F04R01_StructuredDiagnosticReasons_RejectArbitrarySuffixAfterApprovedPrefix_AndPreventRawReasonSearchLeak`) |
+| `.NET Unit & Security Regression Suite` | `dotnet test tests/Warehouse3PL.UnitTests/Warehouse3PL.UnitTests.csproj --configuration Release` + CI Job [`140490676182`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45994588375) | `1,449 / 1,449 Passed` (`0 Failed, 0 Skipped`) |
 | `Phase73PostgresCheck` Build | `dotnet build tests/verification/Phase73PostgresCheck/Phase73PostgresCheck.csproj --configuration Release` | `0 Warning(s), 0 Error(s)` |
-| Live PostgreSQL 16 + Real Redis 7 (`MDM-0`..`MDM-1.6 F03-R01/F04-R01`) | GitHub Actions Run [`45988011092`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45988011092) / Job `140468449890` (`attempt 1`) | `success` (Same-order amend+fulfill, `Open->Packed`, damaged-DB steward review, suffix-PII zero-leak search/export, and SQL vs C# parity including `Reason`) |
+| Live PostgreSQL 16 + Real Redis 7 (`MDM-0`..`MDM-1.6` + `--migrate-db` CLI) | GitHub Actions Run [`45994588375`](https://github.com/Umesh1200/3PL_Warehouse_Logistics/actions/runs/45994588375) / Job `140490676590` (`attempt 1`) | `success` (Real `Warehouse3PL.WebApi.dll --migrate-db` CLI on same-order amend+fulfill -> `NP` preserved, `Open->Packed` -> `US` preserved, unsafe bypass rejected, stale pre-R04 snapshot refreshed on retry, fresh install & pre-MDM-1.6 upgrade succeeded, damaged DB quarantined for steward review, SQL/C# parity including `Reason`) |
 | Frontend Vitest | `npx vitest run --maxWorkers=1` (in `src/UI/Nexus3PLFrontend`) | `13` test files, `111 / 111 Passed` |
 | Frontend TypeScript Check | `npx tsc --noEmit` (in `src/UI/Nexus3PLFrontend`) | Exit code `0` |
 | Frontend Vite Production Build | `npm run build` (in `src/UI/Nexus3PLFrontend`) | Exit code `0` |
