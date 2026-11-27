@@ -123,7 +123,7 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
                 DO $$
                 DECLARE
-                    v_batch CONSTANT VARCHAR(64) := '20261127081525_MDM1_6_F03_F04_SafeProvenanceAndAllowlistedDiagnostics';
+                    v_batch CONSTANT VARCHAR(64) := '20261127081525_MDM1_6_F03_F04_SafeProvenance';
                     v_has_profiles BOOLEAN;
                     r RECORD;
                     v_has_pre_mig_fulfillment BOOLEAN;
