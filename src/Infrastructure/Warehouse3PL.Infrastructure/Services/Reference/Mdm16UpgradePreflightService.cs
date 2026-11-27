@@ -3,15 +3,17 @@ using Microsoft.EntityFrameworkCore.Infrastructure;
 using Microsoft.EntityFrameworkCore.Migrations;
 using Microsoft.Extensions.DependencyInjection;
 using Warehouse3PL.Infrastructure.Persistence;
+using Warehouse3PL.Infrastructure.Persistence.Seed;
 
 namespace Warehouse3PL.Infrastructure.Services.Reference;
 
 /// <summary>
 /// Enforces the safe upgrade boundary before <c>20261127051434_MDM1_6_R04_NormalizationRemediationLifecycle</c>
 /// executes on databases where <c>20261126143014_MDM1_6_LegacyCountryNormalization</c> was already applied.
-/// Captures a protected pre-R04 snapshot of <c>shipping_addresses</c> and strict package immutability timestamps
-/// so legitimate post-MDM-1.6 amendments and Open-to-Packed transitions cannot be lost when R04 executes,
-/// while preserving all existing migration files unedited.
+/// Captures a fresh, maintenance-locked protected pre-R04 snapshot of <c>shipping_addresses</c> and strict package
+/// immutability timestamps so legitimate post-MDM-1.6 amendments and Open-to-Packed transitions cannot be lost
+/// when R04 executes, while preventing stale snapshots across interrupted/retried runs and preserving all
+/// existing migration files unedited.
 /// </summary>
 public static class Mdm16UpgradePreflightService
 {
@@ -19,9 +21,16 @@ public static class Mdm16UpgradePreflightService
     public const string Mdm16R04MigrationId = "20261127051434_MDM1_6_R04_NormalizationRemediationLifecycle";
     public const string Mdm16F03R01MigrationId = "20261127103000_MDM1_6_F03R01_F04R01_SafeUpgradeAndStructuredReasons";
 
+    private static readonly AsyncLocal<bool> AuthorizedSafeUpgradeScope = new();
+
+    internal static bool IsAuthorizedSafeUpgradeActive => AuthorizedSafeUpgradeScope.Value;
+
     /// <summary>
-    /// Captures the protected pre-R04 shipping address snapshot if <see cref="Mdm16InitialMigrationId"/>
+    /// Captures a fresh protected pre-R04 shipping address snapshot if <see cref="Mdm16InitialMigrationId"/>
     /// has already been applied and <see cref="Mdm16R04MigrationId"/> is still pending.
+    /// Any stale snapshot left by a previous interrupted pre-R04 attempt is replaced atomically.
+    /// If <see cref="Mdm16R04MigrationId"/> is already applied, returns <c>false</c> without modifying
+    /// any existing pre-R04 snapshot so post-R04 retries preserve authoritative pre-R04 evidence.
     /// </summary>
     public static async Task<bool> CaptureProtectedPreR04SnapshotAsync(
         ApplicationDbContext db,
@@ -68,8 +77,10 @@ public static class Mdm16UpgradePreflightService
             """,
             cancellationToken);
 
-        // Capture durable protected snapshot BEFORE R04 executes so legitimate amendments (e.g. USA -> US -> NP + Packed)
-        // and Open->Packed transitions after MDM-1.6 are preserved deterministically by F03-R01.
+        // Capture a fresh protected snapshot BEFORE R04 executes.
+        // Because R04 is verified NOT applied above, DELETE + INSERT inside a single statement block
+        // guarantees any stale snapshot from an earlier interrupted pre-R04 run is atomically replaced
+        // with the current live state of shipping_addresses.
         await db.Database.ExecuteSqlRawAsync(
             """
             CREATE TABLE IF NOT EXISTS mdm16_r04_preflight_shipping_snapshots (
@@ -88,6 +99,8 @@ public static class Mdm16UpgradePreflightService
                 has_pre_mig_packed_proof BOOLEAN NOT NULL,
                 captured_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()
             );
+
+            DELETE FROM mdm16_r04_preflight_shipping_snapshots;
 
             INSERT INTO mdm16_r04_preflight_shipping_snapshots (
                 shipping_address_id,
@@ -143,8 +156,7 @@ public static class Mdm16UpgradePreflightService
                 ON cna.entity_type = 'ShippingAddress'
                AND cna.entity_id = sa.shipping_address_id
                AND cna.field_name = 'CountryCode'
-            WHERE sa.is_deleted = false AND o.is_deleted = false
-            ON CONFLICT (shipping_address_id) DO NOTHING;
+            WHERE sa.is_deleted = false AND o.is_deleted = false;
             """,
             cancellationToken);
 
@@ -152,16 +164,142 @@ public static class Mdm16UpgradePreflightService
     }
 
     /// <summary>
-    /// Executes the supported MDM-1.6 upgrade path: captures the pre-R04 protected snapshot when needed,
-    /// then migrates forward through R04, F03, and F03-R01/F04-R01 to the latest schema.
+    /// Executes the supported database migration workflow under a PostgreSQL session-level maintenance lock:
+    /// optionally seeds missing reference catalogs, captures/refreshes the protected pre-R04 snapshot
+    /// immediately before migration, runs EF Core migrations cleanly, and cleans up any pre-R04 snapshot
+    /// if the upgrade is interrupted before R04 commits.
     /// </summary>
     public static async Task ExecuteSafeUpgradeAsync(
         ApplicationDbContext db,
         string? targetMigration = null,
+        bool seedCatalogsIfMissing = false,
         CancellationToken cancellationToken = default)
     {
-        await CaptureProtectedPreR04SnapshotAsync(db, cancellationToken);
-        var migrator = db.GetInfrastructure().GetRequiredService<IMigrator>();
-        await migrator.MigrateAsync(targetMigration, cancellationToken);
+        bool isNpgsql = db.Database.IsRelational() &&
+                        (db.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) ?? false);
+        bool openedConnection = false;
+        bool lockAcquired = false;
+
+        if (isNpgsql)
+        {
+            if (db.Database.GetDbConnection().State != System.Data.ConnectionState.Open)
+            {
+                await db.Database.OpenConnectionAsync(cancellationToken);
+                openedConnection = true;
+            }
+
+            await db.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_lock(hashtextextended('MDM16_SAFE_UPGRADE_ENTRY', 0::bigint));",
+                cancellationToken);
+            lockAcquired = true;
+        }
+
+        try
+        {
+            if (seedCatalogsIfMissing && db.Database.IsRelational())
+            {
+                var appliedBefore = (await db.Database.GetAppliedMigrationsAsync(cancellationToken))
+                    .ToHashSet(StringComparer.Ordinal);
+                if (appliedBefore.Count > 0)
+                {
+                    var hasProfilesTable = await HasTableAsync(db, "country_profiles", cancellationToken);
+                    if (hasProfilesTable && !await db.CountryProfiles.AnyAsync(c => c.IsActive, cancellationToken))
+                    {
+                        await ReferenceCatalogSeeder.SeedAsync(db, cancellationToken);
+                    }
+                }
+            }
+
+            await CaptureProtectedPreR04SnapshotAsync(db, cancellationToken);
+
+            var prevScope = AuthorizedSafeUpgradeScope.Value;
+            AuthorizedSafeUpgradeScope.Value = true;
+            try
+            {
+                var migrator = db.GetInfrastructure().GetRequiredService<IMigrator>();
+                await migrator.MigrateAsync(targetMigration, cancellationToken);
+            }
+            catch
+            {
+                // If interrupted BEFORE R04 committed, drop the preflight snapshot so no stale snapshot lingers.
+                if (isNpgsql)
+                {
+                    try
+                    {
+                        var appliedAfterFail = (await db.Database.GetAppliedMigrationsAsync(CancellationToken.None))
+                            .ToHashSet(StringComparer.Ordinal);
+                        if (!appliedAfterFail.Contains(Mdm16R04MigrationId))
+                        {
+                            await db.Database.ExecuteSqlRawAsync(
+                                "DROP TABLE IF EXISTS mdm16_r04_preflight_shipping_snapshots;",
+                                CancellationToken.None);
+                        }
+                    }
+                    catch
+                    {
+                        // Best-effort cleanup; next retry will also DELETE+INSERT fresh if R04 is still pending.
+                    }
+                }
+
+                throw;
+            }
+            finally
+            {
+                AuthorizedSafeUpgradeScope.Value = prevScope;
+            }
+        }
+        finally
+        {
+            if (lockAcquired)
+            {
+                try
+                {
+                    await db.Database.ExecuteSqlRawAsync(
+                        "SELECT pg_advisory_unlock(hashtextextended('MDM16_SAFE_UPGRADE_ENTRY', 0::bigint));",
+                        CancellationToken.None);
+                }
+                catch
+                {
+                    // Connection close also releases session-level advisory locks.
+                }
+            }
+
+            if (openedConnection)
+            {
+                await db.Database.CloseConnectionAsync();
+            }
+        }
+    }
+
+    /// <summary>
+    /// Verification-only helper used strictly to simulate historical databases where
+    /// <see cref="Mdm16R04MigrationId"/> was already applied before the preflight guard existed.
+    /// </summary>
+    public static async Task ExecuteLegacyUnsafeR04ForDamagedDbSimulationAsync(
+        ApplicationDbContext db,
+        CancellationToken cancellationToken = default)
+    {
+        var prevScope = AuthorizedSafeUpgradeScope.Value;
+        AuthorizedSafeUpgradeScope.Value = true;
+        try
+        {
+            var migrator = db.GetInfrastructure().GetRequiredService<IMigrator>();
+            await migrator.MigrateAsync(Mdm16R04MigrationId, cancellationToken);
+        }
+        finally
+        {
+            AuthorizedSafeUpgradeScope.Value = prevScope;
+        }
+    }
+
+    private static async Task<bool> HasTableAsync(
+        ApplicationDbContext db,
+        string tableName,
+        CancellationToken cancellationToken)
+    {
+        await using var cmd = db.Database.GetDbConnection().CreateCommand();
+        cmd.CommandText = $"SELECT to_regclass('{tableName}')::text;";
+        var result = await cmd.ExecuteScalarAsync(cancellationToken);
+        return result is string s && !string.IsNullOrEmpty(s);
     }
 }

@@ -346,12 +346,12 @@ internal static class Mdm16PostgresCheck
                 await snapDb.SaveChangesAsync();
             }
 
-            // 4. Clean upgrade MDM1_5 -> MDM1_6 -> MDM1_6_R04 against realistic PG rows
+            // 4. Clean upgrade MDM1_5 -> MDM1_6 -> supported safe upgrade (R04 + F03 + F03-R01) against realistic PG rows
             await using (var upDb = CreatePgDb(targetConn))
             {
                 var migrator = upDb.GetInfrastructure().GetRequiredService<IMigrator>();
                 await migrator.MigrateAsync(Mdm16Migration);
-                await migrator.MigrateAsync();
+                await Mdm16UpgradePreflightService.ExecuteSafeUpgradeAsync(upDb);
                 await ReferenceCatalogSeeder.SeedAsync(upDb);
 
                 // Verify facilities
@@ -1178,11 +1178,10 @@ internal static class Mdm16PostgresCheck
                 await cmd.ExecuteNonQueryAsync();
             }
 
-            // Apply R04 + F03 migrations sequentially and verify all F03/F04 assertions
+            // Apply R04 + F03 + F03-R01 migrations via supported safe upgrade and verify all F03/F04 assertions
             await using (var db = CreatePgDb(f03Conn))
             {
-                var migrator = db.GetInfrastructure().GetRequiredService<IMigrator>();
-                await migrator.MigrateAsync();
+                await Mdm16UpgradePreflightService.ExecuteSafeUpgradeAsync(db);
 
                 var rPre = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrPrePackedId);
                 var rPost = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrPostFulfillId);
@@ -1310,6 +1309,39 @@ internal static class Mdm16PostgresCheck
         var adminBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = "postgres" };
         var stagedDbName = $"mdm16_f03r01_stg_{Guid.NewGuid():N}";
         var damagedDbName = $"mdm16_f03r01_dmg_{Guid.NewGuid():N}";
+        var freshCliDbName = $"mdm16_cli_fresh_{Guid.NewGuid():N}";
+        var preMdm16CliDbName = $"mdm16_cli_prem16_{Guid.NewGuid():N}";
+
+        async Task RunSupportedMigrateCliAsync(string connStr, params string[] extraArgs)
+        {
+            var webApiDll = Path.Combine(AppContext.BaseDirectory, "Warehouse3PL.WebApi.dll");
+            if (!File.Exists(webApiDll))
+                throw new InvalidOperationException($"Supported migration entry point DLL not found at '{webApiDll}'.");
+
+            var psi = new System.Diagnostics.ProcessStartInfo("dotnet")
+            {
+                RedirectStandardOutput = true,
+                RedirectStandardError = true,
+                UseShellExecute = false
+            };
+            psi.ArgumentList.Add(webApiDll);
+            psi.ArgumentList.Add("--migrate-db");
+            psi.ArgumentList.Add($"--ConnectionStrings:DefaultConnection={connStr}");
+            foreach (var arg in extraArgs) psi.ArgumentList.Add(arg);
+
+            using var proc = System.Diagnostics.Process.Start(psi)
+                ?? throw new InvalidOperationException("Failed to start dotnet Warehouse3PL.WebApi.dll --migrate-db.");
+            var stdoutTask = proc.StandardOutput.ReadToEndAsync();
+            var stderrTask = proc.StandardError.ReadToEndAsync();
+            await proc.WaitForExitAsync();
+            var stdout = await stdoutTask;
+            var stderr = await stderrTask;
+            if (proc.ExitCode != 0)
+            {
+                throw new InvalidOperationException(
+                    $"Supported --migrate-db entry point failed with exit code {proc.ExitCode}.\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}");
+            }
+        }
 
         async Task CreateDbAsync(string name)
         {
@@ -1462,10 +1494,59 @@ internal static class Mdm16PostgresCheck
                 await snapDb.SaveChangesAsync();
             }
 
-            // Step 5: Execute supported safe upgrade path (preflight snapshot BEFORE R04 -> R04 -> F03 -> F03R01_F04R01)
+            // Step 5a: Verify UNSAFE BYPASS (direct MigrateAsync / 'dotnet ef database update' without preflight) is REJECTED fail-closed
+            await using (var bypassDb = CreatePgDb(stagedConn))
+            {
+                bool bypassBlocked = false;
+                try
+                {
+                    await bypassDb.GetInfrastructure().GetRequiredService<IMigrator>().MigrateAsync();
+                }
+                catch (InvalidOperationException ex) when (ex.Message.Contains("Unsafe MDM-1.6 migration bypass blocked", StringComparison.OrdinalIgnoreCase))
+                {
+                    bypassBlocked = true;
+                }
+
+                if (!bypassBlocked)
+                    throw new InvalidOperationException("Mdm16GuardedMigrator failed to block unsafe direct MigrateAsync bypass on populated pre-R04 database.");
+            }
+
+            // Step 5b: Simulate an INTERRUPTED prior pre-R04 attempt that left a STALE snapshot ('US', is_amended=false)
+            // before the legitimate amendment to 'NP' occurred; verify retry refreshes snapshot and never restores stale 'US'!
+            await using (var staleConn = new NpgsqlConnection(stagedConn))
+            {
+                await staleConn.OpenAsync();
+                await using var staleCmd = new NpgsqlCommand($"""
+                    CREATE TABLE IF NOT EXISTS mdm16_r04_preflight_shipping_snapshots (
+                        shipping_address_id UUID PRIMARY KEY,
+                        order_id UUID NOT NULL,
+                        pre_r04_country_code VARCHAR(100) NOT NULL,
+                        pre_r04_normalization_status VARCHAR(30) NOT NULL,
+                        is_amended BOOLEAN NOT NULL,
+                        amended_at_utc TIMESTAMPTZ NULL,
+                        order_status VARCHAR(50) NOT NULL,
+                        order_updated_at TIMESTAMPTZ NULL,
+                        audit_original_country_value VARCHAR(120) NULL,
+                        audit_normalized_country_code VARCHAR(3) NULL,
+                        audit_correlation_batch_id VARCHAR(64) NOT NULL,
+                        audit_recorded_at_utc TIMESTAMPTZ NOT NULL,
+                        has_pre_mig_packed_proof BOOLEAN NOT NULL,
+                        captured_at_utc TIMESTAMPTZ NOT NULL DEFAULT NOW()
+                    );
+                    INSERT INTO mdm16_r04_preflight_shipping_snapshots
+                        (shipping_address_id, order_id, pre_r04_country_code, pre_r04_normalization_status, is_amended, amended_at_utc, order_status, order_updated_at, audit_original_country_value, audit_normalized_country_code, audit_correlation_batch_id, audit_recorded_at_utc, has_pre_mig_packed_proof, captured_at_utc)
+                    VALUES
+                        ('{addrSameId}', '{ordSameId}', 'US', 'Normalized', false, NULL, 'Draft', NULL, 'USA', 'US', '{Mdm16Migration}', NOW() - INTERVAL '1 hour', false, NOW() - INTERVAL '30 minutes')
+                    ON CONFLICT (shipping_address_id) DO UPDATE SET pre_r04_country_code = 'US', is_amended = false;
+                    """, staleConn);
+                await staleCmd.ExecuteNonQueryAsync();
+            }
+
+            // Step 5c: Execute the ACTUAL supported migration CLI entry point (`dotnet Warehouse3PL.WebApi.dll --migrate-db`)
+            await RunSupportedMigrateCliAsync(stagedConn);
+
             await using (var upDb = CreatePgDb(stagedConn))
             {
-                await Mdm16UpgradePreflightService.ExecuteSafeUpgradeAsync(upDb);
 
                 // Step 6 & 7: Verify SAME order remains NP, snapshots unchanged, Open->Packed remains US, legacy suffix PII sanitized
                 var aSame = await upDb.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrSameId);
@@ -1589,11 +1670,15 @@ internal static class Mdm16PostgresCheck
             }
             await using (var db = CreatePgDb(damagedConn))
             {
-                // Apply R04 without preflight (causes damage on dAddrDamagedId & reverts dAddrOpenId)
-                await db.GetInfrastructure().GetRequiredService<IMigrator>().MigrateAsync(Mdm16UpgradePreflightService.Mdm16R04MigrationId);
-                // Now apply F03 + F03R01_F04R01
-                await db.GetInfrastructure().GetRequiredService<IMigrator>().MigrateAsync();
+                // Explicitly simulate historical DB where R04 ran BEFORE the preflight guard existed
+                await Mdm16UpgradePreflightService.ExecuteLegacyUnsafeR04ForDamagedDbSimulationAsync(db);
+            }
 
+            // Now upgrade the previously damaged DB via the ACTUAL supported --migrate-db entry point
+            await RunSupportedMigrateCliAsync(damagedConn);
+
+            await using (var db = CreatePgDb(damagedConn))
+            {
                 var dmgAddr = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == dAddrDamagedId);
                 var dmgAudit = await db.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "ShippingAddress" && a.EntityId == dAddrDamagedId);
                 var opnAddr = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == dAddrOpenId);
@@ -1607,12 +1692,51 @@ internal static class Mdm16PostgresCheck
                     throw new InvalidOperationException($"F03-R01 Damaged DB Open->Packed recovery failed: expected 'US'/Normalized, got '{opnAddr.CountryCode}'/{opnAddr.CountryNormalizationStatus}.");
             }
 
-            Console.WriteLine("PASS PostgreSQL MDM-1.6 F03-R01 (Same-Order Amend+Fulfill, Open->Packed, Damaged-DB Steward Review) & F04-R01 (Structured Reasons & Zero-Leak Search) verified cleanly.");
+            // =========================================================================
+            // PART 3: Fresh Installation & Pre-MDM-1.6 Existing-Schema Upgrades via Supported --migrate-db CLI
+            // =========================================================================
+            await CreateDbAsync(freshCliDbName);
+            var freshCliConn = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = freshCliDbName }.ConnectionString;
+            await RunSupportedMigrateCliAsync(freshCliConn);
+            await using (var fDb = CreatePgDb(freshCliConn))
+            {
+                var applied = (await fDb.Database.GetAppliedMigrationsAsync()).ToHashSet(StringComparer.Ordinal);
+                if (!applied.Contains(Mdm16UpgradePreflightService.Mdm16F03R01MigrationId))
+                    throw new InvalidOperationException("Fresh installation via --migrate-db did not apply latest MDM-1.6 migration.");
+            }
+
+            await CreateDbAsync(preMdm16CliDbName);
+            var preCliConn = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = preMdm16CliDbName }.ConnectionString;
+            var preFacId = Guid.NewGuid();
+            await using (var pDb = CreatePgDb(preCliConn))
+            {
+                await pDb.GetInfrastructure().GetRequiredService<IMigrator>().MigrateAsync(Mdm15Migration);
+            }
+            await using (var pConn = new NpgsqlConnection(preCliConn))
+            {
+                await pConn.OpenAsync();
+                await using var pCmd = new NpgsqlCommand($"""
+                    INSERT INTO facilities (facility_id, facility_code, name, country_code, state_or_province, postal_code, timezone, is_active, is_deleted, created_at)
+                    VALUES ('{preFacId}', 'PREM16-US', 'Pre MDM16 US', 'USA', 'Illinois', '60601', 'America/Chicago', true, false, NOW());
+                    """, pConn);
+                await pCmd.ExecuteNonQueryAsync();
+            }
+            await RunSupportedMigrateCliAsync(preCliConn, "--seed-catalogs");
+            await using (var pDb = CreatePgDb(preCliConn))
+            {
+                var pFac = await pDb.Facilities.IgnoreQueryFilters().SingleAsync(f => f.Id == preFacId);
+                if (pFac.CountryCode != "US" || pFac.CountryNormalizationStatus != CountryNormalizationStatus.Normalized)
+                    throw new InvalidOperationException($"Pre-MDM-1.6 upgrade via --migrate-db --seed-catalogs failed: Country={pFac.CountryCode}, Status={pFac.CountryNormalizationStatus}.");
+            }
+
+            Console.WriteLine("PASS PostgreSQL MDM-1.6 Supported --migrate-db Entry Point, Unsafe Bypass Rejection, Stale-Snapshot Retry Safety, Fresh/Pre-MDM16 Upgrades, F03-R01 & F04-R01 verified cleanly.");
         }
         finally
         {
             await DropDbAsync(stagedDbName);
             await DropDbAsync(damagedDbName);
+            await DropDbAsync(freshCliDbName);
+            await DropDbAsync(preMdm16CliDbName);
         }
     }
 

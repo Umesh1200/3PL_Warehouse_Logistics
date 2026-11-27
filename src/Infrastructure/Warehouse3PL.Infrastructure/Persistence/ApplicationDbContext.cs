@@ -2058,6 +2058,12 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     {
         base.OnConfiguring(optionsBuilder);
         optionsBuilder.AddInterceptors(_auditableEntityInterceptor);
+
+        if (optionsBuilder.Options.Extensions.Any(e =>
+                e.GetType().FullName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true))
+        {
+            optionsBuilder.ReplaceService<Microsoft.EntityFrameworkCore.Migrations.IMigrator, Mdm16GuardedMigrator>();
+        }
     }
 
     protected override void OnModelCreating(ModelBuilder modelBuilder)

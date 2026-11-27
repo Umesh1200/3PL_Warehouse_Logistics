@@ -1,11 +1,68 @@
 using System.Text.Json.Serialization;
+using Microsoft.EntityFrameworkCore;
 using Serilog;
 using Warehouse3PL.Application;
+using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Infrastructure;
+using Warehouse3PL.Infrastructure.Authentication;
 using Warehouse3PL.Infrastructure.BackgroundJobs;
+using Warehouse3PL.Infrastructure.Persistence;
+using Warehouse3PL.Infrastructure.Persistence.Interceptors;
 using Warehouse3PL.Infrastructure.Persistence.Seed;
+using Warehouse3PL.Infrastructure.Services;
+using Warehouse3PL.Infrastructure.Services.Reference;
 using Warehouse3PL.WebApi.Extensions;
 using Warehouse3PL.WebApi.Middleware;
+
+// Supported executable database migration entry point (enforces MDM-1.6 preflight & maintenance lock):
+//   dotnet run --project src/Presentation/Warehouse3PL.WebApi -- --migrate-db [--target <MigrationId>] [--seed-catalogs]
+if (args.Any(a => string.Equals(a, "--migrate-db", StringComparison.OrdinalIgnoreCase)))
+{
+    var migBuilder = Host.CreateApplicationBuilder(args);
+    string? targetMigration = null;
+    bool seedCatalogs = args.Any(a => string.Equals(a, "--seed-catalogs", StringComparison.OrdinalIgnoreCase));
+    for (int i = 0; i < args.Length - 1; i++)
+    {
+        if (string.Equals(args[i], "--target", StringComparison.OrdinalIgnoreCase))
+        {
+            targetMigration = args[i + 1];
+            break;
+        }
+    }
+
+    var connStr = migBuilder.Configuration.GetConnectionString("DefaultConnection")
+        ?? "Host=localhost;Database=warehouse3pl_db;Username=postgres;Password=postgres";
+
+    migBuilder.Services.AddHttpContextAccessor();
+    migBuilder.Services.AddSingleton<IDateTimeProvider, DateTimeProvider>();
+    migBuilder.Services.AddScoped<ICurrentUserContext, CurrentUserContext>();
+    migBuilder.Services.AddScoped<ITenantProvider, TenantProvider>();
+    migBuilder.Services.AddScoped<AuditableEntityInterceptor>();
+    migBuilder.Services.AddDbContext<ApplicationDbContext>(options =>
+    {
+        options.UseNpgsql(connStr, npgsqlOptions =>
+        {
+            npgsqlOptions.MigrationsAssembly(typeof(ApplicationDbContext).Assembly.FullName);
+            npgsqlOptions.EnableRetryOnFailure(3, TimeSpan.FromSeconds(5), null);
+        }).UseSnakeCaseNamingConvention();
+    });
+
+    using var migHost = migBuilder.Build();
+    try
+    {
+        using var scope = migHost.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        await Mdm16UpgradePreflightService.ExecuteSafeUpgradeAsync(db, targetMigration, seedCatalogs);
+        Console.WriteLine("Database migration completed cleanly via supported --migrate-db entry point.");
+        return;
+    }
+    catch (Exception ex)
+    {
+        Console.Error.WriteLine($"Database migration via --migrate-db failed: {ex.Message}");
+        Environment.ExitCode = 1;
+        return;
+    }
+}
 
 var builder = WebApplication.CreateBuilder(args);
 
