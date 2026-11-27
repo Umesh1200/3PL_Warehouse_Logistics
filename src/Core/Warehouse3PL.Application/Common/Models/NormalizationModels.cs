@@ -35,7 +35,8 @@ public sealed record CountryNormalizationQuarantineItemDto(
     string? FacilityCode,
     Guid? ClientId,
     string CorrelationBatchId,
-    DateTime RecordedAtUtc);
+    DateTime RecordedAtUtc,
+    string ReasonCode = "");
 
 public sealed record PagedNormalizationQuarantineResponse(
     IReadOnlyList<CountryNormalizationQuarantineItemDto> Items,

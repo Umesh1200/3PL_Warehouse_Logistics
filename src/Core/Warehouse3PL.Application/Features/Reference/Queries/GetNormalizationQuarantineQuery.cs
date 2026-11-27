@@ -238,9 +238,13 @@ public sealed class GetNormalizationQuarantineQueryHandler
         if (!string.IsNullOrWhiteSpace(request.Search))
         {
             var term = request.Search.Trim().ToLowerInvariant();
-            // F04: Search ONLY authorized, sanitized allowlisted diagnostic fields.
-            // Match OriginalCountryValue ONLY against verified catalog tokens matching the search term
-            // so unverified/redacted raw values can NEVER be inferred via search result counts.
+            // F04-R01: Search ONLY safe persisted fields, currently verified & displayable catalog tokens,
+            // and exact predefined controlled reason descriptions (NEVER raw Reason.Contains).
+            var activeCountryCodes = activeProfiles
+                .Select(p => CountryNormalizationAlias.NormalizeLookupKey(p.CountryCode))
+                .Where(k => !string.IsNullOrEmpty(k))
+                .ToHashSet(StringComparer.OrdinalIgnoreCase);
+
             var matchingCatalogTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             foreach (var p in activeProfiles)
             {
@@ -250,15 +254,19 @@ public sealed class GetNormalizationQuarantineQueryHandler
             }
             foreach (var al in activeAliases)
             {
+                var targetCode = CountryNormalizationAlias.NormalizeLookupKey(al.CountryCode);
+                if (!activeCountryCodes.Contains(targetCode)) continue;
                 if (al.AliasKey.ToLowerInvariant().Contains(term)) matchingCatalogTokens.Add(al.AliasKey.ToLowerInvariant());
             }
             var allowedTokenList = matchingCatalogTokens.ToList();
+            var matchingControlledReasons = CountryDiagnosticSanitizer.MatchControlledDescriptions(term);
 
             baseQuery = baseQuery.Where(a =>
                 a.EntityType.ToLower().Contains(term) ||
                 a.FieldName.ToLower().Contains(term) ||
+                a.CorrelationBatchId.ToLower().Contains(term) ||
                 (a.NormalizedCountryCode != null && a.NormalizedCountryCode.ToLower().Contains(term)) ||
-                a.Reason.ToLower().Contains(term) ||
+                (matchingControlledReasons.Count > 0 && matchingControlledReasons.Contains(a.Reason)) ||
                 (allowedTokenList.Count > 0 &&
                  a.OriginalCountryValue != null &&
                  a.OriginalCountryValue != CountryDiagnosticSanitizer.RedactedPlaceholder &&
@@ -305,23 +313,28 @@ public sealed class GetNormalizationQuarantineQueryHandler
                 .Where(f => facilityIds.Contains(f.Id))
                 .ToDictionaryAsync(f => f.Id, f => f.FacilityCode, cancellationToken);
 
-        var items = pageRows.Select(r => new CountryNormalizationQuarantineItemDto(
-            r.Id,
-            r.EntityType,
-            r.EntityId,
-            r.FieldName,
-            CountryDiagnosticSanitizer.SanitizeForDiagnostic(r.OriginalCountryValue, verifiedCatalogKeys),
-            r.NormalizedCountryCode,
-            r.NormalizationStatus,
-            r.PreservedHistoricalValue,
-            r.WasInferredFromParent,
-            r.InferenceSource,
-            CountryDiagnosticSanitizer.SanitizeReason(r.Reason),
-            r.FacilityId,
-            r.FacilityId.HasValue && facilityCodeMap.TryGetValue(r.FacilityId.Value, out var code) ? code : null,
-            r.ClientId,
-            r.CorrelationBatchId,
-            r.RecordedAtUtc)).ToList();
+        var items = pageRows.Select(r =>
+        {
+            var classifiedReason = CountryDiagnosticSanitizer.ClassifyReason(r.Reason);
+            return new CountryNormalizationQuarantineItemDto(
+                r.Id,
+                r.EntityType,
+                r.EntityId,
+                r.FieldName,
+                CountryDiagnosticSanitizer.SanitizeForDiagnostic(r.OriginalCountryValue, verifiedCatalogKeys),
+                r.NormalizedCountryCode,
+                r.NormalizationStatus,
+                r.PreservedHistoricalValue,
+                r.WasInferredFromParent,
+                r.InferenceSource,
+                classifiedReason.Description,
+                r.FacilityId,
+                r.FacilityId.HasValue && facilityCodeMap.TryGetValue(r.FacilityId.Value, out var code) ? code : null,
+                r.ClientId,
+                r.CorrelationBatchId,
+                r.RecordedAtUtc,
+                classifiedReason.Code);
+        }).ToList();
 
         return new PagedNormalizationQuarantineResponse(
             items,

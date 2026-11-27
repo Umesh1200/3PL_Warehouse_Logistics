@@ -51,6 +51,7 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             a.PreservedHistoricalValue,
             a.WasInferredFromParent,
             a.InferenceSource,
+            ReasonCode = CountryDiagnosticSanitizer.GetReasonCode(a.Reason),
             Reason = CountryDiagnosticSanitizer.SanitizeReason(a.Reason),
             a.FacilityId,
             a.ClientId,
@@ -63,7 +64,7 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
         return System.Text.Json.JsonSerializer.Serialize(new
         {
             ExportedAtUtc = DateTime.UtcNow,
-            SchemaMigration = "20261127051434_MDM1_6_R04_NormalizationRemediationLifecycle",
+            SchemaMigration = "20261127103000_MDM1_6_F03R01_F04R01_SafeUpgradeAndStructuredReasons",
             TotalAuditRecords = sanitizedRecords.Count,
             Records = sanitizedRecords
         });

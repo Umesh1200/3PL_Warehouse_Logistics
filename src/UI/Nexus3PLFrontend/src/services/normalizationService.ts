@@ -13,6 +13,7 @@ export interface CountryNormalizationQuarantineItem {
   preservedHistoricalValue: boolean;
   wasInferredFromParent: boolean;
   inferenceSource: string | null;
+  reasonCode?: string;
   reason: string;
   facilityId: string | null;
   facilityCode: string | null;

@@ -19,6 +19,7 @@ using Npgsql;
 using Warehouse3PL.Application;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Features.Reference.Queries;
 using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Analytics;
 using Warehouse3PL.Domain.Entities.Billing;
@@ -573,7 +574,10 @@ internal static class Mdm16PostgresCheck
             // 9. F03 Safe Historical Restoration Fixtures, F04 Allowlist Privacy & Independent SQL vs C# Parity
             await VerifyF03SafeHistoricalRestorationAndSqlCSharpParityAsync(baseConnectionString);
 
-            Console.WriteLine("[MDM-1.6] ALL Live PostgreSQL Country Normalization, F01-F04 Remediation, Concurrency, SQL/C# Parity, Quarantine, Historical Immutability, Epoch & RBAC checks passed cleanly.");
+            // 10. F03-R01 & F04-R01 Live PostgreSQL Closure Regressions (Same-order amend+fulfill, Open->Packed, Damaged DB, Suffix PII & Safe Search)
+            await VerifyF03R01AndF04R01LivePostgresAsync(baseConnectionString);
+
+            Console.WriteLine("[MDM-1.6] ALL Live PostgreSQL Country Normalization, F01-F04 + F03-R01/F04-R01 Remediation, Concurrency, SQL/C# Parity, Quarantine, Historical Immutability, Epoch & RBAC checks passed cleanly.");
         }
         finally
         {
@@ -1281,8 +1285,8 @@ internal static class Mdm16PostgresCheck
                 var cCusts = await cDb.Customers.IgnoreQueryFilters().OrderBy(c => c.Id).Select(c => new { c.Id, c.DefaultCountryCode, c.CountryNormalizationStatus }).ToListAsync();
                 var sSups = await sDb.Suppliers.IgnoreQueryFilters().OrderBy(s => s.Id).Select(s => new { s.Id, s.Country, s.CountryNormalizationStatus }).ToListAsync();
                 var cSups = await cDb.Suppliers.IgnoreQueryFilters().OrderBy(s => s.Id).Select(s => new { s.Id, s.Country, s.CountryNormalizationStatus }).ToListAsync();
-                var sAuds = await sDb.CountryNormalizationAudits.OrderBy(a => a.EntityType).ThenBy(a => a.EntityId).Select(a => new { a.EntityType, a.EntityId, a.FieldName, a.OriginalCountryValue, a.NormalizedCountryCode, a.NormalizationStatus }).ToListAsync();
-                var cAuds = await cDb.CountryNormalizationAudits.OrderBy(a => a.EntityType).ThenBy(a => a.EntityId).Select(a => new { a.EntityType, a.EntityId, a.FieldName, a.OriginalCountryValue, a.NormalizedCountryCode, a.NormalizationStatus }).ToListAsync();
+                var sAuds = await sDb.CountryNormalizationAudits.OrderBy(a => a.EntityType).ThenBy(a => a.EntityId).Select(a => new { a.EntityType, a.EntityId, a.FieldName, a.OriginalCountryValue, a.NormalizedCountryCode, a.NormalizationStatus, a.Reason }).ToListAsync();
+                var cAuds = await cDb.CountryNormalizationAudits.OrderBy(a => a.EntityType).ThenBy(a => a.EntityId).Select(a => new { a.EntityType, a.EntityId, a.FieldName, a.OriginalCountryValue, a.NormalizedCountryCode, a.NormalizationStatus, a.Reason }).ToListAsync();
 
                 if (!sFacs.SequenceEqual(cFacs) || !sCusts.SequenceEqual(cCusts) || !sSups.SequenceEqual(cSups) || !sAuds.SequenceEqual(cAuds))
                 {
@@ -1297,6 +1301,317 @@ internal static class Mdm16PostgresCheck
             await DropDbAsync(f03DbName);
             await DropDbAsync(paritySqlDbName);
             await DropDbAsync(parityCsDbName);
+        }
+    }
+
+    private static async Task VerifyF03R01AndF04R01LivePostgresAsync(string baseConnectionString)
+    {
+        var adminBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = "postgres" };
+        var stagedDbName = $"mdm16_f03r01_stg_{Guid.NewGuid():N}";
+        var damagedDbName = $"mdm16_f03r01_dmg_{Guid.NewGuid():N}";
+
+        async Task CreateDbAsync(string name)
+        {
+            await using var adminConn = new NpgsqlConnection(adminBuilder.ConnectionString);
+            await adminConn.OpenAsync();
+            await using var cmd = new NpgsqlCommand($"CREATE DATABASE \"{name}\"", adminConn);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        async Task DropDbAsync(string name)
+        {
+            NpgsqlConnection.ClearAllPools();
+            try
+            {
+                await using var adminConn = new NpgsqlConnection(adminBuilder.ConnectionString);
+                await adminConn.OpenAsync();
+                await using var term = new NpgsqlCommand($"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{name}' AND pid <> pg_backend_pid();", adminConn);
+                await term.ExecuteNonQueryAsync();
+                await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\";", adminConn);
+                await drop.ExecuteNonQueryAsync();
+            }
+            catch { }
+        }
+
+        try
+        {
+            // =========================================================================
+            // PART 1: Fresh Staged Upgrade via Mdm16UpgradePreflightService
+            //   - Regression 1: SAME order/address: Draft USA -> MDM1.6 US -> Amend NP -> Pack/Ship/BOL/Invoice -> Safe Upgrade -> remains NP; snapshots unchanged
+            //   - Regression 2: Package created Open BEFORE MDM1.6 -> transitioned Packed AFTER MDM1.6 -> remains US (Package.CreatedAt alone never proves pre-mig immutability)
+            //   - Regression 3: F04-R01 legacy suffix PII after approved prefix sanitized by SQL, zero leak via HTTP DTO, Search counts, and Export
+            // =========================================================================
+            await CreateDbAsync(stagedDbName);
+            var stagedConn = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = stagedDbName }.ConnectionString;
+
+            var facId = Guid.NewGuid();
+            var clientId = Guid.NewGuid();
+            var ordSameId = Guid.NewGuid();
+            var addrSameId = Guid.NewGuid();
+            var shipSameId = Guid.NewGuid();
+            var bolSameId = Guid.NewGuid();
+            var invSameId = Guid.NewGuid();
+            var ordOpenPackId = Guid.NewGuid();
+            var addrOpenPackId = Guid.NewGuid();
+            var pkgOpenPackId = Guid.NewGuid();
+            var custSuffixPiiId = Guid.NewGuid();
+            var staffId = Guid.NewGuid();
+
+            await using (var db = CreatePgDb(stagedConn))
+            {
+                var mig = db.GetInfrastructure().GetRequiredService<IMigrator>();
+                await mig.MigrateAsync(Mdm15Migration);
+                await ReferenceCatalogSeeder.SeedAsync(db);
+            }
+
+            // Seed pre-MDM-1.6 Draft orders at Mdm15 schema
+            await using (var conn = new NpgsqlConnection(stagedConn))
+            {
+                await conn.OpenAsync();
+                await using var cmd = new NpgsqlCommand($"""
+                    INSERT INTO facilities (facility_id, facility_code, name, country_code, state_or_province, postal_code, timezone, is_active, is_deleted, created_at)
+                    VALUES ('{facId}', 'F03R1-US', 'F03R1 US', 'USA', 'Illinois', '60601', 'America/Chicago', true, false, NOW());
+
+                    INSERT INTO clients (client_id, account_code, company_name, status, sla_tier, currency, is_deleted, created_at)
+                    VALUES ('{clientId}', 'F03R1-CL', 'F03R1 Client', 'Active', 'Standard', 'USD', false, NOW());
+
+                    INSERT INTO client_facility_access (client_id, facility_id, effective_date, status, primary_operating_facility, created_at)
+                    VALUES ('{clientId}', '{facId}', NOW(), 'Active', true, NOW());
+
+                    INSERT INTO customers (customer_id, client_id, customer_code, customer_name, customer_type, email, default_state_or_province, default_postal_code, default_country_code, is_active, version, is_deleted, created_at)
+                    VALUES ('{custSuffixPiiId}', '{clientId}', 'F03R1-C1', 'Legacy Cust', 'RetailCustomer', 'c@f03r1.test', 'Illinois', '60601', 'ZZZ', true, 1, false, NOW());
+
+                    INSERT INTO outbound_orders (order_id, client_id, facility_id, customer_id, order_number, order_type, status, delivery_status, priority, service_level, customer_name, order_date_utc, version, is_deleted, created_at)
+                    VALUES
+                        ('{ordSameId}', '{clientId}', '{facId}', NULL, 'F03R1-SAME', 'B2BSalesOrder', 'Draft', 'PendingShipment', 1, 'StandardGround', 'Same Order', NOW(), 1, false, NOW()),
+                        ('{ordOpenPackId}', '{clientId}', '{facId}', NULL, 'F03R1-OPEN', 'B2BSalesOrder', 'Draft', 'PendingShipment', 1, 'StandardGround', 'Open Pkg Order', NOW(), 1, false, NOW());
+
+                    INSERT INTO shipping_addresses (shipping_address_id, order_id, recipient_name, address_line1, city, state_or_province, postal_code, country_code, is_amended, created_at_utc, is_deleted)
+                    VALUES
+                        ('{addrSameId}', '{ordSameId}', 'R Same', '10 Main', 'Chicago', 'Illinois', '60601', 'USA', false, NOW(), false),
+                        ('{addrOpenPackId}', '{ordOpenPackId}', 'R Open', '20 Main', 'Chicago', 'Illinois', '60601', 'USA', false, NOW(), false);
+                    """, conn);
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            // Seed Package created OPEN before original MDM-1.6 migration on ordOpenPackId
+            await using (var pkgDb = CreatePgDb(stagedConn))
+            {
+                var huOpen = Guid.NewGuid();
+                pkgDb.HandlingUnits.Add(new HandlingUnit { Id = huOpen, ClientId = clientId, FacilityId = facId, LpnCode = "F03R1-HU-OPEN", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.Available });
+                pkgDb.Packages.Add(new Package { Id = pkgOpenPackId, ClientId = clientId, FacilityId = facId, OutboundOrderId = ordOpenPackId, HandlingUnitId = huOpen, PackageNumber = "F03R1-PKG-OPEN", Status = PackageStatus.Open });
+                await pkgDb.SaveChangesAsync();
+            }
+
+            // Step 2: Apply original MDM-1.6 migration -> both Draft USA orders become US
+            await using (var db = CreatePgDb(stagedConn))
+            {
+                var mig = db.GetInfrastructure().GetRequiredService<IMigrator>();
+                await mig.MigrateAsync(Mdm16Migration);
+            }
+            await using (var conn = new NpgsqlConnection(stagedConn))
+            {
+                await conn.OpenAsync();
+                await using var chk = new NpgsqlCommand($"SELECT country_code FROM shipping_addresses WHERE shipping_address_id = '{addrSameId}'", conn);
+                var ccAfterMdm16 = (string?)await chk.ExecuteScalarAsync();
+                if (ccAfterMdm16 != "US")
+                    throw new InvalidOperationException($"F03-R01 Step 2 failed: expected 'US' after original MDM-1.6, got '{ccAfterMdm16}'.");
+            }
+
+            // Steps 3 & 4 (AFTER MDM-1.6, BEFORE R04):
+            // - Legitimate authorized amendment on SAME order ordSameId: US -> NP
+            // - Pack + Ship + BOL + Invoice THAT SAME order ordSameId
+            // - Transition pkgOpenPackId from Open -> Packed (created_at stays pre-MDM-1.6, packed_at_utc & updated_at are post-MDM-1.6)
+            // - Inject synthetic legacy audit reason containing personal name & confidential text after approved prefix
+            await Task.Delay(120);
+            await using (var conn = new NpgsqlConnection(stagedConn))
+            {
+                await conn.OpenAsync();
+                await using var cmd = new NpgsqlCommand($"""
+                    UPDATE shipping_addresses
+                    SET city = 'Kathmandu', state_or_province = 'Bagmati', postal_code = '44600', country_code = 'NP',
+                        is_amended = true, amended_at_utc = NOW(), amendment_reason = 'Authorized cross-border change to NP'
+                    WHERE shipping_address_id = '{addrSameId}';
+
+                    UPDATE outbound_orders
+                    SET status = 'Completed', updated_at = NOW()
+                    WHERE order_id = '{ordSameId}';
+
+                    UPDATE packages
+                    SET status = 'Packed', packed_at_utc = NOW(), updated_at = NOW()
+                    WHERE package_id = '{pkgOpenPackId}';
+
+                    UPDATE country_normalization_audits
+                    SET reason = 'Unrecognized country token — Johnathan Vance (Confidential VIP Deal)'
+                    WHERE entity_type = 'Customer' AND entity_id = '{custSuffixPiiId}';
+                    """, conn);
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            await using (var snapDb = CreatePgDb(stagedConn))
+            {
+                var huSame = Guid.NewGuid();
+                var bpId = Guid.NewGuid();
+                snapDb.HandlingUnits.Add(new HandlingUnit { Id = huSame, ClientId = clientId, FacilityId = facId, LpnCode = "F03R1-HU-SAME", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.Available });
+                snapDb.Shipments.Add(new Shipment { Id = shipSameId, ClientId = clientId, FacilityId = facId, ShipmentNumber = "F03R1-SHP-1", CarrierCode = "DHL", Status = ShipmentStatus.Dispatched, BillOfLadingNumber = "F03R1-BOL-1" });
+                snapDb.Packages.Add(new Package { Id = Guid.NewGuid(), ClientId = clientId, FacilityId = facId, OutboundOrderId = ordSameId, ShipmentId = shipSameId, HandlingUnitId = huSame, PackageNumber = "F03R1-PKG-SAME", Status = PackageStatus.Packed, PackedAtUtc = DateTime.UtcNow });
+                snapDb.BillsOfLading.Add(new BillOfLading { Id = bolSameId, ClientId = clientId, FacilityId = facId, ShipmentId = shipSameId, BolNumber = "F03R1-BOL-1", CarrierCode = "DHL", CarrierName = "DHL", ConsigneeName = "Nepal Consignee", ConsigneeAddressSnapshot = "Amended Nepal Consignee, Kathmandu 44600, NP", DocumentSnapshotJson = "{\"country\":\"NP\"}" });
+                snapDb.BillingPeriods.Add(new BillingPeriod { Id = bpId, ClientId = clientId, PeriodCode = "2026-11", Name = "Nov 2026", StartDateUtc = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc), EndDateUtc = new DateTime(2026, 11, 30, 0, 0, 0, DateTimeKind.Utc) });
+                snapDb.Invoices.Add(new Invoice { Id = invSameId, ClientId = clientId, FacilityId = facId, BillingPeriodId = bpId, InvoiceNumber = "F03R1-INV-1", Status = InvoiceStatus.Issued, Currency = "NPR", InvoiceDate = DateTime.UtcNow, DueDate = DateTime.UtcNow.AddDays(30) });
+                await snapDb.SaveChangesAsync();
+            }
+
+            // Step 5: Execute supported safe upgrade path (preflight snapshot BEFORE R04 -> R04 -> F03 -> F03R01_F04R01)
+            await using (var upDb = CreatePgDb(stagedConn))
+            {
+                await Mdm16UpgradePreflightService.ExecuteSafeUpgradeAsync(upDb);
+
+                // Step 6 & 7: Verify SAME order remains NP, snapshots unchanged, Open->Packed remains US, legacy suffix PII sanitized
+                var aSame = await upDb.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrSameId);
+                var aOpenPack = await upDb.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrOpenPackId);
+                var shp = await upDb.Shipments.IgnoreQueryFilters().SingleAsync(s => s.Id == shipSameId);
+                var bol = await upDb.BillsOfLading.IgnoreQueryFilters().SingleAsync(b => b.Id == bolSameId);
+                var inv = await upDb.Invoices.IgnoreQueryFilters().SingleAsync(i => i.Id == invSameId);
+                var suffixAudit = await upDb.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "Customer" && a.EntityId == custSuffixPiiId);
+
+                if (aSame.CountryCode != "NP" || aSame.CountryNormalizationStatus != CountryNormalizationStatus.Normalized)
+                    throw new InvalidOperationException($"F03-R01 Reg1 failed: same-order amended+fulfilled address expected 'NP'/Normalized, got '{aSame.CountryCode}'/{aSame.CountryNormalizationStatus}.");
+                if (shp.Status != ShipmentStatus.Dispatched || bol.ConsigneeAddressSnapshot != "Amended Nepal Consignee, Kathmandu 44600, NP" || inv.Currency != "NPR")
+                    throw new InvalidOperationException("F03-R01 Reg1 failed: shipment, BOL, or invoice snapshot was altered.");
+                if (aOpenPack.CountryCode != "US" || aOpenPack.CountryNormalizationStatus != CountryNormalizationStatus.Normalized)
+                    throw new InvalidOperationException($"F03-R01 Reg2 failed: Open->Packed post-migration address expected 'US'/Normalized, got '{aOpenPack.CountryCode}'/{aOpenPack.CountryNormalizationStatus}.");
+                if (suffixAudit.Reason != CountryDiagnosticSanitizer.UnrecognizedCountry.Description ||
+                    suffixAudit.Reason.Contains("Johnathan", StringComparison.OrdinalIgnoreCase) ||
+                    suffixAudit.Reason.Contains("Confidential", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException($"F04-R01 SQL sanitization failed: got '{suffixAudit.Reason}'.");
+
+                // Inject an unsanitized synthetic suffix-PII audit directly via SQL AFTER migration to verify runtime HTTP/Search/Export isolation on PG
+                await upDb.Database.ExecuteSqlAsync(
+                    $"UPDATE country_normalization_audits SET reason = 'Conflicting geographic evidence: Elena Rostova Confidential Memo' WHERE audit_id = {suffixAudit.Id};");
+
+                var platRole = new Role { RoleName = "F04R1PgPlat", Description = "Plat", IsSystemRole = false };
+                platRole.RolePermissions.Add(new RolePermission { Role = platRole, PermissionKey = Permissions.Global.NormalizationView, AccessLevel = AccessLevel.Read });
+                var uPlat = new User { Id = staffId, Email = "f04r1@pg.test", FirstName = "P", LastName = "S", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" };
+                upDb.Roles.Add(platRole);
+                upDb.Users.Add(uPlat);
+                upDb.UserRoles.Add(new UserRole { User = uPlat, Role = platRole });
+                await upDb.SaveChangesAsync();
+
+                var handler = new GetNormalizationQuarantineQueryHandler(upDb, new PgAdminUserContext(staffId));
+                var allRes = await handler.Handle(new GetNormalizationQuarantineQuery(IncludeAllStatuses: true, PageSize: 100), CancellationToken.None);
+                var allJson = JsonSerializer.Serialize(allRes, JsonOptions);
+                if (allJson.Contains("Elena", StringComparison.OrdinalIgnoreCase) || allJson.Contains("Confidential", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("F04-R01 PG query response leaked legacy suffix PII.");
+                if (!allRes.Items.Any(i => i.ReasonCode == CountryDiagnosticSanitizer.ConflictingGeographicEvidence.Code))
+                    throw new InvalidOperationException("F04-R01 PG query response missing structured ReasonCode.");
+
+                var leakSearch = await handler.Handle(new GetNormalizationQuarantineQuery(IncludeAllStatuses: true, Search: "Confidential", PageSize: 100), CancellationToken.None);
+                if (leakSearch.TotalCount != 0 || leakSearch.PendingCount != 0 || leakSearch.NormalizedCount != 0)
+                    throw new InvalidOperationException($"F04-R01 PG search leaked raw reason suffix via counts: Total={leakSearch.TotalCount}.");
+
+                var exportJson = await new LegacyCountryNormalizationService(upDb).ExportProvenanceSnapshotJsonAsync();
+                if (exportJson.Contains("Elena", StringComparison.OrdinalIgnoreCase) || exportJson.Contains("Confidential", StringComparison.OrdinalIgnoreCase))
+                    throw new InvalidOperationException("F04-R01 PG export leaked legacy suffix PII.");
+            }
+
+            // =========================================================================
+            // PART 2: Already-R04-Applied Damaged Database (R04 ran earlier WITHOUT preflight)
+            //   - Amended+Packed order already overwritten by R04: NEVER guess; preserve current value and flag PendingNormalization + HISTORICAL_PROVENANCE_REVIEW
+            //   - Unamended Open->Packed order already reverted by R04: safely restored to 'US' using packed_at_utc/updated_at (not created_at alone)
+            // =========================================================================
+            await CreateDbAsync(damagedDbName);
+            var damagedConn = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = damagedDbName }.ConnectionString;
+
+            var dFacId = Guid.NewGuid();
+            var dClientId = Guid.NewGuid();
+            var dOrdDamagedId = Guid.NewGuid();
+            var dAddrDamagedId = Guid.NewGuid();
+            var dOrdOpenId = Guid.NewGuid();
+            var dAddrOpenId = Guid.NewGuid();
+            var dPkgOpenId = Guid.NewGuid();
+
+            await using (var db = CreatePgDb(damagedConn))
+            {
+                var mig = db.GetInfrastructure().GetRequiredService<IMigrator>();
+                await mig.MigrateAsync(Mdm15Migration);
+                await ReferenceCatalogSeeder.SeedAsync(db);
+            }
+            await using (var conn = new NpgsqlConnection(damagedConn))
+            {
+                await conn.OpenAsync();
+                await using var cmd = new NpgsqlCommand($"""
+                    INSERT INTO facilities (facility_id, facility_code, name, country_code, state_or_province, postal_code, timezone, is_active, is_deleted, created_at)
+                    VALUES ('{dFacId}', 'DMG-US', 'DMG US', 'USA', 'Illinois', '60601', 'America/Chicago', true, false, NOW());
+                    INSERT INTO clients (client_id, account_code, company_name, status, sla_tier, currency, is_deleted, created_at)
+                    VALUES ('{dClientId}', 'DMG-CL', 'DMG Client', 'Active', 'Standard', 'USD', false, NOW());
+                    INSERT INTO client_facility_access (client_id, facility_id, effective_date, status, primary_operating_facility, created_at)
+                    VALUES ('{dClientId}', '{dFacId}', NOW(), 'Active', true, NOW());
+                    INSERT INTO outbound_orders (order_id, client_id, facility_id, customer_id, order_number, order_type, status, delivery_status, priority, service_level, customer_name, order_date_utc, version, is_deleted, created_at)
+                    VALUES
+                        ('{dOrdDamagedId}', '{dClientId}', '{dFacId}', NULL, 'DMG-AMD', 'B2BSalesOrder', 'Draft', 'PendingShipment', 1, 'StandardGround', 'Damaged', NOW(), 1, false, NOW()),
+                        ('{dOrdOpenId}', '{dClientId}', '{dFacId}', NULL, 'DMG-OPEN', 'B2BSalesOrder', 'Draft', 'PendingShipment', 1, 'StandardGround', 'OpenNoPre', NOW(), 1, false, NOW());
+                    INSERT INTO shipping_addresses (shipping_address_id, order_id, recipient_name, address_line1, city, state_or_province, postal_code, country_code, is_amended, created_at_utc, is_deleted)
+                    VALUES
+                        ('{dAddrDamagedId}', '{dOrdDamagedId}', 'R Dmg', '1 St', 'Chicago', 'Illinois', '60601', 'USA', false, NOW(), false),
+                        ('{dAddrOpenId}', '{dOrdOpenId}', 'R Opn', '2 St', 'Chicago', 'Illinois', '60601', 'USA', false, NOW(), false);
+                    """, conn);
+                await cmd.ExecuteNonQueryAsync();
+            }
+            await using (var pkgDb = CreatePgDb(damagedConn))
+            {
+                var hu = Guid.NewGuid();
+                pkgDb.HandlingUnits.Add(new HandlingUnit { Id = hu, ClientId = dClientId, FacilityId = dFacId, LpnCode = "DMG-HU-OPEN", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.Available });
+                pkgDb.Packages.Add(new Package { Id = dPkgOpenId, ClientId = dClientId, FacilityId = dFacId, OutboundOrderId = dOrdOpenId, HandlingUnitId = hu, PackageNumber = "DMG-PKG-OPEN", Status = PackageStatus.Open });
+                await pkgDb.SaveChangesAsync();
+            }
+
+            // Apply original MDM-1.6
+            await using (var db = CreatePgDb(damagedConn))
+            {
+                await db.GetInfrastructure().GetRequiredService<IMigrator>().MigrateAsync(Mdm16Migration);
+            }
+
+            // Post-MDM-1.6 mutations -> then apply R04 DIRECTLY WITHOUT PREFLIGHT (simulating previously damaged DB)
+            await Task.Delay(120);
+            await using (var conn = new NpgsqlConnection(damagedConn))
+            {
+                await conn.OpenAsync();
+                await using var cmd = new NpgsqlCommand($"""
+                    UPDATE shipping_addresses
+                    SET city = 'Kathmandu', state_or_province = 'Bagmati', postal_code = '44600', country_code = 'NP',
+                        is_amended = true, amended_at_utc = NOW(), amendment_reason = 'Amended before unguarded R04'
+                    WHERE shipping_address_id = '{dAddrDamagedId}';
+                    UPDATE outbound_orders SET status = 'Completed', updated_at = NOW() WHERE order_id = '{dOrdDamagedId}';
+                    UPDATE packages SET status = 'Packed', packed_at_utc = NOW(), updated_at = NOW() WHERE package_id = '{dPkgOpenId}';
+                    """, conn);
+                await cmd.ExecuteNonQueryAsync();
+            }
+            await using (var db = CreatePgDb(damagedConn))
+            {
+                // Apply R04 without preflight (causes damage on dAddrDamagedId & reverts dAddrOpenId)
+                await db.GetInfrastructure().GetRequiredService<IMigrator>().MigrateAsync(Mdm16UpgradePreflightService.Mdm16R04MigrationId);
+                // Now apply F03 + F03R01_F04R01
+                await db.GetInfrastructure().GetRequiredService<IMigrator>().MigrateAsync();
+
+                var dmgAddr = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == dAddrDamagedId);
+                var dmgAudit = await db.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "ShippingAddress" && a.EntityId == dAddrDamagedId);
+                var opnAddr = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == dAddrOpenId);
+
+                if (dmgAddr.CountryCode != "USA" || dmgAddr.CountryNormalizationStatus != CountryNormalizationStatus.PendingNormalization ||
+                    dmgAudit.NormalizationStatus != CountryNormalizationStatus.PendingNormalization ||
+                    dmgAudit.Reason != CountryDiagnosticSanitizer.HistoricalProvenanceReview.Description)
+                    throw new InvalidOperationException($"F03-R01 Damaged DB steward-review guard failed: Country={dmgAddr.CountryCode}, Status={dmgAddr.CountryNormalizationStatus}, AuditReason={dmgAudit.Reason}");
+
+                if (opnAddr.CountryCode != "US" || opnAddr.CountryNormalizationStatus != CountryNormalizationStatus.Normalized)
+                    throw new InvalidOperationException($"F03-R01 Damaged DB Open->Packed recovery failed: expected 'US'/Normalized, got '{opnAddr.CountryCode}'/{opnAddr.CountryNormalizationStatus}.");
+            }
+
+            Console.WriteLine("PASS PostgreSQL MDM-1.6 F03-R01 (Same-Order Amend+Fulfill, Open->Packed, Damaged-DB Steward Review) & F04-R01 (Structured Reasons & Zero-Leak Search) verified cleanly.");
+        }
+        finally
+        {
+            await DropDbAsync(stagedDbName);
+            await DropDbAsync(damagedDbName);
         }
     }
 

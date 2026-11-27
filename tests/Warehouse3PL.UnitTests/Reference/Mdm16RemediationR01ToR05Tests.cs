@@ -776,6 +776,136 @@ public sealed class Mdm16RemediationR01ToR05Tests
         Assert.Contains("\"USA\"", exportJson);
     }
 
+    [Fact]
+    public async Task F04R01_StructuredDiagnosticReasons_RejectArbitrarySuffixAfterApprovedPrefix_AndPreventRawReasonSearchLeak()
+    {
+        var staffPlatId = Guid.NewGuid();
+        var facId = Guid.NewGuid();
+        var clientId = Guid.NewGuid();
+        var c1 = Guid.NewGuid();
+        var c2 = Guid.NewGuid();
+        var c3 = Guid.NewGuid();
+        var cInactiveAlias = Guid.NewGuid();
+
+        await using var host = await BuildJwtAppAsync(async db =>
+        {
+            await ReferenceCatalogSeeder.SeedAsync(db);
+            // Inactive country profile with active alias -> MUST NOT be searchable/displayable as verified token
+            db.CountryProfiles.Add(new CountryProfile
+            {
+                CountryCode = "XX",
+                IsoAlpha3Code = "XXX",
+                Name = "Inactive Land",
+                IsActive = false
+            });
+            db.CountryNormalizationAliases.Add(new CountryNormalizationAlias
+            {
+                AliasKey = "INACTIVEALIAS",
+                CountryCode = "XX",
+                SourceStandard = "Test",
+                IsActive = true
+            });
+
+            var fac = new Facility { Id = facId, FacilityCode = "F04R1-US", Name = "F04R1 US", CountryCode = "US", Timezone = "America/Chicago", IsActive = true };
+            var client = new Client { Id = clientId, AccountCode = "F04R1-CL", CompanyName = "F04R1 Client", Status = ClientStatus.Active };
+            db.Facilities.Add(fac);
+            db.Clients.Add(client);
+            db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientId, FacilityId = facId, Status = FacilityAccessStatus.Active });
+            db.Customers.AddRange(
+                new Customer { Id = c1, ClientId = clientId, CustomerCode = "C1", CustomerName = "N1", DefaultCountryCode = "ZZ1" },
+                new Customer { Id = c2, ClientId = clientId, CustomerCode = "C2", CustomerName = "N2", DefaultCountryCode = "ZZ2" },
+                new Customer { Id = c3, ClientId = clientId, CustomerCode = "C3", CustomerName = "N3", DefaultCountryCode = "US" },
+                new Customer { Id = cInactiveAlias, ClientId = clientId, CustomerCode = "C4", CustomerName = "N4", DefaultCountryCode = "INACTIVEALIAS" });
+
+            var platRole = new Role { RoleName = "F04R1Plat", Description = "Plat", IsSystemRole = false };
+            platRole.RolePermissions.Add(new RolePermission { Role = platRole, PermissionKey = Permissions.Global.NormalizationView, AccessLevel = AccessLevel.Read });
+            var uPlat = new User { Id = staffPlatId, Email = "plat@f04r1.test", FirstName = "P", LastName = "S", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" };
+            db.Roles.Add(platRole);
+            db.Users.Add(uPlat);
+            db.UserRoles.Add(new UserRole { User = uPlat, Role = platRole });
+            await db.SaveChangesAsync();
+
+            // Inject synthetic legacy persisted reasons containing personal names & confidential text AFTER approved prefixes
+            var a1 = await db.CountryNormalizationAudits.SingleAsync(a => a.EntityType == nameof(Customer) && a.EntityId == c1);
+            a1.Reason = "Unrecognized country token — Johnathan Vance (Confidential VIP Account)";
+            var a2 = await db.CountryNormalizationAudits.SingleAsync(a => a.EntityType == nameof(Customer) && a.EntityId == c2);
+            a2.Reason = "Conflicting geographic evidence: Elena Rostova private postal 90210 secret memo";
+            var a4 = await db.CountryNormalizationAudits.SingleAsync(a => a.EntityType == nameof(Customer) && a.EntityId == cInactiveAlias);
+            a4.OriginalCountryValue = "INACTIVEALIAS";
+            a4.Reason = "Normalized to canonical 'US' — Internal Project Orion";
+
+            db.CountryNormalizationAudits.Add(new CountryNormalizationAudit
+            {
+                EntityType = nameof(Customer),
+                EntityId = c3,
+                FieldName = nameof(Customer.DefaultCountryCode),
+                OriginalCountryValue = "USA",
+                NormalizedCountryCode = "US",
+                NormalizationStatus = CountryNormalizationStatus.Normalized,
+                Reason = CountryDiagnosticSanitizer.ConflictingGeographicEvidence.Description,
+                ClientId = clientId,
+                FacilityId = facId,
+                CorrelationBatchId = "F04R1-CTRL",
+                InitialCorrelationBatchId = "F04R1-CTRL",
+                RecordedAtUtc = DateTime.UtcNow,
+                InitialRecordedAtUtc = DateTime.UtcNow
+            });
+            await db.SaveChangesAsync();
+        });
+
+        // 1. Direct sanitizer contract: never echo suffix text after approved prefixes
+        Assert.Equal(CountryDiagnosticSanitizer.UnrecognizedCountry.Description,
+            CountryDiagnosticSanitizer.SanitizeReason("Unrecognized country token — Johnathan Vance (Confidential VIP Account)"));
+        Assert.Equal(CountryDiagnosticSanitizer.ConflictingGeographicEvidence.Code,
+            CountryDiagnosticSanitizer.GetReasonCode("Conflicting geographic evidence: Elena Rostova private postal 90210 secret memo"));
+        Assert.Equal(CountryDiagnosticSanitizer.NormalizedCanonical.Description,
+            CountryDiagnosticSanitizer.SanitizeReason("Normalized to canonical 'US' — Internal Project Orion"));
+
+        using var http = host.GetTestClient();
+        var jwtPlat = TokenFor(host, staffPlatId, UserType.Staff, null, null, ["F04R1Plat"], [Permissions.Global.NormalizationView]);
+
+        // 2. HTTP response body must expose only controlled reason codes/descriptions and NEVER leak suffix text or inactive aliases
+        var allResp = await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/reference/normalization-quarantine?includeAllStatuses=true&pageSize=100", jwtPlat));
+        Assert.Equal(HttpStatusCode.OK, allResp.StatusCode);
+        var allJson = await allResp.Content.ReadAsStringAsync();
+        foreach (var forbidden in new[] { "Johnathan", "Vance", "Confidential", "VIP Account", "Elena", "Rostova", "90210", "secret memo", "Project Orion", "INACTIVEALIAS" })
+        {
+            Assert.DoesNotContain(forbidden, allJson, StringComparison.OrdinalIgnoreCase);
+        }
+        Assert.Contains("UNRECOGNIZED_COUNTRY", allJson);
+        Assert.Contains("CONFLICTING_GEOGRAPHIC_EVIDENCE", allJson);
+
+        // 3. Search must NEVER match raw persisted Reason suffixes or inactive-country aliases (0 matches, 0 count leak)
+        foreach (var probe in new[] { "Johnathan", "Vance", "Confidential", "Elena", "Rostova", "90210", "Orion", "INACTIVEALIAS" })
+        {
+            var searchResp = await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/reference/normalization-quarantine?includeAllStatuses=true&search={Uri.EscapeDataString(probe)}", jwtPlat));
+            Assert.Equal(HttpStatusCode.OK, searchResp.StatusCode);
+            var searchDto = await searchResp.Content.ReadFromJsonAsync<PagedNormalizationQuarantineResponse>(JsonOptions);
+            Assert.NotNull(searchDto);
+            Assert.Equal(0, searchDto!.TotalCount);
+            Assert.Equal(0, searchDto.PendingCount);
+            Assert.Equal(0, searchDto.NormalizedCount);
+            Assert.Empty(searchDto.Items);
+        }
+
+        // 4. Safe search by predefined ReasonCode matches controlled rows cleanly
+        var codeSearch = await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/reference/normalization-quarantine?includeAllStatuses=true&search=CONFLICTING_GEOGRAPHIC_EVIDENCE", jwtPlat));
+        Assert.Equal(HttpStatusCode.OK, codeSearch.StatusCode);
+        var codeDto = await codeSearch.Content.ReadFromJsonAsync<PagedNormalizationQuarantineResponse>(JsonOptions);
+        Assert.True(codeDto!.TotalCount >= 1);
+        Assert.All(codeDto.Items, item => Assert.Equal("CONFLICTING_GEOGRAPHIC_EVIDENCE", item.ReasonCode));
+
+        // 5. JSON export must never expose suffix text and must include structured ReasonCode
+        using var scope = host.Services.CreateScope();
+        var svc = scope.ServiceProvider.GetRequiredService<ILegacyCountryNormalizationService>();
+        var exportJson = await svc.ExportProvenanceSnapshotJsonAsync();
+        foreach (var forbidden in new[] { "Johnathan", "Vance", "Confidential", "Elena", "Rostova", "90210", "Project Orion", "INACTIVEALIAS" })
+        {
+            Assert.DoesNotContain(forbidden, exportJson, StringComparison.OrdinalIgnoreCase);
+        }
+        Assert.Contains("\"ReasonCode\":", exportJson);
+    }
+
     private static string TokenFor(WebApplication host, Guid id, UserType ut, Guid? cid, Guid? fid, string[] roles, string[] perms)
     {
         using var scope = host.Services.CreateScope();

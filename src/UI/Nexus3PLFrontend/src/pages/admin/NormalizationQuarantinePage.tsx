@@ -182,11 +182,11 @@ export const NormalizationQuarantinePage: React.FC = () => {
             </div>
 
             <div className="form-field quarantine-search-field">
-              <label htmlFor="quarantine-search">Search Entity / Verified Code / Reason</label>
+              <label htmlFor="quarantine-search">Search Entity / Verified Code / Reason Code</label>
               <input
                 id="quarantine-search"
                 type="search"
-                placeholder="e.g. Facility, USA, Conflict"
+                placeholder="e.g. Facility, USA, CONFLICTING_GEOGRAPHIC_EVIDENCE"
                 value={search}
                 onChange={(e) => {
                   setSearch(e.target.value);
@@ -280,7 +280,14 @@ export const NormalizationQuarantinePage: React.FC = () => {
                               )}
                             </div>
                           </td>
-                          <td className="reason-cell">{row.reason}</td>
+                          <td className="reason-cell">
+                            {row.reasonCode && (
+                              <span className="entity-meta" style={{ display: 'block', fontFamily: 'monospace' }}>
+                                {row.reasonCode}
+                              </span>
+                            )}
+                            <span>{row.reason}</span>
+                          </td>
                           <td>
                             <div className="entity-cell">
                               <span>{row.facilityCode || (row.facilityId ? row.facilityId.slice(0, 8) : 'Platform / Multi-Facility')}</span>
