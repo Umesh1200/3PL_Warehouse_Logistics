@@ -1490,7 +1490,7 @@ internal static class Mdm16PostgresCheck
                 await upDb.Database.ExecuteSqlAsync(
                     $"UPDATE country_normalization_audits SET reason = 'Conflicting geographic evidence: Elena Rostova Confidential Memo' WHERE audit_id = {suffixAudit.Id};");
 
-                var platRole = new Role { RoleName = "F04R1PgPlat", Description = "Plat", IsSystemRole = false };
+                var platRole = new Role { RoleName = SystemRoles.SuperAdmin, Description = "Plat", IsSystemRole = true };
                 platRole.RolePermissions.Add(new RolePermission { Role = platRole, PermissionKey = Permissions.Global.NormalizationView, AccessLevel = AccessLevel.Read });
                 var uPlat = new User { Id = staffId, Email = "f04r1@pg.test", FirstName = "P", LastName = "S", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" };
                 upDb.Roles.Add(platRole);
