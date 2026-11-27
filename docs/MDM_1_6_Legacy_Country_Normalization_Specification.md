@@ -116,3 +116,15 @@ Query parameters: `status` (defaults to `PendingNormalization`, optional all/`No
 
 1. Deterministic unit, HTTP auth & live PostgreSQL verification covering all 17 required `MDM-1.6` test scenarios (`USA`/`NPL`, case/whitespace, other catalog countries, already-normalized preservation, deterministic parent+geo inference, blank-orphan/unknown `ZZZ`/conflicting/cross-border quarantine, idempotency, rollback, closed shipment/invoice immutability, FK/row-count conservation, MDM-1.5 epoch & outbox integrity, cross-facility/tenant isolation, Client/Driver/unpriv Staff `403`, fail-closed migration preconditions, and full MDM-1.5 Redis resilience regression).
 2. Full regression green across `.NET` Unit & Security suite, live PostgreSQL 16 (`Phase 7.3–7.4`, `MDM-0`, `MDM-1.1`–`MDM-1.6`), real Redis 7, `Vitest`, `tsc --noEmit`, Vite build, and Playwright Chromium E2E.
+
+---
+
+## 9. R01–R05 Independent Acceptance Remediation Addendum
+
+Implemented in commits through `68f45dfb7ae2ecbdec41a0c1bee8c3242b33db1f` and documented in [`docs/MDM_1_6_Acceptance_Remediation_Report.md`](MDM_1_6_Acceptance_Remediation_Report.md):
+
+- **R01 Lifecycle Consistency:** Removed legacy `"USA"` / `"US"` / `CountryNormalizationStatus.Normalized` defaults across all 7 audited entities and DTOs, added catalog-driven write resolution (`CountryNormalizationWriteHelper`), reset `CountryNormalizationStatus` on `ShippingAddress.Amend(...)`, and enforced persistence-boundary lifecycle consistency in `ApplicationDbContext`.
+- **R02 Strict Inference & Historical Preservation:** Prohibited discarding unresolved facilities during client domestic checks, disallowed origin-warehouse country inference on blank `ShippingAddress` rows, added explicit-country `Facility` timezone conflict quarantine, enforced verified-`Normalized` active non-deleted parents, and expanded fulfillment immutability across `Package` (`Status != Open`), `Shipment`, `BillOfLading`, and `Invoice` snapshots.
+- **R03 Audit Reconciliation:** Added bi-directional `PendingNormalization <-> Normalized` audit reconciliation, soft-deleted/association cleanup, `InitialRecordedAtUtc`/`InitialCorrelationBatchId` immutable provenance, and semantic idempotency on unchanged reruns.
+- **R04 Additive Fail-Closed Migration:** Added `20261127051434_MDM1_6_R04_NormalizationRemediationLifecycle` (leaving `20261126143014` unedited), distinguishing fresh empty installs from populated DBs lacking active `CountryProfile`/`AdministrativeDivision` catalogs and re-evaluating prior blank-inferred / wrongly-mutated packed snapshot rows.
+- **R05 Security & PII Redaction:** Restricted endpoint access to active DB-verified Staff (`global:normalization:view` / `facilities:manage`), added active `ClientFacilityAccess` revalidation per record, rejected header/query conflicts (`400`) and pagination overflow (`400`), and redacted raw PII tokens via `CountryDiagnosticSanitizer`.
