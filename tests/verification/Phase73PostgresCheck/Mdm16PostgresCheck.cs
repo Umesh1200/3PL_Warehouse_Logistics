@@ -1094,35 +1094,28 @@ internal static class Mdm16PostgresCheck
                     await cmd.ExecuteNonQueryAsync();
                 }
 
-                var hu1 = Guid.NewGuid();
                 await ExecF03Async($"""
-                    INSERT INTO facilities (facility_id, facility_code, name, address_line1, city, state_or_province, postal_code, country_code, timezone, is_active, created_at, is_deleted)
-                    VALUES ('{facId}', 'F03-US', 'F03 US', '1 Main', 'Chicago', 'Illinois', '60601', 'USA', 'America/Chicago', true, NOW(), false);
+                    INSERT INTO facilities (facility_id, facility_code, name, country_code, state_or_province, postal_code, timezone, is_active, is_deleted, created_at)
+                    VALUES ('{facId}', 'F03-US', 'F03 US', 'USA', 'Illinois', '60601', 'America/Chicago', true, false, NOW());
 
-                    INSERT INTO clients (client_id, account_code, company_name, status, default_currency, payment_terms_days, created_at, is_deleted)
-                    VALUES ('{clientId}', 'F03-CL', 'F03 Client', 'Active', 'USD', 30, NOW(), false);
+                    INSERT INTO clients (client_id, account_code, company_name, status, sla_tier, currency, is_deleted, created_at)
+                    VALUES ('{clientId}', 'F03-CL', 'F03 Client', 'Active', 'Standard', 'USD', false, NOW());
 
-                    INSERT INTO client_facility_access (client_id, facility_id, is_primary, status, created_at)
-                    VALUES ('{clientId}', '{facId}', true, 'Active', NOW());
+                    INSERT INTO client_facility_access (client_id, facility_id, effective_date, status, primary_operating_facility, created_at)
+                    VALUES ('{clientId}', '{facId}', NOW(), 'Active', true, NOW());
 
-                    INSERT INTO customers (customer_id, client_id, customer_code, customer_name, default_country_code, default_state_or_province, default_postal_code, is_active, created_at, is_deleted)
-                    VALUES ('{custNamePiiId}', '{clientId}', 'F03-PII', 'John', 'John Doe', 'Illinois', '60601', true, NOW(), false);
+                    INSERT INTO customers (customer_id, client_id, customer_code, customer_name, customer_type, email, default_state_or_province, default_postal_code, default_country_code, is_active, version, is_deleted, created_at)
+                    VALUES ('{custNamePiiId}', '{clientId}', 'F03-PII', 'John', 'RetailCustomer', 'f03@m16.test', 'Illinois', '60601', 'John Doe', true, 1, false, NOW());
 
-                    INSERT INTO outbound_orders (order_id, client_id, facility_id, order_number, order_type, status, priority, customer_name, total_lines, total_ordered_units, total_allocated_units, total_picked_units, total_shipped_units, created_at, is_deleted)
+                    INSERT INTO outbound_orders (order_id, client_id, facility_id, customer_id, order_number, order_type, status, delivery_status, priority, service_level, customer_name, order_date_utc, version, is_deleted, created_at)
                     VALUES
-                        ('{ordPrePackedId}', '{clientId}', '{facId}', 'F03-PRE', 'B2BSalesOrder', 'Draft', 'Normal', 'Pre', 1, 1, 0, 0, 0, NOW(), false),
-                        ('{ordPostFulfillId}', '{clientId}', '{facId}', 'F03-POST', 'B2BSalesOrder', 'Draft', 'Normal', 'Post', 1, 1, 0, 0, 0, NOW(), false),
-                        ('{ordAmendedId}', '{clientId}', '{facId}', 'F03-AMD', 'B2BSalesOrder', 'Draft', 'Normal', 'Amd', 1, 1, 0, 0, 0, NOW(), false),
-                        ('{ordHistBlankId}', '{clientId}', '{facId}', 'F03-BLK', 'B2BSalesOrder', 'Draft', 'Normal', 'Blk', 1, 1, 0, 0, 0, NOW(), false),
-                        ('{ordAmbiguousId}', '{clientId}', '{facId}', 'F03-AMB', 'B2BSalesOrder', 'Draft', 'Normal', 'Amb', 1, 1, 0, 0, 0, NOW(), false);
+                        ('{ordPrePackedId}', '{clientId}', '{facId}', NULL, 'F03-PRE', 'B2BSalesOrder', 'Draft', 'PendingShipment', 1, 'StandardGround', 'Pre', NOW(), 1, false, NOW()),
+                        ('{ordPostFulfillId}', '{clientId}', '{facId}', NULL, 'F03-POST', 'B2BSalesOrder', 'Draft', 'PendingShipment', 1, 'StandardGround', 'Post', NOW(), 1, false, NOW()),
+                        ('{ordAmendedId}', '{clientId}', '{facId}', NULL, 'F03-AMD', 'B2BSalesOrder', 'Draft', 'PendingShipment', 1, 'StandardGround', 'Amd', NOW(), 1, false, NOW()),
+                        ('{ordHistBlankId}', '{clientId}', '{facId}', NULL, 'F03-BLK', 'B2BSalesOrder', 'Draft', 'PendingShipment', 1, 'StandardGround', 'Blk', NOW(), 1, false, NOW()),
+                        ('{ordAmbiguousId}', '{clientId}', '{facId}', NULL, 'F03-AMB', 'B2BSalesOrder', 'Draft', 'PendingShipment', 1, 'StandardGround', 'Amb', NOW(), 1, false, NOW());
 
-                    INSERT INTO handling_units (handling_unit_id, client_id, facility_id, lpn_code, unit_type, status, is_mixed_sku, is_mixed_lot, created_at, is_deleted)
-                    VALUES ('{hu1}', '{clientId}', '{facId}', 'F03-HU1', 'ShippingCarton', 'Available', false, false, NOW(), false);
-
-                    INSERT INTO packages (package_id, client_id, facility_id, outbound_order_id, handling_unit_id, package_number, status, total_units, gross_weight_kg, tare_weight_kg, net_weight_kg, created_at, is_deleted)
-                    VALUES ('{Guid.NewGuid()}', '{clientId}', '{facId}', '{ordPrePackedId}', '{hu1}', 'F03-PKG1', 'Packed', 1, 1, 0, 1, NOW(), false);
-
-                    INSERT INTO shipping_addresses (shipping_address_id, order_id, recipient_name, address_line1, city, state_or_province, postal_code, country_code, is_amended, created_at, is_deleted)
+                    INSERT INTO shipping_addresses (shipping_address_id, order_id, recipient_name, address_line1, city, state_or_province, postal_code, country_code, is_amended, created_at_utc, is_deleted)
                     VALUES
                         ('{addrPrePackedId}', '{ordPrePackedId}', 'R1', '1 St', 'Chicago', 'Illinois', '60601', 'USA', false, NOW(), false),
                         ('{addrPostFulfillId}', '{ordPostFulfillId}', 'R2', '2 St', 'Chicago', 'Illinois', '60601', 'USA', false, NOW(), false),
@@ -1130,6 +1123,14 @@ internal static class Mdm16PostgresCheck
                         ('{addrHistBlankId}', '{ordHistBlankId}', 'R4', '4 St', 'Chicago', 'Illinois', '60601', '', false, NOW(), false),
                         ('{addrAmbiguousId}', '{ordAmbiguousId}', 'R5', '5 St', 'Chicago', 'Illinois', '60601', 'US', false, NOW(), false);
                     """);
+            }
+
+            await using (var pkgDb = CreatePgDb(f03Conn))
+            {
+                var hu1 = Guid.NewGuid();
+                pkgDb.HandlingUnits.Add(new HandlingUnit { Id = hu1, ClientId = clientId, FacilityId = facId, LpnCode = "F03-HU1", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.Available });
+                pkgDb.Packages.Add(new Package { Id = Guid.NewGuid(), ClientId = clientId, FacilityId = facId, OutboundOrderId = ordPrePackedId, HandlingUnitId = hu1, PackageNumber = "F03-PKG1", Status = PackageStatus.Packed });
+                await pkgDb.SaveChangesAsync();
             }
 
             // Apply original 20261126143014 migration
@@ -1145,20 +1146,20 @@ internal static class Mdm16PostgresCheck
             // Fixture 4: ordHistBlankId became Completed after MDM-1.6 blank inference
             // Fixture 5: Ambiguous manual audit on ordAmbiguousId
             await Task.Delay(100);
+            await using (var pkgDb2 = CreatePgDb(f03Conn))
+            {
+                var hu2 = Guid.NewGuid();
+                pkgDb2.HandlingUnits.Add(new HandlingUnit { Id = hu2, ClientId = clientId, FacilityId = facId, LpnCode = "F03-HU2", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.Available });
+                pkgDb2.Packages.Add(new Package { Id = Guid.NewGuid(), ClientId = clientId, FacilityId = facId, OutboundOrderId = ordPostFulfillId, HandlingUnitId = hu2, PackageNumber = "F03-PKG2", Status = PackageStatus.Packed });
+                await pkgDb2.SaveChangesAsync();
+            }
             await using (var conn = new NpgsqlConnection(f03Conn))
             {
                 await conn.OpenAsync();
-                var hu2 = Guid.NewGuid();
                 await using var cmd = new NpgsqlCommand($"""
-                    INSERT INTO handling_units (handling_unit_id, client_id, facility_id, lpn_code, unit_type, status, is_mixed_sku, is_mixed_lot, created_at, is_deleted)
-                    VALUES ('{hu2}', '{clientId}', '{facId}', 'F03-HU2', 'ShippingCarton', 'Available', false, false, NOW(), false);
-
-                    INSERT INTO packages (package_id, client_id, facility_id, outbound_order_id, handling_unit_id, package_number, status, total_units, gross_weight_kg, tare_weight_kg, net_weight_kg, created_at, is_deleted)
-                    VALUES ('{Guid.NewGuid()}', '{clientId}', '{facId}', '{ordPostFulfillId}', '{hu2}', 'F03-PKG2', 'Packed', 1, 1, 0, 1, NOW(), false);
-
                     UPDATE shipping_addresses
                     SET city = 'Kathmandu', state_or_province = 'Bagmati', postal_code = '44600', country_code = 'NP',
-                        is_amended = true, amended_at_utc = NOW(), amendment_reason = 'Legit customer move', updated_at = NOW()
+                        is_amended = true, amended_at_utc = NOW(), amendment_reason = 'Legit customer move'
                     WHERE shipping_address_id = '{addrAmendedId}';
 
                     UPDATE outbound_orders
@@ -1224,24 +1225,24 @@ internal static class Mdm16PostgresCheck
             {
                 await conn.OpenAsync();
                 await using var cmd = new NpgsqlCommand($"""
-                    INSERT INTO facilities (facility_id, facility_code, name, address_line1, city, state_or_province, postal_code, country_code, timezone, is_active, created_at, is_deleted)
+                    INSERT INTO facilities (facility_id, facility_code, name, country_code, state_or_province, postal_code, timezone, is_active, is_deleted, created_at)
                     VALUES
-                        ('{pFacUs}', 'PAR-US', 'Par US', '1 Main', 'Chicago', 'Illinois', '60601', 'USA', 'America/Chicago', true, NOW(), false),
-                        ('{pFacConflict}', 'PAR-CNF', 'Par Conflict', '2 Main', 'Kathmandu', 'Bagmati', '44600', 'US', 'Asia/Kathmandu', true, NOW(), false);
+                        ('{pFacUs}', 'PAR-US', 'Par US', 'USA', 'Illinois', '60601', 'America/Chicago', true, false, NOW()),
+                        ('{pFacConflict}', 'PAR-CNF', 'Par Conflict', 'US', 'Bagmati', '44600', 'Asia/Kathmandu', true, false, NOW());
 
-                    INSERT INTO clients (client_id, account_code, company_name, status, default_currency, payment_terms_days, created_at, is_deleted)
-                    VALUES ('{pClientUs}', 'PAR-CL', 'Par Client', 'Active', 'USD', 30, NOW(), false);
+                    INSERT INTO clients (client_id, account_code, company_name, status, sla_tier, currency, is_deleted, created_at)
+                    VALUES ('{pClientUs}', 'PAR-CL', 'Par Client', 'Active', 'Standard', 'USD', false, NOW());
 
-                    INSERT INTO client_facility_access (client_id, facility_id, is_primary, status, created_at)
-                    VALUES ('{pClientUs}', '{pFacUs}', true, 'Active', NOW());
+                    INSERT INTO client_facility_access (client_id, facility_id, effective_date, status, primary_operating_facility, created_at)
+                    VALUES ('{pClientUs}', '{pFacUs}', NOW(), 'Active', true, NOW());
 
-                    INSERT INTO customers (customer_id, client_id, customer_code, customer_name, default_country_code, default_state_or_province, default_postal_code, is_active, created_at, is_deleted)
+                    INSERT INTO customers (customer_id, client_id, customer_code, customer_name, customer_type, email, default_state_or_province, default_postal_code, default_country_code, is_active, version, is_deleted, created_at)
                     VALUES
-                        ('{pCustInfer}', '{pClientUs}', 'PAR-C1', 'C1', '', 'Illinois', '60601', true, NOW(), false),
-                        ('{pCustNamePii}', '{pClientUs}', 'PAR-C2', 'C2', 'Jane Roe', 'Illinois', '60601', true, NOW(), false);
+                        ('{pCustInfer}', '{pClientUs}', 'PAR-C1', 'C1', 'RetailCustomer', 'c1@par.test', 'Illinois', '60601', '', true, 1, false, NOW()),
+                        ('{pCustNamePii}', '{pClientUs}', 'PAR-C2', 'C2', 'RetailCustomer', 'c2@par.test', 'Illinois', '60601', 'Jane Roe', true, 1, false, NOW());
 
-                    INSERT INTO suppliers (supplier_id, client_id, supplier_code, supplier_name, country, state, postal_code, is_active, created_at, is_deleted)
-                    VALUES ('{pSupInfer}', '{pClientUs}', 'PAR-S1', 'S1', NULL, 'Illinois', '60601', true, NOW(), false);
+                    INSERT INTO suppliers (supplier_id, client_id, supplier_code, supplier_name, state, postal_code, country, is_active, is_deleted, created_at)
+                    VALUES ('{pSupInfer}', '{pClientUs}', 'PAR-S1', 'S1', 'Illinois', '60601', NULL, true, false, NOW());
                     """, conn);
                 await cmd.ExecuteNonQueryAsync();
             }
