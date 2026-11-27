@@ -162,7 +162,7 @@ public sealed class WarehouseMasterAuthorization
             throw new ValidationException("CurrencyCode", ex.Message);
         }
 
-        if (_db.IsRelationalDatabase || await _db.Currencies.AsNoTracking().AnyAsync(cancellationToken))
+        if (await _db.Currencies.AsNoTracking().AnyAsync(cancellationToken))
         {
             var isActive = await _db.Currencies
                 .AsNoTracking()

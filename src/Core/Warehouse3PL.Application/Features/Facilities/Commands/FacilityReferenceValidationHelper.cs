@@ -67,7 +67,7 @@ internal static class FacilityReferenceValidationHelper
                 throw new DomainException(ex.Message, "FACILITY_INVALID_CURRENCY");
             }
 
-            if (db.IsRelationalDatabase || await db.Currencies.AsNoTracking().AnyAsync(cancellationToken))
+            if (await db.Currencies.AsNoTracking().AnyAsync(cancellationToken))
             {
                 var activeCurrency = await db.Currencies
                     .AsNoTracking()
