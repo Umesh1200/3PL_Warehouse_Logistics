@@ -30,7 +30,7 @@ using ValidationException = Warehouse3PL.Domain.Exceptions.ValidationException;
 
 internal static class Mdm21PostgresCheck
 {
-    private const string PreMdm21Migration = "20261127103000_MDM1_6_F03_SafeHistoricalRestoration";
+    private const string PreMdm21Migration = "20261127103000_MDM1_6_F03R01_F04R01_SafeUpgradeAndStructuredReasons";
     private const string Mdm21Migration = "20261127125902_MDM2_1_WarehouseMasterAndLocationHierarchy";
 
     public static async Task RunAsync(string baseConnectionString)
@@ -164,7 +164,7 @@ internal static class Mdm21PostgresCheck
                 {
                     await failDb.Database.MigrateAsync();
                 }
-                catch (PostgresException pgEx) when (pgEx.MessageText.Contains("MDM21_PREFLIGHT_FAILED", StringComparison.Ordinal))
+                catch (Exception ex) when (ex.ToString().Contains("MDM21_PREFLIGHT_FAILED", StringComparison.Ordinal))
                 {
                     failedAsExpected = true;
                 }
