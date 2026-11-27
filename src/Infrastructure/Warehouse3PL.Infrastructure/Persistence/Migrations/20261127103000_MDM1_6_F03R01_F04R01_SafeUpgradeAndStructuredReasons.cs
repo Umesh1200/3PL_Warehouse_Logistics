@@ -107,7 +107,7 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         RETURN 'Runtime write quarantined pending country normalization review.';
                     ELSIF v ILIKE 'INFERRED_FROM_PARENT' OR v ILIKE 'Deterministically inferred%' THEN
                         RETURN 'Deterministically inferred canonical ISO 3166-1 country code from verified parent context.';
-                    ELSIF v ILIKE 'NORMALIZED_CANONICAL' OR v ILIKE 'Normalized to canonical%' OR v ILIKE 'Resolved to %' THEN
+                    ELSIF v ILIKE 'NORMALIZED_CANONICAL' OR v ILIKE 'Normalized to canonical%' OR v ILIKE 'Resolved to %' OR v ILIKE 'Mapped %' THEN
                         RETURN 'Normalized to canonical ISO 3166-1 country code.';
                     ELSIF v ILIKE 'CONFLICTING_TIMEZONE_EVIDENCE' OR v ILIKE 'Conflicting timezone evidence%' THEN
                         RETURN 'Conflicting timezone evidence quarantined for steward review.';
@@ -158,6 +158,16 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         reason = pg_temp.mdm16_f04r01_sanitize_reason(reason)
                     WHERE original_country_value IS DISTINCT FROM pg_temp.mdm16_f04r01_sanitize_allowlisted(original_country_value)
                        OR reason IS DISTINCT FROM pg_temp.mdm16_f04r01_sanitize_reason(reason);
+
+                    -- Repair any Normalized row whose legacy 'Mapped ...' reason was downgraded to Unrecognized by F03
+                    UPDATE country_normalization_audits
+                    SET reason = CASE
+                            WHEN preserved_historical_value = true THEN 'Immutable historical record preserved untouched.'
+                            WHEN was_inferred_from_parent = true THEN 'Deterministically inferred canonical ISO 3166-1 country code from verified parent context.'
+                            ELSE 'Normalized to canonical ISO 3166-1 country code.'
+                        END
+                    WHERE normalization_status = 'Normalized'
+                      AND reason = 'Unrecognized or unverified country value quarantined for steward review.';
 
                     SELECT EXISTS (SELECT 1 FROM country_profiles WHERE is_active = true) INTO v_has_profiles;
                     IF NOT v_has_profiles THEN

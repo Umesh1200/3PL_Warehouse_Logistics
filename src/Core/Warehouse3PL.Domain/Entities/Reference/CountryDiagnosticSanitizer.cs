@@ -319,7 +319,8 @@ public static partial class CountryDiagnosticSanitizer
         if (collapsed.StartsWith("Deterministically inferred", StringComparison.OrdinalIgnoreCase))
             return InferredFromParent;
         if (collapsed.StartsWith("Normalized to canonical", StringComparison.OrdinalIgnoreCase) ||
-            collapsed.StartsWith("Resolved to ", StringComparison.OrdinalIgnoreCase))
+            collapsed.StartsWith("Resolved to ", StringComparison.OrdinalIgnoreCase) ||
+            collapsed.StartsWith("Mapped ", StringComparison.OrdinalIgnoreCase))
             return NormalizedCanonical;
         if (collapsed.StartsWith("Conflicting timezone evidence", StringComparison.OrdinalIgnoreCase))
             return ConflictingTimezoneEvidence;

@@ -1290,7 +1290,8 @@ internal static class Mdm16PostgresCheck
 
                 if (!sFacs.SequenceEqual(cFacs) || !sCusts.SequenceEqual(cCusts) || !sSups.SequenceEqual(cSups) || !sAuds.SequenceEqual(cAuds))
                 {
-                    throw new InvalidOperationException("SQL vs C# normalization parity mismatch detected across identical legacy fixtures.");
+                    throw new InvalidOperationException(
+                        $"SQL vs C# normalization parity mismatch detected across identical legacy fixtures.\nSQL Audits: {JsonSerializer.Serialize(sAuds)}\nCS Audits: {JsonSerializer.Serialize(cAuds)}");
                 }
             }
 
