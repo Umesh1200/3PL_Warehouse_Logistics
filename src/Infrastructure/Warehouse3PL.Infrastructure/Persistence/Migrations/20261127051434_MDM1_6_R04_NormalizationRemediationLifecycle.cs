@@ -479,6 +479,10 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     v_orig RECORD;
                     v_dest RECORD;
                     v_old TEXT;
+                    v_eval_input TEXT;
+                    v_eval_input_dest TEXT;
+                    v_prev_blank_inferred BOOLEAN;
+                    v_prev_blank_inferred_dest BOOLEAN;
                     v_new_epoch BIGINT;
                     v_client_single_country VARCHAR(3);
                     v_client_single_fac UUID;
@@ -561,9 +565,17 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         END IF;
                     END LOOP;
 
-                    -- 2. Customers (R02: NEVER discard unresolved facilities from client network!)
+                    -- 2. Customers (R02: NEVER discard unresolved facilities from client network; re-verify prior blank-inferred rows!)
                     FOR r IN SELECT customer_id, client_id, default_country_code, default_state_or_province, default_postal_code FROM customers WHERE is_deleted = false LOOP
-                        v_old := r.default_country_code;
+                        SELECT EXISTS (
+                            SELECT 1 FROM country_normalization_audits cna
+                            WHERE cna.entity_type = 'Customer' AND cna.entity_id = r.customer_id AND cna.field_name = 'DefaultCountryCode'
+                              AND cna.was_inferred_from_parent = true AND COALESCE(BTRIM(cna.original_country_value), '') = ''
+                        ) INTO v_prev_blank_inferred;
+
+                        v_old := CASE WHEN v_prev_blank_inferred THEN '' ELSE r.default_country_code END;
+                        v_eval_input := CASE WHEN v_prev_blank_inferred THEN '' ELSE r.default_country_code END;
+
                         SELECT CASE
                                    WHEN COUNT(*) FILTER (WHERE f.country_normalization_status <> 'Normalized') = 0
                                     AND COUNT(DISTINCT f.country_code) = 1
@@ -578,13 +590,13 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         WHERE cfa.client_id = r.client_id AND cfa.status = 'Active';
 
                         SELECT * INTO v_eval FROM pg_temp.mdm16_r04_resolve_country(
-                            r.default_country_code, r.default_state_or_province, r.default_postal_code,
+                            v_eval_input, r.default_state_or_province, r.default_postal_code,
                             v_client_single_country, 'ClientDomesticAccess', NULL, false, true);
 
                         UPDATE customers
-                        SET default_country_code = CASE WHEN v_eval.is_resolved THEN v_eval.target_code ELSE default_country_code END,
+                        SET default_country_code = CASE WHEN v_eval.is_resolved THEN v_eval.target_code WHEN v_prev_blank_inferred THEN '' ELSE default_country_code END,
                             country_normalization_status = v_eval.norm_status,
-                            updated_at = CASE WHEN v_eval.is_resolved AND v_eval.target_code IS DISTINCT FROM v_old THEN NOW() ELSE updated_at END
+                            updated_at = CASE WHEN (v_eval.is_resolved AND v_eval.target_code IS DISTINCT FROM r.default_country_code) OR (NOT v_eval.is_resolved AND v_prev_blank_inferred) THEN NOW() ELSE updated_at END
                         WHERE customer_id = r.customer_id;
 
                         v_force_audit := (v_eval.is_resolved AND (v_eval.target_code IS DISTINCT FROM v_old OR v_eval.was_inferred)) OR NOT v_eval.is_resolved;
@@ -596,7 +608,15 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
                     -- 3. Suppliers
                     FOR r IN SELECT supplier_id, client_id, country, state, postal_code FROM suppliers WHERE is_deleted = false LOOP
-                        v_old := r.country;
+                        SELECT EXISTS (
+                            SELECT 1 FROM country_normalization_audits cna
+                            WHERE cna.entity_type = 'Supplier' AND cna.entity_id = r.supplier_id AND cna.field_name = 'Country'
+                              AND cna.was_inferred_from_parent = true AND COALESCE(BTRIM(cna.original_country_value), '') = ''
+                        ) INTO v_prev_blank_inferred;
+
+                        v_old := CASE WHEN v_prev_blank_inferred THEN NULL ELSE r.country END;
+                        v_eval_input := CASE WHEN v_prev_blank_inferred THEN '' ELSE r.country END;
+
                         SELECT CASE
                                    WHEN COUNT(*) FILTER (WHERE f.country_normalization_status <> 'Normalized') = 0
                                     AND COUNT(DISTINCT f.country_code) = 1
@@ -611,13 +631,13 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         WHERE cfa.client_id = r.client_id AND cfa.status = 'Active';
 
                         SELECT * INTO v_eval FROM pg_temp.mdm16_r04_resolve_country(
-                            r.country, r.state, r.postal_code,
+                            v_eval_input, r.state, r.postal_code,
                             v_client_single_country, 'ClientDomesticAccess', NULL, false, true);
 
                         UPDATE suppliers
-                        SET country = CASE WHEN v_eval.is_resolved THEN v_eval.target_code ELSE country END,
+                        SET country = CASE WHEN v_eval.is_resolved THEN v_eval.target_code WHEN v_prev_blank_inferred THEN NULL ELSE country END,
                             country_normalization_status = v_eval.norm_status,
-                            updated_at = CASE WHEN v_eval.is_resolved AND v_eval.target_code IS DISTINCT FROM v_old THEN NOW() ELSE updated_at END
+                            updated_at = CASE WHEN (v_eval.is_resolved AND v_eval.target_code IS DISTINCT FROM r.country) OR (NOT v_eval.is_resolved AND v_prev_blank_inferred) THEN NOW() ELSE updated_at END
                         WHERE supplier_id = r.supplier_id;
 
                         v_force_audit := (v_eval.is_resolved AND (v_eval.target_code IS DISTINCT FROM v_old OR v_eval.was_inferred)) OR NOT v_eval.is_resolved;
@@ -648,13 +668,21 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         LEFT JOIN facilities df ON df.facility_id = o.destination_facility_id
                         WHERE sa.is_deleted = false AND o.is_deleted = false
                     LOOP
-                        v_old := r.country_code;
                         v_is_hist := r.has_fulfillment OR r.order_status IN ('Allocated', 'PartiallyAllocated', 'InProgress', 'Completed', 'Cancelled');
+                        SELECT NOT v_is_hist AND EXISTS (
+                            SELECT 1 FROM country_normalization_audits cna
+                            WHERE cna.entity_type = 'ShippingAddress' AND cna.entity_id = r.shipping_address_id AND cna.field_name = 'CountryCode'
+                              AND cna.was_inferred_from_parent = true AND COALESCE(BTRIM(cna.original_country_value), '') = ''
+                        ) INTO v_prev_blank_inferred;
+
+                        v_old := CASE WHEN v_prev_blank_inferred THEN '' ELSE r.country_code END;
+                        v_eval_input := CASE WHEN v_prev_blank_inferred THEN '' ELSE r.country_code END;
+
                         v_cust_country := CASE WHEN r.linked_cust_id IS NOT NULL AND NOT COALESCE(r.cust_deleted, false) AND COALESCE(r.cust_active, false) AND r.cust_status = 'Normalized' THEN r.cust_country ELSE NULL END;
                         v_fac_country := CASE WHEN NOT COALESCE(r.fac_deleted, false) AND COALESCE(r.fac_active, false) AND r.fac_status = 'Normalized' THEN r.fac_country ELSE NULL END;
                         v_dest_fac_country := CASE WHEN r.order_type = 'StockTransferOrder' AND r.destination_facility_id IS NOT NULL AND NOT COALESCE(r.dest_fac_deleted, false) AND COALESCE(r.dest_fac_active, false) AND r.dest_fac_status = 'Normalized' THEN r.dest_fac_country ELSE NULL END;
 
-                        IF (r.country_code IS NULL OR BTRIM(r.country_code) = '') AND r.linked_cust_id IS NOT NULL AND v_cust_country IS NULL THEN
+                        IF (v_eval_input IS NULL OR BTRIM(v_eval_input) = '') AND r.linked_cust_id IS NOT NULL AND v_cust_country IS NULL THEN
                             SELECT false AS is_resolved, NULL::VARCHAR(3) AS target_code, 'PendingNormalization'::VARCHAR(30) AS norm_status, false AS was_inferred,
                                    'QuarantinedCustomerParent'::VARCHAR(120) AS inf_source,
                                    'Quarantined or unverified customer master cannot verify child shipping address country.'::VARCHAR(500) AS reason
@@ -669,12 +697,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                             END IF;
 
                             SELECT * INTO v_eval FROM pg_temp.mdm16_r04_resolve_country(
-                                r.country_code, r.state_or_province, r.postal_code,
+                                v_eval_input, r.state_or_province, r.postal_code,
                                 v_parent_hint, v_hint_src, NULL, false, true);
                         END IF;
 
                         UPDATE shipping_addresses
-                        SET country_code = CASE WHEN NOT v_is_hist AND v_eval.is_resolved THEN v_eval.target_code ELSE country_code END,
+                        SET country_code = CASE WHEN NOT v_is_hist AND v_eval.is_resolved THEN v_eval.target_code WHEN NOT v_is_hist AND v_prev_blank_inferred THEN '' ELSE country_code END,
                             country_normalization_status = v_eval.norm_status
                         WHERE shipping_address_id = r.shipping_address_id;
 
