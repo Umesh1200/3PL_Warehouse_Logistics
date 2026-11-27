@@ -1326,7 +1326,8 @@ internal static class Mdm16PostgresCheck
             };
             psi.ArgumentList.Add(webApiDll);
             psi.ArgumentList.Add("--migrate-db");
-            psi.ArgumentList.Add($"--ConnectionStrings:DefaultConnection={connStr}");
+            psi.ArgumentList.Add("--connection");
+            psi.ArgumentList.Add(connStr);
             foreach (var arg in extraArgs) psi.ArgumentList.Add(arg);
 
             using var proc = System.Diagnostics.Process.Start(psi)

@@ -15,22 +15,36 @@ using Warehouse3PL.WebApi.Extensions;
 using Warehouse3PL.WebApi.Middleware;
 
 // Supported executable database migration entry point (enforces MDM-1.6 preflight & maintenance lock):
-//   dotnet run --project src/Presentation/Warehouse3PL.WebApi -- --migrate-db [--target <MigrationId>] [--seed-catalogs]
+//   dotnet run --project src/Presentation/Warehouse3PL.WebApi -- --migrate-db [--target <MigrationId>] [--seed-catalogs] [--connection <ConnStr>]
 if (args.Any(a => string.Equals(a, "--migrate-db", StringComparison.OrdinalIgnoreCase)))
 {
-    var migBuilder = Host.CreateApplicationBuilder(args);
     string? targetMigration = null;
+    string? cliConnStr = null;
     bool seedCatalogs = args.Any(a => string.Equals(a, "--seed-catalogs", StringComparison.OrdinalIgnoreCase));
-    for (int i = 0; i < args.Length - 1; i++)
+    var hostArgs = new List<string>();
+    for (int i = 0; i < args.Length; i++)
     {
-        if (string.Equals(args[i], "--target", StringComparison.OrdinalIgnoreCase))
+        if (string.Equals(args[i], "--migrate-db", StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(args[i], "--seed-catalogs", StringComparison.OrdinalIgnoreCase))
         {
-            targetMigration = args[i + 1];
-            break;
+            continue;
         }
+        if (string.Equals(args[i], "--target", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+        {
+            targetMigration = args[++i];
+            continue;
+        }
+        if (string.Equals(args[i], "--connection", StringComparison.OrdinalIgnoreCase) && i + 1 < args.Length)
+        {
+            cliConnStr = args[++i];
+            continue;
+        }
+        hostArgs.Add(args[i]);
     }
 
-    var connStr = migBuilder.Configuration.GetConnectionString("DefaultConnection")
+    var migBuilder = Host.CreateApplicationBuilder(hostArgs.ToArray());
+    var connStr = cliConnStr
+        ?? migBuilder.Configuration.GetConnectionString("DefaultConnection")
         ?? "Host=localhost;Database=warehouse3pl_db;Username=postgres;Password=postgres";
 
     migBuilder.Services.AddHttpContextAccessor();
