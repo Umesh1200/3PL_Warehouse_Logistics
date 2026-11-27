@@ -177,7 +177,7 @@ internal static class Mdm21PostgresCheck
             {
                 await sqlConn.OpenAsync();
                 await using var histCmd = new NpgsqlCommand(
-                    $"SELECT COUNT(*) FROM \"__EFMigrationsHistory\" WHERE \"MigrationId\" = '{Mdm21Migration}'", sqlConn);
+                    $"SELECT COUNT(*) FROM \"__EFMigrationsHistory\" WHERE migration_id = '{Mdm21Migration}'", sqlConn);
                 if (Convert.ToInt32(await histCmd.ExecuteScalarAsync()) != 0)
                     throw new InvalidOperationException("Failed MDM-2.1 migration should not be recorded in __EFMigrationsHistory.");
 
@@ -612,11 +612,14 @@ internal static class Mdm21PostgresCheck
 
     private static ApplicationDbContext CreatePgDb(string connStr, Mdm21Identity? identity = null)
     {
-        var opts = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseNpgsql(connStr)
-            .Options;
         var id = identity ?? new Mdm21Identity(Guid.Empty, null);
-        return new ApplicationDbContext(opts, id, id, new AuditableEntityInterceptor(id, new DateTimeProvider()));
+        var audit = new AuditableEntityInterceptor(id, new DateTimeProvider());
+        var opts = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseNpgsql(connStr, b => b.MigrationsAssembly(typeof(ApplicationDbContext).Assembly.FullName))
+            .UseSnakeCaseNamingConvention()
+            .AddInterceptors(audit)
+            .Options;
+        return new ApplicationDbContext(opts, id, id, audit);
     }
 
     private static async Task CreateDbAsync(string adminConnStr, string dbName)
