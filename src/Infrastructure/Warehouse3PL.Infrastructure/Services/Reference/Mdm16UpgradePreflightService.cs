@@ -156,7 +156,18 @@ public static class Mdm16UpgradePreflightService
                 ON cna.entity_type = 'ShippingAddress'
                AND cna.entity_id = sa.shipping_address_id
                AND cna.field_name = 'CountryCode'
-            WHERE sa.is_deleted = false AND o.is_deleted = false;
+            WHERE sa.is_deleted = false
+              AND o.is_deleted = false
+              AND COALESCE(BTRIM(cna.original_country_value), '') <> ''
+              AND (
+                  o.status IN ('Allocated', 'PartiallyAllocated', 'InProgress', 'Completed', 'Cancelled')
+                  OR EXISTS (
+                      SELECT 1 FROM packages p
+                      WHERE p.outbound_order_id = o.order_id
+                        AND p.is_deleted = false
+                        AND (p.status <> 'Open' OR p.shipment_id IS NOT NULL)
+                  )
+              );
             """,
             cancellationToken);
 
