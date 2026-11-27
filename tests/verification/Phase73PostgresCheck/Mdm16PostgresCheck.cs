@@ -559,7 +559,13 @@ internal static class Mdm16PostgresCheck
                 await migrator.MigrateAsync();
             }
 
-            Console.WriteLine("[MDM-1.6] ALL Live PostgreSQL Country Normalization, Quarantine, Historical Immutability, Epoch & RBAC checks passed cleanly.");
+            // 8. F02 Real PostgreSQL Concurrency & Transaction Boundary Verification (independent DbContexts)
+            await VerifyF02RealPostgresConcurrencyAndTransactionsAsync(baseConnectionString);
+
+            // 9. F03 Safe Historical Restoration Fixtures, F04 Allowlist Privacy & Independent SQL vs C# Parity
+            await VerifyF03SafeHistoricalRestorationAndSqlCSharpParityAsync(baseConnectionString);
+
+            Console.WriteLine("[MDM-1.6] ALL Live PostgreSQL Country Normalization, F01-F04 Remediation, Concurrency, SQL/C# Parity, Quarantine, Historical Immutability, Epoch & RBAC checks passed cleanly.");
         }
         finally
         {
@@ -739,6 +745,492 @@ internal static class Mdm16PostgresCheck
         {
             await DropTempDbAsync(emptyDbName);
             await DropTempDbAsync(noCatDbName);
+        }
+    }
+
+    private static async Task VerifyF02RealPostgresConcurrencyAndTransactionsAsync(string baseConnectionString)
+    {
+        var adminBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = "postgres" };
+        var dbName = $"mdm16_f02_conc_{Guid.NewGuid():N}";
+
+        await using (var adminConn = new NpgsqlConnection(adminBuilder.ConnectionString))
+        {
+            await adminConn.OpenAsync();
+            await using var cmd = new NpgsqlCommand($"CREATE DATABASE \"{dbName}\"", adminConn);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        var connStr = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = dbName }.ConnectionString;
+
+        try
+        {
+            var facUsId = Guid.NewGuid();
+            var facParentId = Guid.NewGuid();
+            var clientUsId = Guid.NewGuid();
+            var clientParentId = Guid.NewGuid();
+            var orderLifecycleId = Guid.NewGuid();
+            var addrLifecycleId = Guid.NewGuid();
+            var huLifecycleId = Guid.NewGuid();
+            var custParentChildId = Guid.NewGuid();
+
+            await using (var seedDb = CreatePgDb(connStr))
+            {
+                var migrator = seedDb.GetInfrastructure().GetRequiredService<IMigrator>();
+                await migrator.MigrateAsync();
+                await ReferenceCatalogSeeder.SeedAsync(seedDb);
+
+                seedDb.Facilities.AddRange(
+                    new Facility { Id = facUsId, FacilityCode = "F02-US", Name = "F02 US", CountryCode = "USA", StateOrProvince = "Illinois", PostalCode = "60601", Timezone = "America/Chicago", IsActive = true },
+                    new Facility { Id = facParentId, FacilityCode = "F02-PAR", Name = "F02 Parent", CountryCode = "US", StateOrProvince = "Illinois", PostalCode = "60601", Timezone = "America/Chicago", IsActive = true });
+                seedDb.Clients.AddRange(
+                    new Client { Id = clientUsId, AccountCode = "F02-CLUS", CompanyName = "F02 US Client", Status = ClientStatus.Active },
+                    new Client { Id = clientParentId, AccountCode = "F02-CLPR", CompanyName = "F02 Parent Client", Status = ClientStatus.Active });
+                seedDb.ClientFacilityAccesses.AddRange(
+                    new ClientFacilityAccess { ClientId = clientUsId, FacilityId = facUsId, Status = FacilityAccessStatus.Active },
+                    new ClientFacilityAccess { ClientId = clientParentId, FacilityId = facParentId, Status = FacilityAccessStatus.Active });
+                seedDb.Customers.Add(new Customer
+                {
+                    Id = custParentChildId,
+                    ClientId = clientParentId,
+                    CustomerCode = "F02-C-PAR",
+                    CustomerName = "Parent Race Cust",
+                    DefaultCountryCode = "",
+                    DefaultStateOrProvince = "Bagmati",
+                    DefaultPostalCode = "44600"
+                });
+                seedDb.OutboundOrders.Add(new OutboundOrder
+                {
+                    Id = orderLifecycleId,
+                    ClientId = clientUsId,
+                    FacilityId = facUsId,
+                    OrderNumber = "F02-ORD-LC",
+                    OrderType = OutboundOrderType.B2BSalesOrder,
+                    Status = OutboundOrderStatus.Draft,
+                    CustomerName = "Lifecycle Race"
+                });
+                seedDb.ShippingAddresses.Add(new ShippingAddress
+                {
+                    Id = addrLifecycleId,
+                    OutboundOrderId = orderLifecycleId,
+                    RecipientName = "Lifecycle Recip",
+                    AddressLine1 = "1 Race Rd",
+                    City = "Chicago",
+                    StateOrProvince = "Illinois",
+                    PostalCode = "60601",
+                    CountryCode = "USA"
+                });
+                seedDb.HandlingUnits.Add(new HandlingUnit
+                {
+                    Id = huLifecycleId,
+                    ClientId = clientUsId,
+                    FacilityId = facUsId,
+                    LpnCode = "F02-HU-LC",
+                    UnitType = HandlingUnitType.ShippingCarton,
+                    Status = HandlingUnitStatus.Available
+                });
+                await seedDb.SaveChangesAsync();
+            }
+
+            // 1. Concurrent BackfillAllAsync attempts across 2 independent DbContexts (service-owned transactions)
+            var t1 = Task.Run(async () =>
+            {
+                await using var db1 = CreatePgDb(connStr);
+                return await new LegacyCountryNormalizationService(db1).BackfillAllAsync("F02-CONC-1");
+            });
+            var t2 = Task.Run(async () =>
+            {
+                await using var db2 = CreatePgDb(connStr);
+                return await new LegacyCountryNormalizationService(db2).BackfillAllAsync("F02-CONC-2");
+            });
+            await Task.WhenAll(t1, t2);
+
+            await using (var chkConc = CreatePgDb(connStr))
+            {
+                var audits = await chkConc.CountryNormalizationAudits.ToListAsync();
+                if (audits.Count != audits.Select(a => (a.EntityType, a.EntityId, a.FieldName)).Distinct().Count())
+                    throw new InvalidOperationException("F02 concurrent backfill produced duplicate audit rows.");
+            }
+
+            // 2. Concurrent order/package lifecycle change: order becomes Completed + Packed BEFORE backfill acquires lock -> NO historical mutation!
+            var freshOrderId = Guid.NewGuid();
+            var freshAddrId = Guid.NewGuid();
+            var freshHuId = Guid.NewGuid();
+            await using (var prepDb = CreatePgDb(connStr))
+            {
+                prepDb.OutboundOrders.Add(new OutboundOrder
+                {
+                    Id = freshOrderId,
+                    ClientId = clientUsId,
+                    FacilityId = facUsId,
+                    OrderNumber = "F02-ORD-IMM",
+                    OrderType = OutboundOrderType.B2BSalesOrder,
+                    Status = OutboundOrderStatus.Draft,
+                    CustomerName = "Imm Race"
+                });
+                prepDb.ShippingAddresses.Add(new ShippingAddress
+                {
+                    Id = freshAddrId,
+                    OutboundOrderId = freshOrderId,
+                    RecipientName = "Imm Recip",
+                    AddressLine1 = "2 Race Rd",
+                    City = "Chicago",
+                    StateOrProvince = "Illinois",
+                    PostalCode = "60601",
+                    CountryCode = "USA"
+                });
+                prepDb.HandlingUnits.Add(new HandlingUnit
+                {
+                    Id = freshHuId,
+                    ClientId = clientUsId,
+                    FacilityId = facUsId,
+                    LpnCode = "F02-HU-IMM",
+                    UnitType = HandlingUnitType.ShippingCarton,
+                    Status = HandlingUnitStatus.Available
+                });
+                await prepDb.SaveChangesAsync();
+            }
+
+            var lockHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseCommit = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var lifecycleWriter = Task.Run(async () =>
+            {
+                await using var wDb = CreatePgDb(connStr);
+                await using var tx = await wDb.Database.BeginTransactionAsync();
+                var ord = await wDb.OutboundOrders.IgnoreQueryFilters().SingleAsync(o => o.Id == freshOrderId);
+                ord.Status = OutboundOrderStatus.Completed;
+                wDb.Packages.Add(new Package
+                {
+                    Id = Guid.NewGuid(),
+                    ClientId = clientUsId,
+                    FacilityId = facUsId,
+                    OutboundOrderId = freshOrderId,
+                    HandlingUnitId = freshHuId,
+                    PackageNumber = "F02-PKG-IMM",
+                    Status = PackageStatus.Packed
+                });
+                await wDb.SaveChangesAsync();
+                lockHeld.SetResult();
+                await releaseCommit.Task;
+                await tx.CommitAsync();
+            });
+
+            await lockHeld.Task;
+            var backfillWhileLifecycle = Task.Run(async () =>
+            {
+                await using var bDb = CreatePgDb(connStr);
+                return await new LegacyCountryNormalizationService(bDb).BackfillAllAsync("F02-LC-BACKFILL");
+            });
+
+            // Backfill must block on SHARE ROW EXCLUSIVE until writer commits
+            await Task.Delay(200);
+            if (backfillWhileLifecycle.IsCompleted)
+                throw new InvalidOperationException("F02 backfill did not block on concurrent order/package lifecycle transaction.");
+
+            releaseCommit.SetResult();
+            await Task.WhenAll(lifecycleWriter, backfillWhileLifecycle);
+
+            await using (var chkImm = CreatePgDb(connStr))
+            {
+                var immAddr = await chkImm.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == freshAddrId);
+                var immAudit = await chkImm.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "ShippingAddress" && a.EntityId == freshAddrId);
+                if (immAddr.CountryCode != "USA" || !immAudit.PreservedHistoricalValue)
+                    throw new InvalidOperationException($"F02 historical address was mutated despite concurrent immutability transition: Country={immAddr.CountryCode}, Preserved={immAudit.PreservedHistoricalValue}");
+            }
+
+            // 3. Concurrent parent-country change: Facility switches to NP inside a tx while BackfillAllAsync waits -> Child Customer infers NP
+            var parentLockHeld = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            var releaseParent = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+
+            var parentWriter = Task.Run(async () =>
+            {
+                await using var pDb = CreatePgDb(connStr);
+                await using var tx = await pDb.Database.BeginTransactionAsync();
+                var fac = await pDb.Facilities.SingleAsync(f => f.Id == facParentId);
+                fac.CountryCode = "NP";
+                fac.StateOrProvince = "Bagmati";
+                fac.PostalCode = "44600";
+                fac.Timezone = "Asia/Kathmandu";
+                await pDb.SaveChangesAsync();
+                parentLockHeld.SetResult();
+                await releaseParent.Task;
+                await tx.CommitAsync();
+            });
+
+            await parentLockHeld.Task;
+            var backfillWhileParent = Task.Run(async () =>
+            {
+                await using var bDb = CreatePgDb(connStr);
+                return await new LegacyCountryNormalizationService(bDb).BackfillAllAsync("F02-PAR-BACKFILL");
+            });
+
+            await Task.Delay(200);
+            if (backfillWhileParent.IsCompleted)
+                throw new InvalidOperationException("F02 backfill did not block on concurrent parent Facility update.");
+
+            releaseParent.SetResult();
+            await Task.WhenAll(parentWriter, backfillWhileParent);
+
+            await using (var chkPar = CreatePgDb(connStr))
+            {
+                var custChild = await chkPar.Customers.IgnoreQueryFilters().SingleAsync(c => c.Id == custParentChildId);
+                if (custChild.DefaultCountryCode != "NP" || custChild.CountryNormalizationStatus != CountryNormalizationStatus.Normalized)
+                    throw new InvalidOperationException($"F02 concurrent parent-country update not observed consistently: Country={custChild.DefaultCountryCode}, Status={custChild.CountryNormalizationStatus}");
+            }
+
+            // 4. Caller-owned transaction rollback + service-owned retry
+            var rbFacId = Guid.NewGuid();
+            await using (var rbDb = CreatePgDb(connStr))
+            {
+                await using var tx = await rbDb.Database.BeginTransactionAsync();
+                rbDb.Facilities.Add(new Facility { Id = rbFacId, FacilityCode = "F02-RB", Name = "RB Fac", CountryCode = "USA", StateOrProvince = "Illinois", PostalCode = "60601", Timezone = "America/Chicago", IsActive = true });
+                await rbDb.SaveChangesAsync();
+                await new LegacyCountryNormalizationService(rbDb).BackfillAllAsync("F02-ROLLBACK");
+                await tx.RollbackAsync();
+            }
+
+            await using (var retryDb = CreatePgDb(connStr))
+            {
+                if (await retryDb.Facilities.AnyAsync(f => f.Id == rbFacId))
+                    throw new InvalidOperationException("F02 caller-owned transaction rollback failed.");
+                retryDb.Facilities.Add(new Facility { Id = rbFacId, FacilityCode = "F02-RB", Name = "RB Fac", CountryCode = "USA", StateOrProvince = "Illinois", PostalCode = "60601", Timezone = "America/Chicago", IsActive = true });
+                await retryDb.SaveChangesAsync();
+                await new LegacyCountryNormalizationService(retryDb).BackfillAllAsync("F02-RETRY");
+                var fOk = await retryDb.Facilities.SingleAsync(f => f.Id == rbFacId);
+                if (fOk.CountryCode != "US" || fOk.CountryNormalizationStatus != CountryNormalizationStatus.Normalized)
+                    throw new InvalidOperationException("F02 retry after rollback failed.");
+            }
+
+            Console.WriteLine("PASS PostgreSQL MDM-1.6 F02 Concurrent Backfill, Order/Package Lifecycle Race, Parent-Country Race & Rollback/Retry verified cleanly.");
+        }
+        finally
+        {
+            NpgsqlConnection.ClearAllPools();
+            try
+            {
+                await using var adminConn = new NpgsqlConnection(adminBuilder.ConnectionString);
+                await adminConn.OpenAsync();
+                await using var term = new NpgsqlCommand($"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{dbName}' AND pid <> pg_backend_pid();", adminConn);
+                await term.ExecuteNonQueryAsync();
+                await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{dbName}\";", adminConn);
+                await drop.ExecuteNonQueryAsync();
+            }
+            catch { }
+        }
+    }
+
+    private static async Task VerifyF03SafeHistoricalRestorationAndSqlCSharpParityAsync(string baseConnectionString)
+    {
+        var adminBuilder = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = "postgres" };
+        var f03DbName = $"mdm16_f03_rest_{Guid.NewGuid():N}";
+        var paritySqlDbName = $"mdm16_par_sql_{Guid.NewGuid():N}";
+        var parityCsDbName = $"mdm16_par_cs_{Guid.NewGuid():N}";
+
+        async Task CreateDbAsync(string name)
+        {
+            await using var adminConn = new NpgsqlConnection(adminBuilder.ConnectionString);
+            await adminConn.OpenAsync();
+            await using var cmd = new NpgsqlCommand($"CREATE DATABASE \"{name}\"", adminConn);
+            await cmd.ExecuteNonQueryAsync();
+        }
+
+        async Task DropDbAsync(string name)
+        {
+            NpgsqlConnection.ClearAllPools();
+            try
+            {
+                await using var adminConn = new NpgsqlConnection(adminBuilder.ConnectionString);
+                await adminConn.OpenAsync();
+                await using var term = new NpgsqlCommand($"SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = '{name}' AND pid <> pg_backend_pid();", adminConn);
+                await term.ExecuteNonQueryAsync();
+                await using var drop = new NpgsqlCommand($"DROP DATABASE IF EXISTS \"{name}\";", adminConn);
+                await drop.ExecuteNonQueryAsync();
+            }
+            catch { }
+        }
+
+        try
+        {
+            // Part A: F03 Historical Restoration Fixtures (1..8) + F04 Allowlist Privacy on PG
+            await CreateDbAsync(f03DbName);
+            var f03Conn = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = f03DbName }.ConnectionString;
+
+            var facId = Guid.NewGuid();
+            var clientId = Guid.NewGuid();
+            var ordPrePackedId = Guid.NewGuid();
+            var addrPrePackedId = Guid.NewGuid();
+            var ordPostFulfillId = Guid.NewGuid();
+            var addrPostFulfillId = Guid.NewGuid();
+            var ordAmendedId = Guid.NewGuid();
+            var addrAmendedId = Guid.NewGuid();
+            var ordHistBlankId = Guid.NewGuid();
+            var addrHistBlankId = Guid.NewGuid();
+            var ordAmbiguousId = Guid.NewGuid();
+            var addrAmbiguousId = Guid.NewGuid();
+            var custNamePiiId = Guid.NewGuid();
+
+            await using (var db = CreatePgDb(f03Conn))
+            {
+                var migrator = db.GetInfrastructure().GetRequiredService<IMigrator>();
+                await migrator.MigrateAsync(Mdm15Migration);
+                await ReferenceCatalogSeeder.SeedAsync(db);
+
+                db.Facilities.Add(new Facility { Id = facId, FacilityCode = "F03-US", Name = "F03 US", CountryCode = "USA", StateOrProvince = "Illinois", PostalCode = "60601", Timezone = "America/Chicago", IsActive = true });
+                db.Clients.Add(new Client { Id = clientId, AccountCode = "F03-CL", CompanyName = "F03 Client", Status = ClientStatus.Active });
+                db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientId, FacilityId = facId, Status = FacilityAccessStatus.Active });
+                db.Customers.Add(new Customer { Id = custNamePiiId, ClientId = clientId, CustomerCode = "F03-PII", CustomerName = "John", DefaultCountryCode = "John Doe", DefaultStateOrProvince = "Illinois", DefaultPostalCode = "60601" });
+
+                // Fixture 1: Pre-MDM-1.6 Packed package (Draft order) -> 20261126143014 wrongly mutates USA->US
+                var hu1 = Guid.NewGuid();
+                db.OutboundOrders.AddRange(
+                    new OutboundOrder { Id = ordPrePackedId, ClientId = clientId, FacilityId = facId, OrderNumber = "F03-PRE", OrderType = OutboundOrderType.B2BSalesOrder, Status = OutboundOrderStatus.Draft, CustomerName = "Pre" },
+                    new OutboundOrder { Id = ordPostFulfillId, ClientId = clientId, FacilityId = facId, OrderNumber = "F03-POST", OrderType = OutboundOrderType.B2BSalesOrder, Status = OutboundOrderStatus.Draft, CustomerName = "Post" },
+                    new OutboundOrder { Id = ordAmendedId, ClientId = clientId, FacilityId = facId, OrderNumber = "F03-AMD", OrderType = OutboundOrderType.B2BSalesOrder, Status = OutboundOrderStatus.Draft, CustomerName = "Amd" },
+                    new OutboundOrder { Id = ordHistBlankId, ClientId = clientId, FacilityId = facId, OrderNumber = "F03-BLK", OrderType = OutboundOrderType.B2BSalesOrder, Status = OutboundOrderStatus.Draft, CustomerName = "Blk" },
+                    new OutboundOrder { Id = ordAmbiguousId, ClientId = clientId, FacilityId = facId, OrderNumber = "F03-AMB", OrderType = OutboundOrderType.B2BSalesOrder, Status = OutboundOrderStatus.Draft, CustomerName = "Amb" });
+                db.HandlingUnits.Add(new HandlingUnit { Id = hu1, ClientId = clientId, FacilityId = facId, LpnCode = "F03-HU1", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.Available });
+                db.Packages.Add(new Package { Id = Guid.NewGuid(), ClientId = clientId, FacilityId = facId, OutboundOrderId = ordPrePackedId, HandlingUnitId = hu1, PackageNumber = "F03-PKG1", Status = PackageStatus.Packed });
+                db.ShippingAddresses.AddRange(
+                    new ShippingAddress { Id = addrPrePackedId, OutboundOrderId = ordPrePackedId, RecipientName = "R1", AddressLine1 = "1 St", City = "Chicago", StateOrProvince = "Illinois", PostalCode = "60601", CountryCode = "USA" },
+                    new ShippingAddress { Id = addrPostFulfillId, OutboundOrderId = ordPostFulfillId, RecipientName = "R2", AddressLine1 = "2 St", City = "Chicago", StateOrProvince = "Illinois", PostalCode = "60601", CountryCode = "USA" },
+                    new ShippingAddress { Id = addrAmendedId, OutboundOrderId = ordAmendedId, RecipientName = "R3", AddressLine1 = "3 St", City = "Chicago", StateOrProvince = "Illinois", PostalCode = "60601", CountryCode = "USA" },
+                    new ShippingAddress { Id = addrHistBlankId, OutboundOrderId = ordHistBlankId, RecipientName = "R4", AddressLine1 = "4 St", City = "Chicago", StateOrProvince = "Illinois", PostalCode = "60601", CountryCode = "" },
+                    new ShippingAddress { Id = addrAmbiguousId, OutboundOrderId = ordAmbiguousId, RecipientName = "R5", AddressLine1 = "5 St", City = "Chicago", StateOrProvince = "Illinois", PostalCode = "60601", CountryCode = "US" });
+                await db.SaveChangesAsync();
+
+                // Apply original 20261126143014 migration
+                await migrator.MigrateAsync(Mdm16Migration);
+
+                // Post-MDM-1.6 legitimate events BEFORE R04 + F03 run:
+                // Fixture 2: Legitimate amendment on ordAmendedId -> NP
+                // Fixture 3: Subsequent fulfillment AFTER MDM-1.6 on ordPostFulfillId (package created strictly after initial_recorded_at_utc)
+                // Fixture 4: ordHistBlankId became Completed after MDM-1.6 blank inference
+                // Fixture 5: Ambiguous manual audit on ordAmbiguousId
+                await Task.Delay(50);
+                var hu2 = Guid.NewGuid();
+                db.HandlingUnits.Add(new HandlingUnit { Id = hu2, ClientId = clientId, FacilityId = facId, LpnCode = "F03-HU2", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.Available });
+                db.Packages.Add(new Package { Id = Guid.NewGuid(), ClientId = clientId, FacilityId = facId, OutboundOrderId = ordPostFulfillId, HandlingUnitId = hu2, PackageNumber = "F03-PKG2", Status = PackageStatus.Packed });
+                var aAmd = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrAmendedId);
+                aAmd.Amend("R3", null, "3 St", null, "Kathmandu", "Bagmati", "44600", "NP", null, null, Guid.Empty, "Legit customer move");
+                var oBlk = await db.OutboundOrders.IgnoreQueryFilters().SingleAsync(o => o.Id == ordHistBlankId);
+                oBlk.Status = OutboundOrderStatus.Completed;
+                db.CountryNormalizationAudits.Add(new CountryNormalizationAudit
+                {
+                    Id = Guid.NewGuid(),
+                    EntityType = "ShippingAddress",
+                    EntityId = addrAmbiguousId,
+                    FieldName = "CountryCode",
+                    OriginalCountryValue = "USA",
+                    NormalizedCountryCode = "US",
+                    NormalizationStatus = CountryNormalizationStatus.Normalized,
+                    PreservedHistoricalValue = false,
+                    Reason = "Normalized to canonical 'US' via CatalogAlias.",
+                    FacilityId = facId,
+                    ClientId = clientId,
+                    CorrelationBatchId = "MANUAL-BATCH",
+                    InitialCorrelationBatchId = "MANUAL-BATCH",
+                    RecordedAtUtc = DateTime.UtcNow.AddMinutes(-5),
+                    InitialRecordedAtUtc = DateTime.UtcNow.AddMinutes(-5)
+                });
+                await db.SaveChangesAsync();
+
+                // Apply R04 + F03 migrations sequentially
+                await migrator.MigrateAsync();
+
+                var rPre = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrPrePackedId);
+                var rPost = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrPostFulfillId);
+                var rAmd = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrAmendedId);
+                var rAmb = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrAmbiguousId);
+                var aBlk = await db.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "ShippingAddress" && a.EntityId == addrHistBlankId);
+                var aPiiName = await db.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "Customer" && a.EntityId == custNamePiiId);
+
+                if (rPre.CountryCode != "USA")
+                    throw new InvalidOperationException($"F03 Fixture 1 failed: pre-MDM-1.6 packed address expected 'USA', got '{rPre.CountryCode}'.");
+                if (rPost.CountryCode != "US")
+                    throw new InvalidOperationException($"F03 Fixture 3 failed: post-MDM-1.6 fulfilled address expected 'US', got '{rPost.CountryCode}'.");
+                if (rAmd.CountryCode != "NP")
+                    throw new InvalidOperationException($"F03 Fixture 2 failed: legitimately amended address expected 'NP', got '{rAmd.CountryCode}'.");
+                if (rAmb.CountryCode != "US")
+                    throw new InvalidOperationException($"F03 Fixture 5 failed: ambiguous provenance address expected 'US', got '{rAmb.CountryCode}'.");
+                if (!aBlk.Reason.Contains("Historical blank country inference preserved", StringComparison.Ordinal))
+                    throw new InvalidOperationException($"F03 Fixture 4 failed: expected safe blank-inference diagnostic, got '{aBlk.Reason}'.");
+                if (aPiiName.OriginalCountryValue != CountryDiagnosticSanitizer.RedactedPlaceholder)
+                    throw new InvalidOperationException($"F04 PG allowlist failed: personal name 'John Doe' was not redacted, got '{aPiiName.OriginalCountryValue}'.");
+            }
+
+            // Part B: Independent SQL vs C# Parity on identical original legacy fixtures
+            await CreateDbAsync(paritySqlDbName);
+            await CreateDbAsync(parityCsDbName);
+            var sqlConn = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = paritySqlDbName }.ConnectionString;
+            var csConn = new NpgsqlConnectionStringBuilder(baseConnectionString) { Database = parityCsDbName }.ConnectionString;
+
+            var pFacUs = Guid.NewGuid();
+            var pFacConflict = Guid.NewGuid();
+            var pClientUs = Guid.NewGuid();
+            var pCustInfer = Guid.NewGuid();
+            var pCustNamePii = Guid.NewGuid();
+            var pSupInfer = Guid.NewGuid();
+
+            async Task SeedLegacyParityRowsAsync(ApplicationDbContext ctx)
+            {
+                ctx.Facilities.AddRange(
+                    new Facility { Id = pFacUs, FacilityCode = "PAR-US", Name = "Par US", CountryCode = "USA", StateOrProvince = "Illinois", PostalCode = "60601", Timezone = "America/Chicago", IsActive = true },
+                    new Facility { Id = pFacConflict, FacilityCode = "PAR-CNF", Name = "Par Conflict", CountryCode = "US", StateOrProvince = "Bagmati", PostalCode = "44600", Timezone = "Asia/Kathmandu", IsActive = true });
+                ctx.Clients.Add(new Client { Id = pClientUs, AccountCode = "PAR-CL", CompanyName = "Par Client", Status = ClientStatus.Active });
+                ctx.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = pClientUs, FacilityId = pFacUs, Status = FacilityAccessStatus.Active });
+                ctx.Customers.AddRange(
+                    new Customer { Id = pCustInfer, ClientId = pClientUs, CustomerCode = "PAR-C1", CustomerName = "C1", DefaultCountryCode = "", DefaultStateOrProvince = "Illinois", DefaultPostalCode = "60601" },
+                    new Customer { Id = pCustNamePii, ClientId = pClientUs, CustomerCode = "PAR-C2", CustomerName = "C2", DefaultCountryCode = "Jane Roe", DefaultStateOrProvince = "Illinois", DefaultPostalCode = "60601" });
+                ctx.Suppliers.Add(new Supplier { Id = pSupInfer, ClientId = pClientUs, SupplierCode = "PAR-S1", SupplierName = "S1", Country = null, State = "Illinois", PostalCode = "60601" });
+                await ctx.SaveChangesAsync();
+            }
+
+            // DB A: Pure SQL migration path (MDM1_5 -> seed -> latest)
+            await using (var sDb = CreatePgDb(sqlConn))
+            {
+                var mig = sDb.GetInfrastructure().GetRequiredService<IMigrator>();
+                await mig.MigrateAsync(Mdm15Migration);
+                await ReferenceCatalogSeeder.SeedAsync(sDb);
+                await SeedLegacyParityRowsAsync(sDb);
+                await mig.MigrateAsync();
+            }
+
+            // DB B: Pure C# BackfillAllAsync path (latest empty -> seed -> BackfillAllAsync)
+            await using (var cDb = CreatePgDb(csConn))
+            {
+                var mig = cDb.GetInfrastructure().GetRequiredService<IMigrator>();
+                await mig.MigrateAsync();
+                await ReferenceCatalogSeeder.SeedAsync(cDb);
+                await SeedLegacyParityRowsAsync(cDb);
+                await new LegacyCountryNormalizationService(cDb).BackfillAllAsync("PARITY-CS");
+            }
+
+            // Compare outcomes across SQL DB vs C# DB
+            await using (var sDb = CreatePgDb(sqlConn))
+            await using (var cDb = CreatePgDb(csConn))
+            {
+                var sFacs = await sDb.Facilities.IgnoreQueryFilters().OrderBy(f => f.Id).Select(f => new { f.Id, f.CountryCode, f.CountryNormalizationStatus }).ToListAsync();
+                var cFacs = await cDb.Facilities.IgnoreQueryFilters().OrderBy(f => f.Id).Select(f => new { f.Id, f.CountryCode, f.CountryNormalizationStatus }).ToListAsync();
+                var sCusts = await sDb.Customers.IgnoreQueryFilters().OrderBy(c => c.Id).Select(c => new { c.Id, c.DefaultCountryCode, c.CountryNormalizationStatus }).ToListAsync();
+                var cCusts = await cDb.Customers.IgnoreQueryFilters().OrderBy(c => c.Id).Select(c => new { c.Id, c.DefaultCountryCode, c.CountryNormalizationStatus }).ToListAsync();
+                var sSups = await sDb.Suppliers.IgnoreQueryFilters().OrderBy(s => s.Id).Select(s => new { s.Id, s.Country, s.CountryNormalizationStatus }).ToListAsync();
+                var cSups = await cDb.Suppliers.IgnoreQueryFilters().OrderBy(s => s.Id).Select(s => new { s.Id, s.Country, s.CountryNormalizationStatus }).ToListAsync();
+                var sAuds = await sDb.CountryNormalizationAudits.OrderBy(a => a.EntityType).ThenBy(a => a.EntityId).Select(a => new { a.EntityType, a.EntityId, a.FieldName, a.OriginalCountryValue, a.NormalizedCountryCode, a.NormalizationStatus }).ToListAsync();
+                var cAuds = await cDb.CountryNormalizationAudits.OrderBy(a => a.EntityType).ThenBy(a => a.EntityId).Select(a => new { a.EntityType, a.EntityId, a.FieldName, a.OriginalCountryValue, a.NormalizedCountryCode, a.NormalizationStatus }).ToListAsync();
+
+                if (!sFacs.SequenceEqual(cFacs) || !sCusts.SequenceEqual(cCusts) || !sSups.SequenceEqual(cSups) || !sAuds.SequenceEqual(cAuds))
+                {
+                    throw new InvalidOperationException("SQL vs C# normalization parity mismatch detected across identical legacy fixtures.");
+                }
+            }
+
+            Console.WriteLine("PASS PostgreSQL MDM-1.6 F03 Safe Historical Restoration Fixtures, F04 Allowlist Privacy & Independent SQL/C# Parity verified cleanly.");
+        }
+        finally
+        {
+            await DropDbAsync(f03DbName);
+            await DropDbAsync(paritySqlDbName);
+            await DropDbAsync(parityCsDbName);
         }
     }
 

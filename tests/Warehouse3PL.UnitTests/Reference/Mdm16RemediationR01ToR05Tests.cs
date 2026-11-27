@@ -180,22 +180,12 @@ public sealed class Mdm16RemediationR01ToR05Tests
         db.CarrierContractualSlaPolicies.Add(histPol);
         await db.SaveChangesAsync();
 
-        db.CountryNormalizationAudits.Add(new CountryNormalizationAudit
-        {
-            Id = Guid.NewGuid(),
-            EntityType = nameof(CarrierContractualSlaPolicy),
-            EntityId = histId,
-            FieldName = nameof(CarrierContractualSlaPolicy.DestinationCountry),
-            OriginalCountryValue = "USA",
-            NormalizedCountryCode = "US",
-            NormalizationStatus = CountryNormalizationStatus.Normalized,
-            PreservedHistoricalValue = true,
-            Reason = "Historical preserved",
-            CorrelationBatchId = "R01-INIT",
-            InitialCorrelationBatchId = "R01-INIT",
-            RecordedAtUtc = DateTime.UtcNow,
-            InitialRecordedAtUtc = DateTime.UtcNow
-        });
+        var histAudit = await db.CountryNormalizationAudits.SingleAsync(
+            a => a.EntityType == nameof(CarrierContractualSlaPolicy) && a.EntityId == histId && a.FieldName == nameof(CarrierContractualSlaPolicy.DestinationCountry));
+        histAudit.NormalizedCountryCode = "US";
+        histAudit.NormalizationStatus = CountryNormalizationStatus.Normalized;
+        histAudit.PreservedHistoricalValue = true;
+        histAudit.Reason = "Immutable historical record preserved untouched";
         histPol.CountryNormalizationStatus = CountryNormalizationStatus.Normalized;
         histPol.Notes = "Metadata update keeping historical DestinationCountry intact";
         await db.SaveChangesAsync();
@@ -399,6 +389,7 @@ public sealed class Mdm16RemediationR01ToR05Tests
         });
 
         DateTime initialRecordedAt;
+        string initialBatch;
         using (var s1 = host.Services.CreateScope())
         {
             var svc1 = s1.ServiceProvider.GetRequiredService<ILegacyCountryNormalizationService>();
@@ -406,8 +397,10 @@ public sealed class Mdm16RemediationR01ToR05Tests
             await svc1.BackfillAllAsync("R03-B1");
             var facAudit1 = await db1.CountryNormalizationAudits.SingleAsync(a => a.EntityType == nameof(Facility) && a.EntityId == facId);
             Assert.Equal(CountryNormalizationStatus.PendingNormalization, facAudit1.NormalizationStatus);
-            Assert.Equal("ZZZ", facAudit1.OriginalCountryValue);
-            Assert.Equal("R03-B1", facAudit1.InitialCorrelationBatchId);
+            // F04: Unrecognized arbitrary tokens ('ZZZ') are redacted fail-closed
+            Assert.Equal(CountryDiagnosticSanitizer.RedactedPlaceholder, facAudit1.OriginalCountryValue);
+            initialBatch = facAudit1.InitialCorrelationBatchId;
+            Assert.False(string.IsNullOrWhiteSpace(initialBatch));
             initialRecordedAt = facAudit1.InitialRecordedAtUtc;
         }
 
@@ -425,10 +418,9 @@ public sealed class Mdm16RemediationR01ToR05Tests
             var facAudit2 = await db2.CountryNormalizationAudits.SingleAsync(a => a.EntityType == nameof(Facility) && a.EntityId == facId);
             Assert.Equal(CountryNormalizationStatus.Normalized, facAudit2.NormalizationStatus);
             Assert.Equal("NP", facAudit2.NormalizedCountryCode);
-            Assert.Equal("ZZZ", facAudit2.OriginalCountryValue);
-            Assert.Equal("R03-B1", facAudit2.InitialCorrelationBatchId);
+            Assert.Equal(CountryDiagnosticSanitizer.RedactedPlaceholder, facAudit2.OriginalCountryValue);
+            Assert.Equal(initialBatch, facAudit2.InitialCorrelationBatchId);
             Assert.Equal(initialRecordedAt, facAudit2.InitialRecordedAtUtc);
-            Assert.Equal("R03-B2", facAudit2.CorrelationBatchId);
 
             // Reverse transition: Facility later gets conflicting timezone "America/Chicago" while Country="NP" -> Normalized -> PendingNormalization!
             fac.Timezone = "America/Chicago";
@@ -436,8 +428,7 @@ public sealed class Mdm16RemediationR01ToR05Tests
             await svc2.BackfillAllAsync("R03-B3");
             var facAudit3 = await db2.CountryNormalizationAudits.SingleAsync(a => a.EntityType == nameof(Facility) && a.EntityId == facId);
             Assert.Equal(CountryNormalizationStatus.PendingNormalization, facAudit3.NormalizationStatus);
-            Assert.Equal("R03-B1", facAudit3.InitialCorrelationBatchId);
-            Assert.Equal("R03-B3", facAudit3.CorrelationBatchId);
+            Assert.Equal(initialBatch, facAudit3.InitialCorrelationBatchId);
 
             // Soft-delete Customer -> audit removed cleanly!
             var cust = await db2.Customers.IgnoreQueryFilters().SingleAsync(c => c.Id == custId);
@@ -447,7 +438,7 @@ public sealed class Mdm16RemediationR01ToR05Tests
             Assert.False(await db2.CountryNormalizationAudits.AnyAsync(a => a.EntityType == nameof(Customer) && a.EntityId == custId));
 
             var snapshotJson = await svc2.ExportProvenanceSnapshotJsonAsync();
-            Assert.Contains("R03-B1", snapshotJson);
+            Assert.Contains(initialBatch, snapshotJson);
         }
     }
 
@@ -562,6 +553,227 @@ public sealed class Mdm16RemediationR01ToR05Tests
         Assert.DoesNotContain("+1-312-555-0199", platJson, StringComparison.OrdinalIgnoreCase);
         Assert.DoesNotContain("123 Main Street", platJson, StringComparison.OrdinalIgnoreCase);
         Assert.Contains(CountryDiagnosticSanitizer.RedactedPlaceholder, platJson);
+    }
+
+    [Fact]
+    public async Task F01_RuntimeNormalizationAndDiagnosticConsistency_WithoutBackfill_ReturnShipmentDualFields_CanonicalTrim_And_GeoContradictions()
+    {
+        var facId = Guid.NewGuid();
+        var clientId = Guid.NewGuid();
+        var itemId = Guid.NewGuid();
+        var staffPlatId = Guid.NewGuid();
+        var facGeoConflictId = Guid.NewGuid();
+        var retId = Guid.NewGuid();
+
+        await using var host = await BuildJwtAppAsync(async db =>
+        {
+            await ReferenceCatalogSeeder.SeedAsync(db);
+            db.Facilities.Add(new Facility { Id = facId, FacilityCode = "F01-US", Name = "F01 US", CountryCode = " us ", Timezone = "America/Chicago", IsActive = true });
+            db.Clients.Add(new Client { Id = clientId, AccountCode = "CL-F01", CompanyName = "F01 Client", Status = ClientStatus.Active });
+            db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientId, FacilityId = facId, Status = FacilityAccessStatus.Active });
+            db.Items.Add(new Item { Id = itemId, ClientId = clientId, Sku = "SKU-F01", Description = "F01 Item", Status = ItemStatus.Active });
+
+            var platRole = new Role { RoleName = "F01Plat", Description = "Plat", IsSystemRole = false };
+            platRole.RolePermissions.Add(new RolePermission { Role = platRole, PermissionKey = Permissions.Global.NormalizationView, AccessLevel = AccessLevel.Read });
+            db.Roles.Add(platRole);
+            var uPlat = new User { Id = staffPlatId, Email = "plat@f01.test", FirstName = "P", LastName = "S", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" };
+            db.Users.Add(uPlat);
+            db.UserRoles.Add(new UserRole { User = uPlat, Role = platRole });
+            await db.SaveChangesAsync();
+        });
+
+        using var scope = host.Services.CreateScope();
+        var db = scope.ServiceProvider.GetRequiredService<ApplicationDbContext>();
+        var tenantProvider = scope.ServiceProvider.GetRequiredService<ITenantProvider>();
+        tenantProvider.SetTenantId(clientId);
+        var staffUser = new StubUserContext(staffPlatId, UserType.Staff, null, facId, [SystemRoles.SuperAdmin], Permissions.GetAllPermissions(), true);
+
+        // 1. Persisted canonical country code must be exact 2 uppercase ASCII letters with zero whitespace
+        var savedFac = await db.Facilities.SingleAsync(f => f.Id == facId);
+        Assert.Equal("US", savedFac.CountryCode);
+        Assert.Equal(CountryNormalizationStatus.Normalized, savedFac.CountryNormalizationStatus);
+
+        // 2. Ordinary write paths (CreateSupplier + Bulk Import) create visible pending diagnostics WITHOUT calling BackfillAllAsync
+        var supHandler = new CreateSupplierCommandHandler(db, staffUser);
+        var supRes = await supHandler.Handle(new CreateSupplierCommand { ClientId = clientId, SupplierCode = "SUP-F01-PEND", SupplierName = "Pending Sup", Country = "UnknownRegion" }, CancellationToken.None);
+        Assert.Equal(CountryNormalizationStatus.PendingNormalization, supRes.CountryNormalizationStatus);
+
+        var importHandler = new ImportOutboundOrdersBulkCommandHandler(db, tenantProvider, staffUser);
+        var batchRes = await importHandler.Handle(new ImportOutboundOrdersBulkCommand
+        {
+            FacilityId = facId,
+            SourceFileName = "f01.json",
+            Orders =
+            [
+                new CreateOutboundOrderCommand
+                {
+                    FacilityId = facId,
+                    OrderNumber = "ORD-F01-1",
+                    ShippingAddress = new CreateShippingAddressDto { RecipientName = "Rec", AddressLine1 = "1 St", City = "Chicago", StateOrProvince = "Illinois", PostalCode = "60601", CountryCode = "" },
+                    Lines = [new CreateOutboundOrderLineDto { ItemId = itemId, QuantityOrdered = 1 }]
+                }
+            ]
+        }, CancellationToken.None);
+        Assert.Equal(1, batchRes.SuccessfulRows);
+        var importedAddr = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.RecipientName == "Rec");
+
+        // 3. Geographic/timezone contradiction on Facility is quarantined immediately at runtime (never treated as verified parent)
+        db.Facilities.Add(new Facility
+        {
+            Id = facGeoConflictId,
+            FacilityCode = "F01-CONFLICT",
+            Name = "Conflicting TZ",
+            CountryCode = "US",
+            StateOrProvince = "Bagmati",
+            PostalCode = "44600",
+            Timezone = "Asia/Kathmandu",
+            IsActive = true
+        });
+
+        // 4. ReturnShipment dual fields handled independently
+        db.ReturnShipments.Add(new ReturnShipment
+        {
+            Id = retId,
+            ClientId = clientId,
+            OriginFacilityId = facId,
+            DestinationFacilityId = facId,
+            OrderId = importedAddr.OutboundOrderId,
+            PackageId = Guid.NewGuid(),
+            ReturnRmaNumber = "RMA-F01-DUAL",
+            Reason = ReturnReason.DamagedInTransit,
+            AuthorizedByUserId = staffPlatId,
+            CarrierCode = "UPS",
+            TrackingNumber = "1ZF01",
+            Status = ReturnShipmentStatus.Authorized,
+            OriginCountry = "InvalidOrigin",
+            DestinationCountry = "US"
+        });
+        await db.SaveChangesAsync();
+
+        var facConflict = await db.Facilities.SingleAsync(f => f.Id == facGeoConflictId);
+        Assert.Equal(CountryNormalizationStatus.PendingNormalization, facConflict.CountryNormalizationStatus);
+
+        var retSaved = await db.ReturnShipments.IgnoreQueryFilters().SingleAsync(r => r.Id == retId);
+        Assert.Equal(CountryNormalizationStatus.PendingNormalization, retSaved.CountryNormalizationStatus);
+
+        // Verify ALL pending records are visible in authorized HTTP diagnostics WITHOUT ever calling BackfillAllAsync
+        using var http = host.GetTestClient();
+        var jwtPlat = TokenFor(host, staffPlatId, UserType.Staff, null, null, ["F01Plat"], [Permissions.Global.NormalizationView]);
+        var diagResp = await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/reference/normalization-quarantine?pageSize=100", jwtPlat));
+        Assert.Equal(HttpStatusCode.OK, diagResp.StatusCode);
+        var diagDto = await diagResp.Content.ReadFromJsonAsync<PagedNormalizationQuarantineResponse>(JsonOptions);
+        Assert.NotNull(diagDto);
+        Assert.Contains(diagDto!.Items, i => i.EntityType == nameof(Supplier) && i.EntityId == supRes.Id);
+        Assert.Contains(diagDto.Items, i => i.EntityType == nameof(ShippingAddress) && i.EntityId == importedAddr.Id);
+        Assert.Contains(diagDto.Items, i => i.EntityType == nameof(Facility) && i.EntityId == facGeoConflictId);
+        Assert.Contains(diagDto.Items, i => i.EntityType == nameof(ReturnShipment) && i.EntityId == retId && i.FieldName == nameof(ReturnShipment.OriginCountry));
+        Assert.DoesNotContain(diagDto.Items, i => i.EntityType == nameof(ReturnShipment) && i.EntityId == retId && i.FieldName == nameof(ReturnShipment.DestinationCountry));
+
+        // 5. Runtime corrections reconcile diagnostics atomically while preserving Initial* provenance, and Facility status-only changes emit MDM-1.5 epochs
+        var initialSupAudit = await db.CountryNormalizationAudits.SingleAsync(a => a.EntityType == nameof(Supplier) && a.EntityId == supRes.Id);
+        var origInitTime = initialSupAudit.InitialRecordedAtUtc;
+        var origInitBatch = initialSupAudit.InitialCorrelationBatchId;
+
+        var supEntity = await db.Suppliers.IgnoreQueryFilters().SingleAsync(s => s.Id == supRes.Id);
+        supEntity.Country = " np ";
+        retSaved.OriginCountry = "US";
+        var epochsBefore = await db.ConfigurationScopeEpochs.Where(e => e.ScopeType == ConfigurationScopeType.Facility && e.ScopeKey == facGeoConflictId.ToString("D").ToUpperInvariant()).Select(e => e.CurrentEpoch).FirstOrDefaultAsync();
+        facConflict.Timezone = "America/Chicago";
+        facConflict.StateOrProvince = "Illinois";
+        facConflict.PostalCode = "60601";
+        await db.SaveChangesAsync();
+
+        Assert.Equal("NP", supEntity.Country);
+        Assert.Equal(CountryNormalizationStatus.Normalized, supEntity.CountryNormalizationStatus);
+        Assert.Equal(CountryNormalizationStatus.Normalized, retSaved.CountryNormalizationStatus);
+        Assert.Equal(CountryNormalizationStatus.Normalized, facConflict.CountryNormalizationStatus);
+
+        var reconciledSupAudit = await db.CountryNormalizationAudits.SingleAsync(a => a.EntityType == nameof(Supplier) && a.EntityId == supRes.Id);
+        Assert.Equal(CountryNormalizationStatus.Normalized, reconciledSupAudit.NormalizationStatus);
+        Assert.Equal("NP", reconciledSupAudit.NormalizedCountryCode);
+        Assert.Equal(origInitTime, reconciledSupAudit.InitialRecordedAtUtc);
+        Assert.Equal(origInitBatch, reconciledSupAudit.InitialCorrelationBatchId);
+
+        var epochsAfter = await db.ConfigurationScopeEpochs.Where(e => e.ScopeType == ConfigurationScopeType.Facility && e.ScopeKey == facGeoConflictId.ToString("D").ToUpperInvariant()).Select(e => e.CurrentEpoch).FirstOrDefaultAsync();
+        Assert.True(epochsAfter > epochsBefore);
+    }
+
+    [Fact]
+    public async Task F04_FailClosedAllowlistedDiagnosticPrivacy_PersonalNames_ConfidentialText_SearchCountInference_And_Export()
+    {
+        var facUsId = Guid.NewGuid();
+        var clientId = Guid.NewGuid();
+        var staffPlatId = Guid.NewGuid();
+
+        await using var host = await BuildJwtAppAsync(async db =>
+        {
+            await ReferenceCatalogSeeder.SeedAsync(db);
+            db.Facilities.Add(new Facility { Id = facUsId, FacilityCode = "F04-US", Name = "F04 Hub", CountryCode = "US", Timezone = "America/Chicago", IsActive = true });
+            db.Clients.Add(new Client { Id = clientId, AccountCode = "CL-F04", CompanyName = "F04 Client", Status = ClientStatus.Active });
+            db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientId, FacilityId = facUsId, Status = FacilityAccessStatus.Active });
+
+            // Synthetic personal names, confidential free-text, email, phone, street address + verified catalog alias
+            db.Customers.AddRange(
+                new Customer { ClientId = clientId, CustomerCode = "F04-1", CustomerName = "N1", DefaultCountryCode = "Johnathan Doe" },
+                new Customer { ClientId = clientId, CustomerCode = "F04-2", CustomerName = "N2", DefaultCountryCode = "Priya Sharma" },
+                new Customer { ClientId = clientId, CustomerCode = "F04-3", CustomerName = "N3", DefaultCountryCode = "VIP Confidential Note" },
+                new Customer { ClientId = clientId, CustomerCode = "F04-4", CustomerName = "N4", DefaultCountryCode = "alice.smith@corp.test" },
+                new Customer { ClientId = clientId, CustomerCode = "F04-5", CustomerName = "N5", DefaultCountryCode = "+1-312-555-0199" },
+                new Customer { ClientId = clientId, CustomerCode = "F04-6", CustomerName = "N6", DefaultCountryCode = "123 Main Street" },
+                new Customer { ClientId = clientId, CustomerCode = "F04-7", CustomerName = "N7", DefaultCountryCode = "USA" });
+
+            var platRole = new Role { RoleName = "F04Plat", Description = "Plat", IsSystemRole = false };
+            platRole.RolePermissions.Add(new RolePermission { Role = platRole, PermissionKey = Permissions.Global.NormalizationView, AccessLevel = AccessLevel.Read });
+            db.Roles.Add(platRole);
+            var uPlat = new User { Id = staffPlatId, Email = "plat@f04.test", FirstName = "P", LastName = "S", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" };
+            db.Users.Add(uPlat);
+            db.UserRoles.Add(new UserRole { User = uPlat, Role = platRole });
+            await db.SaveChangesAsync();
+        });
+
+        using var http = host.GetTestClient();
+        var jwtPlat = TokenFor(host, staffPlatId, UserType.Staff, null, null, ["F04Plat"], [Permissions.Global.NormalizationView]);
+
+        var allResp = await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/reference/normalization-quarantine?includeAllStatuses=true&pageSize=100", jwtPlat));
+        Assert.Equal(HttpStatusCode.OK, allResp.StatusCode);
+        var allJson = await allResp.Content.ReadAsStringAsync();
+
+        // Fail-closed redaction: personal names, confidential notes, emails, phones, streets never echoed; verified catalog token 'USA' allowed
+        foreach (var forbidden in new[] { "Johnathan", "Doe", "Priya", "Sharma", "Confidential", "alice.smith", "555-0199", "Main Street" })
+        {
+            Assert.DoesNotContain(forbidden, allJson, StringComparison.OrdinalIgnoreCase);
+        }
+        Assert.Contains("\"USA\"", allJson);
+        Assert.Contains(CountryDiagnosticSanitizer.RedactedPlaceholder, allJson);
+
+        // Search count inference guard: querying any redacted/unverified text MUST yield 0 items and 0 counts
+        foreach (var probe in new[] { "Johnathan", "Priya", "Confidential", "alice", "555-0199", "Main" })
+        {
+            var searchResp = await http.SendAsync(Authed(HttpMethod.Get, $"/api/v1/reference/normalization-quarantine?includeAllStatuses=true&search={Uri.EscapeDataString(probe)}", jwtPlat));
+            Assert.Equal(HttpStatusCode.OK, searchResp.StatusCode);
+            var searchDto = await searchResp.Content.ReadFromJsonAsync<PagedNormalizationQuarantineResponse>(JsonOptions);
+            Assert.NotNull(searchDto);
+            Assert.Equal(0, searchDto!.TotalCount);
+            Assert.Equal(0, searchDto.PendingCount);
+            Assert.Equal(0, searchDto.NormalizedCount);
+            Assert.Empty(searchDto.Items);
+        }
+
+        // Verified catalog token search works cleanly
+        var usaSearch = await http.SendAsync(Authed(HttpMethod.Get, "/api/v1/reference/normalization-quarantine?includeAllStatuses=true&search=USA", jwtPlat));
+        Assert.Equal(HttpStatusCode.OK, usaSearch.StatusCode);
+        var usaDto = await usaSearch.Content.ReadFromJsonAsync<PagedNormalizationQuarantineResponse>(JsonOptions);
+        Assert.True(usaDto!.TotalCount >= 1);
+
+        // Export provenance snapshot applies identical allowlist redaction
+        using var scope = host.Services.CreateScope();
+        var svc = scope.ServiceProvider.GetRequiredService<ILegacyCountryNormalizationService>();
+        var exportJson = await svc.ExportProvenanceSnapshotJsonAsync();
+        foreach (var forbidden in new[] { "Johnathan", "Priya", "Confidential", "alice.smith", "555-0199", "Main Street" })
+        {
+            Assert.DoesNotContain(forbidden, exportJson, StringComparison.OrdinalIgnoreCase);
+        }
+        Assert.Contains("\"USA\"", exportJson);
     }
 
     private static string TokenFor(WebApplication host, Guid id, UserType ut, Guid? cid, Guid? fid, string[] roles, string[] perms)

@@ -42,6 +42,11 @@ export const NormalizationQuarantinePage: React.FC = () => {
 
   const normalizedType = user ? normalizeUserTypeStrict(user.userType) : null;
   const isStaff = normalizedType === UserType.Staff;
+  const canViewQuarantine =
+    isStaff &&
+    (isSuperAdmin ||
+      hasPermission('global:normalization:view') ||
+      hasPermission('facilities:manage'));
   const isPlatformScope =
     isSuperAdmin ||
     hasPermission('global:normalization:view') ||
@@ -50,7 +55,7 @@ export const NormalizationQuarantinePage: React.FC = () => {
 
   const loadDiagnostics = useCallback(
     async (signal?: AbortSignal) => {
-      if (!isStaff) {
+      if (!canViewQuarantine) {
         setIsLoading(false);
         return;
       }
@@ -77,7 +82,7 @@ export const NormalizationQuarantinePage: React.FC = () => {
         setIsLoading(false);
       }
     },
-    [isStaff, statusFilter, entityType, scopedFacilityIdParam, search, pageNumber, pageSize]
+    [canViewQuarantine, statusFilter, entityType, scopedFacilityIdParam, search, pageNumber, pageSize]
   );
 
   useEffect(() => {
@@ -177,11 +182,11 @@ export const NormalizationQuarantinePage: React.FC = () => {
             </div>
 
             <div className="form-field quarantine-search-field">
-              <label htmlFor="quarantine-search">Search Original Code / Reason</label>
+              <label htmlFor="quarantine-search">Search Entity / Verified Code / Reason</label>
               <input
                 id="quarantine-search"
                 type="search"
-                placeholder="e.g. ZZZ, USA, Cross-border"
+                placeholder="e.g. Facility, USA, Conflict"
                 value={search}
                 onChange={(e) => {
                   setSearch(e.target.value);

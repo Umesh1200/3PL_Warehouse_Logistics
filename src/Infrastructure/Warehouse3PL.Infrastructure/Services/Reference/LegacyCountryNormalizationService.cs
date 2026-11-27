@@ -7,6 +7,7 @@ using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Entities.Reference;
 using Warehouse3PL.Domain.Enums;
+using Warehouse3PL.Infrastructure.Persistence;
 
 namespace Warehouse3PL.Infrastructure.Services.Reference;
 
@@ -30,42 +31,54 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
 
     public async Task<string> ExportProvenanceSnapshotJsonAsync(CancellationToken cancellationToken = default)
     {
+        var catalog = await CatalogIndex.LoadAsync(_db, cancellationToken);
         var audits = await _db.CountryNormalizationAudits
             .AsNoTracking()
             .OrderBy(a => a.InitialRecordedAtUtc)
             .ThenBy(a => a.EntityType)
             .ThenBy(a => a.EntityId)
-            .Select(a => new
-            {
-                a.Id,
-                a.EntityType,
-                a.EntityId,
-                a.FieldName,
-                OriginalCountryValue = CountryDiagnosticSanitizer.SanitizeRawValue(a.OriginalCountryValue),
-                a.NormalizedCountryCode,
-                NormalizationStatus = a.NormalizationStatus.ToString(),
-                a.PreservedHistoricalValue,
-                a.WasInferredFromParent,
-                a.InferenceSource,
-                Reason = CountryDiagnosticSanitizer.SanitizeReason(a.Reason),
-                a.FacilityId,
-                a.ClientId,
-                a.InitialCorrelationBatchId,
-                a.InitialRecordedAtUtc,
-                a.CorrelationBatchId,
-                a.RecordedAtUtc
-            })
             .ToListAsync(cancellationToken);
+
+        var sanitizedRecords = audits.Select(a => new
+        {
+            a.Id,
+            a.EntityType,
+            a.EntityId,
+            a.FieldName,
+            OriginalCountryValue = CountryDiagnosticSanitizer.SanitizeForDiagnostic(a.OriginalCountryValue, catalog.VerifiedCatalogKeys),
+            a.NormalizedCountryCode,
+            NormalizationStatus = a.NormalizationStatus.ToString(),
+            a.PreservedHistoricalValue,
+            a.WasInferredFromParent,
+            a.InferenceSource,
+            Reason = CountryDiagnosticSanitizer.SanitizeReason(a.Reason),
+            a.FacilityId,
+            a.ClientId,
+            a.InitialCorrelationBatchId,
+            a.InitialRecordedAtUtc,
+            a.CorrelationBatchId,
+            a.RecordedAtUtc
+        }).ToList();
 
         return System.Text.Json.JsonSerializer.Serialize(new
         {
             ExportedAtUtc = DateTime.UtcNow,
-            SchemaMigration = "20261126143014_MDM1_6_LegacyCountryNormalization",
-            TotalAuditRecords = audits.Count,
-            Records = audits
+            SchemaMigration = "20261127051434_MDM1_6_R04_NormalizationRemediationLifecycle",
+            TotalAuditRecords = sanitizedRecords.Count,
+            Records = sanitizedRecords
         });
     }
 
+    /// <summary>
+    /// Executes deterministic country normalization backfill under strict cross-instance concurrency control.
+    /// <list type="bullet">
+    /// <item><b>Caller-owned relational transaction:</b> Reuses the active transaction, acquires PostgreSQL
+    /// advisory + <c>SHARE ROW EXCLUSIVE</c> table locks in canonical order, and leaves Commit/Rollback to the caller.</item>
+    /// <item><b>Service-owned relational transaction:</b> Opens a resilient execution-strategy transaction, acquires
+    /// PostgreSQL advisory + <c>SHARE ROW EXCLUSIVE</c> table locks, commits atomically, and never falls back to a process-local semaphore.</item>
+    /// <item><b>Non-relational (InMemory test) provider:</b> Uses process-local <see cref="InMemoryBackfillGate"/>.</item>
+    /// </list>
+    /// </summary>
     public async Task<LegacyCountryBackfillSummary> BackfillAllAsync(
         string? correlationBatchId = null,
         CancellationToken cancellationToken = default)
@@ -74,13 +87,42 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             ? $"MDM16-BACKFILL-{DateTime.UtcNow:yyyyMMddHHmmss}"
             : correlationBatchId.Trim();
 
-        if (_db.IsRelationalDatabase && _db is DbContext relationalCtx && relationalCtx.Database.CurrentTransaction != null &&
-            relationalCtx.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+        if (_db.IsRelationalDatabase)
         {
-            await relationalCtx.Database.ExecuteSqlRawAsync(
-                "SELECT pg_advisory_xact_lock(hashtextextended('MDM16_COUNTRY_BACKFILL', 0::bigint))",
-                cancellationToken);
-            return await ExecuteBackfillCoreAsync(batchId, cancellationToken);
+            if (_db is not DbContext relationalCtx)
+            {
+                throw new InvalidOperationException("Relational country normalization backfill requires an EF Core DbContext.");
+            }
+
+            if (relationalCtx.Database.CurrentTransaction != null)
+            {
+                await AcquireRelationalBackfillLocksAsync(relationalCtx, cancellationToken);
+                return await ExecuteBackfillCoreAsync(batchId, cancellationToken);
+            }
+
+            bool firstAttempt = true;
+            return await relationalCtx.Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+            {
+                if (!firstAttempt)
+                {
+                    _db.ClearChangeTracker();
+                }
+                firstAttempt = false;
+
+                await using var tx = await relationalCtx.Database.BeginTransactionAsync(cancellationToken);
+                try
+                {
+                    await AcquireRelationalBackfillLocksAsync(relationalCtx, cancellationToken);
+                    var summary = await ExecuteBackfillCoreAsync(batchId, cancellationToken);
+                    await tx.CommitAsync(cancellationToken);
+                    return summary;
+                }
+                catch
+                {
+                    await tx.RollbackAsync(cancellationToken);
+                    throw;
+                }
+            });
         }
 
         await InMemoryBackfillGate.WaitAsync(cancellationToken);
@@ -91,6 +133,39 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
         finally
         {
             InMemoryBackfillGate.Release();
+        }
+    }
+
+    private static async Task AcquireRelationalBackfillLocksAsync(DbContext relationalCtx, CancellationToken cancellationToken)
+    {
+        if (relationalCtx.Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            await relationalCtx.Database.ExecuteSqlRawAsync(
+                "SELECT pg_advisory_xact_lock(hashtextextended('MDM16_COUNTRY_BACKFILL', 0::bigint));",
+                cancellationToken);
+
+            // SHARE ROW EXCLUSIVE allows concurrent SELECT reads while blocking conflicting operational writes
+            // (order/package lifecycle mutations, parent country updates, and concurrent backfills) across all instances.
+            await relationalCtx.Database.ExecuteSqlRawAsync(
+                """
+                LOCK TABLE
+                    clients,
+                    facilities,
+                    client_facility_access,
+                    customers,
+                    suppliers,
+                    outbound_orders,
+                    packages,
+                    shipments,
+                    bills_of_lading,
+                    shipping_addresses,
+                    return_shipments,
+                    carrier_contractual_sla_policies,
+                    carrier_sla_compliance_records,
+                    country_normalization_audits
+                IN SHARE ROW EXCLUSIVE MODE;
+                """,
+                cancellationToken);
         }
     }
 
@@ -261,7 +336,7 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
                 EntityType = entityType,
                 EntityId = entityId,
                 FieldName = fieldName,
-                OriginalCountryValue = CountryDiagnosticSanitizer.SanitizeRawValue(rawValue),
+                OriginalCountryValue = CountryDiagnosticSanitizer.SanitizeForDiagnostic(rawValue, catalog.VerifiedCatalogKeys),
                 NormalizedCountryCode = resolvedCode,
                 NormalizationStatus = status,
                 PreservedHistoricalValue = preservedHistoricalVal,
@@ -714,7 +789,22 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
                 rec.DestinationCountry, res.TargetCode, res.Status, true, res.WasInferred, src, reason, rec.FacilityId, rec.ClientId, res.NeedsInitialAudit);
         }
 
-        await _db.SaveChangesAsync(cancellationToken);
+        if (_db is ApplicationDbContext backfillDb)
+        {
+            backfillDb.IsInsideNormalizationBackfill = true;
+            try
+            {
+                await _db.SaveChangesAsync(cancellationToken);
+            }
+            finally
+            {
+                backfillDb.IsInsideNormalizationBackfill = false;
+            }
+        }
+        else
+        {
+            await _db.SaveChangesAsync(cancellationToken);
+        }
 
         return new LegacyCountryBackfillSummary(
             batchId,
@@ -736,6 +826,7 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
         private readonly Dictionary<string, string> _timeZoneCountries;
 
         public bool HasActiveProfiles => _profilesByCode.Count > 0;
+        public HashSet<string> VerifiedCatalogKeys { get; }
 
         private CatalogIndex(
             Dictionary<string, CountryProfile> profilesByCode,
@@ -743,7 +834,8 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             Dictionary<string, CountryProfile> profilesByName,
             Dictionary<string, CountryNormalizationAlias> aliasesByKey,
             Dictionary<string, HashSet<string>> divisionCountriesByToken,
-            Dictionary<string, string> timeZoneCountries)
+            Dictionary<string, string> timeZoneCountries,
+            HashSet<string> verifiedCatalogKeys)
         {
             _profilesByCode = profilesByCode;
             _profilesByAlpha3 = profilesByAlpha3;
@@ -751,6 +843,7 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
             _aliasesByKey = aliasesByKey;
             _divisionCountriesByToken = divisionCountriesByToken;
             _timeZoneCountries = timeZoneCountries;
+            VerifiedCatalogKeys = verifiedCatalogKeys;
         }
 
         public static async Task<CatalogIndex> LoadAsync(IApplicationDbContext db, CancellationToken ct)
@@ -804,7 +897,8 @@ public sealed class LegacyCountryNormalizationService : ILegacyCountryNormalizat
                 }
             }
 
-            return new CatalogIndex(byCode, byAlpha3, byName, aliasMap, divMap, tzMap);
+            var verifiedKeys = CountryDiagnosticSanitizer.BuildVerifiedCatalogKeySet(profiles, aliases);
+            return new CatalogIndex(byCode, byAlpha3, byName, aliasMap, divMap, tzMap, verifiedKeys);
         }
 
         public bool TryGetCanonicalCountry(string? raw, out string? code, out string source)

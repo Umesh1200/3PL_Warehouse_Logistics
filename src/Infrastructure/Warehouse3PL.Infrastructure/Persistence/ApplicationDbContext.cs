@@ -58,6 +58,8 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public bool IsRelationalDatabase => Database.IsRelational();
     public bool HasActiveTransaction => Database.CurrentTransaction != null || _currentTransaction != null;
     public bool AllowExplicitAuditTimestamps { get; set; } = false;
+    internal bool IsInsideNormalizationBackfill { get; set; } = false;
+    private bool _isInsideCountryLifecycleReconciliation = false;
     internal bool IsPrivilegedAnalyticsMaintenance => _currentUser.IsAuthenticated && _currentUser.IsSuperAdmin;
     private void EnforceJournalImmutability()
     {
@@ -68,12 +70,20 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
         EnforceJournalImmutability();
-        if (_isInsideConfigurationOutboxSave)
+        if (_isInsideConfigurationOutboxSave || _isInsideCountryLifecycleReconciliation)
         {
             return base.SaveChanges(acceptAllChangesOnSuccess);
         }
 
-        ReconcileCountryNormalizationLifecycleSync();
+        _isInsideCountryLifecycleReconciliation = true;
+        try
+        {
+            ReconcileCountryNormalizationLifecycleSync();
+        }
+        finally
+        {
+            _isInsideCountryLifecycleReconciliation = false;
+        }
 
         var pendingScopes = ConfigurationScopeMapper.ExtractImpactedScopes(ChangeTracker);
         if (pendingScopes.Count == 0)
@@ -92,12 +102,20 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
     {
         EnforceJournalImmutability();
-        if (_isInsideConfigurationOutboxSave)
+        if (_isInsideConfigurationOutboxSave || _isInsideCountryLifecycleReconciliation)
         {
             return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
         }
 
-        await ReconcileCountryNormalizationLifecycleAsync(cancellationToken);
+        _isInsideCountryLifecycleReconciliation = true;
+        try
+        {
+            await ReconcileCountryNormalizationLifecycleAsync(cancellationToken);
+        }
+        finally
+        {
+            _isInsideCountryLifecycleReconciliation = false;
+        }
 
         var pendingScopes = ConfigurationScopeMapper.ExtractImpactedScopes(ChangeTracker);
         if (pendingScopes.Count == 0)
@@ -117,168 +135,508 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         entity is Facility or Customer or Supplier or ShippingAddress or ReturnShipment
             or CarrierContractualSlaPolicy or CarrierSlaComplianceRecord;
 
+    private sealed record RuntimeCatalogContext(
+        Dictionary<string, CountryProfile> ProfilesByCode,
+        HashSet<string> VerifiedCatalogKeys,
+        Dictionary<string, HashSet<string>> DivisionCountriesByToken,
+        Dictionary<string, string> TimeZoneCountries);
+
     private void ReconcileCountryNormalizationLifecycleSync()
     {
         var targets = ChangeTracker.Entries()
-            .Where(e => e.State is EntityState.Added or EntityState.Modified && IsCountryLifecycleTarget(e.Entity))
+            .Where(e => e.State is EntityState.Added or EntityState.Modified or EntityState.Deleted && IsCountryLifecycleTarget(e.Entity))
             .ToList();
         if (targets.Count == 0) return;
 
-        var activeCodes = CountryProfiles.AsNoTracking()
-            .Where(c => c.IsActive)
-            .Select(c => c.CountryCode)
-            .ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var dbProfiles = CountryProfiles.AsNoTracking().Where(c => c.IsActive).ToList();
+        var dbAliases = CountryNormalizationAliases.AsNoTracking().Where(a => a.IsActive).ToList();
+        var dbDivisions = AdministrativeDivisions.AsNoTracking().Where(d => d.IsActive).ToList();
+        var dbTimeZones = TimeZoneProfiles.AsNoTracking().Where(t => t.IsActive && t.CountryCode != null).ToList();
 
-        foreach (var localCp in ChangeTracker.Entries<CountryProfile>().Where(e => e.State != EntityState.Deleted))
-        {
-            if (localCp.Entity.IsActive) activeCodes.Add(localCp.Entity.CountryCode.Trim());
-            else activeCodes.Remove(localCp.Entity.CountryCode.Trim());
-        }
+        var ctx = BuildRuntimeCatalogContext(dbProfiles, dbAliases, dbDivisions, dbTimeZones);
 
-        var localPreserved = CountryNormalizationAudits.Local
-            .Where(a => a.PreservedHistoricalValue && a.NormalizationStatus == CountryNormalizationStatus.Normalized)
-            .GroupBy(a => (a.EntityType, a.EntityId, a.FieldName))
-            .ToDictionary(g => g.Key, g => g.First().OriginalCountryValue);
-
-        var modifiedIds = targets
-            .Where(t => t.State == EntityState.Modified)
-            .Select(t => ((BaseEntity<Guid>)t.Entity).Id)
-            .Distinct()
+        var targetIds = targets.Select(t => ((BaseEntity<Guid>)t.Entity).Id).Distinct().ToList();
+        var existingAudits = CountryNormalizationAudits
+            .Where(a => targetIds.Contains(a.EntityId))
             .ToList();
 
-        if (modifiedIds.Count > 0)
+        var orderIds = targets
+            .Select(t => t.Entity)
+            .OfType<ShippingAddress>()
+            .Select(sa => sa.OutboundOrderId)
+            .Distinct()
+            .ToList();
+        var orderScopes = new Dictionary<Guid, (Guid FacilityId, Guid ClientId)>();
+        foreach (var localOrd in OutboundOrders.Local)
         {
-            foreach (var row in CountryNormalizationAudits.AsNoTracking()
-                .Where(a => modifiedIds.Contains(a.EntityId) && a.PreservedHistoricalValue && a.NormalizationStatus == CountryNormalizationStatus.Normalized)
-                .Select(a => new { a.EntityType, a.EntityId, a.FieldName, a.OriginalCountryValue })
+            orderScopes[localOrd.Id] = (localOrd.FacilityId, localOrd.ClientId);
+        }
+        var missingOrderIds = orderIds.Where(id => !orderScopes.ContainsKey(id)).ToList();
+        if (missingOrderIds.Count > 0)
+        {
+            foreach (var o in OutboundOrders.IgnoreQueryFilters().AsNoTracking()
+                .Where(o => missingOrderIds.Contains(o.Id))
+                .Select(o => new { o.Id, o.FacilityId, o.ClientId })
                 .ToList())
             {
-                localPreserved.TryAdd((row.EntityType, row.EntityId, row.FieldName), row.OriginalCountryValue);
+                orderScopes[o.Id] = (o.FacilityId, o.ClientId);
             }
         }
 
-        ReconcileCountryEntries(targets, activeCodes, localPreserved);
+        ReconcileCountryEntries(targets, ctx, existingAudits, orderScopes);
     }
 
     private async Task ReconcileCountryNormalizationLifecycleAsync(CancellationToken cancellationToken)
     {
         var targets = ChangeTracker.Entries()
-            .Where(e => e.State is EntityState.Added or EntityState.Modified && IsCountryLifecycleTarget(e.Entity))
+            .Where(e => e.State is EntityState.Added or EntityState.Modified or EntityState.Deleted && IsCountryLifecycleTarget(e.Entity))
             .ToList();
         if (targets.Count == 0) return;
 
-        var dbCodes = await CountryProfiles.AsNoTracking()
-            .Where(c => c.IsActive)
-            .Select(c => c.CountryCode)
+        var dbProfiles = await CountryProfiles.AsNoTracking().Where(c => c.IsActive).ToListAsync(cancellationToken);
+        var dbAliases = await CountryNormalizationAliases.AsNoTracking().Where(a => a.IsActive).ToListAsync(cancellationToken);
+        var dbDivisions = await AdministrativeDivisions.AsNoTracking().Where(d => d.IsActive).ToListAsync(cancellationToken);
+        var dbTimeZones = await TimeZoneProfiles.AsNoTracking().Where(t => t.IsActive && t.CountryCode != null).ToListAsync(cancellationToken);
+
+        var ctx = BuildRuntimeCatalogContext(dbProfiles, dbAliases, dbDivisions, dbTimeZones);
+
+        var targetIds = targets.Select(t => ((BaseEntity<Guid>)t.Entity).Id).Distinct().ToList();
+        var existingAudits = await CountryNormalizationAudits
+            .Where(a => targetIds.Contains(a.EntityId))
             .ToListAsync(cancellationToken);
-        var activeCodes = dbCodes.ToHashSet(StringComparer.OrdinalIgnoreCase);
 
-        foreach (var localCp in ChangeTracker.Entries<CountryProfile>().Where(e => e.State != EntityState.Deleted))
-        {
-            if (localCp.Entity.IsActive) activeCodes.Add(localCp.Entity.CountryCode.Trim());
-            else activeCodes.Remove(localCp.Entity.CountryCode.Trim());
-        }
-
-        var localPreserved = CountryNormalizationAudits.Local
-            .Where(a => a.PreservedHistoricalValue && a.NormalizationStatus == CountryNormalizationStatus.Normalized)
-            .GroupBy(a => (a.EntityType, a.EntityId, a.FieldName))
-            .ToDictionary(g => g.Key, g => g.First().OriginalCountryValue);
-
-        var modifiedIds = targets
-            .Where(t => t.State == EntityState.Modified)
-            .Select(t => ((BaseEntity<Guid>)t.Entity).Id)
+        var orderIds = targets
+            .Select(t => t.Entity)
+            .OfType<ShippingAddress>()
+            .Select(sa => sa.OutboundOrderId)
             .Distinct()
             .ToList();
-
-        if (modifiedIds.Count > 0)
+        var orderScopes = new Dictionary<Guid, (Guid FacilityId, Guid ClientId)>();
+        foreach (var localOrd in OutboundOrders.Local)
         {
-            var dbPreserved = await CountryNormalizationAudits.AsNoTracking()
-                .Where(a => modifiedIds.Contains(a.EntityId) && a.PreservedHistoricalValue && a.NormalizationStatus == CountryNormalizationStatus.Normalized)
-                .Select(a => new { a.EntityType, a.EntityId, a.FieldName, a.OriginalCountryValue })
+            orderScopes[localOrd.Id] = (localOrd.FacilityId, localOrd.ClientId);
+        }
+        var missingOrderIds = orderIds.Where(id => !orderScopes.ContainsKey(id)).ToList();
+        if (missingOrderIds.Count > 0)
+        {
+            var dbOrders = await OutboundOrders.IgnoreQueryFilters().AsNoTracking()
+                .Where(o => missingOrderIds.Contains(o.Id))
+                .Select(o => new { o.Id, o.FacilityId, o.ClientId })
                 .ToListAsync(cancellationToken);
-            foreach (var row in dbPreserved)
+            foreach (var o in dbOrders)
             {
-                localPreserved.TryAdd((row.EntityType, row.EntityId, row.FieldName), row.OriginalCountryValue);
+                orderScopes[o.Id] = (o.FacilityId, o.ClientId);
             }
         }
 
-        ReconcileCountryEntries(targets, activeCodes, localPreserved);
+        ReconcileCountryEntries(targets, ctx, existingAudits, orderScopes);
     }
 
-    private static bool IsValidCatalogCanonicalCode(string? raw, HashSet<string> activeCodes)
+    private RuntimeCatalogContext BuildRuntimeCatalogContext(
+        List<CountryProfile> dbProfiles,
+        List<CountryNormalizationAlias> dbAliases,
+        List<AdministrativeDivision> dbDivisions,
+        List<TimeZoneProfile> dbTimeZones)
     {
-        if (string.IsNullOrWhiteSpace(raw) || activeCodes.Count == 0)
+        var profilesByCode = new Dictionary<string, CountryProfile>(StringComparer.OrdinalIgnoreCase);
+        foreach (var p in dbProfiles)
+        {
+            if (p.IsActive && !string.IsNullOrWhiteSpace(p.CountryCode))
+            {
+                profilesByCode[p.CountryCode.Trim().ToUpperInvariant()] = p;
+            }
+        }
+        foreach (var localCp in ChangeTracker.Entries<CountryProfile>().Where(e => e.State != EntityState.Deleted))
+        {
+            var code = localCp.Entity.CountryCode.Trim().ToUpperInvariant();
+            if (localCp.Entity.IsActive) profilesByCode[code] = localCp.Entity;
+            else profilesByCode.Remove(code);
+        }
+
+        var mergedAliases = dbAliases.ToList();
+        foreach (var localAl in ChangeTracker.Entries<CountryNormalizationAlias>().Where(e => e.State != EntityState.Deleted))
+        {
+            if (localAl.Entity.IsActive) mergedAliases.Add(localAl.Entity);
+        }
+
+        var verifiedKeys = CountryDiagnosticSanitizer.BuildVerifiedCatalogKeySet(profilesByCode.Values, mergedAliases);
+
+        var divMap = new Dictionary<string, HashSet<string>>(StringComparer.OrdinalIgnoreCase);
+        void AddDivToken(string? token, string cc)
+        {
+            var norm = CountryNormalizationAlias.NormalizeLookupKey(token);
+            if (string.IsNullOrWhiteSpace(norm)) return;
+            if (!divMap.TryGetValue(norm, out var set))
+            {
+                set = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+                divMap[norm] = set;
+            }
+            set.Add(cc);
+        }
+        foreach (var div in dbDivisions)
+        {
+            var cc = div.CountryCode.Trim().ToUpperInvariant();
+            if (!profilesByCode.ContainsKey(cc)) continue;
+            AddDivToken(div.Code, cc);
+            AddDivToken(div.IsoCode, cc);
+            AddDivToken(div.Name, cc);
+        }
+
+        var tzMap = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+        foreach (var tz in dbTimeZones)
+        {
+            if (!string.IsNullOrWhiteSpace(tz.CountryCode))
+            {
+                var cc = tz.CountryCode.Trim().ToUpperInvariant();
+                if (profilesByCode.ContainsKey(cc))
+                {
+                    tzMap[tz.TimeZoneId.Trim()] = cc;
+                }
+            }
+        }
+
+        return new RuntimeCatalogContext(profilesByCode, verifiedKeys, divMap, tzMap);
+    }
+
+    private static bool TryCanonicalizeStrictIso2(string? raw, Dictionary<string, CountryProfile> profilesByCode, out string canonical)
+    {
+        canonical = string.Empty;
+        if (string.IsNullOrWhiteSpace(raw) || profilesByCode.Count == 0)
         {
             return false;
         }
 
         var trimmed = raw.Trim();
-        return trimmed.Length == 2
-            && trimmed == trimmed.ToUpperInvariant()
-            && trimmed.All(char.IsAsciiLetterUpper)
-            && activeCodes.Contains(trimmed);
+        if (trimmed.Length != 2 || !trimmed.All(char.IsAsciiLetter))
+        {
+            return false;
+        }
+
+        var upper = trimmed.ToUpperInvariant();
+        if (!profilesByCode.ContainsKey(upper))
+        {
+            return false;
+        }
+
+        canonical = upper;
+        return true;
     }
 
-    private static void ReconcileCountryEntries(
-        IReadOnlyList<Microsoft.EntityFrameworkCore.ChangeTracking.EntityEntry> targets,
-        HashSet<string> activeCodes,
-        IReadOnlyDictionary<(string EntityType, Guid EntityId, string FieldName), string?> preservedHistoricalValues)
+    private static bool IsExactCanonicalIso2(string? raw, Dictionary<string, CountryProfile> profilesByCode)
     {
+        if (string.IsNullOrEmpty(raw) || raw.Length != 2 || profilesByCode.Count == 0)
+        {
+            return false;
+        }
+
+        return raw.All(char.IsAsciiLetterUpper) && profilesByCode.ContainsKey(raw);
+    }
+
+    private static string? CheckGeographicContradiction(
+        string canonicalCode,
+        string? state,
+        string? postalCode,
+        string? timeZoneId,
+        bool checkTimeZone,
+        RuntimeCatalogContext ctx)
+    {
+        if (checkTimeZone && !string.IsNullOrWhiteSpace(timeZoneId) &&
+            ctx.TimeZoneCountries.TryGetValue(timeZoneId.Trim(), out var tzCountry) &&
+            !string.Equals(tzCountry, canonicalCode, StringComparison.OrdinalIgnoreCase))
+        {
+            return $"Conflicting timezone evidence: configured timezone maps to '{tzCountry}' while country indicates '{canonicalCode}'.";
+        }
+
+        var divKey = CountryNormalizationAlias.NormalizeLookupKey(state);
+        if (!string.IsNullOrWhiteSpace(divKey) &&
+            ctx.DivisionCountriesByToken.TryGetValue(divKey, out var divCountries) &&
+            divCountries.Count == 1)
+        {
+            var divCountry = divCountries.First();
+            if (!string.Equals(divCountry, canonicalCode, StringComparison.OrdinalIgnoreCase))
+            {
+                var claimedPostalValid = ctx.ProfilesByCode.TryGetValue(canonicalCode, out var claimedProf) &&
+                                         MatchesProfilePostal(claimedProf, postalCode);
+                var divPostalValid = ctx.ProfilesByCode.TryGetValue(divCountry, out var divProf) &&
+                                     MatchesProfilePostal(divProf, postalCode);
+                if (!claimedPostalValid || divPostalValid)
+                {
+                    return $"Conflicting geographic evidence: subdivision matches '{divCountry}' while country indicates '{canonicalCode}'.";
+                }
+            }
+        }
+
+        return null;
+    }
+
+    private static bool MatchesProfilePostal(CountryProfile profile, string? postalCode)
+    {
+        if (string.IsNullOrWhiteSpace(postalCode)) return false;
+        var p = postalCode.Trim();
+        try
+        {
+            if (!string.IsNullOrWhiteSpace(profile.PostalCodeRegex) &&
+                System.Text.RegularExpressions.Regex.IsMatch(p, profile.PostalCodeRegex, System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+            {
+                return true;
+            }
+            if (!string.IsNullOrWhiteSpace(profile.LegacyPostalCodeRegex) &&
+                System.Text.RegularExpressions.Regex.IsMatch(p, profile.LegacyPostalCodeRegex, System.Text.RegularExpressions.RegexOptions.CultureInvariant))
+            {
+                return true;
+            }
+        }
+        catch
+        {
+        }
+        return false;
+    }
+
+    private void ReconcileCountryEntries(
+        IReadOnlyList<Microsoft.EntityFrameworkCore.ChangeTracking.EntityEntry> targets,
+        RuntimeCatalogContext ctx,
+        List<CountryNormalizationAudit> existingAudits,
+        Dictionary<Guid, (Guid FacilityId, Guid ClientId)> orderScopes)
+    {
+        var auditByKey = new Dictionary<(string EntityType, Guid EntityId, string FieldName), CountryNormalizationAudit>();
+        foreach (var a in existingAudits)
+        {
+            auditByKey[(a.EntityType, a.EntityId, a.FieldName)] = a;
+        }
+        foreach (var localAudit in CountryNormalizationAudits.Local)
+        {
+            var localEntry = Entry(localAudit);
+            if (localEntry.State != EntityState.Deleted)
+            {
+                auditByKey[(localAudit.EntityType, localAudit.EntityId, localAudit.FieldName)] = localAudit;
+            }
+        }
+
+        var utcNow = DateTime.UtcNow;
+        const string RuntimeBatchId = "RUNTIME-WRITE";
+
         foreach (var entry in targets)
         {
             var entityId = ((BaseEntity<Guid>)entry.Entity).Id;
+            string entityName = entry.Entity.GetType().Name;
+            bool isDeleted = entry.State == EntityState.Deleted ||
+                             (entry.Entity is ISoftDeletable sd && sd.IsDeleted);
+
+            if (isDeleted)
+            {
+                if (!IsInsideNormalizationBackfill)
+                {
+                    var staleKeys = auditByKey.Keys
+                        .Where(k => k.EntityType == entityName && k.EntityId == entityId)
+                        .ToList();
+                    foreach (var sk in staleKeys)
+                    {
+                        var stale = auditByKey[sk];
+                        CountryNormalizationAudits.Remove(stale);
+                        auditByKey.Remove(sk);
+                    }
+                }
+                continue;
+            }
+
             var statusProp = entry.Property(nameof(Facility.CountryNormalizationStatus));
             var currentStatus = (CountryNormalizationStatus)(statusProp.CurrentValue ?? CountryNormalizationStatus.PendingNormalization);
             bool statusExplicitlyClaimedNormalized = currentStatus == CountryNormalizationStatus.Normalized
                 && (entry.State == EntityState.Added || statusProp.IsModified);
 
-            string entityName = entry.Entity.GetType().Name;
-            bool allCanonical = true;
+            bool allValid = true;
             bool allHistoricalPreserved = true;
             bool anyCountryFieldModified = entry.State == EntityState.Added;
-            string? firstNonCanonicalRaw = null;
+            string? firstFailureMessage = null;
 
-            void EvaluateField(string fieldName, string? val, bool isFieldModified)
+            void ProcessField(
+                string fieldName,
+                string? rawVal,
+                Action<string> setCanonicalVal,
+                bool isFieldModified,
+                string? stateVal,
+                string? postalVal,
+                string? tzVal,
+                bool checkTimeZone,
+                Guid? facilityId,
+                Guid? clientId)
             {
                 if (isFieldModified) anyCountryFieldModified = true;
-                if (IsValidCatalogCanonicalCode(val, activeCodes)) return;
 
-                allCanonical = false;
-                firstNonCanonicalRaw ??= val;
-                if (!preservedHistoricalValues.TryGetValue((entityName, entityId, fieldName), out var origHistVal) ||
-                    !string.Equals((origHistVal ?? string.Empty).Trim(), (val ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase))
+                var key = (entityName, entityId, fieldName);
+                auditByKey.TryGetValue(key, out var existingAudit);
+
+                bool isPreservedHistoricalMatch = existingAudit != null &&
+                    existingAudit.PreservedHistoricalValue &&
+                    existingAudit.NormalizationStatus == CountryNormalizationStatus.Normalized &&
+                    string.Equals((existingAudit.OriginalCountryValue ?? string.Empty).Trim(), (rawVal ?? string.Empty).Trim(), StringComparison.OrdinalIgnoreCase);
+
+                bool isExactCanonical = IsExactCanonicalIso2(rawVal, ctx.ProfilesByCode);
+                string? canonicalCode = null;
+                if (isExactCanonical)
+                {
+                    canonicalCode = rawVal!;
+                }
+                else if (!isPreservedHistoricalMatch && TryCanonicalizeStrictIso2(rawVal, ctx.ProfilesByCode, out var trimmedUpper))
+                {
+                    // F01: Persist exact 2-char uppercase ASCII code with no surrounding whitespace
+                    setCanonicalVal(trimmedUpper);
+                    canonicalCode = trimmedUpper;
+                    isExactCanonical = true;
+                    anyCountryFieldModified = true;
+                }
+
+                string? contradictionReason = null;
+                if (isExactCanonical && canonicalCode != null)
+                {
+                    contradictionReason = CheckGeographicContradiction(canonicalCode, stateVal, postalVal, tzVal, checkTimeZone, ctx);
+                }
+
+                bool fieldValid = isExactCanonical && contradictionReason == null;
+                if (fieldValid)
+                {
+                    // F01: Reconcile any existing diagnostic row atomically on runtime correction
+                    if (!IsInsideNormalizationBackfill && ctx.ProfilesByCode.Count > 0 && existingAudit != null)
+                    {
+                        bool needsReconcile =
+                            existingAudit.NormalizationStatus != CountryNormalizationStatus.Normalized ||
+                            !string.Equals(existingAudit.NormalizedCountryCode, canonicalCode, StringComparison.Ordinal) ||
+                            existingAudit.PreservedHistoricalValue ||
+                            existingAudit.FacilityId != facilityId ||
+                            existingAudit.ClientId != clientId;
+                        if (needsReconcile)
+                        {
+                            existingAudit.NormalizedCountryCode = canonicalCode;
+                            existingAudit.NormalizationStatus = CountryNormalizationStatus.Normalized;
+                            existingAudit.PreservedHistoricalValue = false;
+                            existingAudit.WasInferredFromParent = false;
+                            existingAudit.InferenceSource = "RuntimeWriteCanonical";
+                            existingAudit.Reason = CountryDiagnosticSanitizer.SanitizeReason($"Runtime write reconciled to canonical '{canonicalCode}'.");
+                            existingAudit.FacilityId = facilityId;
+                            existingAudit.ClientId = clientId;
+                            existingAudit.CorrelationBatchId = RuntimeBatchId;
+                            existingAudit.RecordedAtUtc = utcNow;
+                        }
+                    }
+                    return;
+                }
+
+                allValid = false;
+                if (!isPreservedHistoricalMatch)
                 {
                     allHistoricalPreserved = false;
+                }
+
+                string diagnosticReason = contradictionReason ??
+                    (string.IsNullOrWhiteSpace(rawVal)
+                        ? "Blank/null country value quarantined pending normalization."
+                        : "Unrecognized country token not found in active CountryProfile or CountryNormalizationAlias catalog.");
+
+                firstFailureMessage ??= contradictionReason ??
+                    $"{entityName} cannot declare CountryNormalizationStatus='Normalized' for unnormalized, blank, or unverified country value '{CountryDiagnosticSanitizer.SanitizeForDiagnostic(rawVal, ctx.VerifiedCatalogKeys) ?? "<blank>"}'.";
+
+                // F01: Atomically create or update PendingNormalization diagnostic when active catalog exists
+                if (!IsInsideNormalizationBackfill && ctx.ProfilesByCode.Count > 0 && !isPreservedHistoricalMatch)
+                {
+                    var sanitizedReason = CountryDiagnosticSanitizer.SanitizeReason(diagnosticReason);
+                    if (existingAudit != null)
+                    {
+                        bool needsUpdate =
+                            existingAudit.NormalizationStatus != CountryNormalizationStatus.PendingNormalization ||
+                            existingAudit.NormalizedCountryCode != null ||
+                            existingAudit.PreservedHistoricalValue ||
+                            !string.Equals(existingAudit.Reason, sanitizedReason, StringComparison.Ordinal) ||
+                            existingAudit.FacilityId != facilityId ||
+                            existingAudit.ClientId != clientId;
+                        if (needsUpdate)
+                        {
+                            // Preserve immutable initial provenance (OriginalCountryValue, InitialCorrelationBatchId, InitialRecordedAtUtc)
+                            existingAudit.NormalizedCountryCode = null;
+                            existingAudit.NormalizationStatus = CountryNormalizationStatus.PendingNormalization;
+                            existingAudit.PreservedHistoricalValue = false;
+                            existingAudit.WasInferredFromParent = false;
+                            existingAudit.InferenceSource = null;
+                            existingAudit.Reason = sanitizedReason;
+                            existingAudit.FacilityId = facilityId;
+                            existingAudit.ClientId = clientId;
+                            existingAudit.CorrelationBatchId = RuntimeBatchId;
+                            existingAudit.RecordedAtUtc = utcNow;
+                        }
+                    }
+                    else
+                    {
+                        var newAudit = new CountryNormalizationAudit
+                        {
+                            Id = Guid.NewGuid(),
+                            EntityType = entityName,
+                            EntityId = entityId,
+                            FieldName = fieldName,
+                            OriginalCountryValue = CountryDiagnosticSanitizer.SanitizeForDiagnostic(rawVal, ctx.VerifiedCatalogKeys),
+                            NormalizedCountryCode = null,
+                            NormalizationStatus = CountryNormalizationStatus.PendingNormalization,
+                            PreservedHistoricalValue = false,
+                            WasInferredFromParent = false,
+                            InferenceSource = null,
+                            Reason = sanitizedReason,
+                            FacilityId = facilityId,
+                            ClientId = clientId,
+                            CorrelationBatchId = RuntimeBatchId,
+                            RecordedAtUtc = utcNow,
+                            InitialCorrelationBatchId = RuntimeBatchId,
+                            InitialRecordedAtUtc = utcNow
+                        };
+                        auditByKey[key] = newAudit;
+                        CountryNormalizationAudits.Add(newAudit);
+                    }
                 }
             }
 
             switch (entry.Entity)
             {
                 case Facility f:
-                    EvaluateField(nameof(Facility.CountryCode), f.CountryCode, entry.Property(nameof(Facility.CountryCode)).IsModified);
+                    ProcessField(nameof(Facility.CountryCode), f.CountryCode, v => f.CountryCode = v,
+                        entry.Property(nameof(Facility.CountryCode)).IsModified || entry.Property(nameof(Facility.Timezone)).IsModified || entry.Property(nameof(Facility.StateOrProvince)).IsModified || entry.Property(nameof(Facility.PostalCode)).IsModified,
+                        f.StateOrProvince, f.PostalCode, f.Timezone, checkTimeZone: true, facilityId: f.Id, clientId: null);
                     break;
                 case Customer c:
-                    EvaluateField(nameof(Customer.DefaultCountryCode), c.DefaultCountryCode, entry.Property(nameof(Customer.DefaultCountryCode)).IsModified);
+                    ProcessField(nameof(Customer.DefaultCountryCode), c.DefaultCountryCode, v => c.DefaultCountryCode = v,
+                        entry.Property(nameof(Customer.DefaultCountryCode)).IsModified || entry.Property(nameof(Customer.DefaultStateOrProvince)).IsModified || entry.Property(nameof(Customer.DefaultPostalCode)).IsModified,
+                        c.DefaultStateOrProvince, c.DefaultPostalCode, null, checkTimeZone: false, facilityId: null, clientId: c.ClientId);
                     break;
                 case Supplier s:
-                    EvaluateField(nameof(Supplier.Country), s.Country, entry.Property(nameof(Supplier.Country)).IsModified);
+                    ProcessField(nameof(Supplier.Country), s.Country, v => s.Country = v,
+                        entry.Property(nameof(Supplier.Country)).IsModified || entry.Property(nameof(Supplier.State)).IsModified || entry.Property(nameof(Supplier.PostalCode)).IsModified,
+                        s.State, s.PostalCode, null, checkTimeZone: false, facilityId: null, clientId: s.ClientId);
                     break;
                 case ShippingAddress sa:
-                    EvaluateField(nameof(ShippingAddress.CountryCode), sa.CountryCode, entry.Property(nameof(ShippingAddress.CountryCode)).IsModified);
+                    orderScopes.TryGetValue(sa.OutboundOrderId, out var ordScope);
+                    Guid? saFacId = ordScope.FacilityId != Guid.Empty ? ordScope.FacilityId : null;
+                    Guid? saCliId = ordScope.ClientId != Guid.Empty ? ordScope.ClientId : null;
+                    ProcessField(nameof(ShippingAddress.CountryCode), sa.CountryCode, v => sa.CountryCode = v,
+                        entry.Property(nameof(ShippingAddress.CountryCode)).IsModified || entry.Property(nameof(ShippingAddress.StateOrProvince)).IsModified || entry.Property(nameof(ShippingAddress.PostalCode)).IsModified,
+                        sa.StateOrProvince, sa.PostalCode, null, checkTimeZone: false, facilityId: saFacId, clientId: saCliId);
                     break;
                 case ReturnShipment rs:
-                    EvaluateField(nameof(ReturnShipment.OriginCountry), rs.OriginCountry, entry.Property(nameof(ReturnShipment.OriginCountry)).IsModified);
-                    EvaluateField(nameof(ReturnShipment.DestinationCountry), rs.DestinationCountry, entry.Property(nameof(ReturnShipment.DestinationCountry)).IsModified);
+                    ProcessField(nameof(ReturnShipment.OriginCountry), rs.OriginCountry, v => rs.OriginCountry = v,
+                        entry.Property(nameof(ReturnShipment.OriginCountry)).IsModified || entry.Property(nameof(ReturnShipment.OriginState)).IsModified || entry.Property(nameof(ReturnShipment.OriginPostalCode)).IsModified,
+                        rs.OriginState, rs.OriginPostalCode, null, checkTimeZone: false, facilityId: rs.OriginFacilityId, clientId: rs.ClientId);
+                    ProcessField(nameof(ReturnShipment.DestinationCountry), rs.DestinationCountry, v => rs.DestinationCountry = v,
+                        entry.Property(nameof(ReturnShipment.DestinationCountry)).IsModified || entry.Property(nameof(ReturnShipment.DestinationState)).IsModified || entry.Property(nameof(ReturnShipment.DestinationPostalCode)).IsModified,
+                        rs.DestinationState, rs.DestinationPostalCode, null, checkTimeZone: false, facilityId: rs.DestinationFacilityId, clientId: rs.ClientId);
                     break;
                 case CarrierContractualSlaPolicy p:
-                    EvaluateField(nameof(CarrierContractualSlaPolicy.DestinationCountry), p.DestinationCountry, entry.Property(nameof(CarrierContractualSlaPolicy.DestinationCountry)).IsModified);
+                    ProcessField(nameof(CarrierContractualSlaPolicy.DestinationCountry), p.DestinationCountry, v => p.DestinationCountry = v,
+                        entry.Property(nameof(CarrierContractualSlaPolicy.DestinationCountry)).IsModified || entry.Property(nameof(CarrierContractualSlaPolicy.DestinationStateOrRegion)).IsModified || entry.Property(nameof(CarrierContractualSlaPolicy.DestinationPostalCodePrefix)).IsModified,
+                        p.DestinationStateOrRegion, p.DestinationPostalCodePrefix, null, checkTimeZone: false, facilityId: p.OriginFacilityId, clientId: p.ClientId);
                     break;
                 case CarrierSlaComplianceRecord r:
-                    EvaluateField(nameof(CarrierSlaComplianceRecord.DestinationCountry), r.DestinationCountry, entry.Property(nameof(CarrierSlaComplianceRecord.DestinationCountry)).IsModified);
+                    ProcessField(nameof(CarrierSlaComplianceRecord.DestinationCountry), r.DestinationCountry, v => r.DestinationCountry = v,
+                        entry.Property(nameof(CarrierSlaComplianceRecord.DestinationCountry)).IsModified || entry.Property(nameof(CarrierSlaComplianceRecord.DestinationStateOrRegion)).IsModified || entry.Property(nameof(CarrierSlaComplianceRecord.DestinationPostalCodePrefix)).IsModified,
+                        r.DestinationStateOrRegion, r.DestinationPostalCodePrefix, null, checkTimeZone: false, facilityId: r.FacilityId, clientId: r.ClientId);
                     break;
             }
 
-            if (allCanonical)
+            if (allValid)
             {
                 if (currentStatus != CountryNormalizationStatus.Normalized && anyCountryFieldModified)
                 {
@@ -296,7 +654,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             {
                 throw new ValidationException(
                     nameof(Facility.CountryNormalizationStatus),
-                    $"{entityName} cannot declare CountryNormalizationStatus='Normalized' for unnormalized, blank, or unverified country value '{firstNonCanonicalRaw ?? "<blank>"}'.");
+                    firstFailureMessage ?? $"{entityName} cannot declare CountryNormalizationStatus='Normalized' for unnormalized, blank, or conflicting country evidence.");
             }
 
             if (currentStatus != CountryNormalizationStatus.PendingNormalization)

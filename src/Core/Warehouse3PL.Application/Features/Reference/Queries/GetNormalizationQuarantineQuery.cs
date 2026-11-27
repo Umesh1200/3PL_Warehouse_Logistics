@@ -225,17 +225,44 @@ public sealed class GetNormalizationQuarantineQueryHandler
             baseQuery = baseQuery.Where(a => a.EntityType == et);
         }
 
+        var activeProfiles = await _db.CountryProfiles
+            .AsNoTracking()
+            .Where(c => c.IsActive)
+            .ToListAsync(cancellationToken);
+        var activeAliases = await _db.CountryNormalizationAliases
+            .AsNoTracking()
+            .Where(a => a.IsActive)
+            .ToListAsync(cancellationToken);
+        var verifiedCatalogKeys = CountryDiagnosticSanitizer.BuildVerifiedCatalogKeySet(activeProfiles, activeAliases);
+
         if (!string.IsNullOrWhiteSpace(request.Search))
         {
             var term = request.Search.Trim().ToLowerInvariant();
+            // F04: Search ONLY authorized, sanitized allowlisted diagnostic fields.
+            // Match OriginalCountryValue ONLY against verified catalog tokens matching the search term
+            // so unverified/redacted raw values can NEVER be inferred via search result counts.
+            var matchingCatalogTokens = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var p in activeProfiles)
+            {
+                if (p.CountryCode.ToLowerInvariant().Contains(term)) matchingCatalogTokens.Add(p.CountryCode.ToLowerInvariant());
+                if (p.IsoAlpha3Code.ToLowerInvariant().Contains(term)) matchingCatalogTokens.Add(p.IsoAlpha3Code.ToLowerInvariant());
+                if (p.Name.ToLowerInvariant().Contains(term)) matchingCatalogTokens.Add(p.Name.ToLowerInvariant());
+            }
+            foreach (var al in activeAliases)
+            {
+                if (al.AliasKey.ToLowerInvariant().Contains(term)) matchingCatalogTokens.Add(al.AliasKey.ToLowerInvariant());
+            }
+            var allowedTokenList = matchingCatalogTokens.ToList();
+
             baseQuery = baseQuery.Where(a =>
                 a.EntityType.ToLower().Contains(term) ||
                 a.FieldName.ToLower().Contains(term) ||
-                (a.OriginalCountryValue != null &&
-                 a.OriginalCountryValue != CountryDiagnosticSanitizer.RedactedPlaceholder &&
-                 a.OriginalCountryValue.ToLower().Contains(term)) ||
                 (a.NormalizedCountryCode != null && a.NormalizedCountryCode.ToLower().Contains(term)) ||
-                a.Reason.ToLower().Contains(term));
+                a.Reason.ToLower().Contains(term) ||
+                (allowedTokenList.Count > 0 &&
+                 a.OriginalCountryValue != null &&
+                 a.OriginalCountryValue != CountryDiagnosticSanitizer.RedactedPlaceholder &&
+                 allowedTokenList.Contains(a.OriginalCountryValue.ToLower())));
         }
 
         // Apply identical security predicates to counts, status filters, results and pagination
@@ -283,7 +310,7 @@ public sealed class GetNormalizationQuarantineQueryHandler
             r.EntityType,
             r.EntityId,
             r.FieldName,
-            CountryDiagnosticSanitizer.SanitizeRawValue(r.OriginalCountryValue),
+            CountryDiagnosticSanitizer.SanitizeForDiagnostic(r.OriginalCountryValue, verifiedCatalogKeys),
             r.NormalizedCountryCode,
             r.NormalizationStatus,
             r.PreservedHistoricalValue,
