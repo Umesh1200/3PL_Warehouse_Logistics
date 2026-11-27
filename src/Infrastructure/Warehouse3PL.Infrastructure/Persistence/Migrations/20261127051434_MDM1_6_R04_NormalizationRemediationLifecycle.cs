@@ -479,6 +479,7 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     v_orig RECORD;
                     v_dest RECORD;
                     v_old TEXT;
+                    v_hist_restore_val TEXT;
                     v_eval_input TEXT;
                     v_eval_input_dest TEXT;
                     v_prev_blank_inferred BOOLEAN;
@@ -675,8 +676,21 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                               AND cna.was_inferred_from_parent = true AND COALESCE(BTRIM(cna.original_country_value), '') = ''
                         ) INTO v_prev_blank_inferred;
 
-                        v_old := CASE WHEN v_prev_blank_inferred THEN '' ELSE r.country_code END;
-                        v_eval_input := CASE WHEN v_prev_blank_inferred THEN '' ELSE r.country_code END;
+                        v_hist_restore_val := NULL;
+                        IF v_is_hist THEN
+                            SELECT cna.original_country_value INTO v_hist_restore_val
+                            FROM country_normalization_audits cna
+                            WHERE cna.entity_type = 'ShippingAddress' AND cna.entity_id = r.shipping_address_id AND cna.field_name = 'CountryCode'
+                              AND cna.preserved_historical_value = false
+                              AND cna.original_country_value IS NOT NULL
+                              AND BTRIM(cna.original_country_value) <> ''
+                              AND cna.original_country_value <> '[REDACTED_POTENTIAL_PII]'
+                              AND cna.original_country_value IS DISTINCT FROM r.country_code
+                            LIMIT 1;
+                        END IF;
+
+                        v_old := CASE WHEN v_prev_blank_inferred THEN '' WHEN v_hist_restore_val IS NOT NULL THEN v_hist_restore_val ELSE r.country_code END;
+                        v_eval_input := v_old;
 
                         v_cust_country := CASE WHEN r.linked_cust_id IS NOT NULL AND NOT COALESCE(r.cust_deleted, false) AND COALESCE(r.cust_active, false) AND r.cust_status = 'Normalized' THEN r.cust_country ELSE NULL END;
                         v_fac_country := CASE WHEN NOT COALESCE(r.fac_deleted, false) AND COALESCE(r.fac_active, false) AND r.fac_status = 'Normalized' THEN r.fac_country ELSE NULL END;
@@ -702,7 +716,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         END IF;
 
                         UPDATE shipping_addresses
-                        SET country_code = CASE WHEN NOT v_is_hist AND v_eval.is_resolved THEN v_eval.target_code WHEN NOT v_is_hist AND v_prev_blank_inferred THEN '' ELSE country_code END,
+                        SET country_code = CASE
+                                WHEN NOT v_is_hist AND v_eval.is_resolved THEN v_eval.target_code
+                                WHEN NOT v_is_hist AND v_prev_blank_inferred THEN ''
+                                WHEN v_is_hist AND v_hist_restore_val IS NOT NULL THEN v_hist_restore_val
+                                ELSE country_code
+                            END,
                             country_normalization_status = v_eval.norm_status
                         WHERE shipping_address_id = r.shipping_address_id;
 

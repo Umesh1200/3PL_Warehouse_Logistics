@@ -398,7 +398,8 @@ internal static class Mdm16PostgresCheck
                     aPacked.CountryCode != "USA" || aPacked.CountryNormalizationStatus != CountryNormalizationStatus.Normalized ||
                     bolRow.ConsigneeAddressSnapshot != "999 Legacy Way, Chicago IL, USA" ||
                     invRow.Currency != "USD")
-                    throw new InvalidOperationException("PG ShippingAddress/BOL/Invoice immutability or R02 inference check failed.");
+                    throw new InvalidOperationException(
+                        $"PG ShippingAddress/BOL/Invoice immutability or R02 inference check failed: Draft={aDraft.CountryCode}, Comp={aComp.CountryCode}/{aComp.CountryNormalizationStatus}, Xbrd={aXbrd.CountryCode}/{aXbrd.CountryNormalizationStatus}, NoCust={aNoCust.CountryCode}/{aNoCust.CountryNormalizationStatus}, Packed={aPacked.CountryCode}/{aPacked.CountryNormalizationStatus}, Bol={bolRow.ConsigneeAddressSnapshot}, Inv={invRow.Currency}");
 
                 var pAct = await upDb.CarrierContractualSlaPolicies.IgnoreQueryFilters().SingleAsync(p => p.Id == activeSlaId);
                 var pInact = await upDb.CarrierContractualSlaPolicies.IgnoreQueryFilters().SingleAsync(p => p.Id == inactiveSlaId);
