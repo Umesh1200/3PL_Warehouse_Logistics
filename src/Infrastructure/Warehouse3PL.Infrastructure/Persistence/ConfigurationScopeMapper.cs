@@ -1,6 +1,8 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
+using Warehouse3PL.Domain.Entities.Dock;
 using Warehouse3PL.Domain.Entities.Facilities;
+using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Entities.Reference;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
@@ -168,6 +170,49 @@ internal static class ConfigurationScopeMapper
                 case Client client:
                     // Handle Added, Modified, and Deleted/Soft-Deleted Client configuration lifecycle uniformly
                     Register(ConfigurationScopeType.Client, client.Id.ToString("D"), nameof(Client), client.Id.ToString("D"));
+                    break;
+
+                case WarehouseZone zone:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(WarehouseZone.FacilityId), zone.FacilityId, nameof(WarehouseZone), zone.Id.ToString("D"));
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Client, nameof(WarehouseZone.DedicatedClientId), zone.DedicatedClientId, nameof(WarehouseZone), zone.Id.ToString("D"));
+                    break;
+
+                case Location location:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(Location.FacilityId), location.FacilityId, nameof(Location), location.Id.ToString("D"));
+                    break;
+
+                case LocationHierarchyRule rule:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(LocationHierarchyRule.FacilityId), rule.FacilityId, nameof(LocationHierarchyRule), rule.Id.ToString("D"));
+                    if (!rule.FacilityId.HasValue || (entry.State == EntityState.Modified && entry.OriginalValues[nameof(LocationHierarchyRule.FacilityId)] == null))
+                    {
+                        Register(ConfigurationScopeType.Global, GlobalScopeKey, nameof(LocationHierarchyRule), rule.Id.ToString("D"));
+                    }
+                    break;
+
+                case LocationStorageProfile storageProfile:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(LocationStorageProfile.FacilityId), storageProfile.FacilityId, nameof(LocationStorageProfile), storageProfile.LocationId.ToString("D"));
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Client, nameof(LocationStorageProfile.DedicatedClientId), storageProfile.DedicatedClientId, nameof(LocationStorageProfile), storageProfile.LocationId.ToString("D"));
+                    break;
+
+                case LocationOperationalProfile opProfile:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(LocationOperationalProfile.FacilityId), opProfile.FacilityId, nameof(LocationOperationalProfile), opProfile.LocationId.ToString("D"));
+                    break;
+
+                case DockDoor dockDoor:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(DockDoor.FacilityId), dockDoor.FacilityId, nameof(DockDoor), dockDoor.Id.ToString("D"));
+                    break;
+
+                case WarehouseEquipment equipment:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(WarehouseEquipment.FacilityId), equipment.FacilityId, nameof(WarehouseEquipment), equipment.Id.ToString("D"));
+                    break;
+
+                case LocationEquipmentRequirement equipReq:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(LocationEquipmentRequirement.FacilityId), equipReq.FacilityId, nameof(LocationEquipmentRequirement), equipReq.Id.ToString("D"));
+                    break;
+
+                case PackagingMaterial packaging:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(PackagingMaterial.FacilityId), packaging.FacilityId, nameof(PackagingMaterial), packaging.Id.ToString("D"));
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Client, nameof(PackagingMaterial.ClientId), packaging.ClientId, nameof(PackagingMaterial), packaging.Id.ToString("D"));
                     break;
             }
         }

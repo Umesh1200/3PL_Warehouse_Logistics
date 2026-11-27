@@ -8,9 +8,17 @@ public class WarehouseZoneConfiguration : IEntityTypeConfiguration<WarehouseZone
 {
     public void Configure(EntityTypeBuilder<WarehouseZone> builder)
     {
-        builder.ToTable("warehouse_zones");
+        builder.ToTable("warehouse_zones", t =>
+        {
+            t.HasCheckConstraint(
+                "ck_warehouse_zones_temp_bounds",
+                "temp_min_c IS NULL OR temp_max_c IS NULL OR temp_min_c <= temp_max_c");
+        });
 
         builder.HasKey(z => z.Id);
+        builder.HasAlternateKey(z => new { z.Id, z.FacilityId })
+            .HasName("ak_warehouse_zones_zone_id_facility_id");
+
         builder.Property(z => z.Id)
             .HasColumnName("zone_id")
             .ValueGeneratedNever();
@@ -26,8 +34,14 @@ public class WarehouseZoneConfiguration : IEntityTypeConfiguration<WarehouseZone
             .HasMaxLength(50)
             .IsRequired();
 
-        builder.HasIndex(z => new { z.FacilityId, z.ZoneCode })
-            .IsUnique();
+        builder.Property(z => z.NormalizedZoneCode)
+            .HasColumnName("normalized_zone_code")
+            .HasMaxLength(50)
+            .IsRequired();
+
+        builder.HasIndex(z => new { z.FacilityId, z.NormalizedZoneCode })
+            .IsUnique()
+            .HasDatabaseName("ix_warehouse_zones_facility_normalized_code");
 
         builder.Property(z => z.Name)
             .HasColumnName("name")
@@ -48,6 +62,20 @@ public class WarehouseZoneConfiguration : IEntityTypeConfiguration<WarehouseZone
             .HasColumnName("temp_max_c")
             .HasPrecision(5, 2);
 
+        builder.Property(z => z.DedicatedClientId)
+            .HasColumnName("dedicated_client_id");
+
+        builder.HasIndex(z => z.DedicatedClientId);
+
+        builder.Property(z => z.Remarks)
+            .HasColumnName("remarks")
+            .HasMaxLength(500);
+
+        builder.Property(z => z.ConfigRevision)
+            .HasColumnName("config_revision")
+            .HasDefaultValue(1L)
+            .IsRequired();
+
         builder.Property(z => z.IsActive)
             .HasColumnName("is_active")
             .HasDefaultValue(true);
@@ -67,6 +95,11 @@ public class WarehouseZoneConfiguration : IEntityTypeConfiguration<WarehouseZone
         builder.HasOne(z => z.Facility)
             .WithMany(f => f.Zones)
             .HasForeignKey(z => z.FacilityId)
+            .OnDelete(DeleteBehavior.Restrict);
+
+        builder.HasOne(z => z.DedicatedClient)
+            .WithMany()
+            .HasForeignKey(z => z.DedicatedClientId)
             .OnDelete(DeleteBehavior.Restrict);
     }
 }

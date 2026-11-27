@@ -8535,6 +8535,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("dock_door_id");
 
+                    b.Property<long>("ConfigRevision")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -8573,9 +8579,24 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasDefaultValue(false)
                         .HasColumnName("is_deleted");
 
+                    b.Property<Guid?>("LocationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("location_id");
+
+                    b.Property<decimal?>("MaxTrailerLengthCm")
+                        .HasPrecision(10, 2)
+                        .HasColumnType("numeric(10,2)")
+                        .HasColumnName("max_trailer_length_cm");
+
                     b.Property<int?>("MaxTrailerLengthFeet")
                         .HasColumnType("integer")
                         .HasColumnName("max_trailer_length_feet");
+
+                    b.Property<string>("NormalizedDoorNumber")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("normalized_door_number");
 
                     b.Property<string>("Notes")
                         .HasMaxLength(500)
@@ -8605,11 +8626,20 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.HasKey("Id")
                         .HasName("pk_dock_doors");
 
-                    b.HasIndex("FacilityId", "DoorNumber")
-                        .IsUnique()
-                        .HasDatabaseName("ix_dock_doors_facility_id_door_number");
+                    b.HasIndex("LocationId")
+                        .HasDatabaseName("ix_dock_doors_location_id");
 
-                    b.ToTable("dock_doors", (string)null);
+                    b.HasIndex("FacilityId", "NormalizedDoorNumber")
+                        .IsUnique()
+                        .HasDatabaseName("ix_dock_doors_facility_normalized_door_number");
+
+                    b.HasIndex("LocationId", "FacilityId")
+                        .HasDatabaseName("ix_dock_doors_location_id_facility_id");
+
+                    b.ToTable("dock_doors", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_dock_doors_max_trailer_length_cm", "max_trailer_length_cm IS NULL OR max_trailer_length_cm > 0");
+                        });
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Dock.YardVisit", b =>
@@ -9060,6 +9090,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("integer")
                         .HasColumnName("bin_number");
 
+                    b.Property<long>("ConfigRevision")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -9084,6 +9120,18 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasPrecision(10, 2)
                         .HasColumnType("numeric(10,2)")
                         .HasColumnName("height_cm");
+
+                    b.Property<int>("HierarchyLevel")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("hierarchy_level");
+
+                    b.Property<string>("HierarchyPath")
+                        .IsRequired()
+                        .HasMaxLength(1024)
+                        .HasColumnType("character varying(1024)")
+                        .HasColumnName("hierarchy_path");
 
                     b.Property<bool>("IsActive")
                         .ValueGeneratedOnAdd()
@@ -9121,6 +9169,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasDefaultValue(false)
                         .HasColumnName("is_receiving");
 
+                    b.Property<bool>("IsStorable")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_storable");
+
                     b.Property<decimal?>("LengthCm")
                         .HasPrecision(10, 2)
                         .HasColumnType("numeric(10,2)")
@@ -9131,6 +9185,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasMaxLength(100)
                         .HasColumnType("character varying(100)")
                         .HasColumnName("location_code");
+
+                    b.Property<string>("LocationName")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)")
+                        .HasColumnName("location_name");
 
                     b.Property<string>("LocationType")
                         .IsRequired()
@@ -9148,6 +9208,18 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("numeric(10,2)")
                         .HasColumnName("max_weight_kg");
 
+                    b.Property<string>("NormalizedBarcode")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("normalized_barcode");
+
+                    b.Property<string>("NormalizedLocationCode")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("normalized_location_code");
+
                     b.Property<Guid?>("ParentLocationId")
                         .HasColumnType("uuid")
                         .HasColumnName("parent_location_id");
@@ -9161,9 +9233,22 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(20)")
                         .HasColumnName("rack_code");
 
+                    b.Property<string>("Remarks")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("remarks");
+
                     b.Property<int?>("ShelfLevel")
                         .HasColumnType("integer")
                         .HasColumnName("shelf_level");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("Active")
+                        .HasColumnName("status");
 
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -9200,6 +9285,9 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.HasKey("Id")
                         .HasName("pk_locations");
 
+                    b.HasAlternateKey("Id", "FacilityId")
+                        .HasName("ak_locations_location_id_facility_id");
+
                     b.HasIndex("FacilityId")
                         .HasDatabaseName("ix_locations_facility_id");
 
@@ -9212,15 +9300,188 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.HasIndex("ZoneId")
                         .HasDatabaseName("ix_locations_zone_id");
 
-                    b.HasIndex("FacilityId", "Barcode")
-                        .IsUnique()
-                        .HasDatabaseName("ix_locations_facility_id_barcode");
+                    b.HasIndex("FacilityId", "HierarchyPath")
+                        .HasDatabaseName("ix_locations_facility_hierarchy_path");
 
-                    b.HasIndex("FacilityId", "LocationCode")
+                    b.HasIndex("FacilityId", "NormalizedBarcode")
                         .IsUnique()
-                        .HasDatabaseName("ix_locations_facility_id_location_code");
+                        .HasDatabaseName("ix_locations_facility_normalized_barcode");
 
-                    b.ToTable("locations", (string)null);
+                    b.HasIndex("FacilityId", "NormalizedLocationCode")
+                        .IsUnique()
+                        .HasDatabaseName("ix_locations_facility_normalized_code");
+
+                    b.HasIndex("ParentLocationId", "FacilityId")
+                        .HasDatabaseName("ix_locations_parent_location_id_facility_id");
+
+                    b.HasIndex("ZoneId", "FacilityId")
+                        .HasDatabaseName("ix_locations_zone_id_facility_id");
+
+                    b.HasIndex("FacilityId", "Status", "IsStorable")
+                        .HasDatabaseName("ix_locations_facility_status_storable");
+
+                    b.ToTable("locations", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_locations_hierarchy_level", "hierarchy_level >= 1 AND hierarchy_level <= 10");
+
+                            t.HasCheckConstraint("ck_locations_no_self_parent", "parent_location_id IS NULL OR parent_location_id <> location_id");
+                        });
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LocationEquipmentRequirement", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("requirement_id");
+
+                    b.Property<long>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<string>("EquipmentType")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("equipment_type");
+
+                    b.Property<Guid>("FacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_id");
+
+                    b.Property<bool>("IsMandatory")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_mandatory");
+
+                    b.Property<Guid>("LocationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("location_id");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_location_equipment_requirements");
+
+                    b.HasIndex("FacilityId")
+                        .HasDatabaseName("ix_location_equipment_requirements_facility_id");
+
+                    b.HasIndex("LocationId", "EquipmentType")
+                        .IsUnique()
+                        .HasDatabaseName("uq_location_equipment_requirements_loc_type");
+
+                    b.HasIndex("LocationId", "FacilityId")
+                        .HasDatabaseName("ix_location_equipment_requirements_location_id_facility_id");
+
+                    b.ToTable("location_equipment_requirements", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LocationHierarchyRule", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("rule_id");
+
+                    b.Property<string>("ChildLocationType")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("child_location_type");
+
+                    b.Property<long>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<Guid?>("FacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_id");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("IsStorableLeaf")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_storable_leaf");
+
+                    b.Property<int>("MaxDepth")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(6)
+                        .HasColumnName("max_depth");
+
+                    b.Property<string>("ParentLocationType")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("parent_location_type");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_location_hierarchy_rules");
+
+                    b.HasIndex("ChildLocationType")
+                        .IsUnique()
+                        .HasDatabaseName("uq_loc_hier_rules_global_root")
+                        .HasFilter("facility_id IS NULL AND parent_location_type IS NULL");
+
+                    b.HasIndex("FacilityId", "ChildLocationType")
+                        .IsUnique()
+                        .HasDatabaseName("uq_loc_hier_rules_facility_root")
+                        .HasFilter("facility_id IS NOT NULL AND parent_location_type IS NULL");
+
+                    b.HasIndex("ParentLocationType", "ChildLocationType")
+                        .IsUnique()
+                        .HasDatabaseName("uq_loc_hier_rules_global_transition")
+                        .HasFilter("facility_id IS NULL AND parent_location_type IS NOT NULL");
+
+                    b.HasIndex("FacilityId", "ParentLocationType", "ChildLocationType")
+                        .IsUnique()
+                        .HasDatabaseName("uq_loc_hier_rules_facility_transition")
+                        .HasFilter("facility_id IS NOT NULL AND parent_location_type IS NOT NULL");
+
+                    b.ToTable("location_hierarchy_rules", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_location_hierarchy_rules_max_depth", "max_depth >= 1 AND max_depth <= 10");
+                        });
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LocationLock", b =>
@@ -9281,11 +9542,18 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.ToTable("location_locks", (string)null);
                 });
 
-            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.WarehouseZone", b =>
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LocationOperationalProfile", b =>
                 {
                     b.Property<Guid>("Id")
                         .HasColumnType("uuid")
-                        .HasColumnName("zone_id");
+                        .HasColumnName("location_id");
+
+                    b.Property<long>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -9294,6 +9562,289 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Property<Guid?>("CreatedBy")
                         .HasColumnType("uuid")
                         .HasColumnName("created_by");
+
+                    b.Property<Guid?>("DefaultStagingLocationId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("default_staging_location_id");
+
+                    b.Property<Guid>("FacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_id");
+
+                    b.Property<int>("MaxConcurrentSessions")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("max_concurrent_sessions");
+
+                    b.Property<string>("StationRole")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("station_role");
+
+                    b.Property<bool>("SupportsConveyor")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("supports_conveyor");
+
+                    b.Property<bool>("SupportsLabelPrinter")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("supports_label_printer");
+
+                    b.Property<bool>("SupportsScale")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("supports_scale");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_location_operational_profiles");
+
+                    b.HasIndex("FacilityId")
+                        .HasDatabaseName("ix_location_operational_profiles_facility_id");
+
+                    b.HasIndex("DefaultStagingLocationId", "FacilityId")
+                        .HasDatabaseName("ix_location_operational_profiles_default_staging_location_id_f");
+
+                    b.HasIndex("Id", "FacilityId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_location_operational_profiles_location_id_facility_id");
+
+                    b.ToTable("location_operational_profiles", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_location_operational_profiles_max_sessions", "max_concurrent_sessions >= 1");
+                        });
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LocationStorageProfile", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("location_id");
+
+                    b.Property<bool>("AllowMixedLot")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("allow_mixed_lot");
+
+                    b.Property<bool>("AllowMixedSku")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("allow_mixed_sku");
+
+                    b.Property<long>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<Guid?>("DedicatedClientId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("dedicated_client_id");
+
+                    b.Property<Guid>("FacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_id");
+
+                    b.Property<bool>("IsPutawayAllowed")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_putaway_allowed");
+
+                    b.Property<int?>("MaxHandlingUnits")
+                        .HasColumnType("integer")
+                        .HasColumnName("max_handling_units");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_location_storage_profiles");
+
+                    b.HasIndex("DedicatedClientId")
+                        .HasDatabaseName("ix_location_storage_profiles_dedicated_client_id");
+
+                    b.HasIndex("FacilityId")
+                        .HasDatabaseName("ix_location_storage_profiles_facility_id");
+
+                    b.HasIndex("Id", "FacilityId")
+                        .IsUnique()
+                        .HasDatabaseName("ix_location_storage_profiles_location_id_facility_id");
+
+                    b.ToTable("location_storage_profiles", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_location_storage_profiles_max_hu", "max_handling_units IS NULL OR max_handling_units > 0");
+                        });
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.WarehouseEquipment", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("equipment_id");
+
+                    b.Property<long>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<Guid?>("DeletedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deleted_by");
+
+                    b.Property<string>("EquipmentCode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("equipment_code");
+
+                    b.Property<string>("EquipmentType")
+                        .IsRequired()
+                        .HasMaxLength(40)
+                        .HasColumnType("character varying(40)")
+                        .HasColumnName("equipment_type");
+
+                    b.Property<Guid>("FacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_id");
+
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_deleted");
+
+                    b.Property<decimal?>("MaxLiftHeightCm")
+                        .HasPrecision(10, 2)
+                        .HasColumnType("numeric(10,2)")
+                        .HasColumnName("max_lift_height_cm");
+
+                    b.Property<decimal?>("MaxLoadKg")
+                        .HasPrecision(10, 2)
+                        .HasColumnType("numeric(10,2)")
+                        .HasColumnName("max_load_kg");
+
+                    b.Property<string>("Name")
+                        .IsRequired()
+                        .HasMaxLength(150)
+                        .HasColumnType("character varying(150)")
+                        .HasColumnName("name");
+
+                    b.Property<string>("NormalizedEquipmentCode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("normalized_equipment_code");
+
+                    b.Property<string>("Remarks")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("remarks");
+
+                    b.Property<bool>("RequiresCertification")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("requires_certification");
+
+                    b.Property<string>("SerialNumber")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("serial_number");
+
+                    b.Property<string>("Status")
+                        .IsRequired()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("status");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_warehouse_equipment");
+
+                    b.HasIndex("FacilityId")
+                        .HasDatabaseName("ix_warehouse_equipment_facility_id");
+
+                    b.HasIndex("FacilityId", "NormalizedEquipmentCode")
+                        .IsUnique()
+                        .HasDatabaseName("uq_warehouse_equipment_fac_norm_code");
+
+                    b.ToTable("warehouse_equipment", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.WarehouseZone", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("zone_id");
+
+                    b.Property<long>("ConfigRevision")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<Guid?>("DedicatedClientId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("dedicated_client_id");
 
                     b.Property<DateTime?>("DeletedAt")
                         .HasColumnType("timestamp with time zone")
@@ -9324,6 +9875,17 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasMaxLength(150)
                         .HasColumnType("character varying(150)")
                         .HasColumnName("name");
+
+                    b.Property<string>("NormalizedZoneCode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("normalized_zone_code");
+
+                    b.Property<string>("Remarks")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("remarks");
 
                     b.Property<decimal?>("TempMaxC")
                         .HasPrecision(5, 2)
@@ -9358,14 +9920,23 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.HasKey("Id")
                         .HasName("pk_warehouse_zones");
 
+                    b.HasAlternateKey("Id", "FacilityId")
+                        .HasName("ak_warehouse_zones_zone_id_facility_id");
+
+                    b.HasIndex("DedicatedClientId")
+                        .HasDatabaseName("ix_warehouse_zones_dedicated_client_id");
+
                     b.HasIndex("FacilityId")
                         .HasDatabaseName("ix_warehouse_zones_facility_id");
 
-                    b.HasIndex("FacilityId", "ZoneCode")
+                    b.HasIndex("FacilityId", "NormalizedZoneCode")
                         .IsUnique()
-                        .HasDatabaseName("ix_warehouse_zones_facility_id_zone_code");
+                        .HasDatabaseName("ix_warehouse_zones_facility_normalized_code");
 
-                    b.ToTable("warehouse_zones", (string)null);
+                    b.ToTable("warehouse_zones", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_warehouse_zones_temp_bounds", "temp_min_c IS NULL OR temp_max_c IS NULL OR temp_min_c <= temp_max_c");
+                        });
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Inbound.AdvanceShippingNotice", b =>
@@ -12977,6 +13548,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(50)")
                         .HasColumnName("code");
 
+                    b.Property<long>("ConfigRevision")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("bigint")
+                        .HasDefaultValue(1L)
+                        .HasColumnName("config_revision");
+
                     b.Property<decimal?>("CostPerUnit")
                         .HasPrecision(14, 4)
                         .HasColumnType("numeric(14,4)")
@@ -12989,6 +13566,11 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Property<Guid?>("CreatedBy")
                         .HasColumnType("uuid")
                         .HasColumnName("created_by");
+
+                    b.Property<string>("CurrencyCode")
+                        .HasMaxLength(3)
+                        .HasColumnType("character varying(3)")
+                        .HasColumnName("currency_code");
 
                     b.Property<DateTime?>("DeletedAt")
                         .HasColumnType("timestamp with time zone")
@@ -13039,6 +13621,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(150)")
                         .HasColumnName("name");
 
+                    b.Property<string>("NormalizedCode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("normalized_code");
+
                     b.Property<decimal>("TareWeightKg")
                         .HasPrecision(14, 4)
                         .HasColumnType("numeric(14,4)")
@@ -13069,7 +13657,22 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.HasIndex("FacilityId", "Code")
                         .HasDatabaseName("ix_packaging_materials_facility_id_code");
 
-                    b.ToTable("packaging_materials", (string)null);
+                    b.HasIndex("FacilityId", "NormalizedCode")
+                        .IsUnique()
+                        .HasDatabaseName("ix_packaging_materials_facility_wide_code")
+                        .HasFilter("client_id IS NULL");
+
+                    b.HasIndex("FacilityId", "ClientId", "NormalizedCode")
+                        .IsUnique()
+                        .HasDatabaseName("ix_packaging_materials_client_code")
+                        .HasFilter("client_id IS NOT NULL");
+
+                    b.ToTable("packaging_materials", null, t =>
+                        {
+                            t.HasCheckConstraint("ck_packaging_materials_cost_non_negative", "cost_per_unit IS NULL OR cost_per_unit >= 0");
+
+                            t.HasCheckConstraint("ck_packaging_materials_positive_dims", "length_cm > 0 AND width_cm > 0 AND height_cm > 0 AND max_weight_kg > 0 AND tare_weight_kg >= 0");
+                        });
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Outbound.PackingSession", b =>
@@ -18756,7 +19359,16 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .IsRequired()
                         .HasConstraintName("fk_dock_doors_facilities_facility_id");
 
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Location", "PhysicalLocation")
+                        .WithMany()
+                        .HasForeignKey("LocationId", "FacilityId")
+                        .HasPrincipalKey("Id", "FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_dock_doors_locations_location_id_facility_id");
+
                     b.Navigation("Facility");
+
+                    b.Navigation("PhysicalLocation");
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Dock.YardVisit", b =>
@@ -18829,21 +19441,56 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
                     b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Location", "ParentLocation")
                         .WithMany("ChildLocations")
-                        .HasForeignKey("ParentLocationId")
+                        .HasForeignKey("ParentLocationId", "FacilityId")
+                        .HasPrincipalKey("Id", "FacilityId")
                         .OnDelete(DeleteBehavior.Restrict)
-                        .HasConstraintName("fk_locations_locations_parent_location_id");
+                        .HasConstraintName("fk_locations_locations_parent_location_id_facility_id");
 
                     b.HasOne("Warehouse3PL.Domain.Entities.Facilities.WarehouseZone", "Zone")
                         .WithMany("Locations")
-                        .HasForeignKey("ZoneId")
-                        .OnDelete(DeleteBehavior.SetNull)
-                        .HasConstraintName("fk_locations_warehouse_zones_zone_id");
+                        .HasForeignKey("ZoneId", "FacilityId")
+                        .HasPrincipalKey("Id", "FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_locations_warehouse_zones_zone_id_facility_id");
 
                     b.Navigation("Facility");
 
                     b.Navigation("ParentLocation");
 
                     b.Navigation("Zone");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LocationEquipmentRequirement", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "Facility")
+                        .WithMany()
+                        .HasForeignKey("FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_location_equipment_requirements_facilities_facility_id");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Location", "Location")
+                        .WithMany("EquipmentRequirements")
+                        .HasForeignKey("LocationId", "FacilityId")
+                        .HasPrincipalKey("Id", "FacilityId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_location_equipment_requirements_locations_location_id_facil");
+
+                    b.Navigation("Facility");
+
+                    b.Navigation("Location");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LocationHierarchyRule", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "Facility")
+                        .WithMany()
+                        .HasForeignKey("FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_location_hierarchy_rules_facilities_facility_id");
+
+                    b.Navigation("Facility");
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LocationLock", b =>
@@ -18874,14 +19521,95 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("ReleasedByUser");
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LocationOperationalProfile", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "Facility")
+                        .WithMany()
+                        .HasForeignKey("FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_location_operational_profiles_facilities_facility_id");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Location", "DefaultStagingLocation")
+                        .WithMany()
+                        .HasForeignKey("DefaultStagingLocationId", "FacilityId")
+                        .HasPrincipalKey("Id", "FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_location_operational_profiles_locations_default_staging_loc");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Location", "Location")
+                        .WithOne("OperationalProfile")
+                        .HasForeignKey("Warehouse3PL.Domain.Entities.Facilities.LocationOperationalProfile", "Id", "FacilityId")
+                        .HasPrincipalKey("Warehouse3PL.Domain.Entities.Facilities.Location", "Id", "FacilityId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_location_operational_profiles_locations_location_id_facilit");
+
+                    b.Navigation("DefaultStagingLocation");
+
+                    b.Navigation("Facility");
+
+                    b.Navigation("Location");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.LocationStorageProfile", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Security.Client", "DedicatedClient")
+                        .WithMany()
+                        .HasForeignKey("DedicatedClientId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_location_storage_profiles_clients_dedicated_client_id");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "Facility")
+                        .WithMany()
+                        .HasForeignKey("FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_location_storage_profiles_facilities_facility_id");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Location", "Location")
+                        .WithOne("StorageProfile")
+                        .HasForeignKey("Warehouse3PL.Domain.Entities.Facilities.LocationStorageProfile", "Id", "FacilityId")
+                        .HasPrincipalKey("Warehouse3PL.Domain.Entities.Facilities.Location", "Id", "FacilityId")
+                        .OnDelete(DeleteBehavior.Cascade)
+                        .IsRequired()
+                        .HasConstraintName("fk_location_storage_profiles_locations_location_id_facility_id");
+
+                    b.Navigation("DedicatedClient");
+
+                    b.Navigation("Facility");
+
+                    b.Navigation("Location");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.WarehouseEquipment", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "Facility")
+                        .WithMany()
+                        .HasForeignKey("FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_warehouse_equipment_facilities_facility_id");
+
+                    b.Navigation("Facility");
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.WarehouseZone", b =>
                 {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Security.Client", "DedicatedClient")
+                        .WithMany()
+                        .HasForeignKey("DedicatedClientId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_warehouse_zones_clients_dedicated_client_id");
+
                     b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "Facility")
                         .WithMany("Zones")
                         .HasForeignKey("FacilityId")
                         .OnDelete(DeleteBehavior.Restrict)
                         .IsRequired()
                         .HasConstraintName("fk_warehouse_zones_facilities_facility_id");
+
+                    b.Navigation("DedicatedClient");
 
                     b.Navigation("Facility");
                 });
@@ -21483,7 +22211,13 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                 {
                     b.Navigation("ChildLocations");
 
+                    b.Navigation("EquipmentRequirements");
+
                     b.Navigation("Locks");
+
+                    b.Navigation("OperationalProfile");
+
+                    b.Navigation("StorageProfile");
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Facilities.WarehouseZone", b =>

@@ -132,8 +132,58 @@ public static class PutawaySafetyValidator
         Location destination,
         Item item,
         decimal incomingQuantity,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        Guid? lotId = null)
     {
+        if (destination.IsDeleted || !destination.IsActive || destination.Status != LocationStatus.Active)
+        {
+            throw new ValidationException(
+                nameof(destination),
+                $"Destination location '{destination.LocationCode}' is not active (status: {destination.Status}).");
+        }
+
+        if (!destination.IsStorable)
+        {
+            throw new ValidationException(
+                nameof(destination),
+                $"Destination location '{destination.LocationCode}' is not marked as storable.");
+        }
+
+        if (destination.IsLocked || destination.IsDamaged)
+        {
+            throw new ValidationException(
+                nameof(destination),
+                $"Destination location '{destination.LocationCode}' is locked or damaged and cannot accept inventory.");
+        }
+
+        if (destination.Zone?.DedicatedClientId is Guid zoneClientId && zoneClientId != item.ClientId)
+        {
+            throw new ValidationException(
+                nameof(destination),
+                $"Destination zone '{destination.Zone.ZoneCode}' is dedicated to another client and cannot accept inventory for client '{item.ClientId}'.");
+        }
+
+        var storageProfile = destination.StorageProfile ?? await context.LocationStorageProfiles
+            .AsNoTracking()
+            .FirstOrDefaultAsync(p => p.Id == destination.Id && p.FacilityId == destination.FacilityId, cancellationToken);
+
+        if (storageProfile != null)
+        {
+            if (!storageProfile.IsPutawayAllowed)
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Putaway is disallowed by storage profile on location '{destination.LocationCode}'.");
+            }
+
+            if (storageProfile.DedicatedClientId.HasValue && storageProfile.DedicatedClientId.Value != item.ClientId)
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Destination location '{destination.LocationCode}' is dedicated to another client.");
+            }
+        }
+
         var effectiveRule = await ResolveEffectiveRuleAsync(context, item.ClientId, destination.FacilityId, item, cancellationToken);
         var allowsDynamicOverflow = effectiveRule?.AllowDynamicOverflow == true;
 
@@ -142,33 +192,71 @@ public static class PutawaySafetyValidator
             throw new ValidationException(nameof(destination), failureReason!);
         }
 
-        if (!destination.MaxWeightKg.HasValue && !destination.MaxVolumeCm3.HasValue)
+        bool needsStockCheck = destination.MaxWeightKg.HasValue ||
+                               destination.MaxVolumeCm3.HasValue ||
+                               (storageProfile != null && (!storageProfile.AllowMixedSku || !storageProfile.AllowMixedLot));
+
+        if (needsStockCheck)
         {
-            return;
+            var existingStocks = await context.StockOnHand
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Include(s => s.Item)
+                .Where(s => s.FacilityId == destination.FacilityId && s.LocationId == destination.Id)
+                .ToListAsync(cancellationToken);
+
+            if (storageProfile != null && !storageProfile.AllowMixedSku &&
+                existingStocks.Any(s => s.TotalQuantity > 0m && s.ItemId != item.Id))
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Destination location '{destination.LocationCode}' does not allow mixed SKUs.");
+            }
+
+            if (storageProfile != null && !storageProfile.AllowMixedLot &&
+                existingStocks.Any(s => s.TotalQuantity > 0m && s.LotId != lotId))
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Destination location '{destination.LocationCode}' does not allow mixed lots.");
+            }
+
+            var currentWeight = existingStocks.Sum(s => s.TotalQuantity * s.Item.WeightKg);
+            var incomingWeight = incomingQuantity * item.WeightKg;
+            if (destination.MaxWeightKg.HasValue && (currentWeight + incomingWeight) > destination.MaxWeightKg.Value)
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Destination location '{destination.LocationCode}' weight limit ({destination.MaxWeightKg.Value} kg) would be exceeded (current: {currentWeight} kg, incoming: {incomingWeight} kg).");
+            }
+
+            var currentVolume = existingStocks.Sum(s => s.TotalQuantity * ResolveItemVolumeCm3(s.Item));
+            var incomingVolume = incomingQuantity * ResolveItemVolumeCm3(item);
+            if (destination.MaxVolumeCm3.HasValue && (currentVolume + incomingVolume) > destination.MaxVolumeCm3.Value)
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Destination location '{destination.LocationCode}' volume limit ({destination.MaxVolumeCm3.Value} cm3) would be exceeded.");
+            }
         }
 
-        var existingStocks = await context.StockOnHand
-            .AsNoTracking()
-            .Include(s => s.Item)
-            .Where(s => s.FacilityId == destination.FacilityId && s.LocationId == destination.Id)
-            .ToListAsync(cancellationToken);
-
-        var currentWeight = existingStocks.Sum(s => s.TotalQuantity * s.Item.WeightKg);
-        var incomingWeight = incomingQuantity * item.WeightKg;
-        if (destination.MaxWeightKg.HasValue && (currentWeight + incomingWeight) > destination.MaxWeightKg.Value)
+        if (storageProfile?.MaxHandlingUnits is int maxHus)
         {
-            throw new ValidationException(
-                nameof(destination),
-                $"Destination location '{destination.LocationCode}' weight limit ({destination.MaxWeightKg.Value} kg) would be exceeded (current: {currentWeight} kg, incoming: {incomingWeight} kg).");
-        }
+            var activeHuCount = await context.HandlingUnits
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .CountAsync(hu => hu.FacilityId == destination.FacilityId &&
+                                  hu.CurrentLocationId == destination.Id &&
+                                  !hu.IsDeleted &&
+                                  hu.Status != HandlingUnitStatus.Damaged,
+                    cancellationToken);
 
-        var currentVolume = existingStocks.Sum(s => s.TotalQuantity * ResolveItemVolumeCm3(s.Item));
-        var incomingVolume = incomingQuantity * ResolveItemVolumeCm3(item);
-        if (destination.MaxVolumeCm3.HasValue && (currentVolume + incomingVolume) > destination.MaxVolumeCm3.Value)
-        {
-            throw new ValidationException(
-                nameof(destination),
-                $"Destination location '{destination.LocationCode}' volume limit ({destination.MaxVolumeCm3.Value} cm3) would be exceeded.");
+            if (activeHuCount >= maxHus)
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Destination location '{destination.LocationCode}' handling-unit limit ({maxHus}) has been reached.");
+            }
         }
     }
 }

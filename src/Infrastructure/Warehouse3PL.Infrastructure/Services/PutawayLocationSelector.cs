@@ -76,13 +76,16 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
             ? new HashSet<Guid>(excludedLocationIds)
             : new HashSet<Guid>();
 
-        // 1. Query active candidate storage bins in this facility
+        // 1. Query active candidate storable bins in this facility (MDM-2.1 A01/A06)
         var candidateLocations = await _context.Locations
             .AsNoTracking()
             .Include(l => l.Zone)
+            .Include(l => l.StorageProfile)
             .Where(l => l.FacilityId == facilityId &&
                         !l.IsDeleted &&
                         l.IsActive &&
+                        l.Status == LocationStatus.Active &&
+                        l.IsStorable &&
                         !l.IsLocked &&
                         !l.IsDamaged &&
                         (l.LocationType == LocationType.Bin ||
@@ -111,9 +114,10 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
         bool preferConsolidation = effectiveRule?.PreferConsolidation ?? true;
         bool allowsDynamicOverflow = effectiveRule?.AllowDynamicOverflow == true;
 
-        // 3. Query existing stock in candidate locations to evaluate capacity and SKU consolidation
+        // 3. Query existing stock and active handling units in candidate locations
         var candidateIds = candidateLocations.Select(c => c.Id).ToHashSet();
         var currentStocks = await _context.StockOnHand
+            .IgnoreQueryFilters()
             .AsNoTracking()
             .Include(s => s.Item)
             .Where(s => s.FacilityId == facilityId && candidateIds.Contains(s.LocationId))
@@ -123,19 +127,81 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
             .GroupBy(s => s.LocationId)
             .ToDictionary(g => g.Key, g => g.ToList());
 
+        var huCappedLocationIds = candidateLocations
+            .Where(l => l.StorageProfile?.MaxHandlingUnits.HasValue == true)
+            .Select(l => l.Id)
+            .ToHashSet();
+
+        Dictionary<Guid, int> activeHuCounts = new();
+        if (huCappedLocationIds.Count > 0)
+        {
+            activeHuCounts = await _context.HandlingUnits
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(hu => hu.FacilityId == facilityId &&
+                             hu.CurrentLocationId.HasValue &&
+                             huCappedLocationIds.Contains(hu.CurrentLocationId.Value) &&
+                             !hu.IsDeleted &&
+                             hu.Status != HandlingUnitStatus.Damaged)
+                .GroupBy(hu => hu.CurrentLocationId!.Value)
+                .Select(g => new { LocationId = g.Key, Count = g.Count() })
+                .ToDictionaryAsync(x => x.LocationId, x => x.Count, cancellationToken);
+        }
+
         var recommendations = new List<PutawayRecommendation>();
 
         foreach (var loc in candidateLocations)
         {
+            // A0. MDM-2.1 A06 Dedicated Client & Storage Profile Restrictions
+            if (loc.Zone?.DedicatedClientId is Guid zoneClientId && zoneClientId != clientId)
+            {
+                continue;
+            }
+
+            var profile = loc.StorageProfile;
+            if (profile != null)
+            {
+                if (!profile.IsPutawayAllowed)
+                {
+                    continue;
+                }
+
+                if (profile.DedicatedClientId.HasValue && profile.DedicatedClientId.Value != clientId)
+                {
+                    continue;
+                }
+
+                if (profile.MaxHandlingUnits.HasValue)
+                {
+                    activeHuCounts.TryGetValue(loc.Id, out var huCount);
+                    if (huCount >= profile.MaxHandlingUnits.Value)
+                    {
+                        continue;
+                    }
+                }
+            }
+
             // A. Strict Temperature Compatibility Check (shared single source of truth with confirmation)
             if (!PutawaySafetyValidator.IsZoneTemperatureCompatible(loc.Zone, item, loc, allowsDynamicOverflow, out _))
             {
                 continue;
             }
 
-            // B. Physical & Volumetric Capacity Constraints
+            // B. Physical, Volumetric & Storage-Profile Mixing Constraints
             stockByLocation.TryGetValue(loc.Id, out var existingStockInBin);
             existingStockInBin ??= [];
+
+            if (profile != null && !profile.AllowMixedSku &&
+                existingStockInBin.Any(s => s.TotalQuantity > 0m && s.ItemId != itemId))
+            {
+                continue;
+            }
+
+            if (profile != null && !profile.AllowMixedLot &&
+                existingStockInBin.Any(s => s.TotalQuantity > 0m && s.LotId != lotId))
+            {
+                continue;
+            }
 
             var currentWeight = existingStockInBin.Sum(s => s.TotalQuantity * s.Item.WeightKg);
             var currentVolume = existingStockInBin.Sum(s => s.TotalQuantity * PutawaySafetyValidator.ResolveItemVolumeCm3(s.Item));

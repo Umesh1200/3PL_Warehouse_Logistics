@@ -21,6 +21,7 @@ public class PackagingMaterial : AuditableEntity<Guid>, ISoftDeletable
     public Guid FacilityId { get; set; }
 
     public string Code { get; set; } = string.Empty;
+    public string NormalizedCode { get; set; } = string.Empty;
     public string Name { get; set; } = string.Empty;
     public PackagingMaterialType MaterialType { get; set; } = PackagingMaterialType.CorrugatedBox;
 
@@ -31,8 +32,13 @@ public class PackagingMaterial : AuditableEntity<Guid>, ISoftDeletable
     public decimal MaxWeightKg { get; set; }
     public decimal TareWeightKg { get; set; }
     public decimal? CostPerUnit { get; set; }
+    public string? CurrencyCode { get; set; }
 
     public bool IsActive { get; set; } = true;
+    public long ConfigRevision { get; set; } = 1;
+
+    public static string NormalizeMaterialCode(string code) =>
+        (code ?? string.Empty).Trim().ToUpperInvariant();
 
     public decimal CalculatedVolumeCm3 => LengthCm * WidthCm * HeightCm;
 

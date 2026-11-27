@@ -38,7 +38,7 @@ public class AllocationCandidateFilter : IAllocationCandidateFilter
                 "Storage location reference is missing or null.");
         }
 
-        if (!stock.Location.IsActive || stock.Location.IsDeleted || stock.Location.IsDamaged)
+        if (!stock.Location.IsActive || stock.Location.Status != LocationStatus.Active || stock.Location.IsDeleted || stock.Location.IsDamaged)
         {
             return CandidateEligibilityResult.Ineligible(
                 ShortageReason.LocationLocked,

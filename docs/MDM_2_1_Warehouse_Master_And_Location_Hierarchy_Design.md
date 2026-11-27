@@ -1,12 +1,13 @@
 # Nexus3PL — MDM-2.1 Warehouse Master & Location Hierarchy Design Study
 
-**Document Status:** Architecture & Design Study Only — **Do not implement until independently approved**  
+**Document Status:** Approved & Implemented (Option C + Mandatory Architectural Conditions **A01–A07**)  
 **Workstream:** `MDM-2.0` / `MDM-2.1` — Warehouse Master & Physical Location Hierarchy  
 **Branch:** `feature/phase-7-enterprise-frontend`  
 **Authoritative Accepted Baseline SHA:** `c1723711be66c8f5e0d882b8d9c5d359d881d039`  
 **Companion Documents:**
 - [MDM_2_0_Discovery_And_Gap_Audit.md](MDM_2_0_Discovery_And_Gap_Audit.md)
-- [MDM_2_Implementation_Plan_And_Design.md](MDM_2_Implementation_Plan_And_Design.md)  
+- [MDM_2_Implementation_Plan_And_Design.md](MDM_2_Implementation_Plan_And_Design.md)
+- [MDM_2_1_Warehouse_Master_And_Location_Hierarchy_Implementation_Report.md](MDM_2_1_Warehouse_Master_And_Location_Hierarchy_Implementation_Report.md)  
 **Date:** November 27, 2026
 
 ---
@@ -268,4 +269,18 @@ flowchart TD
 | **`MDM21-D01`** | **Location Hierarchy Architecture** | Approve **Option C (Hybrid)**: retain `warehouse_zones` + evolve `locations` self-referencing hierarchy with composite same-facility FK, cycle-prevention trigger, `location_hierarchy_rules`, and separated companion profile tables (`location_storage_profiles`, `location_operational_profiles`, `warehouse_equipment`, `location_equipment_requirements`). |
 | **`MDM21-D02`** | **Legacy Flag Synchronization** | Keep `Location.IsActive`, `IsLocked`, `IsDamaged` synchronized with the new `LocationStatus` enum during `MDM-2` so all Phase 7.3/7.4 queries remain zero-breaking. |
 | **`MDM21-D03`** | **`WarehouseZone.OnDelete` Hardening** | Change `locations.zone_id` FK from `SetNull` to `Restrict` (after verifying zero orphaned rows) so zones with active locations cannot be silently orphaned. |
-| **`MDM21-D04`** | **DockDoor Length Units** | Retain `dock_doors.max_trailer_length_feet` for backward compatibility while adding canonical `max_trailer_length_cm` (converted via `MDM-1.3` `IUomConversionService` for UI display). |
+| **`MDM21-D04`** | **DockDoor Length Units** | Retain `dock_doors.max_trailer_length_feet` for backward compatibility while adding canonical `max_trailer_length_cm` (converted via canonical `30.48 cm/ft` factor). |
+
+---
+
+## 9. Approved Mandatory Architectural Conditions (A01–A07)
+
+The independent design review approved **Option C** subject to mandatory conditions **A01–A07**, which supersede any draft details in Sections 3–6 above:
+
+- **A01 — Orthogonal Lifecycle, Locks & Damage:** `LocationStatus` is strictly administrative (`Active`, `Inactive`, `Decommissioned`) and synchronized only with `IsActive`. Operational locks (`LocationLock` / `IsLocked`) and physical damage (`IsDamaged`) are orthogonal; administrative reactivation (`Inactive -> Active`) **never** implicitly releases locks or clears damage. Individual locks can be released independently via `POST /api/v1/locations/{id}/locks/{lockId}/release`, recomputing `IsLocked` from remaining active locks. `IsPickable`, `IsReceiving`, and `IsStorable` remain independent.
+- **A02 — Database & Concurrency-Safe Hierarchy Integrity:** Composite same-facility FKs `(parent_location_id, facility_id)` and `(zone_id, facility_id)`, `CHECK (parent_location_id IS NULL OR parent_location_id <> location_id)`, PostgreSQL recursive trigger `trg_locations_prevent_cycle` (`BEFORE INSERT OR UPDATE OF parent_location_id`), per-facility transactional advisory lock (`pg_advisory_xact_lock`) serializing concurrent opposite reparenting (`A->B` vs `B->A`), server-derived `hierarchy_level` (1..10) and stable ID-based `hierarchy_path` (`/{id:N}/...`) with atomic descendant recalculation, and 4 partial unique indexes on `location_hierarchy_rules` covering nullable `facility_id` and nullable `parent_location_type` with deterministic facility-over-global precedence.
+- **A03 — Permanent Normalized Code & Barcode Uniqueness:** Facility-scoped unique indexes on `normalized_location_code`, `normalized_barcode`, `normalized_zone_code`, `normalized_door_number`, and `normalized_equipment_code` are **permanent** (not `WHERE is_deleted = false`), preventing reuse of soft-deleted codes/barcodes. Codes are immutable by default.
+- **A04 — Configurable Topologies Over Existing `LocationType`:** Existing `LocationType` enum values are preserved; `hierarchy_level` is the derived tree depth (1..10), not the enum integer value. Seeded global rules support both compact layouts (`FAC-KTM1`) and deep high-bay layouts (`FAC-ORD1`), with facility-specific overrides.
+- **A05 — Cross-Facility, Tenant & Scope Isolation:** Same-facility composite FKs enforced across parent locations, zones, `location_storage_profiles`, `location_operational_profiles` (including `default_staging_location_id`), `location_equipment_requirements`, and `dock_doors.location_id`. `DedicatedClientId` and client-owned `PackagingMaterial.ClientId` require an active `Client` with active `ClientFacilityAccess`. `PackagingMaterial` uses deterministic partial unique indexes for facility-wide (`client_id IS NULL`) vs client-specific (`client_id IS NOT NULL`). Server-side `WarehouseMasterAuthorization` enforces DB-verified Staff/SuperAdmin/AssignedFacility and rejects conflicting `X-Facility-Id` header vs request `FacilityId` with `400`.
+- **A06 — Active Operational Enforcement Only (No Dead Fields):** `location_storage_profiles` exposes only fields actively enforced by `PutawayLocationSelector` and `PutawaySafetyValidator` (`DedicatedClientId`, `MaxHandlingUnits`, `AllowMixedSku`, `AllowMixedLot`, `IsPutawayAllowed`), alongside `Location.IsStorable`, `Location.Status == Active`, and `WarehouseZone.DedicatedClientId`. Thermal/hazmat bin overrides are deferred to `MDM-2.4` (no CSV hazard strings), and `MDM-0.4` temperature safety floors are never weakened.
+- **A07 — Fail-Closed Migration, Concurrency Guards & FK Preservation:** Pre-cutover `DO $$` guard fails closed on cycles, cross-facility links, orphans, normalized collisions, invalid zone temperature bounds, or stock in non-storable structural nodes before altering schema. All 21 existing `location_id` FKs and 3 `zone_id` FKs are preserved. Location deactivation is serialized via `ExecuteWithLocationLifecycleLockAsync` (`pg_advisory_xact_lock` + `SELECT ... FOR UPDATE`) against concurrent stock/HU/task placement.

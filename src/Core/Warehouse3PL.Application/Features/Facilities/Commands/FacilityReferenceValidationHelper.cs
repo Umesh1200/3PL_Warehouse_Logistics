@@ -66,6 +66,19 @@ internal static class FacilityReferenceValidationHelper
             {
                 throw new DomainException(ex.Message, "FACILITY_INVALID_CURRENCY");
             }
+
+            if (db.IsRelationalDatabase || await db.Currencies.AsNoTracking().AnyAsync(cancellationToken))
+            {
+                var activeCurrency = await db.Currencies
+                    .AsNoTracking()
+                    .AnyAsync(c => c.CurrencyCode == normalizedCurrency && c.IsActive, cancellationToken);
+                if (!activeCurrency)
+                {
+                    throw new DomainException(
+                        $"DefaultCurrencyCode '{normalizedCurrency}' is not an active CurrencyMaster record.",
+                        "FACILITY_INVALID_CURRENCY");
+                }
+            }
         }
 
         if (defaultLegalEntityId.HasValue)

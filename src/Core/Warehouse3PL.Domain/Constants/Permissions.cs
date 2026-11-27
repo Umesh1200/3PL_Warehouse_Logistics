@@ -33,8 +33,16 @@ public static class Permissions
     {
         public const string View = "facilities:view";
         public const string Manage = "facilities:manage";
+        public const string ZonesView = "facilities:zones:view";
+        public const string ZonesManage = "facilities:zones:manage";
+        public const string LocationsView = "facilities:locations:view";
+        public const string LocationsManage = "facilities:locations:manage";
         public const string DockDoorsView = "facilities:dock-doors:view";
         public const string DockDoorsManage = "facilities:dock-doors:manage";
+        public const string EquipmentView = "facilities:equipment:view";
+        public const string EquipmentManage = "facilities:equipment:manage";
+        public const string PackagingMaterialsView = "facilities:packaging-materials:view";
+        public const string PackagingMaterialsManage = "facilities:packaging-materials:manage";
     }
 
     public static class Items
@@ -182,7 +190,12 @@ public static class Permissions
         Clients.View, Clients.Create, Clients.Edit, Clients.Delete, Clients.ManageAccess,
         Users.View, Users.Create, Users.Edit, Users.Delete, Users.AssignRoles,
         Roles.View, Roles.Create, Roles.Edit, Roles.Delete, Roles.ManagePermissions,
-        Facilities.View, Facilities.Manage, Facilities.DockDoorsView, Facilities.DockDoorsManage,
+        Facilities.View, Facilities.Manage,
+        Facilities.ZonesView, Facilities.ZonesManage,
+        Facilities.LocationsView, Facilities.LocationsManage,
+        Facilities.DockDoorsView, Facilities.DockDoorsManage,
+        Facilities.EquipmentView, Facilities.EquipmentManage,
+        Facilities.PackagingMaterialsView, Facilities.PackagingMaterialsManage,
         Items.View, Items.Create, Items.Edit, Items.Delete,
         Inventory.View, Inventory.Adjust, Inventory.Count, Inventory.Transfer,
         Inbound.View, Inbound.Receive, Inbound.Putaway, Inbound.PutawayManage, Inbound.PutawayExecute, Inbound.PutawayRules,

@@ -2,6 +2,8 @@ using FluentValidation;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
+using Warehouse3PL.Application.Common.Security;
+using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -29,37 +31,52 @@ public class LockLocationCommandValidator : AbstractValidator<LockLocationComman
 public class LockLocationCommandHandler : IRequestHandler<LockLocationCommand, Guid>
 {
     private readonly IApplicationDbContext _context;
-    private readonly ICurrentUserContext _currentUser;
+    private readonly WarehouseMasterAuthorization _auth;
 
-    public LockLocationCommandHandler(IApplicationDbContext context, ICurrentUserContext currentUser)
+    public LockLocationCommandHandler(IApplicationDbContext context, WarehouseMasterAuthorization auth)
     {
         _context = context;
-        _currentUser = currentUser;
+        _auth = auth;
     }
 
     public async Task<Guid> Handle(LockLocationCommand request, CancellationToken cancellationToken)
     {
-        var location = await _context.Locations.FirstOrDefaultAsync(l => l.Id == request.LocationId, cancellationToken);
-        if (location == null)
+        var preRead = await _context.Locations
+            .AsNoTracking()
+            .Where(l => l.Id == request.LocationId && !l.IsDeleted)
+            .Select(l => new { l.FacilityId })
+            .FirstOrDefaultAsync(cancellationToken)
+            ?? throw new EntityNotFoundException(nameof(Location), request.LocationId);
+
+        var (userId, facilityId, _) = await _auth.ResolveAuthorizedFacilityAsync(
+            preRead.FacilityId,
+            cancellationToken,
+            Permissions.Facilities.LocationsManage,
+            Permissions.Facilities.Manage);
+
+        return await _context.ExecuteWithLocationLifecycleLockAsync(facilityId, request.LocationId, async () =>
         {
-            throw new EntityNotFoundException(nameof(Location), request.LocationId);
-        }
+            var location = await _context.Locations
+                .FirstOrDefaultAsync(l => l.Id == request.LocationId && l.FacilityId == facilityId && !l.IsDeleted, cancellationToken)
+                ?? throw new EntityNotFoundException(nameof(Location), request.LocationId);
 
-        var locationLock = new LocationLock
-        {
-            LocationId = location.Id,
-            LockType = request.LockType,
-            ReasonCode = request.ReasonCode,
-            Notes = request.Notes,
-            LockedByUserId = _currentUser.UserId,
-            LockedAt = DateTime.UtcNow
-        };
+            var locationLock = new LocationLock
+            {
+                LocationId = location.Id,
+                LockType = request.LockType,
+                ReasonCode = request.ReasonCode.Trim(),
+                Notes = string.IsNullOrWhiteSpace(request.Notes) ? null : request.Notes.Trim(),
+                LockedByUserId = userId,
+                LockedAt = DateTime.UtcNow
+            };
 
-        location.IsLocked = true;
-        _context.LocationLocks.Add(locationLock);
-        await _context.SaveChangesAsync(cancellationToken);
+            location.IsLocked = true;
+            location.ConfigRevision++;
+            location.UpdatedBy = userId;
+            _context.LocationLocks.Add(locationLock);
+            await _context.SaveChangesAsync(cancellationToken);
 
-        return locationLock.Id;
+            return locationLock.Id;
+        }, cancellationToken);
     }
 }
-

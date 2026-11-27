@@ -37,6 +37,8 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryLegalEntityLocks = new();
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryFxRateLocks = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryFacilityCalendarLocks = new();
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryFacilityHierarchyLocks = new();
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryLocationLifecycleLocks = new();
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryScopeEpochLocks = new(StringComparer.Ordinal);
     private bool _isInsideConfigurationOutboxSave;
     private bool? _hasMdm15Schema;
@@ -70,6 +72,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public override int SaveChanges(bool acceptAllChangesOnSuccess)
     {
         EnforceJournalImmutability();
+        NormalizeWarehouseMasterEntities();
         if (_isInsideConfigurationOutboxSave || _isInsideCountryLifecycleReconciliation)
         {
             return base.SaveChanges(acceptAllChangesOnSuccess);
@@ -102,6 +105,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public override async Task<int> SaveChangesAsync(bool acceptAllChangesOnSuccess, CancellationToken cancellationToken = default)
     {
         EnforceJournalImmutability();
+        NormalizeWarehouseMasterEntities();
         if (_isInsideConfigurationOutboxSave || _isInsideCountryLifecycleReconciliation)
         {
             return await base.SaveChangesAsync(acceptAllChangesOnSuccess, cancellationToken);
@@ -1060,6 +1064,11 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<WarehouseZone> WarehouseZones => Set<WarehouseZone>();
     public DbSet<Location> Locations => Set<Location>();
     public DbSet<LocationLock> LocationLocks => Set<LocationLock>();
+    public DbSet<LocationHierarchyRule> LocationHierarchyRules => Set<LocationHierarchyRule>();
+    public DbSet<LocationStorageProfile> LocationStorageProfiles => Set<LocationStorageProfile>();
+    public DbSet<LocationOperationalProfile> LocationOperationalProfiles => Set<LocationOperationalProfile>();
+    public DbSet<WarehouseEquipment> WarehouseEquipment => Set<WarehouseEquipment>();
+    public DbSet<LocationEquipmentRequirement> LocationEquipmentRequirements => Set<LocationEquipmentRequirement>();
 
     public DbSet<Item> Items => Set<Item>();
     public DbSet<ItemBarcode> ItemBarcodes => Set<ItemBarcode>();
@@ -2052,6 +2061,237 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public void ClearChangeTracker()
     {
         ChangeTracker.Clear();
+    }
+
+    private void NormalizeWarehouseMasterEntities()
+    {
+        foreach (var entry in ChangeTracker.Entries())
+        {
+            if (entry.State is not (EntityState.Added or EntityState.Modified))
+            {
+                continue;
+            }
+
+            switch (entry.Entity)
+            {
+                case Location loc:
+                    if (loc.Id == Guid.Empty) loc.Id = Guid.NewGuid();
+                    if (!string.IsNullOrWhiteSpace(loc.LocationCode))
+                    {
+                        loc.LocationCode = loc.LocationCode.Trim();
+                        loc.NormalizedLocationCode = Location.NormalizeCode(loc.LocationCode);
+                    }
+                    if (!string.IsNullOrWhiteSpace(loc.Barcode))
+                    {
+                        loc.Barcode = loc.Barcode.Trim();
+                        loc.NormalizedBarcode = Location.NormalizeCode(loc.Barcode);
+                    }
+                    if (string.IsNullOrWhiteSpace(loc.LocationName))
+                    {
+                        loc.LocationName = loc.LocationCode;
+                    }
+                    if (loc.HierarchyLevel < 1)
+                    {
+                        loc.HierarchyLevel = 1;
+                    }
+                    if (string.IsNullOrWhiteSpace(loc.HierarchyPath))
+                    {
+                        loc.HierarchyPath = Location.BuildHierarchyPath(null, loc.Id);
+                    }
+                    if (entry.State == EntityState.Added)
+                    {
+                        if (!loc.IsActive && loc.Status == LocationStatus.Active)
+                        {
+                            loc.Status = LocationStatus.Inactive;
+                        }
+                        else
+                        {
+                            loc.IsActive = loc.Status == LocationStatus.Active;
+                        }
+                    }
+                    else
+                    {
+                        var statusProp = entry.Property(nameof(Location.Status));
+                        var activeProp = entry.Property(nameof(Location.IsActive));
+                        if (statusProp.IsModified)
+                        {
+                            loc.IsActive = loc.Status == LocationStatus.Active;
+                        }
+                        else if (activeProp.IsModified)
+                        {
+                            loc.Status = loc.IsActive ? LocationStatus.Active : LocationStatus.Inactive;
+                        }
+                    }
+                    break;
+
+                case WarehouseZone zone:
+                    if (!string.IsNullOrWhiteSpace(zone.ZoneCode))
+                    {
+                        zone.ZoneCode = zone.ZoneCode.Trim();
+                        zone.NormalizedZoneCode = WarehouseZone.NormalizeCode(zone.ZoneCode);
+                    }
+                    break;
+
+                case DockDoor dock:
+                    if (!string.IsNullOrWhiteSpace(dock.DoorNumber))
+                    {
+                        dock.DoorNumber = dock.DoorNumber.Trim();
+                        dock.NormalizedDoorNumber = DockDoor.NormalizeDoorNo(dock.DoorNumber);
+                    }
+                    if (!dock.MaxTrailerLengthCm.HasValue && dock.MaxTrailerLengthFeet.HasValue && dock.MaxTrailerLengthFeet.Value > 0)
+                    {
+                        dock.MaxTrailerLengthCm = Math.Round(dock.MaxTrailerLengthFeet.Value * DockDoor.CmPerFoot, 2, MidpointRounding.AwayFromZero);
+                    }
+                    break;
+
+                case PackagingMaterial pm:
+                    if (!string.IsNullOrWhiteSpace(pm.Code))
+                    {
+                        pm.Code = pm.Code.Trim();
+                        pm.NormalizedCode = PackagingMaterial.NormalizeMaterialCode(pm.Code);
+                    }
+                    if (!string.IsNullOrWhiteSpace(pm.CurrencyCode))
+                    {
+                        pm.CurrencyCode = pm.CurrencyCode.Trim().ToUpperInvariant();
+                    }
+                    break;
+
+                case Domain.Entities.Facilities.WarehouseEquipment eq:
+                    if (!string.IsNullOrWhiteSpace(eq.EquipmentCode))
+                    {
+                        eq.EquipmentCode = eq.EquipmentCode.Trim();
+                        eq.NormalizedEquipmentCode = Domain.Entities.Facilities.WarehouseEquipment.NormalizeCode(eq.EquipmentCode);
+                    }
+                    break;
+            }
+        }
+    }
+
+    public async Task<TResult> ExecuteWithFacilityHierarchyLockAsync<TResult>(
+        Guid facilityId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Database.IsRelational())
+        {
+            var gate = InMemoryFacilityHierarchyLocks.GetOrAdd(facilityId, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                return await action();
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        async Task AcquireHierarchyLockAsync()
+        {
+            if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var lockKey = $"FACILITY_HIERARCHY:{facilityId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0::bigint))",
+                    cancellationToken);
+            }
+        }
+
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            await AcquireHierarchyLockAsync();
+            return await action();
+        }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt)
+            {
+                ClearChangeTracker();
+            }
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await AcquireHierarchyLockAsync();
+                var result = await action();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
+    }
+
+    public async Task<TResult> ExecuteWithLocationLifecycleLockAsync<TResult>(
+        Guid facilityId,
+        Guid locationId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Database.IsRelational())
+        {
+            var gate = InMemoryLocationLifecycleLocks.GetOrAdd(locationId, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                return await action();
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        async Task AcquireLocationLifecycleLockAsync()
+        {
+            if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var lockKey = $"LOCATION_LIFECYCLE:{locationId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0::bigint))",
+                    cancellationToken);
+
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM locations WHERE location_id = {locationId} AND facility_id = {facilityId} FOR UPDATE",
+                    cancellationToken);
+            }
+        }
+
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            await AcquireLocationLifecycleLockAsync();
+            return await action();
+        }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt)
+            {
+                ClearChangeTracker();
+            }
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await AcquireLocationLifecycleLockAsync();
+                var result = await action();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
     }
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)

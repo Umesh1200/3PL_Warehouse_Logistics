@@ -8,7 +8,15 @@ public class PackagingMaterialConfiguration : IEntityTypeConfiguration<Packaging
 {
     public void Configure(EntityTypeBuilder<PackagingMaterial> builder)
     {
-        builder.ToTable("packaging_materials");
+        builder.ToTable("packaging_materials", t =>
+        {
+            t.HasCheckConstraint(
+                "ck_packaging_materials_positive_dims",
+                "length_cm > 0 AND width_cm > 0 AND height_cm > 0 AND max_weight_kg > 0 AND tare_weight_kg >= 0");
+            t.HasCheckConstraint(
+                "ck_packaging_materials_cost_non_negative",
+                "cost_per_unit IS NULL OR cost_per_unit >= 0");
+        });
 
         builder.HasKey(m => m.Id);
         builder.Property(m => m.Id)
@@ -24,6 +32,11 @@ public class PackagingMaterialConfiguration : IEntityTypeConfiguration<Packaging
 
         builder.Property(m => m.Code)
             .HasColumnName("code")
+            .HasMaxLength(50)
+            .IsRequired();
+
+        builder.Property(m => m.NormalizedCode)
+            .HasColumnName("normalized_code")
             .HasMaxLength(50)
             .IsRequired();
 
@@ -67,6 +80,15 @@ public class PackagingMaterialConfiguration : IEntityTypeConfiguration<Packaging
             .HasColumnName("cost_per_unit")
             .HasPrecision(14, 4);
 
+        builder.Property(m => m.CurrencyCode)
+            .HasColumnName("currency_code")
+            .HasMaxLength(3);
+
+        builder.Property(m => m.ConfigRevision)
+            .HasColumnName("config_revision")
+            .HasDefaultValue(1L)
+            .IsRequired();
+
         builder.Property(m => m.IsActive)
             .HasColumnName("is_active")
             .HasDefaultValue(true)
@@ -85,8 +107,16 @@ public class PackagingMaterialConfiguration : IEntityTypeConfiguration<Packaging
         builder.Property(m => m.UpdatedAt).HasColumnName("updated_at");
         builder.Property(m => m.UpdatedBy).HasColumnName("updated_by");
 
-        // Indexes
+        // Indexes (A05: deterministic facility-wide vs client-specific uniqueness)
         builder.HasIndex(m => new { m.FacilityId, m.Code });
+        builder.HasIndex(m => new { m.FacilityId, m.NormalizedCode })
+            .IsUnique()
+            .HasFilter("client_id IS NULL")
+            .HasDatabaseName("ix_packaging_materials_facility_wide_code");
+        builder.HasIndex(m => new { m.FacilityId, m.ClientId, m.NormalizedCode })
+            .IsUnique()
+            .HasFilter("client_id IS NOT NULL")
+            .HasDatabaseName("ix_packaging_materials_client_code");
         builder.HasIndex(m => m.ClientId);
         builder.HasIndex(m => m.IsActive);
 

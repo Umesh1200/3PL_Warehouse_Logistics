@@ -133,9 +133,14 @@ public class ConfirmPutawayTaskCommandHandler : IRequestHandler<ConfirmPutawayTa
             }
 
             // Validate destination suitability
-            if (!scannedLoc.IsActive)
+            if (!scannedLoc.IsActive || scannedLoc.Status != LocationStatus.Active)
             {
                 throw new ValidationException(nameof(request.ScannedLocationBarcode), $"Destination location '{scannedLoc.LocationCode}' is inactive.");
+            }
+
+            if (!scannedLoc.IsStorable)
+            {
+                throw new ValidationException(nameof(request.ScannedLocationBarcode), $"Destination location '{scannedLoc.LocationCode}' is not marked as storable.");
             }
 
             if (scannedLoc.IsDeleted)
@@ -188,8 +193,14 @@ public class ConfirmPutawayTaskCommandHandler : IRequestHandler<ConfirmPutawayTa
                 }
             }
 
+            var lockedDestination = await _context.Locations
+                .AsNoTracking()
+                .Include(l => l.Zone)
+                .Include(l => l.StorageProfile)
+                .FirstAsync(l => l.Id == actualLocation.Id, cancellationToken);
+
             await PutawaySafetyValidator.ValidateDestinationSafetyAndCapacityAsync(
-                _context, actualLocation, task.Item, task.Quantity, cancellationToken);
+                _context, lockedDestination, task.Item, task.Quantity, cancellationToken, task.LotId);
 
             // 3. Inventory Conservation: Verify and decrement stock from source staging location
             var sourceStock = await _context.StockOnHand

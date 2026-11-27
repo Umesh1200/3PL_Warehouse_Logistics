@@ -1,12 +1,16 @@
 using Microsoft.EntityFrameworkCore;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Locations.Commands.BatchGenerateLocations;
 using Warehouse3PL.Application.Features.Locations.Commands.CreateLocation;
 using Warehouse3PL.Application.Features.Locations.Commands.LockLocation;
 using Warehouse3PL.Application.Features.Locations.Commands.UnlockLocation;
 using Warehouse3PL.Application.Features.Locations.Queries.GetLocationTree;
+using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Facilities;
+using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
+using Warehouse3PL.Infrastructure.Persistence;
 using Warehouse3PL.UnitTests.Common;
 using Xunit;
 
@@ -14,6 +18,36 @@ namespace Warehouse3PL.UnitTests.Wms;
 
 public class WarehouseLocationHierarchyTests
 {
+    private static async Task<TestCurrentUserContext> SeedStaffAdminAsync(ApplicationDbContext db, Guid facilityId)
+    {
+        var role = new Role { RoleName = SystemRoles.SuperAdmin };
+        var userId = Guid.NewGuid();
+        db.Roles.Add(role);
+        await db.SaveChangesAsync();
+        db.Users.Add(new User
+        {
+            Id = userId,
+            Email = $"admin-{userId:N}@nexus3pl.test",
+            PasswordHash = "hash",
+            FirstName = "Test",
+            LastName = "Admin",
+            UserType = UserType.Staff,
+            Status = UserStatus.Active,
+            AssignedFacilityId = facilityId
+        });
+        db.UserRoles.Add(new UserRole { UserId = userId, RoleId = role.Id });
+        await db.SaveChangesAsync();
+
+        return new TestCurrentUserContext
+        {
+            UserId = userId,
+            UserType = UserType.Staff,
+            FacilityId = facilityId,
+            RolesList = [SystemRoles.SuperAdmin],
+            PermissionsList = Permissions.GetAllPermissions().ToList()
+        };
+    }
+
     [Fact]
     public async Task ConfigurableHierarchy_SupportsArbitraryParentChildTopology()
     {
@@ -23,19 +57,21 @@ public class WarehouseLocationHierarchyTests
         var zoneId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var seedUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        TestCurrentUserContext currentUser;
 
-        using (var seedContext = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
+        using (var seedContext = TestDbContextFactory.Create(tenantProvider, seedUser, dbName))
         {
             var facility = new Facility { Id = facilityId, FacilityCode = "FAC-CHI", Name = "Chicago Hub" };
             var zone = new WarehouseZone { Id = zoneId, FacilityId = facilityId, ZoneCode = "ZN-PICK", Name = "Pick Mezzanine" };
             seedContext.Facilities.Add(facility);
             seedContext.WarehouseZones.Add(zone);
-            await seedContext.SaveChangesAsync();
+            currentUser = await SeedStaffAdminAsync(seedContext, facilityId);
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
-        var handler = new CreateLocationCommandHandler(context);
+        var auth = new WarehouseMasterAuthorization(context, currentUser);
+        var handler = new CreateLocationCommandHandler(context, auth);
 
         // 1. Create Aisle (Parent: null)
         var aisle = await handler.Handle(new CreateLocationCommand
@@ -90,7 +126,7 @@ public class WarehouseLocationHierarchyTests
         }, CancellationToken.None);
 
         // Query the tree
-        var treeHandler = new GetLocationTreeQueryHandler(context);
+        var treeHandler = new GetLocationTreeQueryHandler(context, auth);
         var tree = await treeHandler.Handle(new GetLocationTreeQuery(facilityId, zoneId), CancellationToken.None);
 
         // Assert
@@ -113,17 +149,18 @@ public class WarehouseLocationHierarchyTests
         var zoneId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var seedUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        TestCurrentUserContext currentUser;
 
-        using (var seedContext = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
+        using (var seedContext = TestDbContextFactory.Create(tenantProvider, seedUser, dbName))
         {
             seedContext.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "FAC-BULK", Name = "Bulk Logistics Center" });
             seedContext.WarehouseZones.Add(new WarehouseZone { Id = zoneId, FacilityId = facilityId, ZoneCode = "ZN-BULK", Name = "Bulk A" });
-            await seedContext.SaveChangesAsync();
+            currentUser = await SeedStaffAdminAsync(seedContext, facilityId);
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
-        var handler = new BatchGenerateLocationsCommandHandler(context);
+        var handler = new BatchGenerateLocationsCommandHandler(context, new WarehouseMasterAuthorization(context, currentUser));
 
         // Act: Generate 2 Aisles, 2 Racks per Aisle, 2 Shelves per Rack, 2 Bins per Shelf
         var result = await handler.Handle(new BatchGenerateLocationsCommand
@@ -157,9 +194,10 @@ public class WarehouseLocationHierarchyTests
         var locationId = Guid.NewGuid();
 
         var tenantProvider = new TestTenantProvider { BypassTenantFilter = true };
-        var currentUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        var seedUser = new TestCurrentUserContext { UserType = UserType.Staff };
+        TestCurrentUserContext currentUser;
 
-        using (var seedContext = TestDbContextFactory.Create(tenantProvider, currentUser, dbName))
+        using (var seedContext = TestDbContextFactory.Create(tenantProvider, seedUser, dbName))
         {
             seedContext.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "FAC-MAIN", Name = "Main Hub" });
             seedContext.Locations.Add(new Location
@@ -170,13 +208,14 @@ public class WarehouseLocationHierarchyTests
                 Barcode = "LOC-BIN-01-A",
                 IsLocked = false
             });
-            await seedContext.SaveChangesAsync();
+            currentUser = await SeedStaffAdminAsync(seedContext, facilityId);
         }
 
         using var context = TestDbContextFactory.Create(tenantProvider, currentUser, dbName);
+        var auth = new WarehouseMasterAuthorization(context, currentUser);
 
         // Act 1: Lock Location for Quarantine
-        var lockHandler = new LockLocationCommandHandler(context, currentUser);
+        var lockHandler = new LockLocationCommandHandler(context, auth);
         var lockId = await lockHandler.Handle(new LockLocationCommand
         {
             LocationId = locationId,
@@ -191,7 +230,7 @@ public class WarehouseLocationHierarchyTests
         Assert.True(lockedLoc.Locks.First().IsActive);
 
         // Act 2: Unlock Location
-        var unlockHandler = new UnlockLocationCommandHandler(context, currentUser);
+        var unlockHandler = new UnlockLocationCommandHandler(context, auth);
         await unlockHandler.Handle(new UnlockLocationCommand(locationId), CancellationToken.None);
 
         var unlockedLoc = await context.Locations.Include(l => l.Locks).FirstAsync(l => l.Id == locationId);

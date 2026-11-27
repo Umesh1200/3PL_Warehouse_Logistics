@@ -97,17 +97,13 @@ public class ConfirmPutawayCommandHandler : IRequestHandler<ConfirmPutawayComman
             {
                 throw new EntityNotFoundException(nameof(Location), targetLocationId);
             }
-            if (!destination.IsActive || destination.IsLocked || destination.IsDamaged ||
+            if (!destination.IsActive || destination.Status != LocationStatus.Active || !destination.IsStorable ||
+                destination.IsLocked || destination.IsDamaged ||
                 destination.IsReceiving || destination.LocationType == LocationType.StagingLane)
             {
                 throw new ValidationException(nameof(request.ConfirmedTargetLocationId),
-                    $"Destination location '{destination.LocationCode}' is not a suitable active storage location.");
+                    $"Destination location '{destination.LocationCode}' is not a suitable active storable location.");
             }
-
-            var destinationWithZone = await _context.Locations
-                .AsNoTracking()
-                .Include(l => l.Zone)
-                .FirstAsync(l => l.Id == destination.Id, cancellationToken);
 
             var sourceStockId = await _context.StockOnHand
                 .AsNoTracking()
@@ -121,7 +117,7 @@ public class ConfirmPutawayCommandHandler : IRequestHandler<ConfirmPutawayComman
                 .FirstOrDefaultAsync(cancellationToken);
 
             await using var putawayLocks = await _context.AcquirePutawayExecutionLocksAsync(
-                sourceStockId, destinationWithZone.Id, cancellationToken);
+                sourceStockId, destination.Id, cancellationToken);
 
             if (_context.IsRelationalDatabase && _context is DbContext efDb)
             {
@@ -132,8 +128,14 @@ public class ConfirmPutawayCommandHandler : IRequestHandler<ConfirmPutawayComman
                 }
             }
 
+            var destinationWithZone = await _context.Locations
+                .AsNoTracking()
+                .Include(l => l.Zone)
+                .Include(l => l.StorageProfile)
+                .FirstAsync(l => l.Id == destination.Id, cancellationToken);
+
             await PutawaySafetyValidator.ValidateDestinationSafetyAndCapacityAsync(
-                _context, destinationWithZone, task.Item, putawayQty, cancellationToken);
+                _context, destinationWithZone, task.Item, putawayQty, cancellationToken, task.LotId);
 
             // 1. Decrement Stock from Receiving/Source Location
             var sourceStock = await _context.StockOnHand

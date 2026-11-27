@@ -1,5 +1,6 @@
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Inbound.DockManagement.Appointments.Commands.CancelDockAppointment;
 using Warehouse3PL.Application.Features.Inbound.DockManagement.Appointments.Commands.RescheduleDockAppointment;
 using Warehouse3PL.Application.Features.Inbound.DockManagement.Appointments.Commands.ScheduleDockAppointment;
@@ -14,6 +15,7 @@ using Warehouse3PL.Application.Features.Inbound.DockManagement.Yard.Commands.Rec
 using Warehouse3PL.Application.Features.Inbound.DockManagement.Yard.Commands.ReleaseDockDoor;
 using Warehouse3PL.Application.Features.Inbound.DockManagement.Yard.Queries.GetReceivingQueue;
 using Warehouse3PL.Application.Features.Inbound.DockManagement.Yard.Queries.GetYardVisits;
+using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Catalog;
 using Warehouse3PL.Domain.Entities.Dock;
 using Warehouse3PL.Domain.Entities.Facilities;
@@ -21,6 +23,7 @@ using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
+using Warehouse3PL.Infrastructure.Persistence;
 using Warehouse3PL.UnitTests.Common;
 using Xunit;
 using ValidationException = Warehouse3PL.Domain.Exceptions.ValidationException;
@@ -29,20 +32,51 @@ namespace Warehouse3PL.UnitTests.Inbound;
 
 public class ReceivingDockManagementTests
 {
+    private static async Task<TestCurrentUserContext> SeedStaffAdminAsync(ApplicationDbContext db, Guid facilityId)
+    {
+        var role = new Role { RoleName = SystemRoles.SuperAdmin };
+        var userId = Guid.NewGuid();
+        db.Roles.Add(role);
+        await db.SaveChangesAsync();
+        db.Users.Add(new User
+        {
+            Id = userId,
+            Email = $"dock-admin-{userId:N}@nexus3pl.test",
+            PasswordHash = "hash",
+            FirstName = "Dock",
+            LastName = "Admin",
+            UserType = UserType.Staff,
+            Status = UserStatus.Active,
+            AssignedFacilityId = facilityId
+        });
+        db.UserRoles.Add(new UserRole { UserId = userId, RoleId = role.Id });
+        await db.SaveChangesAsync();
+
+        return new TestCurrentUserContext
+        {
+            UserId = userId,
+            UserType = UserType.Staff,
+            FacilityId = facilityId,
+            RolesList = [SystemRoles.SuperAdmin],
+            PermissionsList = Permissions.GetAllPermissions().ToList()
+        };
+    }
+
     [Fact]
     public async Task CreateDockDoor_WithUniqueDoorNumber_PersistsActiveDoor()
     {
         var dbName = Guid.NewGuid().ToString();
         var facilityId = Guid.NewGuid();
+        TestCurrentUserContext adminUser;
 
         using (var seed = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName))
         {
             seed.Facilities.Add(new Facility { Id = facilityId, FacilityCode = "FAC-ORD1", Name = "Chicago Hub" });
-            await seed.SaveChangesAsync();
+            adminUser = await SeedStaffAdminAsync(seed, facilityId);
         }
 
-        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName);
-        var handler = new CreateDockDoorCommandHandler(context);
+        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, adminUser, dbName);
+        var handler = new CreateDockDoorCommandHandler(context, new WarehouseMasterAuthorization(context, adminUser));
 
         var result = await handler.Handle(new CreateDockDoorCommand
         {
@@ -67,6 +101,7 @@ public class ReceivingDockManagementTests
     {
         var dbName = Guid.NewGuid().ToString();
         var facilityId = Guid.NewGuid();
+        TestCurrentUserContext adminUser;
 
         using (var seed = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName))
         {
@@ -78,11 +113,11 @@ public class ReceivingDockManagementTests
                 DoorType = DockDoorType.Inbound,
                 Status = DockDoorStatus.Active
             });
-            await seed.SaveChangesAsync();
+            adminUser = await SeedStaffAdminAsync(seed, facilityId);
         }
 
-        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName);
-        var handler = new CreateDockDoorCommandHandler(context);
+        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, adminUser, dbName);
+        var handler = new CreateDockDoorCommandHandler(context, new WarehouseMasterAuthorization(context, adminUser));
 
         await Assert.ThrowsAsync<ValidationException>(async () =>
         {
@@ -101,6 +136,7 @@ public class ReceivingDockManagementTests
         var dbName = Guid.NewGuid().ToString();
         var facilityId = Guid.NewGuid();
         var doorId = Guid.NewGuid();
+        TestCurrentUserContext adminUser;
 
         using (var seed = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName))
         {
@@ -113,11 +149,11 @@ public class ReceivingDockManagementTests
                 DoorType = DockDoorType.Inbound,
                 Status = DockDoorStatus.Active
             });
-            await seed.SaveChangesAsync();
+            adminUser = await SeedStaffAdminAsync(seed, facilityId);
         }
 
-        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, new TestCurrentUserContext { UserType = UserType.Staff }, dbName);
-        var handler = new UpdateDockDoorStatusCommandHandler(context);
+        using var context = TestDbContextFactory.Create(new TestTenantProvider { BypassTenantFilter = true }, adminUser, dbName);
+        var handler = new UpdateDockDoorStatusCommandHandler(context, new WarehouseMasterAuthorization(context, adminUser));
 
         var result = await handler.Handle(new UpdateDockDoorStatusCommand
         {

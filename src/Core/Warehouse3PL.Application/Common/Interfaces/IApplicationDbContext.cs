@@ -28,6 +28,11 @@ public interface IApplicationDbContext
     DbSet<WarehouseZone> WarehouseZones { get; }
     DbSet<Location> Locations { get; }
     DbSet<LocationLock> LocationLocks { get; }
+    DbSet<LocationHierarchyRule> LocationHierarchyRules { get; }
+    DbSet<LocationStorageProfile> LocationStorageProfiles { get; }
+    DbSet<LocationOperationalProfile> LocationOperationalProfiles { get; }
+    DbSet<WarehouseEquipment> WarehouseEquipment { get; }
+    DbSet<LocationEquipmentRequirement> LocationEquipmentRequirements { get; }
 
     DbSet<Item> Items { get; }
     DbSet<ItemBarcode> ItemBarcodes { get; }
@@ -240,6 +245,15 @@ public interface IApplicationDbContext
         CancellationToken cancellationToken = default);
     Task<TResult> ExecuteWithFacilityCalendarLockAsync<TResult>(
         Guid facilityId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithFacilityHierarchyLockAsync<TResult>(
+        Guid facilityId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithLocationLifecycleLockAsync<TResult>(
+        Guid facilityId,
+        Guid locationId,
         Func<Task<TResult>> action,
         CancellationToken cancellationToken = default);
     bool IsRelationalDatabase { get; }

@@ -10,7 +10,12 @@ public class LocationDto
     public Guid? ParentLocationId { get; set; }
     public LocationType LocationType { get; set; }
     public string LocationCode { get; set; } = string.Empty;
+    public string LocationName { get; set; } = string.Empty;
     public string Barcode { get; set; } = string.Empty;
+    public int HierarchyLevel { get; set; } = 1;
+    public string HierarchyPath { get; set; } = string.Empty;
+    public string? Remarks { get; set; }
+    public long ConfigRevision { get; set; } = 1;
 
     public string? AisleCode { get; set; }
     public string? RackCode { get; set; }
@@ -24,7 +29,9 @@ public class LocationDto
     public decimal? MaxVolumeCm3 { get; set; }
     public decimal? MaxWeightKg { get; set; }
 
+    public LocationStatus Status { get; set; } = LocationStatus.Active;
     public bool IsActive { get; set; }
+    public bool IsStorable { get; set; } = true;
     public bool IsPickable { get; set; }
     public bool IsReceiving { get; set; }
     public bool IsDamaged { get; set; }

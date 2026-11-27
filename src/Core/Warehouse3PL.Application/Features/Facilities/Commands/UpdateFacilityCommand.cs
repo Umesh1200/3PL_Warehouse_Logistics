@@ -115,6 +115,51 @@ public sealed class UpdateFacilityCommandHandler : IRequestHandler<UpdateFacilit
                     request.DefaultLegalEntityId,
                     cancellationToken);
 
+            if (facility.IsActive && !request.IsActive)
+            {
+                var hasActiveStock = await _db.StockOnHand
+                    .IgnoreQueryFilters()
+                    .AsNoTracking()
+                    .AnyAsync(s => s.FacilityId == facility.Id &&
+                                   (s.QtyAvailable > 0m || s.QtyAllocated > 0m || s.QtyQuarantined > 0m),
+                        cancellationToken);
+                if (hasActiveStock)
+                {
+                    throw new DomainException(
+                        $"Cannot deactivate facility '{facility.FacilityCode}' while active stock on hand exists.",
+                        "FACILITY_DEACTIVATION_BLOCKED_STOCK");
+                }
+
+                var hasOpenOrders = await _db.OutboundOrders
+                    .IgnoreQueryFilters()
+                    .AsNoTracking()
+                    .AnyAsync(o => o.FacilityId == facility.Id &&
+                                   !o.IsDeleted &&
+                                   o.Status != Domain.Enums.OutboundOrderStatus.Completed &&
+                                   o.Status != Domain.Enums.OutboundOrderStatus.Cancelled,
+                        cancellationToken);
+                if (hasOpenOrders)
+                {
+                    throw new DomainException(
+                        $"Cannot deactivate facility '{facility.FacilityCode}' while open outbound orders exist.",
+                        "FACILITY_DEACTIVATION_BLOCKED_ORDERS");
+                }
+
+                var hasOpenPutaway = await _db.PutawayTasks
+                    .IgnoreQueryFilters()
+                    .AsNoTracking()
+                    .AnyAsync(t => t.FacilityId == facility.Id &&
+                                   t.Status != Domain.Enums.PutawayTaskStatus.Completed &&
+                                   t.Status != Domain.Enums.PutawayTaskStatus.Cancelled,
+                        cancellationToken);
+                if (hasOpenPutaway)
+                {
+                    throw new DomainException(
+                        $"Cannot deactivate facility '{facility.FacilityCode}' while open putaway tasks exist.",
+                        "FACILITY_DEACTIVATION_BLOCKED_TASKS");
+                }
+            }
+
             facility.Name = request.Name.Trim();
             facility.AddressLine1 = string.IsNullOrWhiteSpace(request.AddressLine1) ? null : request.AddressLine1.Trim();
             facility.AddressLine2 = string.IsNullOrWhiteSpace(request.AddressLine2) ? null : request.AddressLine2.Trim();
