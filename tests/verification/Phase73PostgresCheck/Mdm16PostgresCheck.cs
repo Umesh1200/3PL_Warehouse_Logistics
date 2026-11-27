@@ -21,6 +21,7 @@ using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Analytics;
+using Warehouse3PL.Domain.Entities.Billing;
 using Warehouse3PL.Domain.Entities.Facilities;
 using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Entities.Outbound;
@@ -187,7 +188,7 @@ internal static class Mdm16PostgresCheck
                 await ExecAsync(insertCustSql, ("@id", custInferNpId), ("@cid", clientNpId), ("@code", "C16-NP"), ("@name", "PII Hidden Name"), ("@email", "pii-cust@pg16.test"), ("@st", "Bagmati"), ("@zip", "44600"), ("@cc", ""));
                 await ExecAsync(insertCustSql, ("@id", custUnknownId), ("@cid", clientUsId), ("@code", "C16-ZZ"), ("@name", "Unknown Cust"), ("@email", "unk@pg16.test"), ("@st", "Illinois"), ("@zip", "60601"), ("@cc", "ZZZ"));
                 await ExecAsync(insertCustSql, ("@id", custMixedBlankId), ("@cid", clientMixedId), ("@code", "C16-MX"), ("@name", "Mixed Blank Cust"), ("@email", "mix@pg16.test"), ("@st", "Illinois"), ("@zip", "60601"), ("@cc", ""));
-                await ExecAsync(insertCustSql, ("@id", custPiiId), ("@cid", clientNpId), ("@code", "C16-PII"), ("@name", "PII Cust"), ("@email", "p@pg16.test"), ("@st", "Bagmati"), ("@zip", "44600"), ("@cc", "alice.smith@corp.test"));
+                await ExecAsync(insertCustSql, ("@id", custPiiId), ("@cid", clientNpId), ("@code", "C16-PII"), ("@name", "PII Cust"), ("@email", "p@pg16.test"), ("@st", "Bagmati"), ("@zip", "44600"), ("@cc", "a@b.test"));
 
                 // Supplier (blank -> infer US)
                 await ExecAsync("""
@@ -215,24 +216,6 @@ internal static class Mdm16PostgresCheck
                 await ExecAsync(insertAddrSql, ("@id", xbrdAddrId), ("@oid", xbrdOrderId), ("@st", "Illinois"), ("@zip", "60601"), ("@cc", ""));
                 await ExecAsync(insertAddrSql, ("@id", noCustAddrId), ("@oid", noCustOrderId), ("@st", "Illinois"), ("@zip", "60601"), ("@cc", ""));
                 await ExecAsync(insertAddrSql, ("@id", packedAddrId), ("@oid", packedOrderId), ("@st", "Illinois"), ("@zip", "60601"), ("@cc", "USA"));
-
-                // Closed Shipment, BillOfLading, Packed Package, & Issued Invoice snapshots
-                await ExecAsync("""
-                    INSERT INTO shipments (shipment_id, client_id, facility_id, shipment_number, carrier_code, carrier_service_level, status, delivery_status, total_packages_count, total_weight_kg, total_volume_cm3, custody_status, bill_of_lading_number, version, is_deleted, created_at)
-                    VALUES (@sid, @cid, @fid, 'PG16-SHP-1', 'UPS', 'StandardGround', 'Dispatched', 'PendingHandover', 1, 1.0, 100.0, 'Unassigned', 'PG16-BOL-1', 1, false, NOW());
-                    INSERT INTO bills_of_lading (bol_id, client_id, facility_id, shipment_id, bol_number, revision_number, carrier_code, carrier_name, service_level, total_package_count, total_gross_weight_kg, total_volume_cm3, shipper_name, shipper_address_snapshot, consignee_name, consignee_address_snapshot, package_tracking_numbers, document_snapshot_json, prepared_by_user_id, is_deleted, created_at)
-                    VALUES (@bid, @cid, @fid, @sid, 'PG16-BOL-1', 1, 'UPS', 'UPS', 'StandardGround', 1, 1.0, 100.0, 'Shipper', 'Chicago, USA', 'Consignee', '999 Legacy Way, Chicago IL, USA', 'TRK1', '{"country":"USA"}', @uid, false, NOW());
-                    INSERT INTO packages (package_id, client_id, facility_id, outbound_order_id, shipment_id, package_number, status, total_weight_kg, length_cm, width_cm, height_cm, version, is_deleted, created_at)
-                    VALUES (@pid, @cid, @fid, @oid, NULL, 'PG16-PKG-1', 'Packed', 1.0, 10, 10, 10, 1, false, NOW());
-                    """, ("@sid", closedShipmentId), ("@bid", closedBolId), ("@pid", Guid.NewGuid()), ("@oid", packedOrderId), ("@cid", clientUsId), ("@fid", facUsId), ("@uid", Guid.Empty));
-
-                var bpId = Guid.NewGuid();
-                await ExecAsync("""
-                    INSERT INTO billing_periods (billing_period_id, client_id, period_code, period_type, start_date, end_date, status, total_billable_amount, created_at)
-                    VALUES (@bpid, @cid, '2026-11-PG16', 'Monthly', '2026-11-01', '2026-11-30', 'Closed', 100.0, NOW());
-                    INSERT INTO invoices (invoice_id, client_id, facility_id, billing_period_id, invoice_number, status, invoice_date, due_date, payment_terms_days, currency, subtotal_amount, tax_rate, tax_amount, total_amount, paid_amount, credited_amount, outstanding_balance, created_at)
-                    VALUES (@iid, @cid, @fid, @bpid, 'PG16-INV-1', 'Issued', NOW(), NOW() + INTERVAL '30 days', 30, 'USD', 100, 0, 0, 100, 0, 0, 100, NOW());
-                    """, ("@bpid", bpId), ("@iid", closedInvoiceId), ("@cid", clientUsId), ("@fid", facUsId));
 
                 // CarrierContractualSlaPolicies & Historical CarrierSlaComplianceRecord
                 const string insertSlaSql = """
@@ -291,6 +274,77 @@ internal static class Mdm16PostgresCheck
                 await ExecAsync("DELETE FROM configuration_scope_epochs WHERE scope_key IN ('MDM16PRECHECK', 'mdm16precheck');");
             }
 
+            // 2b. Seed Closed Shipment, BillOfLading, HandlingUnit+Packed Package & Issued Invoice snapshots via EF at MDM-1.5 schema
+            await using (var snapDb = CreatePgDb(targetConn))
+            {
+                var huId = Guid.NewGuid();
+                var bpId = Guid.NewGuid();
+                snapDb.HandlingUnits.Add(new HandlingUnit
+                {
+                    Id = huId,
+                    ClientId = clientUsId,
+                    FacilityId = facUsId,
+                    LpnCode = "PG16-HU-1",
+                    UnitType = HandlingUnitType.ShippingCarton,
+                    Status = HandlingUnitStatus.Available
+                });
+                snapDb.Packages.Add(new Package
+                {
+                    Id = Guid.NewGuid(),
+                    ClientId = clientUsId,
+                    FacilityId = facUsId,
+                    OutboundOrderId = packedOrderId,
+                    HandlingUnitId = huId,
+                    PackageNumber = "PG16-PKG-1",
+                    Status = PackageStatus.Packed
+                });
+                snapDb.Shipments.Add(new Shipment
+                {
+                    Id = closedShipmentId,
+                    ClientId = clientUsId,
+                    FacilityId = facUsId,
+                    ShipmentNumber = "PG16-SHP-1",
+                    CarrierCode = "UPS",
+                    Status = ShipmentStatus.Dispatched,
+                    BillOfLadingNumber = "PG16-BOL-1"
+                });
+                snapDb.BillsOfLading.Add(new BillOfLading
+                {
+                    Id = closedBolId,
+                    ClientId = clientUsId,
+                    FacilityId = facUsId,
+                    ShipmentId = closedShipmentId,
+                    BolNumber = "PG16-BOL-1",
+                    CarrierCode = "UPS",
+                    CarrierName = "UPS",
+                    ConsigneeName = "Consignee",
+                    ConsigneeAddressSnapshot = "999 Legacy Way, Chicago IL, USA",
+                    DocumentSnapshotJson = "{\"country\":\"USA\"}"
+                });
+                snapDb.BillingPeriods.Add(new BillingPeriod
+                {
+                    Id = bpId,
+                    ClientId = clientUsId,
+                    PeriodCode = "2026-11",
+                    Name = "Nov 2026",
+                    StartDateUtc = new DateTime(2026, 11, 1, 0, 0, 0, DateTimeKind.Utc),
+                    EndDateUtc = new DateTime(2026, 11, 30, 0, 0, 0, DateTimeKind.Utc)
+                });
+                snapDb.Invoices.Add(new Invoice
+                {
+                    Id = closedInvoiceId,
+                    ClientId = clientUsId,
+                    FacilityId = facUsId,
+                    BillingPeriodId = bpId,
+                    InvoiceNumber = "PG16-INV-1",
+                    Status = InvoiceStatus.Issued,
+                    Currency = "USD",
+                    InvoiceDate = DateTime.UtcNow.AddDays(-2),
+                    DueDate = DateTime.UtcNow.AddDays(28)
+                });
+                await snapDb.SaveChangesAsync();
+            }
+
             // 4. Clean upgrade MDM1_5 -> MDM1_6 -> MDM1_6_R04 against realistic PG rows
             await using (var upDb = CreatePgDb(targetConn))
             {
@@ -325,7 +379,7 @@ internal static class Mdm16PostgresCheck
 
                 var piiAudit = await upDb.CountryNormalizationAudits.SingleAsync(a => a.EntityType == "Customer" && a.EntityId == custPiiId);
                 if (piiAudit.OriginalCountryValue != CountryDiagnosticSanitizer.RedactedPlaceholder ||
-                    piiAudit.Reason.Contains("alice.smith@corp.test", StringComparison.OrdinalIgnoreCase) ||
+                    piiAudit.Reason.Contains("a@b.test", StringComparison.OrdinalIgnoreCase) ||
                     string.IsNullOrWhiteSpace(piiAudit.InitialCorrelationBatchId))
                     throw new InvalidOperationException("PG SQL PII redaction or initial provenance tracking failed.");
 
