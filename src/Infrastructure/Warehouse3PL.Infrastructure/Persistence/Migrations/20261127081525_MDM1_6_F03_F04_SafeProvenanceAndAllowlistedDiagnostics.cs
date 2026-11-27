@@ -125,12 +125,29 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                 DECLARE
                     v_batch CONSTANT VARCHAR(64) := '20261127081525_MDM1_6_F03_F04_SafeProvenance';
                     v_has_profiles BOOLEAN;
+                    v_orig_mdm16_ts TIMESTAMPTZ;
                     r RECORD;
                     v_has_pre_mig_fulfillment BOOLEAN;
                     v_has_post_mig_fulfillment BOOLEAN;
                     v_orig_is_verified_catalog BOOLEAN;
                     v_new_epoch BIGINT;
                 BEGIN
+                    -- 0. Repair sentinel initial_recorded_at_utc (-infinity / 0001-01-01) left when Npgsql mapped DateTime.MinValue to -infinity in 20261127051434
+                    SELECT MIN(recorded_at_utc)
+                    INTO v_orig_mdm16_ts
+                    FROM country_normalization_audits
+                    WHERE correlation_batch_id = '20261126143014_MDM1_6_LegacyCountryNormalization'
+                      AND recorded_at_utc > TIMESTAMPTZ '1970-01-01 00:00:00+00';
+
+                    UPDATE country_normalization_audits
+                    SET initial_recorded_at_utc = CASE
+                            WHEN initial_correlation_batch_id = '20261126143014_MDM1_6_LegacyCountryNormalization'
+                                 AND v_orig_mdm16_ts IS NOT NULL
+                                THEN LEAST(recorded_at_utc, v_orig_mdm16_ts)
+                            ELSE recorded_at_utc
+                        END
+                    WHERE initial_recorded_at_utc <= TIMESTAMPTZ '1970-01-01 00:00:00+00';
+
                     -- 1. F04: Apply fail-closed allowlisted sanitization to all existing audit rows
                     UPDATE country_normalization_audits
                     SET original_country_value = pg_temp.mdm16_f03_sanitize_allowlisted(original_country_value),

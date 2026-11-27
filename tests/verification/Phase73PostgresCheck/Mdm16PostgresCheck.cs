@@ -1074,67 +1074,101 @@ internal static class Mdm16PostgresCheck
                 var migrator = db.GetInfrastructure().GetRequiredService<IMigrator>();
                 await migrator.MigrateAsync(Mdm15Migration);
                 await ReferenceCatalogSeeder.SeedAsync(db);
+            }
 
-                db.Facilities.Add(new Facility { Id = facId, FacilityCode = "F03-US", Name = "F03 US", CountryCode = "USA", StateOrProvince = "Illinois", PostalCode = "60601", Timezone = "America/Chicago", IsActive = true });
-                db.Clients.Add(new Client { Id = clientId, AccountCode = "F03-CL", CompanyName = "F03 Client", Status = ClientStatus.Active });
-                db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientId, FacilityId = facId, Status = FacilityAccessStatus.Active });
-                db.Customers.Add(new Customer { Id = custNamePiiId, ClientId = clientId, CustomerCode = "F03-PII", CustomerName = "John", DefaultCountryCode = "John Doe", DefaultStateOrProvince = "Illinois", DefaultPostalCode = "60601" });
-
-                // Fixture 1: Pre-MDM-1.6 Packed package (Draft order) -> 20261126143014 wrongly mutates USA->US
-                var hu1 = Guid.NewGuid();
-                db.OutboundOrders.AddRange(
-                    new OutboundOrder { Id = ordPrePackedId, ClientId = clientId, FacilityId = facId, OrderNumber = "F03-PRE", OrderType = OutboundOrderType.B2BSalesOrder, Status = OutboundOrderStatus.Draft, CustomerName = "Pre" },
-                    new OutboundOrder { Id = ordPostFulfillId, ClientId = clientId, FacilityId = facId, OrderNumber = "F03-POST", OrderType = OutboundOrderType.B2BSalesOrder, Status = OutboundOrderStatus.Draft, CustomerName = "Post" },
-                    new OutboundOrder { Id = ordAmendedId, ClientId = clientId, FacilityId = facId, OrderNumber = "F03-AMD", OrderType = OutboundOrderType.B2BSalesOrder, Status = OutboundOrderStatus.Draft, CustomerName = "Amd" },
-                    new OutboundOrder { Id = ordHistBlankId, ClientId = clientId, FacilityId = facId, OrderNumber = "F03-BLK", OrderType = OutboundOrderType.B2BSalesOrder, Status = OutboundOrderStatus.Draft, CustomerName = "Blk" },
-                    new OutboundOrder { Id = ordAmbiguousId, ClientId = clientId, FacilityId = facId, OrderNumber = "F03-AMB", OrderType = OutboundOrderType.B2BSalesOrder, Status = OutboundOrderStatus.Draft, CustomerName = "Amb" });
-                db.HandlingUnits.Add(new HandlingUnit { Id = hu1, ClientId = clientId, FacilityId = facId, LpnCode = "F03-HU1", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.Available });
-                db.Packages.Add(new Package { Id = Guid.NewGuid(), ClientId = clientId, FacilityId = facId, OutboundOrderId = ordPrePackedId, HandlingUnitId = hu1, PackageNumber = "F03-PKG1", Status = PackageStatus.Packed });
-                db.ShippingAddresses.AddRange(
-                    new ShippingAddress { Id = addrPrePackedId, OutboundOrderId = ordPrePackedId, RecipientName = "R1", AddressLine1 = "1 St", City = "Chicago", StateOrProvince = "Illinois", PostalCode = "60601", CountryCode = "USA" },
-                    new ShippingAddress { Id = addrPostFulfillId, OutboundOrderId = ordPostFulfillId, RecipientName = "R2", AddressLine1 = "2 St", City = "Chicago", StateOrProvince = "Illinois", PostalCode = "60601", CountryCode = "USA" },
-                    new ShippingAddress { Id = addrAmendedId, OutboundOrderId = ordAmendedId, RecipientName = "R3", AddressLine1 = "3 St", City = "Chicago", StateOrProvince = "Illinois", PostalCode = "60601", CountryCode = "USA" },
-                    new ShippingAddress { Id = addrHistBlankId, OutboundOrderId = ordHistBlankId, RecipientName = "R4", AddressLine1 = "4 St", City = "Chicago", StateOrProvince = "Illinois", PostalCode = "60601", CountryCode = "" },
-                    new ShippingAddress { Id = addrAmbiguousId, OutboundOrderId = ordAmbiguousId, RecipientName = "R5", AddressLine1 = "5 St", City = "Chicago", StateOrProvince = "Illinois", PostalCode = "60601", CountryCode = "US" });
-                await db.SaveChangesAsync();
-
-                // Apply original 20261126143014 migration
-                await migrator.MigrateAsync(Mdm16Migration);
-
-                // Post-MDM-1.6 legitimate events BEFORE R04 + F03 run:
-                // Fixture 2: Legitimate amendment on ordAmendedId -> NP
-                // Fixture 3: Subsequent fulfillment AFTER MDM-1.6 on ordPostFulfillId (package created strictly after initial_recorded_at_utc)
-                // Fixture 4: ordHistBlankId became Completed after MDM-1.6 blank inference
-                // Fixture 5: Ambiguous manual audit on ordAmbiguousId
-                await Task.Delay(50);
-                var hu2 = Guid.NewGuid();
-                db.HandlingUnits.Add(new HandlingUnit { Id = hu2, ClientId = clientId, FacilityId = facId, LpnCode = "F03-HU2", UnitType = HandlingUnitType.ShippingCarton, Status = HandlingUnitStatus.Available });
-                db.Packages.Add(new Package { Id = Guid.NewGuid(), ClientId = clientId, FacilityId = facId, OutboundOrderId = ordPostFulfillId, HandlingUnitId = hu2, PackageNumber = "F03-PKG2", Status = PackageStatus.Packed });
-                var aAmd = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrAmendedId);
-                aAmd.Amend("R3", null, "3 St", null, "Kathmandu", "Bagmati", "44600", "NP", null, null, Guid.Empty, "Legit customer move");
-                var oBlk = await db.OutboundOrders.IgnoreQueryFilters().SingleAsync(o => o.Id == ordHistBlankId);
-                oBlk.Status = OutboundOrderStatus.Completed;
-                db.CountryNormalizationAudits.Add(new CountryNormalizationAudit
+            // Seed pre-MDM-1.6 fixtures directly against the MDM-1.5 schema via Npgsql
+            await using (var conn = new NpgsqlConnection(f03Conn))
+            {
+                await conn.OpenAsync();
+                async Task ExecF03Async(string sql)
                 {
-                    Id = Guid.NewGuid(),
-                    EntityType = "ShippingAddress",
-                    EntityId = addrAmbiguousId,
-                    FieldName = "CountryCode",
-                    OriginalCountryValue = "USA",
-                    NormalizedCountryCode = "US",
-                    NormalizationStatus = CountryNormalizationStatus.Normalized,
-                    PreservedHistoricalValue = false,
-                    Reason = "Normalized to canonical 'US' via CatalogAlias.",
-                    FacilityId = facId,
-                    ClientId = clientId,
-                    CorrelationBatchId = "MANUAL-BATCH",
-                    InitialCorrelationBatchId = "MANUAL-BATCH",
-                    RecordedAtUtc = DateTime.UtcNow.AddMinutes(-5),
-                    InitialRecordedAtUtc = DateTime.UtcNow.AddMinutes(-5)
-                });
-                await db.SaveChangesAsync();
+                    await using var cmd = new NpgsqlCommand(sql, conn);
+                    await cmd.ExecuteNonQueryAsync();
+                }
 
-                // Apply R04 + F03 migrations sequentially
+                var hu1 = Guid.NewGuid();
+                await ExecF03Async($"""
+                    INSERT INTO facilities (facility_id, facility_code, name, address_line1, city, state_or_province, postal_code, country_code, timezone, is_active, created_at, is_deleted)
+                    VALUES ('{facId}', 'F03-US', 'F03 US', '1 Main', 'Chicago', 'Illinois', '60601', 'USA', 'America/Chicago', true, NOW(), false);
+
+                    INSERT INTO clients (client_id, account_code, company_name, status, default_currency, payment_terms_days, created_at, is_deleted)
+                    VALUES ('{clientId}', 'F03-CL', 'F03 Client', 'Active', 'USD', 30, NOW(), false);
+
+                    INSERT INTO client_facility_access (client_id, facility_id, is_primary, status, created_at)
+                    VALUES ('{clientId}', '{facId}', true, 'Active', NOW());
+
+                    INSERT INTO customers (customer_id, client_id, customer_code, customer_name, default_country_code, default_state_or_province, default_postal_code, is_active, created_at, is_deleted)
+                    VALUES ('{custNamePiiId}', '{clientId}', 'F03-PII', 'John', 'John Doe', 'Illinois', '60601', true, NOW(), false);
+
+                    INSERT INTO outbound_orders (order_id, client_id, facility_id, order_number, order_type, status, priority, customer_name, total_lines, total_ordered_units, total_allocated_units, total_picked_units, total_shipped_units, created_at, is_deleted)
+                    VALUES
+                        ('{ordPrePackedId}', '{clientId}', '{facId}', 'F03-PRE', 'B2BSalesOrder', 'Draft', 'Normal', 'Pre', 1, 1, 0, 0, 0, NOW(), false),
+                        ('{ordPostFulfillId}', '{clientId}', '{facId}', 'F03-POST', 'B2BSalesOrder', 'Draft', 'Normal', 'Post', 1, 1, 0, 0, 0, NOW(), false),
+                        ('{ordAmendedId}', '{clientId}', '{facId}', 'F03-AMD', 'B2BSalesOrder', 'Draft', 'Normal', 'Amd', 1, 1, 0, 0, 0, NOW(), false),
+                        ('{ordHistBlankId}', '{clientId}', '{facId}', 'F03-BLK', 'B2BSalesOrder', 'Draft', 'Normal', 'Blk', 1, 1, 0, 0, 0, NOW(), false),
+                        ('{ordAmbiguousId}', '{clientId}', '{facId}', 'F03-AMB', 'B2BSalesOrder', 'Draft', 'Normal', 'Amb', 1, 1, 0, 0, 0, NOW(), false);
+
+                    INSERT INTO handling_units (handling_unit_id, client_id, facility_id, lpn_code, unit_type, status, is_mixed_sku, is_mixed_lot, created_at, is_deleted)
+                    VALUES ('{hu1}', '{clientId}', '{facId}', 'F03-HU1', 'ShippingCarton', 'Available', false, false, NOW(), false);
+
+                    INSERT INTO packages (package_id, client_id, facility_id, outbound_order_id, handling_unit_id, package_number, status, total_units, gross_weight_kg, tare_weight_kg, net_weight_kg, created_at, is_deleted)
+                    VALUES ('{Guid.NewGuid()}', '{clientId}', '{facId}', '{ordPrePackedId}', '{hu1}', 'F03-PKG1', 'Packed', 1, 1, 0, 1, NOW(), false);
+
+                    INSERT INTO shipping_addresses (shipping_address_id, order_id, recipient_name, address_line1, city, state_or_province, postal_code, country_code, is_amended, created_at, is_deleted)
+                    VALUES
+                        ('{addrPrePackedId}', '{ordPrePackedId}', 'R1', '1 St', 'Chicago', 'Illinois', '60601', 'USA', false, NOW(), false),
+                        ('{addrPostFulfillId}', '{ordPostFulfillId}', 'R2', '2 St', 'Chicago', 'Illinois', '60601', 'USA', false, NOW(), false),
+                        ('{addrAmendedId}', '{ordAmendedId}', 'R3', '3 St', 'Chicago', 'Illinois', '60601', 'USA', false, NOW(), false),
+                        ('{addrHistBlankId}', '{ordHistBlankId}', 'R4', '4 St', 'Chicago', 'Illinois', '60601', '', false, NOW(), false),
+                        ('{addrAmbiguousId}', '{ordAmbiguousId}', 'R5', '5 St', 'Chicago', 'Illinois', '60601', 'US', false, NOW(), false);
+                    """);
+            }
+
+            // Apply original 20261126143014 migration
+            await using (var db = CreatePgDb(f03Conn))
+            {
+                var migrator = db.GetInfrastructure().GetRequiredService<IMigrator>();
+                await migrator.MigrateAsync(Mdm16Migration);
+            }
+
+            // Post-MDM-1.6 legitimate events BEFORE R04 + F03 run (executed against Mdm16 schema):
+            // Fixture 2: Legitimate amendment on ordAmendedId -> NP
+            // Fixture 3: Subsequent fulfillment AFTER MDM-1.6 on ordPostFulfillId (package created strictly after initial_recorded_at_utc)
+            // Fixture 4: ordHistBlankId became Completed after MDM-1.6 blank inference
+            // Fixture 5: Ambiguous manual audit on ordAmbiguousId
+            await Task.Delay(100);
+            await using (var conn = new NpgsqlConnection(f03Conn))
+            {
+                await conn.OpenAsync();
+                var hu2 = Guid.NewGuid();
+                await using var cmd = new NpgsqlCommand($"""
+                    INSERT INTO handling_units (handling_unit_id, client_id, facility_id, lpn_code, unit_type, status, is_mixed_sku, is_mixed_lot, created_at, is_deleted)
+                    VALUES ('{hu2}', '{clientId}', '{facId}', 'F03-HU2', 'ShippingCarton', 'Available', false, false, NOW(), false);
+
+                    INSERT INTO packages (package_id, client_id, facility_id, outbound_order_id, handling_unit_id, package_number, status, total_units, gross_weight_kg, tare_weight_kg, net_weight_kg, created_at, is_deleted)
+                    VALUES ('{Guid.NewGuid()}', '{clientId}', '{facId}', '{ordPostFulfillId}', '{hu2}', 'F03-PKG2', 'Packed', 1, 1, 0, 1, NOW(), false);
+
+                    UPDATE shipping_addresses
+                    SET city = 'Kathmandu', state_or_province = 'Bagmati', postal_code = '44600', country_code = 'NP',
+                        is_amended = true, amended_at_utc = NOW(), amendment_reason = 'Legit customer move', updated_at = NOW()
+                    WHERE shipping_address_id = '{addrAmendedId}';
+
+                    UPDATE outbound_orders
+                    SET status = 'Completed', updated_at = NOW()
+                    WHERE order_id = '{ordHistBlankId}';
+
+                    INSERT INTO country_normalization_audits (audit_id, entity_type, entity_id, field_name, original_country_value, normalized_country_code, normalization_status, was_inferred_from_parent, preserved_historical_value, reason, facility_id, client_id, correlation_batch_id, recorded_at_utc)
+                    VALUES ('{Guid.NewGuid()}', 'ShippingAddress', '{addrAmbiguousId}', 'CountryCode', 'USA', 'US', 'Normalized', false, false, 'Normalized to canonical ''US'' via CatalogAlias.', '{facId}', '{clientId}', 'MANUAL-BATCH', NOW() - INTERVAL '5 minutes')
+                    ON CONFLICT (entity_type, entity_id, field_name) DO UPDATE
+                    SET original_country_value = 'USA', normalized_country_code = 'US', correlation_batch_id = 'MANUAL-BATCH', recorded_at_utc = NOW() - INTERVAL '5 minutes';
+                    """, conn);
+                await cmd.ExecuteNonQueryAsync();
+            }
+
+            // Apply R04 + F03 migrations sequentially and verify all F03/F04 assertions
+            await using (var db = CreatePgDb(f03Conn))
+            {
+                var migrator = db.GetInfrastructure().GetRequiredService<IMigrator>();
                 await migrator.MigrateAsync();
 
                 var rPre = await db.ShippingAddresses.IgnoreQueryFilters().SingleAsync(a => a.Id == addrPrePackedId);
@@ -1171,27 +1205,41 @@ internal static class Mdm16PostgresCheck
             var pCustNamePii = Guid.NewGuid();
             var pSupInfer = Guid.NewGuid();
 
-            async Task SeedLegacyParityRowsAsync(ApplicationDbContext ctx)
-            {
-                ctx.Facilities.AddRange(
-                    new Facility { Id = pFacUs, FacilityCode = "PAR-US", Name = "Par US", CountryCode = "USA", StateOrProvince = "Illinois", PostalCode = "60601", Timezone = "America/Chicago", IsActive = true },
-                    new Facility { Id = pFacConflict, FacilityCode = "PAR-CNF", Name = "Par Conflict", CountryCode = "US", StateOrProvince = "Bagmati", PostalCode = "44600", Timezone = "Asia/Kathmandu", IsActive = true });
-                ctx.Clients.Add(new Client { Id = pClientUs, AccountCode = "PAR-CL", CompanyName = "Par Client", Status = ClientStatus.Active });
-                ctx.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = pClientUs, FacilityId = pFacUs, Status = FacilityAccessStatus.Active });
-                ctx.Customers.AddRange(
-                    new Customer { Id = pCustInfer, ClientId = pClientUs, CustomerCode = "PAR-C1", CustomerName = "C1", DefaultCountryCode = "", DefaultStateOrProvince = "Illinois", DefaultPostalCode = "60601" },
-                    new Customer { Id = pCustNamePii, ClientId = pClientUs, CustomerCode = "PAR-C2", CustomerName = "C2", DefaultCountryCode = "Jane Roe", DefaultStateOrProvince = "Illinois", DefaultPostalCode = "60601" });
-                ctx.Suppliers.Add(new Supplier { Id = pSupInfer, ClientId = pClientUs, SupplierCode = "PAR-S1", SupplierName = "S1", Country = null, State = "Illinois", PostalCode = "60601" });
-                await ctx.SaveChangesAsync();
-            }
-
-            // DB A: Pure SQL migration path (MDM1_5 -> seed -> latest)
+            // DB A: Pure SQL migration path (MDM1_5 -> seed via raw SQL -> latest)
             await using (var sDb = CreatePgDb(sqlConn))
             {
                 var mig = sDb.GetInfrastructure().GetRequiredService<IMigrator>();
                 await mig.MigrateAsync(Mdm15Migration);
                 await ReferenceCatalogSeeder.SeedAsync(sDb);
-                await SeedLegacyParityRowsAsync(sDb);
+            }
+            await using (var conn = new NpgsqlConnection(sqlConn))
+            {
+                await conn.OpenAsync();
+                await using var cmd = new NpgsqlCommand($"""
+                    INSERT INTO facilities (facility_id, facility_code, name, address_line1, city, state_or_province, postal_code, country_code, timezone, is_active, created_at, is_deleted)
+                    VALUES
+                        ('{pFacUs}', 'PAR-US', 'Par US', '1 Main', 'Chicago', 'Illinois', '60601', 'USA', 'America/Chicago', true, NOW(), false),
+                        ('{pFacConflict}', 'PAR-CNF', 'Par Conflict', '2 Main', 'Kathmandu', 'Bagmati', '44600', 'US', 'Asia/Kathmandu', true, NOW(), false);
+
+                    INSERT INTO clients (client_id, account_code, company_name, status, default_currency, payment_terms_days, created_at, is_deleted)
+                    VALUES ('{pClientUs}', 'PAR-CL', 'Par Client', 'Active', 'USD', 30, NOW(), false);
+
+                    INSERT INTO client_facility_access (client_id, facility_id, is_primary, status, created_at)
+                    VALUES ('{pClientUs}', '{pFacUs}', true, 'Active', NOW());
+
+                    INSERT INTO customers (customer_id, client_id, customer_code, customer_name, default_country_code, default_state_or_province, default_postal_code, is_active, created_at, is_deleted)
+                    VALUES
+                        ('{pCustInfer}', '{pClientUs}', 'PAR-C1', 'C1', '', 'Illinois', '60601', true, NOW(), false),
+                        ('{pCustNamePii}', '{pClientUs}', 'PAR-C2', 'C2', 'Jane Roe', 'Illinois', '60601', true, NOW(), false);
+
+                    INSERT INTO suppliers (supplier_id, client_id, supplier_code, supplier_name, country, state, postal_code, is_active, created_at, is_deleted)
+                    VALUES ('{pSupInfer}', '{pClientUs}', 'PAR-S1', 'S1', NULL, 'Illinois', '60601', true, NOW(), false);
+                    """, conn);
+                await cmd.ExecuteNonQueryAsync();
+            }
+            await using (var sDb = CreatePgDb(sqlConn))
+            {
+                var mig = sDb.GetInfrastructure().GetRequiredService<IMigrator>();
                 await mig.MigrateAsync();
             }
 
@@ -1201,7 +1249,16 @@ internal static class Mdm16PostgresCheck
                 var mig = cDb.GetInfrastructure().GetRequiredService<IMigrator>();
                 await mig.MigrateAsync();
                 await ReferenceCatalogSeeder.SeedAsync(cDb);
-                await SeedLegacyParityRowsAsync(cDb);
+                cDb.Facilities.AddRange(
+                    new Facility { Id = pFacUs, FacilityCode = "PAR-US", Name = "Par US", CountryCode = "USA", StateOrProvince = "Illinois", PostalCode = "60601", Timezone = "America/Chicago", IsActive = true },
+                    new Facility { Id = pFacConflict, FacilityCode = "PAR-CNF", Name = "Par Conflict", CountryCode = "US", StateOrProvince = "Bagmati", PostalCode = "44600", Timezone = "Asia/Kathmandu", IsActive = true });
+                cDb.Clients.Add(new Client { Id = pClientUs, AccountCode = "PAR-CL", CompanyName = "Par Client", Status = ClientStatus.Active });
+                cDb.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = pClientUs, FacilityId = pFacUs, Status = FacilityAccessStatus.Active });
+                cDb.Customers.AddRange(
+                    new Customer { Id = pCustInfer, ClientId = pClientUs, CustomerCode = "PAR-C1", CustomerName = "C1", DefaultCountryCode = "", DefaultStateOrProvince = "Illinois", DefaultPostalCode = "60601" },
+                    new Customer { Id = pCustNamePii, ClientId = pClientUs, CustomerCode = "PAR-C2", CustomerName = "C2", DefaultCountryCode = "Jane Roe", DefaultStateOrProvince = "Illinois", DefaultPostalCode = "60601" });
+                cDb.Suppliers.Add(new Supplier { Id = pSupInfer, ClientId = pClientUs, SupplierCode = "PAR-S1", SupplierName = "S1", Country = null, State = "Illinois", PostalCode = "60601" });
+                await cDb.SaveChangesAsync();
                 await new LegacyCountryNormalizationService(cDb).BackfillAllAsync("PARITY-CS");
             }
 
