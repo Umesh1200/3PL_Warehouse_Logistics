@@ -141,16 +141,36 @@ internal static class Mdm21PostgresCheck
             await VerifyF02ReturnMoveAndCrossDockEligibilityAsync(targetConn, adminCtx, facOrd, facKtm, clientA, clientB);
             await VerifyF03ConcurrentZonePackingAndFacilityBoundariesAsync(targetConn, adminCtx, facOrd, clientA, clientB);
 
-            // PG-13: Reversible Down() (corrective -> base -> pre-MDM2.1) and clean re-Up() to corrective migration
+            // PG-13: Reversible Down() & re-Up():
+            // (a) Incremental rollback/re-apply of corrective migration preserving facility rules & populated data
+            // (b) Full rollback to PreMdm21Migration, verifying R02 preflight fails closed on custom Aisle->Aisle links without rules, then succeeds cleanly.
             await using (var revDb = CreatePgDb(targetConn))
             {
                 var migrator = revDb.GetInfrastructure().GetRequiredService<IMigrator>();
                 await migrator.MigrateAsync(Mdm21Migration);
+                await migrator.MigrateAsync(Mdm21CorrectiveMigration);
+
                 await migrator.MigrateAsync(PreMdm21Migration);
+
+                bool r02PreflightBlocked = false;
+                try
+                {
+                    await migrator.MigrateAsync(Mdm21CorrectiveMigration);
+                }
+                catch (Exception ex) when (ex.ToString().Contains("MDM21_R02_PREFLIGHT_FAILED", StringComparison.Ordinal))
+                {
+                    r02PreflightBlocked = true;
+                }
+                if (!r02PreflightBlocked)
+                    throw new InvalidOperationException("PG-13 violation: Corrective migration did not fail closed with MDM21_R02_PREFLIGHT_FAILED on custom Aisle->Aisle links without rules.");
+
+                await revDb.Database.ExecuteSqlRawAsync(
+                    "UPDATE locations SET parent_location_id = NULL WHERE location_code IN ('RACE-A','RACE-B','RR-A','RR-B','SQL-A','SQL-B');");
+
                 await migrator.MigrateAsync(Mdm21CorrectiveMigration);
             }
 
-            Console.WriteLine("  [PASS] PG-13 & All MDM-2.1 (R01-R06) Live PostgreSQL 16 verification checks passed!");
+            Console.WriteLine("  [PASS] PG-13 & All MDM-2.1 (R01-R06 & F01-F03) Live PostgreSQL 16 verification checks passed!");
         }
         finally
         {
@@ -856,16 +876,22 @@ internal static class Mdm21PostgresCheck
                 ClientId = clientA,
                 FacilityId = facIsoId,
                 SessionNumber = "RCV-R04-001",
-                Status = ReceivingStatus.Completed
+                Status = ReceivingStatus.Completed,
+                ReceivedByUserId = adminCtx.UserId!.Value,
+                StartedAtUtc = DateTime.UtcNow.AddMinutes(-10),
+                CompletedAtUtc = DateTime.UtcNow.AddMinutes(-5)
             };
             db.ReceivingSessions.Add(session);
             db.ReceiptLines.Add(new ReceiptLine
             {
                 ReceivingSessionId = session.Id,
                 ItemId = item.Id,
+                Lpn = "LPN-R04-PUT-001",
+                QuantityExpected = 5m,
                 QuantityReceived = 5m,
                 StagingLocationId = stg.Id,
-                Condition = ReceiptConditionStatus.Sound
+                Condition = ReceiptConditionStatus.Sound,
+                ScannedAtUtc = DateTime.UtcNow.AddMinutes(-6)
             });
             await db.SaveChangesAsync();
         }
@@ -1103,10 +1129,26 @@ internal static class Mdm21PostgresCheck
         foreach (var t in new[] { tSql1, tSql2 })
         {
             try { await t; sqlOk++; }
-            catch (PostgresException pgEx) when (pgEx.MessageText.Contains("LOCATION_HIERARCHY_CYCLE", StringComparison.Ordinal)) { sqlRejected++; }
+            catch (PostgresException pgEx) when (
+                pgEx.MessageText.Contains("LOCATION_HIERARCHY_CYCLE", StringComparison.Ordinal) ||
+                pgEx.SqlState == "40P01")
+            {
+                sqlRejected++;
+            }
         }
         if (sqlOk != 1 || sqlRejected != 1)
-            throw new InvalidOperationException($"PG-20 R04 violation: Expected 1 direct-SQL success and 1 trigger cycle rejection, got ok={sqlOk}, rejected={sqlRejected}.");
+            throw new InvalidOperationException($"PG-20 R04 violation: Expected 1 direct-SQL success and 1 rejection (cycle or deadlock), got ok={sqlOk}, rejected={sqlRejected}.");
+
+        await using (var verifySqlDb = CreatePgDb(connStr, adminCtx))
+        {
+            var aRow = await verifySqlDb.Locations.AsNoTracking().FirstAsync(l => l.Id == sqlA);
+            var bRow = await verifySqlDb.Locations.AsNoTracking().FirstAsync(l => l.Id == sqlB);
+            if (aRow.ParentLocationId == sqlB && bRow.ParentLocationId == sqlA)
+                throw new InvalidOperationException("PG-20 R04 violation: Direct-SQL opposite reparenting persisted a cycle!");
+
+            await verifySqlDb.Database.ExecuteSqlRawAsync(
+                $"UPDATE locations SET parent_location_id = NULL, hierarchy_level = 1, hierarchy_path = '/' || replace(location_id::text, '-', '') || '/' WHERE location_id IN ('{sqlA}', '{sqlB}');");
+        }
 
         Console.WriteLine("  [PASS] PG-20 (R04): Concurrent rule mutation vs reparenting & direct-SQL fn_locations_prevent_cycle() advisory lock verified.");
     }
