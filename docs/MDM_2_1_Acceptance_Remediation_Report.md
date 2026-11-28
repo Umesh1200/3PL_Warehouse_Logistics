@@ -247,3 +247,38 @@ sequenceDiagram
 - **New Unit & Service Regressions:** `tests/Warehouse3PL.UnitTests/Facilities/Mdm21ClosureF01F03Tests.cs` (+14 test cases covering F01 legacy zone/facility guards, F02-A return posting, F02-B move parity, F02-C cross-dock eligibility, F03-B packing station lifecycle).
 - **New Live PostgreSQL 16 Regressions (`PG-21`–`PG-30`):** Added to `tests/verification/Phase73PostgresCheck/Mdm21PostgresCheck.cs` (preserving `PG-1`–`PG-20` and `PG-13` rollback/re-apply).
 
+---
+
+## 10. Final Targeted Closure (`MDM21-F02-R01` & `MDM21-F03-R01`)
+
+Following independent review of `a0cdf23cf6070559178c04ddf675fb9d46a1251f` (which accepted `F01`, `F02-B`, and `F03-B`), the final two closure blockers (`F02-R01` and `F03-R01`) were closed without modifying any existing migration or redesigning the warehouse architecture.
+
+### 10.1 Exact Source Changes
+
+| Finding | Summary of Fix | Source Paths |
+| :--- | :--- | :--- |
+| **F02-R01-A (Projected-State Return Validation & Duplicate Serialization)** | Added `PutawaySafetyValidator.ValidateProjectedBatchSafetyAndCapacityAsync` to validate cumulative projected inventory per destination across the entire return batch (combined weight, combined volume, mixed-SKU including empty bins with `AllowMixedSku = false`, mixed-lot, dedicated-client, temperature compatibility, HU limit). Wrapped `ReturnReceivingService.PostReturnInventoryAsync` inside `ExecuteInTransactionAsync` with `AcquireScopedIdempotencyLockAsync("RETURN_POST", ...)` + in-transaction session re-read to prevent concurrent duplicate posting, fail-closed `EntityNotFoundException` on missing `Item` records, and deterministic `AcquireMultiLocationExecutionLocksAsync`. | `src/Core/Warehouse3PL.Application/Features/Putaway/PutawaySafetyValidator.cs`, `src/Infrastructure/Warehouse3PL.Infrastructure/Services/Shipping/ReturnReceivingService.cs` |
+| **F02-R01-B (Cross-Dock Structural & Storage-Profile Eligibility)** | Explicitly rejected structural container types (`Facility`, `Zone`, `Aisle`, `Rack`, `ShelfLevel`, `Mezzanine`, `Cantilever`, `PackingStation`) regardless of contradictory capability flags (`IsReceiving = true`). Preserved legitimate `StagingLane` / `DockDoor` transient workflows (enforcing active zone and dedicated-client compatibility) and enforced full `PutawaySafetyValidator.ValidateDestinationSafetyAndCapacityAsync` on permanent storage targets (`Bin`, `BulkFloor`). | `src/Core/Warehouse3PL.Application/Features/CrossDock/Tasks/Commands/ConfirmCrossDockTask/ConfirmCrossDockTaskCommand.cs` |
+| **F03-R01-A (Stable Location-to-Zone Membership Locking)** | Hardened `AcquirePutawayExecutionLocksAsync`, `ExecuteWithLocationLifecycleLockAsync`, and new `AcquireMultiLocationExecutionLocksAsync` to verify `actualZoneId == observedZoneId` **after** acquiring `LOCATION_LIFECYCLE(EX)` + `SELECT ... FOR UPDATE`. If a concurrent move/update changed zone membership in the pre-lock window, throws `ZoneMembershipChangedException` (never acquires out-of-order locks); `ExecuteInTransactionAsync` and `ExecuteWithLocationLifecycleLockAsync` roll back cleanly, clear change tracker, and retry the full transaction (up to 5 attempts) with the refreshed canonical lock scope (`FACILITY_LIFECYCLE(SH)` → sorted `ZONE_LIFECYCLE(SH)` → sorted `LOCATION_LIFECYCLE(EX)`). | `src/Core/Warehouse3PL.Application/Common/Interfaces/IApplicationDbContext.cs`, `src/Infrastructure/Warehouse3PL.Infrastructure/Persistence/ApplicationDbContext.cs` |
+| **F03-R01-B (`CompleteReceivingSessionCommand` Lifecycle Integration)** | Serialized completion via `AcquireScopedIdempotencyLockAsync("RCV_COMPLETE", ...)` inside `ExecuteInTransactionAsync`, acquired `AcquireMultiLocationExecutionLocksAsync` across all resolved staging destinations, revalidated active facility (`EnsureFacilityIsActiveAsync`), re-read and validated every destination under lock (same-facility, active/unlocked/undamaged, `LocationType.StagingLane && IsReceiving`, active zone, dedicated-client compatibility), rejected stale/deactivated receipt-line staging assignments before mutating ASN/PO/Stock/Ledger, and protected automatic staging provisioning under `ExecuteWithFacilityHierarchyLockAsync` with `LocationHierarchyRuleEvaluator.ValidatePlacementAsync`, derived `HierarchyLevel`/`HierarchyPath`, and permanent normalized code/barcode collision handling. | `src/Core/Warehouse3PL.Application/Features/Inbound/Receiving/Commands/CompleteReceivingSession/CompleteReceivingSessionCommand.cs` |
+
+### 10.2 Regression Assertions & Live PostgreSQL Coverage (`PG-31`–`PG-36`)
+
+- **Unit & Service Regressions (`tests/Warehouse3PL.UnitTests/Facilities/Mdm21FinalClosureF02R01F03R01Tests.cs`):**
+  - Cumulative return batch weight/volume/mixed-SKU rejection + valid multi-line posting.
+  - Cross-dock rejection of `Aisle(IsReceiving=true)`, `Rack(IsReceiving=true)`, and permanent `Bin(IsPutawayAllowed=false)` + valid staging completion.
+  - `CompleteReceivingSessionCommand` stale deactivated staging rejection + safe auto-provisioning metadata verification.
+- **Live PostgreSQL 16 Regressions (`tests/verification/Phase73PostgresCheck/Mdm21PostgresCheck.cs`, preserving `PG-1`–`PG-30`):**
+  - `PG-31`: Multi-line return combined weight, combined volume, empty-bin `AllowMixedSku=false`, zero leaked stock/ledger on rejection, and valid multi-line posting.
+  - `PG-32`: Concurrent duplicate `PostReturnInventoryAsync` on the same return session with `Barrier(2)` → exactly 1 success, 1 `InvalidDomainStateException`, exactly 1 committed inventory/ledger effect.
+  - `PG-33`: Cross-dock rejects `Aisle(IsReceiving=true)`, `Rack(IsReceiving=true)`, and `Bin(IsPutawayAllowed=false)`, then completes cleanly on valid `StagingLane`.
+  - `PG-34`: Deterministic 4-step stale-zone race (`Transfer/Profile observes Zone A` → `MoveLocation A→B commits` → `Transfer/Profile resumes, detects stale zone, rolls back & retries` → `Zone B dedication to Client B runs concurrently`) for **both** `TransferInventoryCommand` (Part A) and `UpsertLocationStorageProfileCommand` (Part B) — asserts zero conflicting inventory or profile ownership persisted.
+  - `PG-35`: `CompleteReceivingSessionCommand` rejects deactivated receipt-line staging without stock/ledger mutation + safe automatic staging provisioning creates valid `StagingLane` with `HierarchyLevel = 1`, `HierarchyPath`, and normalized identifiers.
+  - `PG-36`: Concurrent `CompleteReceivingSessionCommand` vs (a) staging deactivation, (b) incompatible Client-B zone dedication, and (c) facility deactivation with `Barrier(2)` on independent PostgreSQL connections.
+
+### 10.3 Migration Compatibility & Remaining Limitations
+
+- **Zero Schema Changes:** Existing accepted migrations `20261127125902_MDM2_1_WarehouseMasterAndLocationHierarchy` and `20261127150334_MDM2_1_R01_R06_ConcurrencyAndLifecycleGuards` remain untouched.
+- **Limitations:** `MaxConcurrentSessions > 1`, `LocationEquipmentRequirement.IsMandatory = true`, and per-bin thermal/hazmat overrides (`MDM-2.4`) remain explicitly deferred; stale-zone retry is bounded to 5 full-transaction retries before surfacing `ConcurrencyException` to the caller.
+
+

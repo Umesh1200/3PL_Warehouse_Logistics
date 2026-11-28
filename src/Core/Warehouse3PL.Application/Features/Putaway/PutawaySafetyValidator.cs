@@ -258,4 +258,172 @@ public static class PutawaySafetyValidator
             }
         }
     }
+
+    /// <summary>
+    /// Validates the cumulative projected inventory state of a multi-line incoming batch targeting a single destination
+    /// (MDM21-F02-R01). Accounts for existing stock PLUS all incoming lines in the batch for weight, volume,
+    /// mixed-SKU, mixed-lot, dedicated-client, temperature compatibility, and handling-unit capacity.
+    /// </summary>
+    public static async Task ValidateProjectedBatchSafetyAndCapacityAsync(
+        IApplicationDbContext context,
+        Location destination,
+        Guid clientId,
+        IReadOnlyList<(Item Item, decimal Quantity, Guid? LotId)> incomingLines,
+        CancellationToken cancellationToken,
+        int incomingHandlingUnitCount = 0)
+    {
+        if (incomingLines == null || incomingLines.Count == 0)
+        {
+            return;
+        }
+
+        if (destination.IsDeleted || !destination.IsActive || destination.Status != LocationStatus.Active)
+        {
+            throw new ValidationException(
+                nameof(destination),
+                $"Destination location '{destination.LocationCode}' is not active (status: {destination.Status}).");
+        }
+
+        if (!destination.IsStorable)
+        {
+            throw new ValidationException(
+                nameof(destination),
+                $"Destination location '{destination.LocationCode}' is not marked as storable.");
+        }
+
+        if (destination.IsLocked || destination.IsDamaged)
+        {
+            throw new ValidationException(
+                nameof(destination),
+                $"Destination location '{destination.LocationCode}' is locked or damaged and cannot accept inventory.");
+        }
+
+        if (destination.Zone?.DedicatedClientId is Guid zoneClientId && zoneClientId != clientId)
+        {
+            throw new ValidationException(
+                nameof(destination),
+                $"Destination zone '{destination.Zone.ZoneCode}' is dedicated to another client and cannot accept inventory for client '{clientId}'.");
+        }
+
+        var storageProfile = destination.StorageProfile ?? await context.LocationStorageProfiles
+            .AsNoTracking()
+            .FirstOrDefaultAsync(p => p.Id == destination.Id && p.FacilityId == destination.FacilityId, cancellationToken);
+
+        if (storageProfile != null)
+        {
+            if (!storageProfile.IsPutawayAllowed)
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Putaway is disallowed by storage profile on location '{destination.LocationCode}'.");
+            }
+
+            if (storageProfile.DedicatedClientId.HasValue && storageProfile.DedicatedClientId.Value != clientId)
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Destination location '{destination.LocationCode}' is dedicated to another client.");
+            }
+        }
+
+        foreach (var (item, _, _) in incomingLines)
+        {
+            if (item.ClientId != clientId)
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Item '{item.Sku}' does not belong to client '{clientId}'.");
+            }
+
+            var effectiveRule = await ResolveEffectiveRuleAsync(context, clientId, destination.FacilityId, item, cancellationToken);
+            var allowsDynamicOverflow = effectiveRule?.AllowDynamicOverflow == true;
+
+            if (!IsZoneTemperatureCompatible(destination.Zone, item, destination, allowsDynamicOverflow, out var failureReason))
+            {
+                throw new ValidationException(nameof(destination), failureReason!);
+            }
+        }
+
+        bool needsStockCheck = destination.MaxWeightKg.HasValue ||
+                               destination.MaxVolumeCm3.HasValue ||
+                               (storageProfile != null && (!storageProfile.AllowMixedSku || !storageProfile.AllowMixedLot));
+
+        if (needsStockCheck)
+        {
+            var existingStocks = await context.StockOnHand
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Include(s => s.Item)
+                .Where(s => s.FacilityId == destination.FacilityId && s.LocationId == destination.Id)
+                .ToListAsync(cancellationToken);
+
+            var activeExisting = existingStocks.Where(s => s.TotalQuantity > 0m).ToList();
+            var positiveIncoming = incomingLines.Where(l => l.Quantity > 0m).ToList();
+
+            if (storageProfile != null && !storageProfile.AllowMixedSku)
+            {
+                var projectedSkus = activeExisting.Select(s => s.ItemId)
+                    .Concat(positiveIncoming.Select(l => l.Item.Id))
+                    .Distinct()
+                    .Count();
+                if (projectedSkus > 1)
+                {
+                    throw new ValidationException(
+                        nameof(destination),
+                        $"Destination location '{destination.LocationCode}' does not allow mixed SKUs (projected distinct SKUs: {projectedSkus}).");
+                }
+            }
+
+            if (storageProfile != null && !storageProfile.AllowMixedLot)
+            {
+                var projectedLots = activeExisting.Select(s => s.LotId)
+                    .Concat(positiveIncoming.Select(l => l.LotId))
+                    .Distinct()
+                    .Count();
+                if (projectedLots > 1)
+                {
+                    throw new ValidationException(
+                        nameof(destination),
+                        $"Destination location '{destination.LocationCode}' does not allow mixed lots (projected distinct lots: {projectedLots}).");
+                }
+            }
+
+            var currentWeight = activeExisting.Sum(s => s.TotalQuantity * s.Item.WeightKg);
+            var incomingWeight = positiveIncoming.Sum(l => l.Quantity * l.Item.WeightKg);
+            if (destination.MaxWeightKg.HasValue && (currentWeight + incomingWeight) > destination.MaxWeightKg.Value)
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Destination location '{destination.LocationCode}' weight limit ({destination.MaxWeightKg.Value} kg) would be exceeded by cumulative batch (current: {currentWeight} kg, incoming batch: {incomingWeight} kg).");
+            }
+
+            var currentVolume = activeExisting.Sum(s => s.TotalQuantity * ResolveItemVolumeCm3(s.Item));
+            var incomingVolume = positiveIncoming.Sum(l => l.Quantity * ResolveItemVolumeCm3(l.Item));
+            if (destination.MaxVolumeCm3.HasValue && (currentVolume + incomingVolume) > destination.MaxVolumeCm3.Value)
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Destination location '{destination.LocationCode}' volume limit ({destination.MaxVolumeCm3.Value} cm3) would be exceeded by cumulative batch (current: {currentVolume} cm3, incoming batch: {incomingVolume} cm3).");
+            }
+        }
+
+        if (storageProfile?.MaxHandlingUnits is int maxHusLimit)
+        {
+            var activeHuCount = await context.HandlingUnits
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .CountAsync(hu => hu.FacilityId == destination.FacilityId &&
+                                  hu.CurrentLocationId == destination.Id &&
+                                  !hu.IsDeleted,
+                    cancellationToken);
+
+            var projectedHus = activeHuCount + Math.Max(0, incomingHandlingUnitCount);
+            if (projectedHus > maxHusLimit || (incomingHandlingUnitCount == 0 && activeHuCount > maxHusLimit))
+            {
+                throw new ValidationException(
+                    nameof(destination),
+                    $"Destination location '{destination.LocationCode}' handling-unit limit ({maxHusLimit}) would be exceeded (current: {activeHuCount}, incoming: {incomingHandlingUnitCount}).");
+            }
+        }
+    }
 }

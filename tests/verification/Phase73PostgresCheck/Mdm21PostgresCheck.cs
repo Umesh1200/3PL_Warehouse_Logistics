@@ -10,6 +10,7 @@ using Warehouse3PL.Application.Features.CrossDock.Tasks.Commands.ConfirmCrossDoc
 using Warehouse3PL.Application.Features.Facilities.Commands;
 using Warehouse3PL.Application.Features.Inbound.DockManagement.DockDoors.Commands.CreateDockDoor;
 using Warehouse3PL.Application.Features.Inbound.DockManagement.DockDoors.Commands.UpdateDockDoorStatus;
+using Warehouse3PL.Application.Features.Inbound.Receiving.Commands.CompleteReceivingSession;
 using Warehouse3PL.Application.Features.Inventory.Commands.TransferInventory;
 using Warehouse3PL.Application.Features.Locations.Commands.CreateLocation;
 using Warehouse3PL.Application.Features.Locations.Commands.LockLocation;
@@ -140,6 +141,11 @@ internal static class Mdm21PostgresCheck
             await VerifyF01AggregateGuardsAsync(targetConn, adminCtx, clientA);
             await VerifyF02ReturnMoveAndCrossDockEligibilityAsync(targetConn, adminCtx, facOrd, facKtm, clientA, clientB);
             await VerifyF03ConcurrentZonePackingAndFacilityBoundariesAsync(targetConn, adminCtx, facOrd, clientA, clientB);
+
+            // PG-31..PG-36 (MDM21-F02-R01 & F03-R01): Projected-state return batch, concurrent duplicate return post,
+            // cross-dock structural IsReceiving=true + storage profile, deterministic stale-zone retry race, receiving lifecycle races
+            await VerifyF02R01ReturnBatchAndCrossDockAsync(targetConn, adminCtx, facOrd, clientA);
+            await VerifyF03R01StaleZoneMembershipAndReceivingLifecycleAsync(targetConn, adminCtx, facOrd, clientA, clientB);
 
             // PG-13: Reversible Down() & re-Up():
             // (a) Incremental rollback/re-apply of corrective migration preserving facility rules & populated data
@@ -1661,6 +1667,448 @@ internal static class Mdm21PostgresCheck
         }
 
         Console.WriteLine("  [PASS] PG-26, PG-27, PG-28 & PG-29 (F03): Concurrent zone dedication vs transfer/profile, PackingExecutionService vs station deactivation, and facility deactivation vs location creation verified on live PostgreSQL.");
+    }
+
+    private static async Task<Guid> SeedPgTwoLineReturnAsync(
+        ApplicationDbContext db, Guid facId, Guid clientId, Guid userId, Item item1, decimal qty1, Item item2, decimal qty2)
+    {
+        var origOrder = new OutboundOrder { ClientId = clientId, FacilityId = facId, OrderNumber = $"ORD-{Guid.NewGuid():N}"[..16], CustomerName = "PG31 Cust", Status = OutboundOrderStatus.Completed };
+        var origHu = new HandlingUnit { ClientId = clientId, FacilityId = facId, LpnCode = $"LPN-{Guid.NewGuid():N}"[..16], UnitType = HandlingUnitType.Pallet };
+        var origPkg = new Package { ClientId = clientId, FacilityId = facId, OutboundOrderId = origOrder.Id, HandlingUnitId = origHu.Id, PackageNumber = $"PKG-{Guid.NewGuid():N}"[..16], TrackingNumber = $"TRK-{Guid.NewGuid():N}"[..16], Status = PackageStatus.Loaded };
+        var retAuth = ReturnAuthorization.Create(clientId, facId, facId, origOrder.Id, null, origPkg.Id, null, $"RA-{Guid.NewGuid():N}"[..12], ReturnReason.DamagedInTransit, "PG31", userId, $"RMA-{Guid.NewGuid():N}"[..12], DateTime.UtcNow.AddDays(7));
+        var retShip = new ReturnShipment { ClientId = clientId, ReturnAuthorizationId = retAuth.Id, OrderId = origOrder.Id, PackageId = origPkg.Id, OriginFacilityId = facId, DestinationFacilityId = facId, CarrierCode = "FEDEX", TrackingNumber = origPkg.TrackingNumber, AuthorizedByUserId = userId, Status = ReturnShipmentStatus.DeliveredAtWarehouse, DeliveredAtWarehouseUtc = DateTime.UtcNow.AddHours(-1) };
+        var handoff = ReturnInboundHandoff.Create(clientId, facId, retShip.Id, retAuth.Id, origPkg.Id, origOrder.Id, $"HND-{Guid.NewGuid():N}"[..14], retAuth.RmaNumber!, retShip.TrackingNumber, retShip.CarrierCode, DateTime.UtcNow.AddHours(-1), "D-1", "Arrived");
+
+        db.OutboundOrders.Add(origOrder);
+        db.HandlingUnits.Add(origHu);
+        db.Packages.Add(origPkg);
+        db.ReturnAuthorizations.Add(retAuth);
+        db.ReturnShipments.Add(retShip);
+        db.ReturnInboundHandoffs.Add(handoff);
+
+        var session = new ReturnReceivingSession
+        {
+            ClientId = clientId,
+            FacilityId = facId,
+            ReturnInboundHandoffId = handoff.Id,
+            ReturnShipmentId = retShip.Id,
+            ReturnAuthorizationId = retAuth.Id,
+            OrderId = origOrder.Id,
+            PackageId = origPkg.Id,
+            ReceivedByUserId = userId,
+            StartedAtUtc = DateTime.UtcNow.AddMinutes(-5),
+            SessionNumber = $"RRS-{Guid.NewGuid():N}"[..16],
+            Status = ReturnReceivingSessionStatus.Inspected,
+            IsInventoryPosted = false
+        };
+        var l1 = new ReturnReceivingLine { ReturnReceivingSessionId = session.Id, ItemId = item1.Id, Sku = item1.Sku, ExpectedQuantity = qty1, ReceivedQuantity = qty1 };
+        l1.AssignDisposition(qty1, 0m, 0m, ReturnDisposition.RestockToAvailable, null, "L1", DateTime.UtcNow);
+        var l2 = new ReturnReceivingLine { ReturnReceivingSessionId = session.Id, ItemId = item2.Id, Sku = item2.Sku, ExpectedQuantity = qty2, ReceivedQuantity = qty2 };
+        l2.AssignDisposition(qty2, 0m, 0m, ReturnDisposition.RestockToAvailable, null, "L2", DateTime.UtcNow);
+        session.Lines.Add(l1);
+        session.Lines.Add(l2);
+        db.ReturnReceivingSessions.Add(session);
+        await db.SaveChangesAsync();
+        return session.Id;
+    }
+
+    private static async Task VerifyF02R01ReturnBatchAndCrossDockAsync(
+        string connStr, Mdm21Identity adminCtx, Guid facOrd, Guid clientA)
+    {
+        Guid wvBinId, singleSkuBinId, okBinId, sWeightId, sVolId, sConcId;
+        await using (var db = CreatePgDb(connStr, adminCtx))
+        {
+            var auth = new WarehouseMasterAuthorization(db, adminCtx);
+            var createLoc = new CreateLocationCommandHandler(db, auth);
+            var upsertProf = new UpsertLocationStorageProfileCommandHandler(db, auth);
+
+            wvBinId = (await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.Bin, LocationCode = "PG31-WV", Barcode = "BC-PG31-WV", MaxWeightKg = 10m, MaxVolumeCm3 = 1000m }, CancellationToken.None)).Id;
+            singleSkuBinId = (await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.Bin, LocationCode = "PG31-1SKU", Barcode = "BC-PG31-1SKU" }, CancellationToken.None)).Id;
+            await upsertProf.Handle(new UpsertLocationStorageProfileCommand { LocationId = singleSkuBinId, AllowMixedSku = false }, CancellationToken.None);
+            okBinId = (await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.Bin, LocationCode = "PG31-OK", Barcode = "BC-PG31-OK", MaxWeightKg = 100m, MaxVolumeCm3 = 50000m }, CancellationToken.None)).Id;
+
+            var h1 = new Item { ClientId = clientA, Sku = "SKU-PG31-H1", Description = "H1", WeightKg = 6m, LengthCm = 10, WidthCm = 10, HeightCm = 2 };
+            var h2 = new Item { ClientId = clientA, Sku = "SKU-PG31-H2", Description = "H2", WeightKg = 6m, LengthCm = 10, WidthCm = 10, HeightCm = 2 };
+            var b1 = new Item { ClientId = clientA, Sku = "SKU-PG31-B1", Description = "B1", WeightKg = 1m, LengthCm = 10, WidthCm = 10, HeightCm = 6 };
+            var b2 = new Item { ClientId = clientA, Sku = "SKU-PG31-B2", Description = "B2", WeightKg = 1m, LengthCm = 10, WidthCm = 10, HeightCm = 6 };
+            db.Items.AddRange(h1, h2, b1, b2);
+            await db.SaveChangesAsync();
+
+            sWeightId = await SeedPgTwoLineReturnAsync(db, facOrd, clientA, adminCtx.UserId!.Value, h1, 1m, h2, 1m);
+            sVolId = await SeedPgTwoLineReturnAsync(db, facOrd, clientA, adminCtx.UserId!.Value, b1, 1m, b2, 1m);
+            sConcId = await SeedPgTwoLineReturnAsync(db, facOrd, clientA, adminCtx.UserId!.Value, b1, 2m, b2, 2m);
+
+            var svc = new ReturnReceivingService(db, adminCtx, adminCtx, NullLogger<ReturnReceivingService>.Instance);
+
+            // PG-31.1: Combined weight > MaxWeightKg -> rejected atomically
+            bool weightBlocked = false;
+            try { await svc.PostReturnInventoryAsync(new PostReturnInventoryRequest { SessionId = sWeightId, OperatorUserId = adminCtx.UserId!.Value, DefaultLocationId = wvBinId }); }
+            catch (ValidationException) { weightBlocked = true; }
+            if (!weightBlocked) throw new InvalidOperationException("PG-31 violation: Combined return weight exceeded MaxWeightKg!");
+
+            // PG-31.2: Combined volume > MaxVolumeCm3 -> rejected atomically
+            bool volBlocked = false;
+            try { await svc.PostReturnInventoryAsync(new PostReturnInventoryRequest { SessionId = sVolId, OperatorUserId = adminCtx.UserId!.Value, DefaultLocationId = wvBinId }); }
+            catch (ValidationException) { volBlocked = true; }
+            if (!volBlocked) throw new InvalidOperationException("PG-31 violation: Combined return volume exceeded MaxVolumeCm3!");
+
+            // PG-31.3: Two different SKUs targeting EMPTY bin with AllowMixedSku=false -> rejected atomically
+            bool mixedBlocked = false;
+            try { await svc.PostReturnInventoryAsync(new PostReturnInventoryRequest { SessionId = sVolId, OperatorUserId = adminCtx.UserId!.Value, DefaultLocationId = singleSkuBinId }); }
+            catch (ValidationException) { mixedBlocked = true; }
+            if (!mixedBlocked) throw new InvalidOperationException("PG-31 violation: Two SKUs posted into empty AllowMixedSku=false bin!");
+
+            // Verify zero stock/ledger persisted in wvBin or singleSkuBin
+            if (await db.StockOnHand.IgnoreQueryFilters().AnyAsync(s => s.LocationId == wvBinId || s.LocationId == singleSkuBinId))
+                throw new InvalidOperationException("PG-31 violation: Rejected return batch leaked StockOnHand!");
+
+            // PG-31.4: Valid multi-line return posting
+            var ok = await svc.PostReturnInventoryAsync(new PostReturnInventoryRequest { SessionId = sWeightId, OperatorUserId = adminCtx.UserId!.Value, DefaultLocationId = okBinId });
+            if (!ok.IsSuccess || ok.TotalItemsPosted != 2 || ok.TotalAcceptedQuantity != 2m)
+                throw new InvalidOperationException("PG-31 violation: Valid multi-line return posting failed!");
+        }
+
+        // PG-32: Concurrent duplicate posting of the SAME return session -> exactly 1 committed effect!
+        using var barrier32 = new Barrier(2);
+        int concSuccess = 0, concRejected = 0;
+        var tasks32 = Enumerable.Range(0, 2).Select(_ => Task.Run(async () =>
+        {
+            await using var cdb = CreatePgDb(connStr, adminCtx);
+            var svc = new ReturnReceivingService(cdb, adminCtx, adminCtx, NullLogger<ReturnReceivingService>.Instance);
+            barrier32.SignalAndWait();
+            try
+            {
+                await svc.PostReturnInventoryAsync(new PostReturnInventoryRequest { SessionId = sConcId, OperatorUserId = adminCtx.UserId!.Value, DefaultLocationId = okBinId });
+                Interlocked.Increment(ref concSuccess);
+            }
+            catch (InvalidDomainStateException)
+            {
+                Interlocked.Increment(ref concRejected);
+            }
+        })).ToArray();
+        await Task.WhenAll(tasks32);
+        if (concSuccess != 1 || concRejected != 1)
+            throw new InvalidOperationException($"PG-32 violation: Expected 1 success & 1 duplicate rejection, got success={concSuccess}, rejected={concRejected}.");
+
+        await using (var check32 = CreatePgDb(connStr, adminCtx))
+        {
+            var txCount = await check32.InventoryTransactions.AsNoTracking().CountAsync(t => t.ReferenceType == "ReturnReceivingSession" && t.ReferenceId == sConcId);
+            if (txCount != 2)
+                throw new InvalidOperationException($"PG-32 violation: Expected exactly 2 ledger transactions for 2-line return session, found {txCount}.");
+        }
+
+        // PG-33: Cross-dock rejects Aisle(IsReceiving=true), Rack(IsReceiving=true), and permanent storage bin with IsPutawayAllowed=false
+        await using (var db = CreatePgDb(connStr, adminCtx))
+        {
+            var auth = new WarehouseMasterAuthorization(db, adminCtx);
+            var createLoc = new CreateLocationCommandHandler(db, auth);
+            var upsertProf = new UpsertLocationStorageProfileCommandHandler(db, auth);
+
+            var xdSrc = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.StagingLane, LocationCode = "PG33-SRC", Barcode = "BC-PG33-SRC", IsReceiving = true }, CancellationToken.None);
+            var xdDst = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.StagingLane, LocationCode = "PG33-DST", Barcode = "BC-PG33-DST" }, CancellationToken.None);
+            var xdAisle = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.Aisle, LocationCode = "PG33-AISLE", Barcode = "BC-PG33-AISLE", IsReceiving = true }, CancellationToken.None);
+            var xdRack = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, ParentLocationId = xdAisle.Id, LocationType = LocationType.Rack, LocationCode = "PG33-RACK", Barcode = "BC-PG33-RACK", IsReceiving = true }, CancellationToken.None);
+            var xdNoPutBin = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.Bin, LocationCode = "PG33-NOPUT", Barcode = "BC-PG33-NOPUT" }, CancellationToken.None);
+            await upsertProf.Handle(new UpsertLocationStorageProfileCommand { LocationId = xdNoPutBin.Id, IsPutawayAllowed = false }, CancellationToken.None);
+
+            var item = new Item { ClientId = clientA, Sku = "SKU-PG33", Description = "PG33 XD", WeightKg = 1m };
+            db.Items.Add(item);
+            db.StockOnHand.Add(new StockOnHand { ClientId = clientA, FacilityId = facOrd, ItemId = item.Id, LocationId = xdSrc.Id, QtyAllocated = 4m });
+            var plan = new CrossDockPlan { ClientId = clientA, FacilityId = facOrd, PlanNumber = "CDP-PG33", TotalPlannedQuantity = 4m, Status = CrossDockPlanStatus.InProgress };
+            var planLine = new CrossDockPlanLine { CrossDockPlanId = plan.Id, ItemId = item.Id, SourceLocationId = xdSrc.Id, TargetLocationId = xdDst.Id, PlannedQuantity = 4m, Status = CrossDockLineStatus.InProgress };
+            var task = new CrossDockTask { CrossDockPlanId = plan.Id, CrossDockPlanLineId = planLine.Id, ClientId = clientA, FacilityId = facOrd, ItemId = item.Id, TaskNumber = "CDT-PG33", Lpn = "LPN-PG33", SourceLocationId = xdSrc.Id, DestinationLocationId = xdDst.Id, Quantity = 4m, Status = CrossDockTaskStatus.Pending };
+            db.CrossDockPlans.Add(plan);
+            db.CrossDockPlanLines.Add(planLine);
+            db.CrossDockTasks.Add(task);
+            await db.SaveChangesAsync();
+
+            var cdHandler = new ConfirmCrossDockTaskCommandHandler(db, adminCtx);
+            foreach (var badBarcode in new[] { "BC-PG33-AISLE", "BC-PG33-RACK", "BC-PG33-NOPUT" })
+            {
+                bool blocked = false;
+                try { await cdHandler.Handle(new ConfirmCrossDockTaskCommand { TaskId = task.Id, ScannedLpn = "LPN-PG33", ScannedDestinationBarcode = badBarcode, AllowOverride = true }, CancellationToken.None); }
+                catch (ValidationException) { blocked = true; }
+                if (!blocked) throw new InvalidOperationException($"PG-33 F02-R01-B violation: Cross-dock accepted invalid destination '{badBarcode}'!");
+            }
+
+            var ok = await cdHandler.Handle(new ConfirmCrossDockTaskCommand { TaskId = task.Id, ScannedLpn = "LPN-PG33", ScannedDestinationBarcode = "BC-PG33-DST", AllowOverride = false }, CancellationToken.None);
+            if (ok.Status != CrossDockTaskStatus.Completed) throw new InvalidOperationException("PG-33 violation: Valid cross-dock failed!");
+        }
+
+        Console.WriteLine("  [PASS] PG-31, PG-32 & PG-33 (F02-R01): Projected-state return batch, concurrent duplicate return posting, and cross-dock structural/profile guards verified on live PostgreSQL.");
+    }
+
+    private static async Task VerifyF03R01StaleZoneMembershipAndReceivingLifecycleAsync(
+        string connStr, Mdm21Identity adminCtx, Guid facOrd, Guid clientA, Guid clientB)
+    {
+        // PG-34 Part A: Deterministic 4-step stale-zone race for Inventory Transfer
+        // 1. Transfer observes Zone A -> 2. MoveLocation moves bin A->B -> 3. Transfer resumes (aborts & retries!) -> 4. Zone B dedication changes concurrently!
+        Guid zAId, zBId, srcBinId, movingBinId, itemId;
+        await using (var db = CreatePgDb(connStr, adminCtx))
+        {
+            var auth = new WarehouseMasterAuthorization(db, adminCtx);
+            zAId = (await new CreateWarehouseZoneCommandHandler(db, auth).Handle(new CreateWarehouseZoneCommand { FacilityId = facOrd, ZoneCode = "ZN-PG34-A", Name = "PG34 Zone A" }, CancellationToken.None)).Id;
+            zBId = (await new CreateWarehouseZoneCommandHandler(db, auth).Handle(new CreateWarehouseZoneCommand { FacilityId = facOrd, ZoneCode = "ZN-PG34-B", Name = "PG34 Zone B" }, CancellationToken.None)).Id;
+            var createLoc = new CreateLocationCommandHandler(db, auth);
+            srcBinId = (await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.Bin, LocationCode = "PG34-SRC", Barcode = "BC-PG34-SRC" }, CancellationToken.None)).Id;
+            movingBinId = (await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, ZoneId = zAId, LocationType = LocationType.Bin, LocationCode = "PG34-MOV", Barcode = "BC-PG34-MOV" }, CancellationToken.None)).Id;
+            var item = new Item { ClientId = clientA, Sku = "SKU-PG34", Description = "PG34 Stale Zone Item", WeightKg = 1m };
+            db.Items.Add(item);
+            itemId = item.Id;
+            db.StockOnHand.Add(new StockOnHand { ClientId = clientA, FacilityId = facOrd, ItemId = itemId, LocationId = srcBinId, QtyAvailable = 10m });
+            await db.SaveChangesAsync();
+        }
+
+        var observedZoneA = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resumeTransfer = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int hookFired = 0;
+
+        ApplicationDbContext.OnZoneMembershipObservedForTesting = async locId =>
+        {
+            if (locId == movingBinId && Interlocked.Exchange(ref hookFired, 1) == 0)
+            {
+                observedZoneA.TrySetResult();
+                await resumeTransfer.Task;
+            }
+        };
+
+        try
+        {
+            var tTransfer = Task.Run(async () =>
+            {
+                await using var db1 = CreatePgDb(connStr, adminCtx);
+                await new TransferInventoryCommandHandler(db1, adminCtx, new WarehouseOperationalAuthorization(db1, adminCtx)).Handle(new TransferInventoryCommand
+                {
+                    ClientId = clientA,
+                    FacilityId = facOrd,
+                    ItemId = itemId,
+                    FromLocationId = srcBinId,
+                    ToLocationId = movingBinId,
+                    Quantity = 5m
+                }, CancellationToken.None);
+            });
+
+            // Wait until Transfer has observed Zone A (before acquiring ZONE_LIFECYCLE)
+            await observedZoneA.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            // Step 2: Move movingBin from Zone A -> Zone B on Connection 2
+            await using (var moveDb = CreatePgDb(connStr, adminCtx))
+            {
+                await new MoveLocationCommandHandler(moveDb, new WarehouseMasterAuthorization(moveDb, adminCtx))
+                    .Handle(new MoveLocationCommand(movingBinId, null, zBId), CancellationToken.None);
+            }
+
+            // Step 3 & 4: Resume Transfer (which MUST detect stale Zone A, rollback & retry on Zone B!) concurrently with dedicating Zone B to Client B!
+            var tDedicateB = Task.Run(async () =>
+            {
+                await using var db3 = CreatePgDb(connStr, adminCtx);
+                await new UpdateWarehouseZoneCommandHandler(db3, new WarehouseMasterAuthorization(db3, adminCtx)).Handle(new UpdateWarehouseZoneCommand
+                {
+                    Id = zBId,
+                    Name = "PG34 Zone B",
+                    ZoneType = WarehouseZoneType.BulkStorage,
+                    DedicatedClientId = clientB
+                }, CancellationToken.None);
+            });
+            resumeTransfer.TrySetResult();
+
+            bool trOk = false, dedOk = false;
+            try { await tTransfer; trOk = true; } catch (DomainException) { }
+            try { await tDedicateB; dedOk = true; } catch (DomainException) { }
+
+            if (trOk && dedOk)
+                throw new InvalidOperationException("PG-34 Part A violation: Stale-zone race allowed both Client-A transfer and Client-B Zone B dedication to commit!");
+
+            await using var checkA = CreatePgDb(connStr, adminCtx);
+            var zbRow = await checkA.WarehouseZones.AsNoTracking().FirstAsync(z => z.Id == zBId);
+            var caStock = await checkA.StockOnHand.IgnoreQueryFilters().AsNoTracking()
+                .Where(s => s.LocationId == movingBinId && s.ClientId == clientA)
+                .SumAsync(s => s.QtyAvailable + s.QtyAllocated + s.QtyReserved + s.QtyQuarantined + s.QtyDamaged + s.QtyOnHold);
+            if (zbRow.DedicatedClientId == clientB && caStock > 0m)
+                throw new InvalidOperationException("PG-34 Part A invariant broken: Client-A stock persisted inside Client-B dedicated Zone B!");
+        }
+        finally
+        {
+            ApplicationDbContext.OnZoneMembershipObservedForTesting = null;
+        }
+
+        // PG-34 Part B: Deterministic 4-step stale-zone race for Storage-Profile Dedication
+        Guid zP1Id, zP2Id, profBinId;
+        await using (var db = CreatePgDb(connStr, adminCtx))
+        {
+            var auth = new WarehouseMasterAuthorization(db, adminCtx);
+            zP1Id = (await new CreateWarehouseZoneCommandHandler(db, auth).Handle(new CreateWarehouseZoneCommand { FacilityId = facOrd, ZoneCode = "ZN-PG34-P1", Name = "PG34 P1" }, CancellationToken.None)).Id;
+            zP2Id = (await new CreateWarehouseZoneCommandHandler(db, auth).Handle(new CreateWarehouseZoneCommand { FacilityId = facOrd, ZoneCode = "ZN-PG34-P2", Name = "PG34 P2" }, CancellationToken.None)).Id;
+            profBinId = (await new CreateLocationCommandHandler(db, auth).Handle(new CreateLocationCommand { FacilityId = facOrd, ZoneId = zP1Id, LocationType = LocationType.Bin, LocationCode = "PG34-PBIN", Barcode = "BC-PG34-PBIN" }, CancellationToken.None)).Id;
+        }
+
+        var observedP1 = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var resumeProf = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        int profHookFired = 0;
+
+        ApplicationDbContext.OnZoneMembershipObservedForTesting = async locId =>
+        {
+            if (locId == profBinId && Interlocked.Exchange(ref profHookFired, 1) == 0)
+            {
+                observedP1.TrySetResult();
+                await resumeProf.Task;
+            }
+        };
+
+        try
+        {
+            var tProf = Task.Run(async () =>
+            {
+                await using var db1 = CreatePgDb(connStr, adminCtx);
+                await new UpsertLocationStorageProfileCommandHandler(db1, new WarehouseMasterAuthorization(db1, adminCtx)).Handle(new UpsertLocationStorageProfileCommand
+                {
+                    LocationId = profBinId,
+                    DedicatedClientId = clientA
+                }, CancellationToken.None);
+            });
+
+            await observedP1.Task.WaitAsync(TimeSpan.FromSeconds(15));
+
+            await using (var moveDb = CreatePgDb(connStr, adminCtx))
+            {
+                await new MoveLocationCommandHandler(moveDb, new WarehouseMasterAuthorization(moveDb, adminCtx))
+                    .Handle(new MoveLocationCommand(profBinId, null, zP2Id), CancellationToken.None);
+            }
+
+            var tDedP2 = Task.Run(async () =>
+            {
+                await using var db3 = CreatePgDb(connStr, adminCtx);
+                await new UpdateWarehouseZoneCommandHandler(db3, new WarehouseMasterAuthorization(db3, adminCtx)).Handle(new UpdateWarehouseZoneCommand
+                {
+                    Id = zP2Id,
+                    Name = "PG34 P2",
+                    ZoneType = WarehouseZoneType.BulkStorage,
+                    DedicatedClientId = clientB
+                }, CancellationToken.None);
+            });
+            resumeProf.TrySetResult();
+
+            bool pOk = false, dOk = false;
+            try { await tProf; pOk = true; } catch (DomainException) { }
+            try { await tDedP2; dOk = true; } catch (DomainException) { }
+
+            if (pOk && dOk)
+                throw new InvalidOperationException("PG-34 Part B violation: Stale-zone race allowed both Client-A profile and Client-B Zone P2 dedication to commit!");
+
+            await using var checkB = CreatePgDb(connStr, adminCtx);
+            var zRow = await checkB.WarehouseZones.AsNoTracking().FirstAsync(z => z.Id == zP2Id);
+            var pRow = await checkB.LocationStorageProfiles.AsNoTracking().FirstOrDefaultAsync(p => p.Id == profBinId);
+            if (zRow.DedicatedClientId.HasValue && pRow?.DedicatedClientId.HasValue == true && zRow.DedicatedClientId != pRow.DedicatedClientId)
+                throw new InvalidOperationException("PG-34 Part B invariant broken: Conflicting Zone P2 & storage-profile dedication persisted!");
+        }
+        finally
+        {
+            ApplicationDbContext.OnZoneMembershipObservedForTesting = null;
+        }
+
+        // PG-35: CompleteReceivingSessionCommand stale deactivated staging rejection + safe auto-provisioning
+        var facAuto = Guid.NewGuid();
+        await using (var db = CreatePgDb(connStr, adminCtx))
+        {
+            db.Facilities.Add(new Facility { Id = facAuto, FacilityCode = "FAC-PG35", Name = "PG35 Auto Hub", CountryCode = "US", Timezone = "America/Chicago", DefaultCurrencyCode = "USD", IsActive = true });
+            db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientA, FacilityId = facAuto, Status = FacilityAccessStatus.Active });
+            await db.SaveChangesAsync();
+
+            var auth = new WarehouseMasterAuthorization(db, adminCtx);
+            var stg = await new CreateLocationCommandHandler(db, auth).Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.StagingLane, LocationCode = "PG35-STALE", Barcode = "BC-PG35-STALE", IsReceiving = true }, CancellationToken.None);
+
+            var rcvStale = new ReceivingSession { ClientId = clientA, FacilityId = facOrd, SessionNumber = "RCV-PG35-STALE", Status = ReceivingStatus.InProgress, ReceivedByUserId = adminCtx.UserId!.Value, StartedAtUtc = DateTime.UtcNow.AddMinutes(-5) };
+            rcvStale.Lines.Add(new ReceiptLine { ReceivingSessionId = rcvStale.Id, ItemId = itemId, Lpn = "LPN-PG35-S", QuantityExpected = 3m, QuantityReceived = 3m, StagingLocationId = stg.Id, Condition = ReceiptConditionStatus.Sound, ScannedAtUtc = DateTime.UtcNow.AddMinutes(-2) });
+            db.ReceivingSessions.Add(rcvStale);
+            await db.SaveChangesAsync();
+
+            await new UpdateLocationStatusCommandHandler(db, auth).Handle(new UpdateLocationStatusCommand(stg.Id, LocationStatus.Inactive), CancellationToken.None);
+
+            var rcvHandler = new CompleteReceivingSessionCommandHandler(db, adminCtx, new WarehouseOperationalAuthorization(db, adminCtx));
+            bool staleBlocked = false;
+            try { await rcvHandler.Handle(new CompleteReceivingSessionCommand { ReceivingSessionId = rcvStale.Id }, CancellationToken.None); }
+            catch (ValidationException) { staleBlocked = true; }
+            if (!staleBlocked) throw new InvalidOperationException("PG-35 violation: CompleteReceivingSession accepted deactivated staging lane!");
+            if (await db.StockOnHand.IgnoreQueryFilters().AnyAsync(s => s.LocationId == stg.Id))
+                throw new InvalidOperationException("PG-35 violation: Rejected receiving completion persisted stock!");
+
+            // Safe auto-provisioning in facAuto (which has no staging lane yet)
+            var rcvAuto = new ReceivingSession { ClientId = clientA, FacilityId = facAuto, SessionNumber = "RCV-PG35-AUTO", Status = ReceivingStatus.InProgress, ReceivedByUserId = adminCtx.UserId!.Value, StartedAtUtc = DateTime.UtcNow.AddMinutes(-5) };
+            rcvAuto.Lines.Add(new ReceiptLine { ReceivingSessionId = rcvAuto.Id, ItemId = itemId, Lpn = "LPN-PG35-A", QuantityExpected = 4m, QuantityReceived = 4m, StagingLocationId = null, Condition = ReceiptConditionStatus.Sound, ScannedAtUtc = DateTime.UtcNow.AddMinutes(-2) });
+            db.ReceivingSessions.Add(rcvAuto);
+            await db.SaveChangesAsync();
+
+            var autoDone = await rcvHandler.Handle(new CompleteReceivingSessionCommand { ReceivingSessionId = rcvAuto.Id }, CancellationToken.None);
+            if (autoDone.Status != ReceivingStatus.Completed) throw new InvalidOperationException("PG-35 violation: Safe auto-provisioning receiving completion failed!");
+            var autoLoc = await db.Locations.AsNoTracking().SingleAsync(l => l.FacilityId == facAuto && l.LocationType == LocationType.StagingLane);
+            if (autoLoc.HierarchyLevel != 1 || autoLoc.HierarchyPath != $"/{autoLoc.Id:N}/" || !autoLoc.IsReceiving || !autoLoc.IsStorable)
+                throw new InvalidOperationException("PG-35 violation: Auto-provisioned staging lane missing valid derived hierarchy/capability metadata!");
+        }
+
+        // PG-36: Concurrent CompleteReceivingSessionCommand vs (a) staging deactivation, (b) incompatible zone dedication, (c) facility deactivation
+        Guid stg36a, rcv36a, z36b, stg36b, rcv36b, fac36c, rcv36c;
+        await using (var db = CreatePgDb(connStr, adminCtx))
+        {
+            var auth = new WarehouseMasterAuthorization(db, adminCtx);
+            var createLoc = new CreateLocationCommandHandler(db, auth);
+
+            stg36a = (await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.StagingLane, LocationCode = "PG36-STGA", Barcode = "BC-PG36-STGA", IsReceiving = true }, CancellationToken.None)).Id;
+            var sA = new ReceivingSession { ClientId = clientA, FacilityId = facOrd, SessionNumber = "RCV-PG36-A", Status = ReceivingStatus.InProgress, ReceivedByUserId = adminCtx.UserId!.Value, StartedAtUtc = DateTime.UtcNow.AddMinutes(-5) };
+            sA.Lines.Add(new ReceiptLine { ReceivingSessionId = sA.Id, ItemId = itemId, Lpn = "LPN-PG36-A", QuantityExpected = 2m, QuantityReceived = 2m, StagingLocationId = stg36a, Condition = ReceiptConditionStatus.Sound, ScannedAtUtc = DateTime.UtcNow });
+            db.ReceivingSessions.Add(sA);
+            rcv36a = sA.Id;
+
+            z36b = (await new CreateWarehouseZoneCommandHandler(db, auth).Handle(new CreateWarehouseZoneCommand { FacilityId = facOrd, ZoneCode = "ZN-PG36-B", Name = "PG36 Zone B" }, CancellationToken.None)).Id;
+            stg36b = (await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, ZoneId = z36b, LocationType = LocationType.StagingLane, LocationCode = "PG36-STGB", Barcode = "BC-PG36-STGB", IsReceiving = true }, CancellationToken.None)).Id;
+            var sB = new ReceivingSession { ClientId = clientA, FacilityId = facOrd, SessionNumber = "RCV-PG36-B", Status = ReceivingStatus.InProgress, ReceivedByUserId = adminCtx.UserId!.Value, StartedAtUtc = DateTime.UtcNow.AddMinutes(-5) };
+            sB.Lines.Add(new ReceiptLine { ReceivingSessionId = sB.Id, ItemId = itemId, Lpn = "LPN-PG36-B", QuantityExpected = 2m, QuantityReceived = 2m, StagingLocationId = stg36b, Condition = ReceiptConditionStatus.Sound, ScannedAtUtc = DateTime.UtcNow });
+            db.ReceivingSessions.Add(sB);
+            rcv36b = sB.Id;
+
+            fac36c = Guid.NewGuid();
+            db.Facilities.Add(new Facility { Id = fac36c, FacilityCode = "FAC-PG36C", Name = "PG36C Hub", CountryCode = "US", Timezone = "America/Chicago", DefaultCurrencyCode = "USD", IsActive = true });
+            db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientA, FacilityId = fac36c, Status = FacilityAccessStatus.Active });
+            var sC = new ReceivingSession { ClientId = clientA, FacilityId = fac36c, SessionNumber = "RCV-PG36-C", Status = ReceivingStatus.InProgress, ReceivedByUserId = adminCtx.UserId!.Value, StartedAtUtc = DateTime.UtcNow.AddMinutes(-5) };
+            sC.Lines.Add(new ReceiptLine { ReceivingSessionId = sC.Id, ItemId = itemId, Lpn = "LPN-PG36-C", QuantityExpected = 2m, QuantityReceived = 2m, StagingLocationId = null, Condition = ReceiptConditionStatus.Sound, ScannedAtUtc = DateTime.UtcNow });
+            db.ReceivingSessions.Add(sC);
+            rcv36c = sC.Id;
+            await db.SaveChangesAsync();
+        }
+
+        // 36(a): Receiving completion vs staging deactivation
+        using (var b = new Barrier(2))
+        {
+            var t1 = Task.Run(async () => { await using var d = CreatePgDb(connStr, adminCtx); b.SignalAndWait(); await new CompleteReceivingSessionCommandHandler(d, adminCtx, new WarehouseOperationalAuthorization(d, adminCtx)).Handle(new CompleteReceivingSessionCommand { ReceivingSessionId = rcv36a }, CancellationToken.None); });
+            var t2 = Task.Run(async () => { await using var d = CreatePgDb(connStr, adminCtx); b.SignalAndWait(); await new UpdateLocationStatusCommandHandler(d, new WarehouseMasterAuthorization(d, adminCtx)).Handle(new UpdateLocationStatusCommand(stg36a, LocationStatus.Inactive), CancellationToken.None); });
+            bool r1 = false, r2 = false;
+            try { await t1; r1 = true; } catch (DomainException) { }
+            try { await t2; r2 = true; } catch (DomainException) { }
+            if (r1 && r2) throw new InvalidOperationException("PG-36a violation: Both receiving completion and staging deactivation succeeded!");
+        }
+
+        // 36(b): Receiving completion vs incompatible zone dedication (Client B)
+        using (var b = new Barrier(2))
+        {
+            var t1 = Task.Run(async () => { await using var d = CreatePgDb(connStr, adminCtx); b.SignalAndWait(); await new CompleteReceivingSessionCommandHandler(d, adminCtx, new WarehouseOperationalAuthorization(d, adminCtx)).Handle(new CompleteReceivingSessionCommand { ReceivingSessionId = rcv36b }, CancellationToken.None); });
+            var t2 = Task.Run(async () => { await using var d = CreatePgDb(connStr, adminCtx); b.SignalAndWait(); await new UpdateWarehouseZoneCommandHandler(d, new WarehouseMasterAuthorization(d, adminCtx)).Handle(new UpdateWarehouseZoneCommand { Id = z36b, Name = "PG36 Zone B", ZoneType = WarehouseZoneType.BulkStorage, DedicatedClientId = clientB }, CancellationToken.None); });
+            bool r1 = false, r2 = false;
+            try { await t1; r1 = true; } catch (DomainException) { }
+            try { await t2; r2 = true; } catch (DomainException) { }
+            if (r1 && r2) throw new InvalidOperationException("PG-36b violation: Both Client-A receiving completion and Client-B zone dedication succeeded!");
+        }
+
+        // 36(c): Receiving completion (with auto-staging) vs facility deactivation
+        using (var b = new Barrier(2))
+        {
+            var t1 = Task.Run(async () => { await using var d = CreatePgDb(connStr, adminCtx); b.SignalAndWait(); await new CompleteReceivingSessionCommandHandler(d, adminCtx, new WarehouseOperationalAuthorization(d, adminCtx)).Handle(new CompleteReceivingSessionCommand { ReceivingSessionId = rcv36c }, CancellationToken.None); });
+            var t2 = Task.Run(async () => { await using var d = CreatePgDb(connStr, adminCtx); b.SignalAndWait(); await new UpdateFacilityCommandHandler(d, new CompliancePlatformAuthorization(d, adminCtx), new TestTzResolver()).Handle(new UpdateFacilityCommand(fac36c, null, "PG36C Hub", null, null, null, null, null, "US", "America/Chicago", null, "USD", null, null, null, 0, IsActive: false), CancellationToken.None); });
+            bool r1 = false, r2 = false;
+            try { await t1; r1 = true; } catch (DomainException) { }
+            try { await t2; r2 = true; } catch (DomainException) { }
+            if (r1 && r2) throw new InvalidOperationException("PG-36c violation: Both receiving completion and facility deactivation succeeded!");
+        }
+
+        Console.WriteLine("  [PASS] PG-34, PG-35 & PG-36 (F03-R01): Deterministic stale-zone membership retry (transfer & profile) and CompleteReceivingSession lifecycle races verified on live PostgreSQL.");
     }
 
     private static async Task AssertPgErrorAsync(NpgsqlConnection conn, string sql, string expectedSqlState, string label)

@@ -45,6 +45,17 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private bool _isInsideConfigurationOutboxSave;
     private bool? _hasMdm15Schema;
 
+    /// <summary>
+    /// Optional deterministic test synchronization hook invoked after observing a location's
+    /// zone membership and before acquiring its ZONE_LIFECYCLE lock (MDM21-F03-R01 testing only).
+    /// </summary>
+    public static Func<Guid, Task>? OnZoneMembershipObservedForTesting { get; set; }
+
+    private sealed class ZoneMembershipChangedException(Guid locationId, Guid? expectedZoneId, Guid? actualZoneId)
+        : ConcurrencyException(
+            "LOCATION_ZONE_MEMBERSHIP_CHANGED",
+            $"Location '{locationId}' zone membership changed concurrently from '{expectedZoneId?.ToString() ?? "NULL"}' to '{actualZoneId?.ToString() ?? "NULL"}'; retrying transaction with refreshed lock scope.");
+
     public ApplicationDbContext(
         DbContextOptions<ApplicationDbContext> options,
         ITenantProvider tenantProvider,
@@ -1316,28 +1327,39 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             return await action();
         }
 
-        bool firstAttempt = true;
-        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        const int maxZoneRetries = 5;
+        for (int zoneAttempt = 0; ; zoneAttempt++)
         {
-            if (!firstAttempt)
+            try
+            {
+                bool firstAttempt = true;
+                return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+                {
+                    if (!firstAttempt)
+                    {
+                        ClearChangeTracker();
+                    }
+                    firstAttempt = false;
+
+                    await BeginTransactionAsync(cancellationToken);
+                    try
+                    {
+                        var result = await action();
+                        await CommitTransactionAsync(cancellationToken);
+                        return result;
+                    }
+                    catch
+                    {
+                        await RollbackTransactionAsync(cancellationToken);
+                        throw;
+                    }
+                });
+            }
+            catch (ZoneMembershipChangedException) when (zoneAttempt < maxZoneRetries)
             {
                 ClearChangeTracker();
             }
-            firstAttempt = false;
-
-            await BeginTransactionAsync(cancellationToken);
-            try
-            {
-                var result = await action();
-                await CommitTransactionAsync(cancellationToken);
-                return result;
-            }
-            catch
-            {
-                await RollbackTransactionAsync(cancellationToken);
-                throw;
-            }
-        });
+        }
     }
 
     public Task<IAsyncDisposable> AcquirePackIdempotencyLockAsync(
@@ -1461,6 +1483,8 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         {
             if (destinationLocationId != Guid.Empty)
             {
+                Guid? observedZoneId = null;
+                bool verifyZoneMembership = false;
                 if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
                 {
                     var locScope = await Locations
@@ -1472,14 +1496,23 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
 
                     if (locScope != null)
                     {
+                        observedZoneId = locScope.ZoneId;
+                        verifyZoneMembership = true;
+
+                        var testHook = OnZoneMembershipObservedForTesting;
+                        if (testHook != null)
+                        {
+                            await testHook(destinationLocationId);
+                        }
+
                         var facLockKey = $"FACILITY_LIFECYCLE:{locScope.FacilityId:N}";
                         await Database.ExecuteSqlInterpolatedAsync(
                             $"SELECT pg_advisory_xact_lock_shared(hashtextextended({facLockKey}, 0::bigint))",
                             cancellationToken);
 
-                        if (locScope.ZoneId.HasValue)
+                        if (observedZoneId.HasValue)
                         {
-                            var zoneLockKey = $"ZONE_LIFECYCLE:{locScope.ZoneId.Value:N}";
+                            var zoneLockKey = $"ZONE_LIFECYCLE:{observedZoneId.Value:N}";
                             await Database.ExecuteSqlInterpolatedAsync(
                                 $"SELECT pg_advisory_xact_lock_shared(hashtextextended({zoneLockKey}, 0::bigint))",
                                 cancellationToken);
@@ -1495,6 +1528,22 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
                 await Database.ExecuteSqlInterpolatedAsync(
                     $"SELECT 1 FROM locations WHERE location_id = {destinationLocationId} FOR UPDATE",
                     cancellationToken);
+
+                // MDM21-F03-R01-A: Verify zone membership did not change between pre-lock observation and row lock;
+                // if stale, abort & retry the full transaction cleanly (never acquire out-of-order locks).
+                if (verifyZoneMembership)
+                {
+                    var actualZoneId = await Locations
+                        .IgnoreQueryFilters()
+                        .AsNoTracking()
+                        .Where(l => l.Id == destinationLocationId)
+                        .Select(l => l.ZoneId)
+                        .FirstOrDefaultAsync(cancellationToken);
+                    if (actualZoneId != observedZoneId)
+                    {
+                        throw new ZoneMembershipChangedException(destinationLocationId, observedZoneId, actualZoneId);
+                    }
+                }
             }
 
             if (sourceStockId.HasValue && sourceStockId.Value != Guid.Empty)
@@ -1502,6 +1551,105 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
                 await Database.ExecuteSqlInterpolatedAsync(
                     $"SELECT 1 FROM stock_on_hand WHERE stock_id = {sourceStockId.Value} FOR UPDATE",
                     cancellationToken);
+            }
+        }
+
+        return NoOpAsyncDisposable.Instance;
+    }
+
+    public async Task<IAsyncDisposable> AcquireMultiLocationExecutionLocksAsync(
+        Guid facilityId,
+        IReadOnlyCollection<Guid> destinationLocationIds,
+        CancellationToken cancellationToken = default)
+    {
+        var sortedLocIds = destinationLocationIds
+            .Where(id => id != Guid.Empty)
+            .Distinct()
+            .OrderBy(id => id)
+            .ToList();
+
+        if (!Database.IsRelational())
+        {
+            var gates = new List<SemaphoreSlim>(sortedLocIds.Count);
+            try
+            {
+                foreach (var locId in sortedLocIds)
+                {
+                    var locGate = InMemoryBillingLocks.GetOrAdd($"PUTAWAYLOC:{locId:N}", _ => new SemaphoreSlim(1, 1));
+                    await locGate.WaitAsync(cancellationToken);
+                    gates.Add(locGate);
+                }
+                return new MultiSemaphoreReleaser(gates);
+            }
+            catch
+            {
+                for (int i = gates.Count - 1; i >= 0; i--) gates[i].Release();
+                throw;
+            }
+        }
+
+        if (Database.CurrentTransaction != null &&
+            Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+        {
+            var facLockKey = $"FACILITY_LIFECYCLE:{facilityId:N}";
+            await Database.ExecuteSqlInterpolatedAsync(
+                $"SELECT pg_advisory_xact_lock_shared(hashtextextended({facLockKey}, 0::bigint))",
+                cancellationToken);
+
+            if (sortedLocIds.Count == 0)
+            {
+                return NoOpAsyncDisposable.Instance;
+            }
+
+            var observedZones = await Locations
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(l => sortedLocIds.Contains(l.Id))
+                .Select(l => new { l.Id, l.ZoneId })
+                .ToDictionaryAsync(l => l.Id, l => l.ZoneId, cancellationToken);
+
+            var sortedZoneIds = observedZones.Values
+                .Where(z => z.HasValue)
+                .Select(z => z!.Value)
+                .Distinct()
+                .OrderBy(z => z)
+                .ToList();
+
+            foreach (var zoneId in sortedZoneIds)
+            {
+                var zoneLockKey = $"ZONE_LIFECYCLE:{zoneId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock_shared(hashtextextended({zoneLockKey}, 0::bigint))",
+                    cancellationToken);
+            }
+
+            foreach (var locId in sortedLocIds)
+            {
+                var locLockKey = $"LOCATION_LIFECYCLE:{locId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({locLockKey}, 0::bigint))",
+                    cancellationToken);
+
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM locations WHERE location_id = {locId} FOR UPDATE",
+                    cancellationToken);
+            }
+
+            var actualZones = await Locations
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(l => sortedLocIds.Contains(l.Id))
+                .Select(l => new { l.Id, l.ZoneId })
+                .ToDictionaryAsync(l => l.Id, l => l.ZoneId, cancellationToken);
+
+            foreach (var locId in sortedLocIds)
+            {
+                observedZones.TryGetValue(locId, out var expectedZone);
+                actualZones.TryGetValue(locId, out var actualZone);
+                if (expectedZone != actualZone)
+                {
+                    throw new ZoneMembershipChangedException(locId, expectedZone, actualZone);
+                }
             }
         }
 
@@ -2430,20 +2578,27 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         {
             if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
             {
-                var facLockKey = $"FACILITY_LIFECYCLE:{facilityId:N}";
-                await Database.ExecuteSqlInterpolatedAsync(
-                    $"SELECT pg_advisory_xact_lock_shared(hashtextextended({facLockKey}, 0::bigint))",
-                    cancellationToken);
-
-                var zoneId = await Locations
+                var observedZoneId = await Locations
                     .IgnoreQueryFilters()
                     .AsNoTracking()
                     .Where(l => l.Id == locationId && l.FacilityId == facilityId)
                     .Select(l => l.ZoneId)
                     .FirstOrDefaultAsync(cancellationToken);
-                if (zoneId.HasValue)
+
+                var testHook = OnZoneMembershipObservedForTesting;
+                if (testHook != null)
                 {
-                    var zoneLockKey = $"ZONE_LIFECYCLE:{zoneId.Value:N}";
+                    await testHook(locationId);
+                }
+
+                var facLockKey = $"FACILITY_LIFECYCLE:{facilityId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock_shared(hashtextextended({facLockKey}, 0::bigint))",
+                    cancellationToken);
+
+                if (observedZoneId.HasValue)
+                {
+                    var zoneLockKey = $"ZONE_LIFECYCLE:{observedZoneId.Value:N}";
                     await Database.ExecuteSqlInterpolatedAsync(
                         $"SELECT pg_advisory_xact_lock_shared(hashtextextended({zoneLockKey}, 0::bigint))",
                         cancellationToken);
@@ -2457,6 +2612,19 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
                 await Database.ExecuteSqlInterpolatedAsync(
                     $"SELECT 1 FROM locations WHERE location_id = {locationId} AND facility_id = {facilityId} FOR UPDATE",
                     cancellationToken);
+
+                // MDM21-F03-R01-A: Detect concurrent zone reassignment & abort/retry cleanly without out-of-order locks
+                var actualZoneId = await Locations
+                    .IgnoreQueryFilters()
+                    .AsNoTracking()
+                    .Where(l => l.Id == locationId && l.FacilityId == facilityId)
+                    .Select(l => l.ZoneId)
+                    .FirstOrDefaultAsync(cancellationToken);
+
+                if (actualZoneId != observedZoneId)
+                {
+                    throw new ZoneMembershipChangedException(locationId, observedZoneId, actualZoneId);
+                }
             }
         }
 
@@ -2466,29 +2634,40 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             return await action();
         }
 
-        bool firstAttempt = true;
-        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        const int maxZoneRetries = 5;
+        for (int zoneAttempt = 0; ; zoneAttempt++)
         {
-            if (!firstAttempt)
+            try
+            {
+                bool firstAttempt = true;
+                return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+                {
+                    if (!firstAttempt)
+                    {
+                        ClearChangeTracker();
+                    }
+                    firstAttempt = false;
+
+                    await BeginTransactionAsync(cancellationToken);
+                    try
+                    {
+                        await AcquireLocationLifecycleLockAsync();
+                        var result = await action();
+                        await CommitTransactionAsync(cancellationToken);
+                        return result;
+                    }
+                    catch
+                    {
+                        await RollbackTransactionAsync(cancellationToken);
+                        throw;
+                    }
+                });
+            }
+            catch (ZoneMembershipChangedException) when (zoneAttempt < maxZoneRetries)
             {
                 ClearChangeTracker();
             }
-            firstAttempt = false;
-
-            await BeginTransactionAsync(cancellationToken);
-            try
-            {
-                await AcquireLocationLifecycleLockAsync();
-                var result = await action();
-                await CommitTransactionAsync(cancellationToken);
-                return result;
-            }
-            catch
-            {
-                await RollbackTransactionAsync(cancellationToken);
-                throw;
-            }
-        });
+        }
     }
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)

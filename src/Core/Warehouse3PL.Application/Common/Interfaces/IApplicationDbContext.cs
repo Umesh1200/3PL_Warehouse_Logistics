@@ -227,6 +227,7 @@ public interface IApplicationDbContext
     Task<IAsyncDisposable> AcquireScopedIdempotencyLockAsync(string lockScope, Guid facilityId, string idempotencyKey, CancellationToken cancellationToken = default);
     Task<IAsyncDisposable> AcquireStockAllocationLocksAsync(IReadOnlyCollection<Guid> stockOnHandIds, CancellationToken cancellationToken = default);
     Task<IAsyncDisposable> AcquirePutawayExecutionLocksAsync(Guid? sourceStockId, Guid destinationLocationId, CancellationToken cancellationToken = default);
+    Task<IAsyncDisposable> AcquireMultiLocationExecutionLocksAsync(Guid facilityId, IReadOnlyCollection<Guid> destinationLocationIds, CancellationToken cancellationToken = default);
     Task<TResult> ExecuteWithCompliancePolicyLockAsync<TResult>(
         string countryCode,
         string policyCode,

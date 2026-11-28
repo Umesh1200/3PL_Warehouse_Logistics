@@ -122,19 +122,23 @@ public class ConfirmCrossDockTaskCommandHandler : IRequestHandler<ConfirmCrossDo
                     nameof(request.ScannedDestinationBarcode),
                     $"Cross-dock destination location '{scannedDest.LocationCode}' is inactive, locked, or damaged.");
 
-            // MDM21-F02-C: Preserve authorized transient staging (StagingLane, DockDoor, IsReceiving) and storable floor/bin;
-            // reject structural container nodes (Aisle, Rack, ShelfLevel, Mezzanine, Facility, Zone, PackingStation, Cantilever).
-            var isTransientStaging = actualDestLocation.IsReceiving ||
-                                     actualDestLocation.LocationType == LocationType.StagingLane ||
-                                     actualDestLocation.LocationType == LocationType.DockDoor;
-            var isEligibleStorable = actualDestLocation.IsStorable &&
-                                     (actualDestLocation.LocationType == LocationType.BulkFloor ||
-                                      actualDestLocation.LocationType == LocationType.Bin);
-            if (!isTransientStaging && !isEligibleStorable)
+            // MDM21-F02-R01-B: Explicitly reject structural container types REGARDLESS of contradictory capability flags (e.g. IsReceiving=true).
+            // Preserve legitimate staging/dock-door workflows and enforce full storage-profile restrictions on permanent storage targets.
+            var isTransientStagingType = actualDestLocation.LocationType is LocationType.StagingLane or LocationType.DockDoor;
+            var isPermanentStorageType = actualDestLocation.LocationType is LocationType.BulkFloor or LocationType.Bin;
+
+            if (!isTransientStagingType && !isPermanentStorageType)
             {
                 throw new ValidationException(
                     nameof(request.ScannedDestinationBarcode),
-                    $"Location '{actualDestLocation.LocationCode}' (type '{actualDestLocation.LocationType}') is not an eligible cross-dock staging or storage destination.");
+                    $"Location '{actualDestLocation.LocationCode}' (type '{actualDestLocation.LocationType}') is a structural or non-cross-dock location and cannot accept cross-dock inventory even if capability flags are set.");
+            }
+
+            if (actualDestLocation.Zone != null && !actualDestLocation.Zone.IsActive)
+            {
+                throw new ValidationException(
+                    nameof(request.ScannedDestinationBarcode),
+                    $"Cross-dock destination zone '{actualDestLocation.Zone.ZoneCode}' is inactive.");
             }
 
             if (actualDestLocation.Zone?.DedicatedClientId is Guid cdZoneClientId && cdZoneClientId != task.ClientId)
@@ -149,6 +153,17 @@ public class ConfirmCrossDockTaskCommandHandler : IRequestHandler<ConfirmCrossDo
                 throw new ValidationException(
                     nameof(request.ScannedDestinationBarcode),
                     $"Cross-dock destination location '{actualDestLocation.LocationCode}' is dedicated to another client.");
+            }
+
+            if (isPermanentStorageType)
+            {
+                var item = task.Item ?? await _context.Items
+                    .AsNoTracking()
+                    .FirstOrDefaultAsync(i => i.Id == task.ItemId, cancellationToken)
+                    ?? throw new EntityNotFoundException(nameof(Domain.Entities.Catalog.Item), task.ItemId);
+
+                await Putaway.PutawaySafetyValidator.ValidateDestinationSafetyAndCapacityAsync(
+                    _context, actualDestLocation, item, task.Quantity, cancellationToken, task.LotId);
             }
 
             // 3. Atomic Ledger Relocation: Decrement QtyAllocated at Source Staging

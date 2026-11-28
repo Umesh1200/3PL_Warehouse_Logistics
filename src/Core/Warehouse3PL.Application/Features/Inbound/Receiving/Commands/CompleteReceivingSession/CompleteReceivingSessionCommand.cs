@@ -100,100 +100,271 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
                 $"Cannot complete session '{session.SessionNumber}' with {pendingDiscrepancies.Count} discrepancy(ies) pending review. All discrepancies must be approved, rejected, or quarantined.");
         }
 
-        // 5. Execute all updates atomically within a single encompassing database transaction
+        // 5. Execute all lifecycle locking, destination validation, and ledger updates atomically inside a single transaction (MDM21-F03-R01-B)
         return await _context.ExecuteInTransactionAsync(async () =>
         {
+            await using var sessionLock = await _context.AcquireScopedIdempotencyLockAsync(
+                "RCV_COMPLETE", session.FacilityId, request.ReceivingSessionId.ToString("N"), cancellationToken);
+
+            // Re-read authoritative session inside transaction
+            var lockedSession = await _context.ReceivingSessions
+                .Include(s => s.Facility)
+                .Include(s => s.DockDoor)
+                .Include(s => s.YardVisit)
+                .Include(s => s.Client)
+                .Include(s => s.Discrepancies)
+                .Include(s => s.Lines)
+                    .ThenInclude(l => l.Item)
+                .Include(s => s.AdvanceShippingNotice)
+                    .ThenInclude(asn => asn!.Lines)
+                .Include(s => s.PurchaseOrder)
+                    .ThenInclude(po => po!.Lines)
+                .FirstOrDefaultAsync(s => s.Id == request.ReceivingSessionId, cancellationToken)
+                ?? throw new EntityNotFoundException(nameof(ReceivingSession), request.ReceivingSessionId);
+
+            if (lockedSession.Status == ReceivingStatus.Completed)
+            {
+                return MapToDto(lockedSession);
+            }
+
+            if (lockedSession.Status == ReceivingStatus.Cancelled)
+            {
+                throw new ValidationException(nameof(request.ReceivingSessionId), $"Cannot complete cancelled receiving session '{lockedSession.SessionNumber}'.");
+            }
+
+            // Resolve authoritative staging destinations for all lines
+            var resolvedLineTargets = new Dictionary<Guid, Guid>();
+            Location? fallbackStagingLocation = null;
+
+            foreach (var line in lockedSession.Lines)
+            {
+                var lineClientId = lockedSession.ClientId ?? line.Item.ClientId;
+                var stagingLocId = line.StagingLocationId;
+
+                if (!stagingLocId.HasValue)
+                {
+                    if (fallbackStagingLocation == null)
+                    {
+                        var candidates = await _context.Locations
+                            .AsNoTracking()
+                            .Include(l => l.Zone)
+                            .Include(l => l.StorageProfile)
+                            .Where(l =>
+                                l.FacilityId == lockedSession.FacilityId &&
+                                l.IsReceiving &&
+                                l.LocationType == LocationType.StagingLane &&
+                                l.IsActive &&
+                                l.Status == LocationStatus.Active &&
+                                !l.IsDeleted &&
+                                !l.IsLocked &&
+                                !l.IsDamaged)
+                            .OrderBy(l => l.LocationCode)
+                            .ToListAsync(cancellationToken);
+
+                        fallbackStagingLocation = candidates.FirstOrDefault(l =>
+                            (l.Zone == null || (l.Zone.IsActive && (!l.Zone.DedicatedClientId.HasValue || l.Zone.DedicatedClientId.Value == lineClientId))) &&
+                            (l.StorageProfile == null || !l.StorageProfile.DedicatedClientId.HasValue || l.StorageProfile.DedicatedClientId.Value == lineClientId));
+                    }
+
+                    if (fallbackStagingLocation == null)
+                    {
+                        // MDM21-F03-R01-B: Safe automatic staging provisioning under protected FacilityHierarchy lock,
+                        // enforcing active facility, hierarchy rules, derived hierarchy metadata, and permanent normalized uniqueness.
+                        fallbackStagingLocation = await _context.ExecuteWithFacilityHierarchyLockAsync(lockedSession.FacilityId, async () =>
+                        {
+                            await WarehouseMaster.WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(
+                                _context, lockedSession.FacilityId, cancellationToken);
+
+                            await WarehouseMaster.LocationHierarchyRuleEvaluator.ValidatePlacementAsync(
+                                _context,
+                                lockedSession.FacilityId,
+                                null,
+                                LocationType.StagingLane,
+                                targetHierarchyLevel: 1,
+                                cancellationToken,
+                                requestedIsStorable: true);
+
+                            var facilityCode = lockedSession.Facility?.FacilityCode ?? lockedSession.FacilityId.ToString("N")[..8].ToUpperInvariant();
+                            var baseCode = $"STAGING-RCV-{facilityCode}";
+                            var baseBarcode = $"LOC-STG-RCV-{facilityCode}";
+                            var candidateCode = baseCode;
+                            var candidateBarcode = baseBarcode;
+                            int suffix = 0;
+
+                            while (await _context.Locations.IgnoreQueryFilters().AsNoTracking().AnyAsync(l =>
+                                l.FacilityId == lockedSession.FacilityId &&
+                                (l.NormalizedLocationCode == Location.NormalizeCode(candidateCode) ||
+                                 l.NormalizedBarcode == Location.NormalizeCode(candidateBarcode)),
+                                cancellationToken))
+                            {
+                                suffix++;
+                                candidateCode = $"{baseCode}-{suffix}";
+                                candidateBarcode = $"{baseBarcode}-{suffix}";
+                            }
+
+                            var autoId = Guid.NewGuid();
+                            var autoStaging = new Location
+                            {
+                                Id = autoId,
+                                FacilityId = lockedSession.FacilityId,
+                                LocationType = LocationType.StagingLane,
+                                LocationCode = candidateCode,
+                                NormalizedLocationCode = Location.NormalizeCode(candidateCode),
+                                LocationName = candidateCode,
+                                Barcode = candidateBarcode,
+                                NormalizedBarcode = Location.NormalizeCode(candidateBarcode),
+                                HierarchyLevel = 1,
+                                HierarchyPath = Location.BuildHierarchyPath(null, autoId),
+                                Status = LocationStatus.Active,
+                                IsActive = true,
+                                IsStorable = true,
+                                IsReceiving = true,
+                                ConfigRevision = 1,
+                                CreatedBy = _currentUser.UserId
+                            };
+                            _context.Locations.Add(autoStaging);
+                            await _context.SaveChangesAsync(cancellationToken);
+                            return autoStaging;
+                        }, cancellationToken);
+                    }
+
+                    stagingLocId = fallbackStagingLocation.Id;
+                }
+
+                resolvedLineTargets[line.Id] = stagingLocId.Value;
+            }
+
+            // Acquire deterministic FACILITY_LIFECYCLE(SH) -> sorted ZONE_LIFECYCLE(SH) -> sorted LOCATION_LIFECYCLE(EX)
+            var distinctStagingIds = resolvedLineTargets.Values.Distinct().OrderBy(id => id).ToList();
+            await using var stagingLocks = await _context.AcquireMultiLocationExecutionLocksAsync(
+                lockedSession.FacilityId, distinctStagingIds, cancellationToken);
+
+            // Re-validate active facility under lock
+            await WarehouseMaster.WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(
+                _context, lockedSession.FacilityId, cancellationToken);
+
+            // Re-read all staging destinations under lock and validate EVERY line BEFORE mutating ASN/PO/Stock/Ledger
+            var lockedLocations = await _context.Locations
+                .AsNoTracking()
+                .Include(l => l.Zone)
+                .Include(l => l.StorageProfile)
+                .Where(l => distinctStagingIds.Contains(l.Id) && !l.IsDeleted)
+                .ToDictionaryAsync(l => l.Id, cancellationToken);
+
+            foreach (var line in lockedSession.Lines)
+            {
+                var lineClientId = lockedSession.ClientId ?? line.Item.ClientId;
+                var targetId = resolvedLineTargets[line.Id];
+
+                if (!lockedLocations.TryGetValue(targetId, out var destLoc) || destLoc.FacilityId != lockedSession.FacilityId)
+                {
+                    throw new ValidationException(
+                        nameof(line.StagingLocationId),
+                        $"Receiving staging location '{targetId}' does not exist in facility '{lockedSession.FacilityId}'.");
+                }
+
+                if (!destLoc.IsActive || destLoc.Status != LocationStatus.Active)
+                {
+                    throw new ValidationException(
+                        nameof(line.StagingLocationId),
+                        $"Receiving staging location '{destLoc.LocationCode}' is inactive or decommissioned (status: '{destLoc.Status}').");
+                }
+
+                if (destLoc.IsLocked || destLoc.IsDamaged)
+                {
+                    throw new ValidationException(
+                        nameof(line.StagingLocationId),
+                        $"Receiving staging location '{destLoc.LocationCode}' is locked or damaged and cannot accept received inventory.");
+                }
+
+                if (destLoc.LocationType != LocationType.StagingLane || !destLoc.IsReceiving)
+                {
+                    throw new ValidationException(
+                        nameof(line.StagingLocationId),
+                        $"Location '{destLoc.LocationCode}' (type '{destLoc.LocationType}', isReceiving: {destLoc.IsReceiving}) is not an eligible receiving staging lane.");
+                }
+
+                if (destLoc.Zone != null)
+                {
+                    if (!destLoc.Zone.IsActive)
+                    {
+                        throw new ValidationException(
+                            nameof(line.StagingLocationId),
+                            $"Receiving staging zone '{destLoc.Zone.ZoneCode}' is inactive.");
+                    }
+
+                    if (destLoc.Zone.DedicatedClientId.HasValue && destLoc.Zone.DedicatedClientId.Value != lineClientId)
+                    {
+                        throw new ValidationException(
+                            nameof(line.StagingLocationId),
+                            $"Receiving staging zone '{destLoc.Zone.ZoneCode}' is dedicated to another client.");
+                    }
+                }
+
+                if (destLoc.StorageProfile?.DedicatedClientId is Guid profileClientId && profileClientId != lineClientId)
+                {
+                    throw new ValidationException(
+                        nameof(line.StagingLocationId),
+                        $"Receiving staging location '{destLoc.LocationCode}' is dedicated to another client.");
+                }
+            }
+
             var completingUserId = _currentUser.UserId ?? Guid.NewGuid();
-            session.Complete(completingUserId);
+            lockedSession.Complete(completingUserId);
 
             // Reconcile ASN quantities & status
-            if (session.AdvanceShippingNotice != null)
+            if (lockedSession.AdvanceShippingNotice != null)
             {
-                foreach (var line in session.Lines)
+                foreach (var line in lockedSession.Lines)
                 {
                     if (line.AsnLineItemId.HasValue)
                     {
-                        session.AdvanceShippingNotice.RecordLineReceipt(line.AsnLineItemId.Value, line.QuantityReceived);
+                        lockedSession.AdvanceShippingNotice.RecordLineReceipt(line.AsnLineItemId.Value, line.QuantityReceived);
                     }
                     else
                     {
-                        var matchingAsnLine = session.AdvanceShippingNotice.Lines.FirstOrDefault(l => l.ItemId == line.ItemId);
+                        var matchingAsnLine = lockedSession.AdvanceShippingNotice.Lines.FirstOrDefault(l => l.ItemId == line.ItemId);
                         if (matchingAsnLine != null)
                         {
-                            session.AdvanceShippingNotice.RecordLineReceipt(matchingAsnLine.Id, line.QuantityReceived);
+                            lockedSession.AdvanceShippingNotice.RecordLineReceipt(matchingAsnLine.Id, line.QuantityReceived);
                         }
                     }
                 }
 
-                session.AdvanceShippingNotice.CompleteReceiving();
+                lockedSession.AdvanceShippingNotice.CompleteReceiving();
             }
 
             // Reconcile PO line quantities & status
-            if (session.PurchaseOrder != null)
+            if (lockedSession.PurchaseOrder != null)
             {
-                foreach (var line in session.Lines)
+                foreach (var line in lockedSession.Lines)
                 {
                     if (line.PurchaseOrderLineId.HasValue)
                     {
-                        session.PurchaseOrder.RecordLineReceipt(line.PurchaseOrderLineId.Value, line.QuantityReceived);
+                        lockedSession.PurchaseOrder.RecordLineReceipt(line.PurchaseOrderLineId.Value, line.QuantityReceived);
                     }
                     else
                     {
-                        var matchingPoLine = session.PurchaseOrder.Lines.FirstOrDefault(l => l.ItemId == line.ItemId);
+                        var matchingPoLine = lockedSession.PurchaseOrder.Lines.FirstOrDefault(l => l.ItemId == line.ItemId);
                         if (matchingPoLine != null)
                         {
-                            session.PurchaseOrder.RecordLineReceipt(matchingPoLine.Id, line.QuantityReceived);
+                            lockedSession.PurchaseOrder.RecordLineReceipt(matchingPoLine.Id, line.QuantityReceived);
                         }
                     }
                 }
             }
 
-            // Ledger Integration: Ingest into transient staging records
-            Location? fallbackStagingLocation = null;
+            // Ledger Integration: Ingest into validated transient staging records
             var localLots = new Dictionary<(Guid ClientId, Guid ItemId, string LotNumber), InventoryLot>();
             var localStocks = new Dictionary<(Guid ClientId, Guid FacilityId, Guid ItemId, Guid LocationId, Guid? LotId), StockOnHand>();
 
-            foreach (var line in session.Lines)
+            foreach (var line in lockedSession.Lines)
             {
-                var clientId = session.ClientId ?? line.Item.ClientId;
-
-                // Determine destination receiving staging location
-                var stagingLocId = line.StagingLocationId;
-                if (!stagingLocId.HasValue)
-                {
-                    fallbackStagingLocation ??= await _context.Locations
-                        .FirstOrDefaultAsync(l =>
-                            l.FacilityId == session.FacilityId &&
-                            l.IsReceiving &&
-                            l.LocationType == LocationType.StagingLane &&
-                            l.IsActive &&
-                            !l.IsDeleted &&
-                            !l.IsLocked &&
-                            !l.IsDamaged,
-                            cancellationToken);
-
-                    stagingLocId = fallbackStagingLocation?.Id;
-                }
-
-                if (!stagingLocId.HasValue)
-                {
-                    // Create a default transient receiving staging location if none exists
-                    var autoStaging = new Location
-                    {
-                        FacilityId = session.FacilityId,
-                        LocationCode = $"STAGING-RCV-{session.Facility.FacilityCode}",
-                        Barcode = $"LOC-STG-RCV-{session.Facility.FacilityCode}",
-                        LocationType = LocationType.StagingLane,
-                        IsActive = true,
-                        IsReceiving = true
-                    };
-                    _context.Locations.Add(autoStaging);
-                    stagingLocId = autoStaging.Id;
-                    fallbackStagingLocation = autoStaging;
-                }
+                var clientId = lockedSession.ClientId ?? line.Item.ClientId;
+                var stagingLocId = resolvedLineTargets[line.Id];
 
                 // Persist the authoritative staging assignment onto the receipt line
-                line.StagingLocationId = stagingLocId.Value;
+                line.StagingLocationId = stagingLocId;
 
                 // Inventory Lot Handling
                 InventoryLot? lot = null;
@@ -235,16 +406,16 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
 
                 // StockOnHand snapshot update
                 var lotId = lot?.Id;
-                var stockKey = (clientId, session.FacilityId, line.ItemId, stagingLocId.Value, lotId);
+                var stockKey = (clientId, lockedSession.FacilityId, line.ItemId, stagingLocId, lotId);
 
                 if (!localStocks.TryGetValue(stockKey, out var stock))
                 {
                     stock = await _context.StockOnHand
                         .FirstOrDefaultAsync(s =>
                             s.ClientId == clientId &&
-                            s.FacilityId == session.FacilityId &&
+                            s.FacilityId == lockedSession.FacilityId &&
                             s.ItemId == line.ItemId &&
-                            s.LocationId == stagingLocId.Value &&
+                            s.LocationId == stagingLocId &&
                             s.LotId == lotId,
                             cancellationToken);
 
@@ -253,9 +424,9 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
                         stock = new StockOnHand
                         {
                             ClientId = clientId,
-                            FacilityId = session.FacilityId,
+                            FacilityId = lockedSession.FacilityId,
                             ItemId = line.ItemId,
-                            LocationId = stagingLocId.Value,
+                            LocationId = stagingLocId,
                             LotId = lotId,
                             QtyAvailable = 0m,
                             QtyDamaged = 0m,
@@ -285,18 +456,18 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
                 var ledgerTx = new InventoryTransaction
                 {
                     ClientId = clientId,
-                    FacilityId = session.FacilityId,
+                    FacilityId = lockedSession.FacilityId,
                     ItemId = line.ItemId,
                     LotId = lotId,
                     FromLocationId = null,
-                    ToLocationId = stagingLocId.Value,
+                    ToLocationId = stagingLocId,
                     TxType = InventoryTxType.Receive,
                     Quantity = line.QuantityReceived,
                     ReferenceType = "ReceivingSession",
-                    ReferenceId = session.Id,
+                    ReferenceId = lockedSession.Id,
                     UserId = completingUserId,
                     TxTimestamp = DateTime.UtcNow,
-                    Notes = $"Goods Received: Session {session.SessionNumber} (LPN: {line.Lpn}, Condition: {line.Condition})"
+                    Notes = $"Goods Received: Session {lockedSession.SessionNumber} (LPN: {line.Lpn}, Condition: {line.Condition})"
                 };
                 _context.InventoryTransactions.Add(ledgerTx);
             }
@@ -304,7 +475,7 @@ public class CompleteReceivingSessionCommandHandler : IRequestHandler<CompleteRe
             // Commit all changes atomically at the end of the transaction
             await _context.SaveChangesAsync(cancellationToken);
 
-            return MapToDto(session);
+            return MapToDto(lockedSession);
         }, cancellationToken);
     }
 
