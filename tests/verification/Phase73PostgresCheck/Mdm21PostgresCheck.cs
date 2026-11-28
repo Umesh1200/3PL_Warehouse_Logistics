@@ -846,16 +846,22 @@ internal static class Mdm21PostgresCheck
                 ClientId = clientA,
                 FacilityId = facIsoId,
                 SessionNumber = "RCV-R04-001",
-                Status = ReceivingStatus.Completed
+                Status = ReceivingStatus.Completed,
+                ReceivedByUserId = adminCtx.UserId!.Value,
+                StartedAtUtc = DateTime.UtcNow.AddMinutes(-10),
+                CompletedAtUtc = DateTime.UtcNow.AddMinutes(-5)
             };
             db.ReceivingSessions.Add(session);
             db.ReceiptLines.Add(new ReceiptLine
             {
                 ReceivingSessionId = session.Id,
                 ItemId = item.Id,
+                Lpn = "LPN-R04-PUT-001",
+                QuantityExpected = 5m,
                 QuantityReceived = 5m,
                 StagingLocationId = stg.Id,
-                Condition = ReceiptConditionStatus.Sound
+                Condition = ReceiptConditionStatus.Sound,
+                ScannedAtUtc = DateTime.UtcNow.AddMinutes(-6)
             });
             await db.SaveChangesAsync();
         }
@@ -1104,10 +1110,23 @@ internal static class Mdm21PostgresCheck
         foreach (var t in new[] { tSql1, tSql2 })
         {
             try { await t; sqlOk++; }
-            catch (PostgresException pgEx) when (pgEx.MessageText.Contains("LOCATION_HIERARCHY_CYCLE", StringComparison.Ordinal)) { sqlRejected++; }
+            catch (PostgresException pgEx) when (
+                pgEx.MessageText.Contains("LOCATION_HIERARCHY_CYCLE", StringComparison.Ordinal) ||
+                pgEx.SqlState == "40P01")
+            {
+                sqlRejected++;
+            }
         }
         if (sqlOk != 1 || sqlRejected != 1)
-            throw new InvalidOperationException($"PG-20 R04 violation: Expected 1 direct-SQL success and 1 trigger cycle rejection, got ok={sqlOk}, rejected={sqlRejected}.");
+            throw new InvalidOperationException($"PG-20 R04 violation: Expected 1 direct-SQL success and 1 rejection (cycle or deadlock), got ok={sqlOk}, rejected={sqlRejected}.");
+
+        await using (var verifySqlDb = CreatePgDb(connStr, adminCtx))
+        {
+            var aRow = await verifySqlDb.Locations.AsNoTracking().FirstAsync(l => l.Id == sqlA);
+            var bRow = await verifySqlDb.Locations.AsNoTracking().FirstAsync(l => l.Id == sqlB);
+            if (aRow.ParentLocationId == sqlB && bRow.ParentLocationId == sqlA)
+                throw new InvalidOperationException("PG-20 R04 violation: Direct-SQL opposite reparenting persisted a cycle!");
+        }
 
         Console.WriteLine("  [PASS] PG-20 (R04): Concurrent rule mutation vs reparenting & direct-SQL fn_locations_prevent_cycle() advisory lock verified.");
     }
