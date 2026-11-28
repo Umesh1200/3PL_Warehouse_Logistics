@@ -368,12 +368,14 @@ VALUES (@s1, @cid, 'dup-sup', 'Supplier Lower', 'PendingNormalization', TRUE, FA
 
     private static ApplicationDbContext CreatePgDb(string connectionString, ICurrentUserContext? user = null)
     {
-        var opts = new DbContextOptionsBuilder<ApplicationDbContext>()
-            .UseNpgsql(connectionString)
-            .Options;
-        var tenant = new PgTenantProvider();
         var activeUser = user ?? new PgSuperAdminUser(Guid.NewGuid(), Guid.NewGuid());
         var interceptor = new AuditableEntityInterceptor(activeUser, new DateTimeProvider());
+        var opts = new DbContextOptionsBuilder<ApplicationDbContext>()
+            .UseNpgsql(connectionString, b => b.MigrationsAssembly(typeof(ApplicationDbContext).Assembly.FullName))
+            .UseSnakeCaseNamingConvention()
+            .AddInterceptors(interceptor)
+            .Options;
+        var tenant = new PgTenantProvider();
         return new ApplicationDbContext(opts, tenant, activeUser, interceptor);
     }
 
