@@ -1156,8 +1156,8 @@ internal static class Mdm21PostgresCheck
             if (aRow.ParentLocationId == sqlB && bRow.ParentLocationId == sqlA)
                 throw new InvalidOperationException("PG-20 R04 violation: Direct-SQL opposite reparenting persisted a cycle!");
 
-            await verifySqlDb.Database.ExecuteSqlRawAsync(
-                $"UPDATE locations SET parent_location_id = NULL, hierarchy_level = 1, hierarchy_path = '/' || replace(location_id::text, '-', '') || '/' WHERE location_id IN ('{sqlA}', '{sqlB}');");
+            await verifySqlDb.Database.ExecuteSqlInterpolatedAsync(
+                $"UPDATE locations SET parent_location_id = NULL, hierarchy_level = 1, hierarchy_path = '/' || replace(location_id::text, '-', '') || '/' WHERE location_id IN ({sqlA}, {sqlB});");
         }
 
         Console.WriteLine("  [PASS] PG-20 (R04): Concurrent rule mutation vs reparenting & direct-SQL fn_locations_prevent_cycle() advisory lock verified.");
@@ -1316,11 +1316,13 @@ internal static class Mdm21PostgresCheck
         db.Items.Add(itemA);
 
         var origOrder = new OutboundOrder { ClientId = clientA, FacilityId = facOrd, OrderNumber = "ORD-PG23-RET", CustomerName = "PG23 Cust", Status = OutboundOrderStatus.Completed };
-        var origPkg = new Package { ClientId = clientA, FacilityId = facOrd, OutboundOrderId = origOrder.Id, PackageNumber = "PKG-PG23-RET", TrackingNumber = "TRK-PG23-RET", Status = PackageStatus.Loaded };
+        var origHu = new HandlingUnit { ClientId = clientA, FacilityId = facOrd, LpnCode = "LPN-PG23-ORIG", UnitType = HandlingUnitType.Carton, Status = HandlingUnitStatus.Shipped };
+        var origPkg = new Package { ClientId = clientA, FacilityId = facOrd, OutboundOrderId = origOrder.Id, HandlingUnitId = origHu.Id, PackageNumber = "PKG-PG23-RET", TrackingNumber = "TRK-PG23-RET", Status = PackageStatus.Loaded };
         var retAuth = ReturnAuthorization.Create(clientA, facOrd, facOrd, origOrder.Id, null, origPkg.Id, null, "RA-PG23", ReturnReason.DamagedInTransit, "PG23 Test", adminCtx.UserId!.Value, "RMA-PG23", DateTime.UtcNow.AddDays(7));
         var retShip = new ReturnShipment { ClientId = clientA, ReturnAuthorizationId = retAuth.Id, OrderId = origOrder.Id, PackageId = origPkg.Id, OriginFacilityId = facOrd, DestinationFacilityId = facOrd, CarrierCode = "FEDEX", TrackingNumber = origPkg.TrackingNumber, AuthorizedByUserId = adminCtx.UserId!.Value, Status = ReturnShipmentStatus.DeliveredAtWarehouse, DeliveredAtWarehouseUtc = DateTime.UtcNow.AddHours(-1) };
         var handoff = ReturnInboundHandoff.Create(clientA, facOrd, retShip.Id, retAuth.Id, origPkg.Id, origOrder.Id, "HND-PG23", retAuth.RmaNumber!, retShip.TrackingNumber, retShip.CarrierCode, DateTime.UtcNow.AddHours(-1), "D-1", "Arrived");
         db.OutboundOrders.Add(origOrder);
+        db.HandlingUnits.Add(origHu);
         db.Packages.Add(origPkg);
         db.ReturnAuthorizations.Add(retAuth);
         db.ReturnShipments.Add(retShip);
