@@ -1154,6 +1154,10 @@ internal static class Mdm21PostgresCheck
             var bRow = await verifySqlDb.Locations.AsNoTracking().FirstAsync(l => l.Id == sqlB);
             if (aRow.ParentLocationId == sqlB && bRow.ParentLocationId == sqlA)
                 throw new InvalidOperationException("PG-20 R04 violation: Direct-SQL opposite reparenting persisted a cycle!");
+
+            // Clean up direct-SQL reparenting test links (which intentionally bypassed app hierarchy rules)
+            await verifySqlDb.Database.ExecuteSqlRawAsync(
+                $"UPDATE locations SET parent_location_id = NULL, hierarchy_level = 1, hierarchy_path = '/' || replace(location_id::text, '-', '') || '/' WHERE location_id IN ('{sqlA}', '{sqlB}');");
         }
 
         Console.WriteLine("  [PASS] PG-20 (R04): Concurrent rule mutation vs reparenting & direct-SQL fn_locations_prevent_cycle() advisory lock verified.");
