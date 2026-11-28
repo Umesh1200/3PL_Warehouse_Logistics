@@ -1148,6 +1148,38 @@ try
     // ------------------------------------------------------------------------------------------------
     Console.WriteLine("\n[4/4] Running Metadata Schema & Client CRUD HTTP Integration Verification...");
 
+    // Ensure the TestAuthHandler default SuperAdmin actor has an authoritative DB User + SuperAdmin Role assignment (MDM-2.2 DB-authoritative RBAC)
+    await using (var authSeedDb = CreateDb(operationalConn, user))
+    {
+        var saRole = await authSeedDb.Roles.FirstOrDefaultAsync(r => r.RoleName == SystemRoles.SuperAdmin);
+        if (saRole == null)
+        {
+            saRole = new Role { RoleName = SystemRoles.SuperAdmin, Description = "Platform SuperAdmin", IsSystemRole = true };
+            authSeedDb.Roles.Add(saRole);
+            await authSeedDb.SaveChangesAsync();
+        }
+        var existingActor = await authSeedDb.Users.IgnoreQueryFilters().FirstOrDefaultAsync(u => u.Id == TestAuthHandler.CurrentUserId);
+        if (existingActor == null)
+        {
+            authSeedDb.Users.Add(new User
+            {
+                Id = TestAuthHandler.CurrentUserId,
+                Email = $"pg-section4-{TestAuthHandler.CurrentUserId:N}@nexus3pl.test",
+                PasswordHash = "hash",
+                FirstName = "PG",
+                LastName = "Section4Admin",
+                UserType = UserType.Staff,
+                Status = UserStatus.Active
+            });
+            await authSeedDb.SaveChangesAsync();
+        }
+        if (!await authSeedDb.UserRoles.AnyAsync(ur => ur.UserId == TestAuthHandler.CurrentUserId && ur.RoleId == saRole.Id))
+        {
+            authSeedDb.UserRoles.Add(new UserRole { UserId = TestAuthHandler.CurrentUserId, RoleId = saRole.Id });
+            await authSeedDb.SaveChangesAsync();
+        }
+    }
+
     // 4.1 Authoritative Schema Resolution: GET /api/v1/schemas/Client
     var schemaResponse = await client.GetAsync("/api/v1/schemas/Client");
     if (schemaResponse.StatusCode != HttpStatusCode.OK)

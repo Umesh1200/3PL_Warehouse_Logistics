@@ -54,7 +54,7 @@ public class CreateClientCommandValidator : AbstractValidator<CreateClientComman
         RuleFor(x => x.AccountCode)
             .NotEmpty().WithMessage("Account code is required.")
             .MaximumLength(50).WithMessage("Account code must not exceed 50 characters.")
-            .Matches("^[A-Za-z0-9_-]+$").WithMessage("Account code must only contain alphanumeric characters, hyphens, or underscores.");
+            .Matches("^[A-Z0-9_-]+$").WithMessage("Account code must only contain uppercase alphanumeric characters, hyphens, or underscores.");
 
         RuleFor(x => x.Currency)
             .NotEmpty().WithMessage("Currency is required.")
