@@ -161,6 +161,26 @@ public class GeneratePutawayTasksCommandHandler : IRequestHandler<GeneratePutawa
                         continue; // Skip if no eligible bin is currently available
                     }
 
+                    // MDM21-R04: Lock destination location row and re-verify active/storable eligibility against concurrent deactivation
+                    await using var destLock = await _context.AcquirePutawayExecutionLocksAsync(
+                        null, optimalLocation.Id, cancellationToken);
+
+                    var verifiedDest = await _context.Locations
+                        .AsNoTracking()
+                        .FirstOrDefaultAsync(l => l.Id == optimalLocation.Id &&
+                                                  l.FacilityId == facilityId &&
+                                                  !l.IsDeleted &&
+                                                  l.IsActive &&
+                                                  l.Status == LocationStatus.Active &&
+                                                  l.IsStorable &&
+                                                  !l.IsLocked &&
+                                                  !l.IsDamaged,
+                            cancellationToken);
+                    if (verifiedDest == null)
+                    {
+                        continue; // Destination became unavailable concurrently; do not target inactive/non-storable bin
+                    }
+
                     // Determine Priority
                     var priority = PutawayPriority.Normal;
                     if (line.Item.StorageTempClass == StorageTempClass.Frozen || line.Item.StorageTempClass == StorageTempClass.Refrigerated)

@@ -45,6 +45,13 @@ public class AllocationCandidateFilter : IAllocationCandidateFilter
                 $"Location '{stock.Location.LocationCode}' is inactive, deleted, or damaged.");
         }
 
+        if (!stock.Location.IsStorable)
+        {
+            return CandidateEligibilityResult.Ineligible(
+                ShortageReason.InsufficientStock,
+                $"Location '{stock.Location.LocationCode}' is marked as non-storable and excluded from standard allocation.");
+        }
+
         if (!stock.Location.IsPickable)
         {
             return CandidateEligibilityResult.Ineligible(

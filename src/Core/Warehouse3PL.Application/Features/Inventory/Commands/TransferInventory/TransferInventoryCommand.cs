@@ -61,6 +61,7 @@ public class TransferInventoryCommandHandler : IRequestHandler<TransferInventory
         {
             // 1. Fetch Source Stock Balance
             var sourceStock = await _context.StockOnHand
+                .Include(s => s.Item)
                 .FirstOrDefaultAsync(s =>
                     s.ClientId == request.ClientId &&
                     s.FacilityId == request.FacilityId &&
@@ -75,27 +76,34 @@ public class TransferInventoryCommandHandler : IRequestHandler<TransferInventory
                     $"Insufficient available stock at source location. Requested: {request.Quantity}, Available: {available}.");
             }
 
-            // 2. Validate Destination Location
+            // 2. Acquire canonical LocationLifecycle + StockOnHand locks (MDM21-R04) and validate destination
+            await using var moveLocks = await _context.AcquirePutawayExecutionLocksAsync(
+                sourceStock.Id, request.ToLocationId, cancellationToken);
+
             var destLocation = await _context.Locations
-                .FirstOrDefaultAsync(l => l.Id == request.ToLocationId && l.FacilityId == request.FacilityId, cancellationToken);
+                .AsNoTracking()
+                .Include(l => l.Zone)
+                .Include(l => l.StorageProfile)
+                .FirstOrDefaultAsync(l => l.Id == request.ToLocationId && l.FacilityId == request.FacilityId && !l.IsDeleted, cancellationToken);
 
             if (destLocation == null)
             {
                 throw new EntityNotFoundException(nameof(Location), request.ToLocationId);
             }
 
-            if (!destLocation.IsActive || destLocation.IsDeleted || destLocation.IsReceiving ||
-                destLocation.LocationType == LocationType.StagingLane)
+            if (destLocation.IsReceiving || destLocation.LocationType == LocationType.StagingLane)
             {
                 throw new ValidationException(nameof(request.ToLocationId),
-                    $"Target location '{destLocation.LocationCode}' is not an active storage location.");
+                    $"Target location '{destLocation.LocationCode}' is a staging/receiving location, not a permanent storage location.");
             }
 
-            if (destLocation.IsLocked || destLocation.IsDamaged)
-            {
-                throw new ValidationException(nameof(request.ToLocationId),
-                    $"Target location '{destLocation.LocationCode}' is locked or damaged.");
-            }
+            // MDM21-R03: Enforce IsStorable, LocationStatus, Zone.DedicatedClientId, LocationStorageProfile, and thermal/capacity limits
+            var item = sourceStock.Item ?? await _context.Items
+                .AsNoTracking()
+                .FirstAsync(i => i.Id == request.ItemId, cancellationToken);
+
+            await Putaway.PutawaySafetyValidator.ValidateDestinationSafetyAndCapacityAsync(
+                _context, destLocation, item, request.Quantity, cancellationToken, request.LotId);
 
             // 3. Atomically Decrement Source Balance
             sourceStock.QtyAvailable -= request.Quantity;

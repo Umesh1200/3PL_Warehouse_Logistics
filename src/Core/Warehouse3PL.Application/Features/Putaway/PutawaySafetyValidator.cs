@@ -247,8 +247,7 @@ public static class PutawaySafetyValidator
                 .AsNoTracking()
                 .CountAsync(hu => hu.FacilityId == destination.FacilityId &&
                                   hu.CurrentLocationId == destination.Id &&
-                                  !hu.IsDeleted &&
-                                  hu.Status != HandlingUnitStatus.Damaged,
+                                  !hu.IsDeleted,
                     cancellationToken);
 
             if (activeHuCount >= maxHus)

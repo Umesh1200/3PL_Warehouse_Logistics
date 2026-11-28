@@ -247,6 +247,9 @@ public interface IApplicationDbContext
         Guid facilityId,
         Func<Task<TResult>> action,
         CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithGlobalHierarchyLockAsync<TResult>(
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default);
     Task<TResult> ExecuteWithFacilityHierarchyLockAsync<TResult>(
         Guid facilityId,
         Func<Task<TResult>> action,

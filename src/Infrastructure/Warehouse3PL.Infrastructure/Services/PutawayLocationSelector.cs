@@ -141,8 +141,7 @@ public class PutawayLocationSelector : IPutawayLocationSelector, IPutawayRecomme
                 .Where(hu => hu.FacilityId == facilityId &&
                              hu.CurrentLocationId.HasValue &&
                              huCappedLocationIds.Contains(hu.CurrentLocationId.Value) &&
-                             !hu.IsDeleted &&
-                             hu.Status != HandlingUnitStatus.Damaged)
+                             !hu.IsDeleted)
                 .GroupBy(hu => hu.CurrentLocationId!.Value)
                 .Select(g => new { LocationId = g.Key, Count = g.Count() })
                 .ToDictionaryAsync(x => x.LocationId, x => x.Count, cancellationToken);

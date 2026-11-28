@@ -37,6 +37,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryLegalEntityLocks = new();
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryFxRateLocks = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryFacilityCalendarLocks = new();
+    private static readonly SemaphoreSlim InMemoryGlobalHierarchyLock = new(1, 1);
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryFacilityHierarchyLocks = new();
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryLocationLifecycleLocks = new();
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryScopeEpochLocks = new(StringComparer.Ordinal);
@@ -1459,6 +1460,14 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         {
             if (destinationLocationId != Guid.Empty)
             {
+                if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    var locLockKey = $"LOCATION_LIFECYCLE:{destinationLocationId:N}";
+                    await Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT pg_advisory_xact_lock(hashtextextended({locLockKey}, 0::bigint))",
+                        cancellationToken);
+                }
+
                 await Database.ExecuteSqlInterpolatedAsync(
                     $"SELECT 1 FROM locations WHERE location_id = {destinationLocationId} FOR UPDATE",
                     cancellationToken);
@@ -2167,6 +2176,62 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         }
     }
 
+    public async Task<TResult> ExecuteWithGlobalHierarchyLockAsync<TResult>(
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Database.IsRelational())
+        {
+            await InMemoryGlobalHierarchyLock.WaitAsync(cancellationToken);
+            try
+            {
+                return await action();
+            }
+            finally
+            {
+                InMemoryGlobalHierarchyLock.Release();
+            }
+        }
+
+        async Task AcquireGlobalLockAsync()
+        {
+            if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                const string globalKey = "GLOBAL_HIERARCHY_RULES";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({globalKey}, 0::bigint))",
+                    cancellationToken);
+            }
+        }
+
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            await AcquireGlobalLockAsync();
+            return await action();
+        }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt) ClearChangeTracker();
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await AcquireGlobalLockAsync();
+                var result = await action();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
+    }
+
     public async Task<TResult> ExecuteWithFacilityHierarchyLockAsync<TResult>(
         Guid facilityId,
         Func<Task<TResult>> action,
@@ -2190,6 +2255,11 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         {
             if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
             {
+                const string globalKey = "GLOBAL_HIERARCHY_RULES";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock_shared(hashtextextended({globalKey}, 0::bigint))",
+                    cancellationToken);
+
                 var lockKey = $"FACILITY_HIERARCHY:{facilityId:N}";
                 await Database.ExecuteSqlInterpolatedAsync(
                     $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0::bigint))",

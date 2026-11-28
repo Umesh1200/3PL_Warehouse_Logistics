@@ -32,7 +32,7 @@ public sealed class GetDockDoorByIdQueryHandler : IRequestHandler<GetDockDoorByI
             .FirstOrDefaultAsync(d => d.Id == request.Id && !d.IsDeleted, cancellationToken)
             ?? throw new EntityNotFoundException(nameof(DockDoor), request.Id);
 
-        await _auth.ResolveAuthorizedFacilityAsync(
+        await _auth.ResolveAuthorizedFacilityReadAsync(
             dockDoor.FacilityId,
             cancellationToken,
             Permissions.Facilities.DockDoorsView,
@@ -111,14 +111,26 @@ public sealed class UpdateDockDoorCommandHandler : IRequestHandler<UpdateDockDoo
 
         if (request.LocationId.HasValue)
         {
-            var locValid = await _db.Locations
+            var loc = await _db.Locations
                 .AsNoTracking()
-                .AnyAsync(l => l.Id == request.LocationId.Value && l.FacilityId == facilityId && !l.IsDeleted, cancellationToken);
-            if (!locValid)
+                .FirstOrDefaultAsync(l => l.Id == request.LocationId.Value && l.FacilityId == facilityId && !l.IsDeleted, cancellationToken);
+            if (loc == null)
             {
                 throw new ValidationException(
                     nameof(request.LocationId),
                     $"Physical location '{request.LocationId.Value}' does not belong to facility '{facilityId}'.");
+            }
+            if (loc.Status != LocationStatus.Active || !loc.IsActive)
+            {
+                throw new ValidationException(
+                    nameof(request.LocationId),
+                    $"Physical location '{loc.LocationCode}' must be active.");
+            }
+            if (loc.LocationType != LocationType.DockDoor)
+            {
+                throw new ValidationException(
+                    nameof(request.LocationId),
+                    $"Physical location '{loc.LocationCode}' must have LocationType 'DockDoor'.");
             }
         }
 

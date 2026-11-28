@@ -27,8 +27,21 @@ public sealed class WarehouseMasterAuthorization
         _currentUser = currentUser;
     }
 
-    public async Task<(Guid UserId, Guid FacilityId, bool IsSuperAdmin)> ResolveAuthorizedFacilityAsync(
+    public Task<(Guid UserId, Guid FacilityId, bool IsSuperAdmin)> ResolveAuthorizedFacilityAsync(
         Guid? requestedFacilityId,
+        CancellationToken cancellationToken,
+        params string[] allowedPermissions) =>
+        ResolveAuthorizedFacilityCoreAsync(requestedFacilityId, requireActiveFacility: true, cancellationToken, allowedPermissions);
+
+    public Task<(Guid UserId, Guid FacilityId, bool IsSuperAdmin)> ResolveAuthorizedFacilityReadAsync(
+        Guid? requestedFacilityId,
+        CancellationToken cancellationToken,
+        params string[] allowedPermissions) =>
+        ResolveAuthorizedFacilityCoreAsync(requestedFacilityId, requireActiveFacility: false, cancellationToken, allowedPermissions);
+
+    private async Task<(Guid UserId, Guid FacilityId, bool IsSuperAdmin)> ResolveAuthorizedFacilityCoreAsync(
+        Guid? requestedFacilityId,
+        bool requireActiveFacility,
         CancellationToken cancellationToken,
         params string[] allowedPermissions)
     {
@@ -71,6 +84,24 @@ public sealed class WarehouseMasterAuthorization
             {
                 throw new ForbiddenException(
                     $"Staff user is not authorized for facility '{effectiveFacilityId.Value}'.");
+            }
+        }
+
+        // MDM21-R06: Enforce active facility scope for mutations while preserving authorized historical read access
+        if (requireActiveFacility)
+        {
+            var facilityState = await _db.Facilities
+                .AsNoTracking()
+                .Where(f => f.Id == effectiveFacilityId.Value && !f.IsDeleted)
+                .Select(f => new { f.FacilityCode, f.IsActive })
+                .FirstOrDefaultAsync(cancellationToken)
+                ?? throw new EntityNotFoundException("Facility", effectiveFacilityId.Value);
+
+            if (!facilityState.IsActive)
+            {
+                throw new DomainException(
+                    $"Facility '{facilityState.FacilityCode}' is inactive; warehouse master mutations are blocked.",
+                    "FACILITY_INACTIVE");
             }
         }
 

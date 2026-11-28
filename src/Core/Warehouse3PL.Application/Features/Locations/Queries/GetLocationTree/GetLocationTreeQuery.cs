@@ -22,7 +22,7 @@ public class GetLocationTreeQueryHandler : IRequestHandler<GetLocationTreeQuery,
 
     public async Task<List<LocationTreeNodeDto>> Handle(GetLocationTreeQuery request, CancellationToken cancellationToken)
     {
-        var (_, facilityId, _) = await _auth.ResolveAuthorizedFacilityAsync(
+        var (_, facilityId, _) = await _auth.ResolveAuthorizedFacilityReadAsync(
             request.FacilityId,
             cancellationToken,
             Permissions.Facilities.LocationsView,

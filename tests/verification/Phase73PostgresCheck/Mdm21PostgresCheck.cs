@@ -8,15 +8,18 @@ using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Security;
 using Warehouse3PL.Application.Features.Inbound.DockManagement.DockDoors.Commands.CreateDockDoor;
 using Warehouse3PL.Application.Features.Inbound.DockManagement.DockDoors.Commands.UpdateDockDoorStatus;
+using Warehouse3PL.Application.Features.Inventory.Commands.TransferInventory;
 using Warehouse3PL.Application.Features.Locations.Commands.CreateLocation;
 using Warehouse3PL.Application.Features.Locations.Commands.LockLocation;
 using Warehouse3PL.Application.Features.Putaway;
 using Warehouse3PL.Application.Features.Putaway.Commands.ConfirmPutaway;
+using Warehouse3PL.Application.Features.Putaway.Tasks.Commands.GeneratePutawayTasks;
 using Warehouse3PL.Application.Features.WarehouseMaster;
 using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Catalog;
 using Warehouse3PL.Domain.Entities.Dock;
 using Warehouse3PL.Domain.Entities.Facilities;
+using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Entities.Inventory;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Entities.Security;
@@ -32,6 +35,7 @@ internal static class Mdm21PostgresCheck
 {
     private const string PreMdm21Migration = "20261127103000_MDM1_6_F03R01_F04R01_SafeUpgradeAndStructuredReasons";
     private const string Mdm21Migration = "20261127125902_MDM2_1_WarehouseMasterAndLocationHierarchy";
+    private const string Mdm21CorrectiveMigration = "20261127150334_MDM2_1_R01_R06_ConcurrencyAndLifecycleGuards";
 
     public static async Task RunAsync(string baseConnectionString)
     {
@@ -106,15 +110,37 @@ internal static class Mdm21PostgresCheck
             // PG-11 & PG-12: Dedicated client, packaging isolation, dock cm/ft + appointment guard, A06 profiles, 2-context MDM-1.5 outbox
             await VerifyProfilesPackagingDockAndEpochOutboxAsync(targetConn, adminCtx, facOrd, clientA, clientB);
 
-            // PG-13: Reversible Down() and clean re-Up()
+            // PG-14 (R01): All 6 StockOnHand buckets (Reserved/Damaged/OnHold) & Damaged HU block deactivation
+            await VerifyR01StockBucketsAndDamagedHuGuardsAsync(targetConn, adminCtx, facOrd, clientA);
+
+            // PG-15 (R02): Descendant configurable MaxDepth rejection + rule mutation conflict rejection
+            await VerifyR02DescendantDepthAndRuleConflictAsync(targetConn, adminCtx, facOrd);
+
+            // PG-16 (R04): Concurrent Parent deactivation vs Child creation race
+            await VerifyR04ConcurrentParentDeactivationVsChildCreateAsync(targetConn, adminCtx, facOrd);
+
+            // PG-17 (R04): Concurrent Location deactivation vs Putaway task generation race
+            await VerifyR04ConcurrentDeactivationVsPutawayTaskGenerationAsync(targetConn, adminCtx, facOrd, clientA);
+
+            // PG-18 (R04): Concurrent IsStorable=false vs TransferInventoryCommand race
+            await VerifyR04ConcurrentNonStorableVsTransferAsync(targetConn, adminCtx, facOrd, clientA);
+
+            // PG-19 (R04): Concurrent Storage-profile tightening vs TransferInventoryCommand race
+            await VerifyR04ConcurrentProfileTighteningVsTransferAsync(targetConn, adminCtx, facOrd, clientA);
+
+            // PG-20 (R04): Concurrent Hierarchy rule mutation vs Reparenting + direct SQL opposite reparenting
+            await VerifyR04ConcurrentRuleChangeVsReparentingAndTriggerLockAsync(targetConn, adminCtx, facOrd);
+
+            // PG-13: Reversible Down() (corrective -> base -> pre-MDM2.1) and clean re-Up() to corrective migration
             await using (var revDb = CreatePgDb(targetConn))
             {
                 var migrator = revDb.GetInfrastructure().GetRequiredService<IMigrator>();
-                await migrator.MigrateAsync(PreMdm21Migration);
                 await migrator.MigrateAsync(Mdm21Migration);
+                await migrator.MigrateAsync(PreMdm21Migration);
+                await migrator.MigrateAsync(Mdm21CorrectiveMigration);
             }
 
-            Console.WriteLine("  [PASS] All MDM-2.1 Live PostgreSQL 16 verification checks passed!");
+            Console.WriteLine("  [PASS] PG-13 & All MDM-2.1 (R01-R06) Live PostgreSQL 16 verification checks passed!");
         }
         finally
         {
@@ -580,6 +606,499 @@ internal static class Mdm21PostgresCheck
         }
 
         Console.WriteLine("  [PASS] PG-11 & PG-12: Dock cm/ft conversion, packaging tenant isolation, and 2-context MDM-1.5 epoch/outbox invalidation verified.");
+    }
+
+    private static async Task VerifyR01StockBucketsAndDamagedHuGuardsAsync(
+        string connStr, Mdm21Identity adminCtx, Guid facOrd, Guid clientA)
+    {
+        await using var db = CreatePgDb(connStr, adminCtx);
+        var auth = new WarehouseMasterAuthorization(db, adminCtx);
+        var createLoc = new CreateLocationCommandHandler(db, auth);
+        var statusHandler = new UpdateLocationStatusCommandHandler(db, auth);
+
+        var item = new Item { ClientId = clientA, Sku = "SKU-R01-PG", Description = "R01 PG Item", WeightKg = 1m };
+        db.Items.Add(item);
+        await db.SaveChangesAsync();
+
+        var buckets = new (string Code, Action<StockOnHand> Configure)[]
+        {
+            ("R01-RES", s => s.QtyReserved = 2m),
+            ("R01-DMG", s => s.QtyDamaged = 1m),
+            ("R01-HLD", s => s.QtyOnHold = 3m),
+        };
+
+        foreach (var (code, configure) in buckets)
+        {
+            var loc = await createLoc.Handle(new CreateLocationCommand
+            {
+                FacilityId = facOrd,
+                LocationType = LocationType.Bin,
+                LocationCode = code,
+                Barcode = $"BC-{code}"
+            }, CancellationToken.None);
+
+            var stock = new StockOnHand { ClientId = clientA, FacilityId = facOrd, ItemId = item.Id, LocationId = loc.Id };
+            configure(stock);
+            db.StockOnHand.Add(stock);
+            await db.SaveChangesAsync();
+
+            bool blocked = false;
+            try
+            {
+                await statusHandler.Handle(new UpdateLocationStatusCommand(loc.Id, LocationStatus.Inactive), CancellationToken.None);
+            }
+            catch (DomainException)
+            {
+                blocked = true;
+            }
+            if (!blocked)
+                throw new InvalidOperationException($"PG-14 R01 violation: Location {code} with non-zero stock bucket was deactivated!");
+        }
+
+        // Damaged HandlingUnit physically present in bin must block deactivation
+        var huBin = await createLoc.Handle(new CreateLocationCommand
+        {
+            FacilityId = facOrd,
+            LocationType = LocationType.Bin,
+            LocationCode = "R01-HU-DMG",
+            Barcode = "BC-R01-HU-DMG"
+        }, CancellationToken.None);
+        db.HandlingUnits.Add(new HandlingUnit
+        {
+            ClientId = clientA,
+            FacilityId = facOrd,
+            CurrentLocationId = huBin.Id,
+            LpnCode = "LPN-PG-R01-DMG",
+            UnitType = HandlingUnitType.Pallet,
+            Status = HandlingUnitStatus.Damaged
+        });
+        await db.SaveChangesAsync();
+
+        bool huBlocked = false;
+        try
+        {
+            await statusHandler.Handle(new UpdateLocationStatusCommand(huBin.Id, LocationStatus.Inactive), CancellationToken.None);
+        }
+        catch (DomainException)
+        {
+            huBlocked = true;
+        }
+        if (!huBlocked)
+            throw new InvalidOperationException("PG-14 R01 violation: Location with physically present Damaged HandlingUnit was deactivated!");
+
+        Console.WriteLine("  [PASS] PG-14 (R01): QtyReserved, QtyDamaged, QtyOnHold and Damaged HandlingUnit block deactivation on live PostgreSQL.");
+    }
+
+    private static async Task VerifyR02DescendantDepthAndRuleConflictAsync(
+        string connStr, Mdm21Identity adminCtx, Guid facOrd)
+    {
+        await using var db = CreatePgDb(connStr, adminCtx);
+        var auth = new WarehouseMasterAuthorization(db, adminCtx);
+        var upsertRule = new UpsertLocationHierarchyRuleCommandHandler(db, auth);
+        var createLoc = new CreateLocationCommandHandler(db, auth);
+        var moveLoc = new MoveLocationCommandHandler(db, auth);
+
+        // Configure facOrd rule: Level -> Bin with MaxDepth = 3
+        await upsertRule.Handle(new UpsertLocationHierarchyRuleCommand
+        {
+            FacilityId = facOrd,
+            ParentLocationType = LocationType.ShelfLevel,
+            ChildLocationType = LocationType.Bin,
+            MaxDepth = 3,
+            IsStorableLeaf = true,
+            IsActive = true
+        }, CancellationToken.None);
+
+        var aisle = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.Aisle, LocationCode = "R02-AISLE", Barcode = "BC-R02-AISLE" }, CancellationToken.None);
+        var rack = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, ParentLocationId = aisle.Id, LocationType = LocationType.Rack, LocationCode = "R02-RACK", Barcode = "BC-R02-RACK" }, CancellationToken.None);
+        var level = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.ShelfLevel, LocationCode = "R02-LEVEL", Barcode = "BC-R02-LEVEL" }, CancellationToken.None);
+        var bin = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, ParentLocationId = level.Id, LocationType = LocationType.Bin, LocationCode = "R02-BIN", Barcode = "BC-R02-BIN" }, CancellationToken.None);
+
+        // Moving level (L1) + bin (L2) under rack (L2) would push bin to L4 > MaxDepth 3 -> MUST reject!
+        bool depthBlocked = false;
+        try
+        {
+            await moveLoc.Handle(new MoveLocationCommand(level.Id, rack.Id), CancellationToken.None);
+        }
+        catch (DomainException)
+        {
+            depthBlocked = true;
+        }
+        if (!depthBlocked)
+            throw new InvalidOperationException("PG-15 R02 violation: MoveLocation allowed descendant bin to exceed configurable MaxDepth=3!");
+
+        // Verify subtree remained completely unchanged
+        var levelAfter = await db.Locations.AsNoTracking().FirstAsync(l => l.Id == level.Id);
+        var binAfter = await db.Locations.AsNoTracking().FirstAsync(l => l.Id == bin.Id);
+        if (levelAfter.ParentLocationId != null || levelAfter.HierarchyLevel != 1 || binAfter.HierarchyLevel != 2)
+            throw new InvalidOperationException("PG-15 R02 violation: Rejected move mutated subtree state!");
+
+        // Attempting to disable Level -> Bin rule while bin exists under level -> MUST reject!
+        bool ruleConflictBlocked = false;
+        try
+        {
+            await upsertRule.Handle(new UpsertLocationHierarchyRuleCommand
+            {
+                FacilityId = facOrd,
+                ParentLocationType = LocationType.ShelfLevel,
+                ChildLocationType = LocationType.Bin,
+                MaxDepth = 3,
+                IsStorableLeaf = true,
+                IsActive = false
+            }, CancellationToken.None);
+        }
+        catch (DomainException)
+        {
+            ruleConflictBlocked = true;
+        }
+        if (!ruleConflictBlocked)
+            throw new InvalidOperationException("PG-15 R02 violation: Rule mutation silently invalidated existing Level->Bin hierarchy!");
+
+        Console.WriteLine("  [PASS] PG-15 (R02): Descendant configurable MaxDepth and rule-mutation conflict guards verified on live PostgreSQL.");
+    }
+
+    private static async Task VerifyR04ConcurrentParentDeactivationVsChildCreateAsync(
+        string connStr, Mdm21Identity adminCtx, Guid facOrd)
+    {
+        Guid parentAisleId;
+        await using (var db = CreatePgDb(connStr, adminCtx))
+        {
+            var createLoc = new CreateLocationCommandHandler(db, new WarehouseMasterAuthorization(db, adminCtx));
+            var parent = await createLoc.Handle(new CreateLocationCommand
+            {
+                FacilityId = facOrd,
+                LocationType = LocationType.Aisle,
+                LocationCode = "R04-PAR-RACE",
+                Barcode = "BC-R04-PAR-RACE"
+            }, CancellationToken.None);
+            parentAisleId = parent.Id;
+        }
+
+        var tDeactivate = Task.Run(async () =>
+        {
+            await using var db1 = CreatePgDb(connStr, adminCtx);
+            await new UpdateLocationStatusCommandHandler(db1, new WarehouseMasterAuthorization(db1, adminCtx))
+                .Handle(new UpdateLocationStatusCommand(parentAisleId, LocationStatus.Inactive), CancellationToken.None);
+        });
+        var tCreateChild = Task.Run(async () =>
+        {
+            await using var db2 = CreatePgDb(connStr, adminCtx);
+            await new CreateLocationCommandHandler(db2, new WarehouseMasterAuthorization(db2, adminCtx))
+                .Handle(new CreateLocationCommand
+                {
+                    FacilityId = facOrd,
+                    ParentLocationId = parentAisleId,
+                    LocationType = LocationType.Rack,
+                    LocationCode = "R04-CHD-RACE",
+                    Barcode = "BC-R04-CHD-RACE"
+                }, CancellationToken.None);
+        });
+
+        bool deactOk = false, createOk = false;
+        try { await tDeactivate; deactOk = true; } catch (DomainException) { }
+        try { await tCreateChild; createOk = true; } catch (DomainException) { }
+
+        if (deactOk && createOk)
+            throw new InvalidOperationException("PG-16 R04 violation: Both parent deactivation and child creation succeeded concurrently!");
+
+        await using (var checkDb = CreatePgDb(connStr, adminCtx))
+        {
+            var parent = await checkDb.Locations.AsNoTracking().FirstAsync(l => l.Id == parentAisleId);
+            var activeChildren = await checkDb.Locations.AsNoTracking()
+                .CountAsync(l => l.ParentLocationId == parentAisleId && l.Status == LocationStatus.Active && l.IsActive);
+            if (parent.Status != LocationStatus.Active && activeChildren > 0)
+                throw new InvalidOperationException("PG-16 R04 invariant broken: Active child persisted under inactive parent!");
+        }
+
+        Console.WriteLine("  [PASS] PG-16 (R04): Concurrent parent deactivation vs child creation serialized cleanly.");
+    }
+
+    private static async Task VerifyR04ConcurrentDeactivationVsPutawayTaskGenerationAsync(
+        string connStr, Mdm21Identity adminCtx, Guid facOrd, Guid clientA)
+    {
+        Guid facIsoId = Guid.NewGuid();
+        Guid destBinId;
+        await using (var db = CreatePgDb(connStr, adminCtx))
+        {
+            db.Facilities.Add(new Facility
+            {
+                Id = facIsoId,
+                FacilityCode = "FAC-R04-PUT",
+                Name = "R04 Putaway Race Hub",
+                CountryCode = "US",
+                Timezone = "America/Chicago",
+                DefaultCurrencyCode = "USD",
+                IsActive = true
+            });
+            db.ClientFacilityAccesses.Add(new ClientFacilityAccess { ClientId = clientA, FacilityId = facIsoId, Status = FacilityAccessStatus.Active });
+            await db.SaveChangesAsync();
+
+            var auth = new WarehouseMasterAuthorization(db, adminCtx);
+            var createLoc = new CreateLocationCommandHandler(db, auth);
+            var stg = await createLoc.Handle(new CreateLocationCommand { FacilityId = facIsoId, LocationType = LocationType.StagingLane, LocationCode = "STG-R04", Barcode = "BC-STG-R04", IsReceiving = true }, CancellationToken.None);
+            var bin = await createLoc.Handle(new CreateLocationCommand { FacilityId = facIsoId, LocationType = LocationType.Bin, LocationCode = "BIN-R04-PUT", Barcode = "BC-BIN-R04-PUT", IsStorable = true }, CancellationToken.None);
+            destBinId = bin.Id;
+
+            var item = new Item { ClientId = clientA, Sku = "SKU-R04-PUT", Description = "R04 Putaway Item", WeightKg = 1m, LengthCm = 10, WidthCm = 10, HeightCm = 10, StorageTempClass = StorageTempClass.Ambient };
+            db.Items.Add(item);
+            var session = new ReceivingSession
+            {
+                ClientId = clientA,
+                FacilityId = facIsoId,
+                SessionNumber = "RCV-R04-001",
+                Status = ReceivingStatus.Completed
+            };
+            db.ReceivingSessions.Add(session);
+            db.ReceiptLines.Add(new ReceiptLine
+            {
+                ReceivingSessionId = session.Id,
+                ItemId = item.Id,
+                QuantityReceived = 5m,
+                StagingLocationId = stg.Id,
+                Condition = ReceiptConditionStatus.Sound
+            });
+            await db.SaveChangesAsync();
+        }
+
+        var tDeactivate = Task.Run(async () =>
+        {
+            await using var db1 = CreatePgDb(connStr, adminCtx);
+            await new UpdateLocationStatusCommandHandler(db1, new WarehouseMasterAuthorization(db1, adminCtx))
+                .Handle(new UpdateLocationStatusCommand(destBinId, LocationStatus.Inactive), CancellationToken.None);
+        });
+        var tGenerate = Task.Run(async () =>
+        {
+            await using var db2 = CreatePgDb(connStr, adminCtx);
+            var selector = new PutawayLocationSelector(db2, NullLogger<PutawayLocationSelector>.Instance);
+            var opAuth = new WarehouseOperationalAuthorization(db2, adminCtx);
+            await new GeneratePutawayTasksCommandHandler(db2, selector, opAuth)
+                .Handle(new GeneratePutawayTasksCommand { FacilityId = facIsoId, ClientId = clientA }, CancellationToken.None);
+        });
+
+        try { await tDeactivate; } catch (DomainException) { }
+        try { await tGenerate; } catch (Exception) { }
+
+        await using (var checkDb = CreatePgDb(connStr, adminCtx))
+        {
+            var bin = await checkDb.Locations.AsNoTracking().FirstAsync(l => l.Id == destBinId);
+            var openTasks = await checkDb.PutawayTasks.AsNoTracking()
+                .CountAsync(t => t.SuggestedLocationId == destBinId &&
+                                 (t.Status == PutawayTaskStatus.Pending || t.Status == PutawayTaskStatus.Assigned));
+            if (bin.Status != LocationStatus.Active && openTasks > 0)
+                throw new InvalidOperationException($"PG-17 R04 invariant broken: {openTasks} open putaway task(s) target inactive bin!");
+        }
+
+        Console.WriteLine("  [PASS] PG-17 (R04): Concurrent location deactivation vs putaway task generation serialized cleanly.");
+    }
+
+    private static async Task VerifyR04ConcurrentNonStorableVsTransferAsync(
+        string connStr, Mdm21Identity adminCtx, Guid facOrd, Guid clientA)
+    {
+        Guid srcId, destId, itemId;
+        await using (var db = CreatePgDb(connStr, adminCtx))
+        {
+            var createLoc = new CreateLocationCommandHandler(db, new WarehouseMasterAuthorization(db, adminCtx));
+            var src = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.Bin, LocationCode = "R04-TR-SRC", Barcode = "BC-R04-TR-SRC" }, CancellationToken.None);
+            var dest = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.Bin, LocationCode = "R04-TR-DST", Barcode = "BC-R04-TR-DST" }, CancellationToken.None);
+            srcId = src.Id;
+            destId = dest.Id;
+
+            var item = new Item { ClientId = clientA, Sku = "SKU-R04-TR", Description = "R04 Transfer Item", WeightKg = 1m };
+            db.Items.Add(item);
+            itemId = item.Id;
+            db.StockOnHand.Add(new StockOnHand { ClientId = clientA, FacilityId = facOrd, ItemId = itemId, LocationId = srcId, QtyAvailable = 10m });
+            await db.SaveChangesAsync();
+        }
+
+        var tNonStorable = Task.Run(async () =>
+        {
+            await using var db1 = CreatePgDb(connStr, adminCtx);
+            await new UpdateLocationCommandHandler(db1, new WarehouseMasterAuthorization(db1, adminCtx))
+                .Handle(new UpdateLocationCommand { Id = destId, IsStorable = false }, CancellationToken.None);
+        });
+        var tTransfer = Task.Run(async () =>
+        {
+            await using var db2 = CreatePgDb(connStr, adminCtx);
+            await new TransferInventoryCommandHandler(db2, adminCtx, new WarehouseOperationalAuthorization(db2, adminCtx))
+                .Handle(new TransferInventoryCommand
+                {
+                    ClientId = clientA,
+                    FacilityId = facOrd,
+                    ItemId = itemId,
+                    FromLocationId = srcId,
+                    ToLocationId = destId,
+                    Quantity = 4m
+                }, CancellationToken.None);
+        });
+
+        bool nonStorableOk = false, transferOk = false;
+        try { await tNonStorable; nonStorableOk = true; } catch (DomainException) { }
+        try { await tTransfer; transferOk = true; } catch (ValidationException) { } catch (DomainException) { }
+
+        if (nonStorableOk && transferOk)
+            throw new InvalidOperationException("PG-18 R04 violation: Both IsStorable=false and TransferInventoryCommand succeeded concurrently!");
+
+        await using (var checkDb = CreatePgDb(connStr, adminCtx))
+        {
+            var dest = await checkDb.Locations.AsNoTracking().FirstAsync(l => l.Id == destId);
+            var stockQty = await checkDb.StockOnHand.IgnoreQueryFilters().AsNoTracking()
+                .Where(s => s.LocationId == destId)
+                .SumAsync(s => s.QtyAvailable + s.QtyAllocated + s.QtyReserved + s.QtyQuarantined + s.QtyDamaged + s.QtyOnHold);
+            if (!dest.IsStorable && stockQty > 0m)
+                throw new InvalidOperationException($"PG-18 R04 invariant broken: Non-storable bin holds {stockQty} stock!");
+        }
+
+        Console.WriteLine("  [PASS] PG-18 (R04): Concurrent IsStorable=false vs TransferInventoryCommand serialized cleanly.");
+    }
+
+    private static async Task VerifyR04ConcurrentProfileTighteningVsTransferAsync(
+        string connStr, Mdm21Identity adminCtx, Guid facOrd, Guid clientA)
+    {
+        Guid srcId, destId, itemId;
+        await using (var db = CreatePgDb(connStr, adminCtx))
+        {
+            var createLoc = new CreateLocationCommandHandler(db, new WarehouseMasterAuthorization(db, adminCtx));
+            var src = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.Bin, LocationCode = "R04-PR-SRC", Barcode = "BC-R04-PR-SRC" }, CancellationToken.None);
+            var dest = await createLoc.Handle(new CreateLocationCommand { FacilityId = facOrd, LocationType = LocationType.Bin, LocationCode = "R04-PR-DST", Barcode = "BC-R04-PR-DST" }, CancellationToken.None);
+            srcId = src.Id;
+            destId = dest.Id;
+
+            var item = new Item { ClientId = clientA, Sku = "SKU-R04-PR", Description = "R04 Profile Item", WeightKg = 1m };
+            db.Items.Add(item);
+            itemId = item.Id;
+            db.StockOnHand.Add(new StockOnHand { ClientId = clientA, FacilityId = facOrd, ItemId = itemId, LocationId = srcId, QtyAvailable = 10m });
+            await db.SaveChangesAsync();
+        }
+
+        var tTighten = Task.Run(async () =>
+        {
+            await using var db1 = CreatePgDb(connStr, adminCtx);
+            await new UpsertLocationStorageProfileCommandHandler(db1, new WarehouseMasterAuthorization(db1, adminCtx))
+                .Handle(new UpsertLocationStorageProfileCommand { LocationId = destId, IsPutawayAllowed = false }, CancellationToken.None);
+        });
+        var tTransfer = Task.Run(async () =>
+        {
+            await using var db2 = CreatePgDb(connStr, adminCtx);
+            await new TransferInventoryCommandHandler(db2, adminCtx, new WarehouseOperationalAuthorization(db2, adminCtx))
+                .Handle(new TransferInventoryCommand
+                {
+                    ClientId = clientA,
+                    FacilityId = facOrd,
+                    ItemId = itemId,
+                    FromLocationId = srcId,
+                    ToLocationId = destId,
+                    Quantity = 4m
+                }, CancellationToken.None);
+        });
+
+        try { await tTighten; } catch (DomainException) { }
+        try { await tTransfer; } catch (ValidationException) { } catch (DomainException) { }
+
+        await using (var checkDb = CreatePgDb(connStr, adminCtx))
+        {
+            var profile = await checkDb.LocationStorageProfiles.AsNoTracking().FirstOrDefaultAsync(p => p.Id == destId);
+            var stockQty = await checkDb.StockOnHand.IgnoreQueryFilters().AsNoTracking()
+                .Where(s => s.LocationId == destId)
+                .SumAsync(s => s.QtyAvailable + s.QtyAllocated + s.QtyReserved + s.QtyQuarantined + s.QtyDamaged + s.QtyOnHold);
+            if (profile != null && !profile.IsPutawayAllowed && stockQty > 0m)
+                throw new InvalidOperationException($"PG-19 R04 invariant broken: Storage profile has IsPutawayAllowed=false while holding {stockQty} stock!");
+        }
+
+        Console.WriteLine("  [PASS] PG-19 (R04): Concurrent storage-profile tightening vs TransferInventoryCommand serialized cleanly.");
+    }
+
+    private static async Task VerifyR04ConcurrentRuleChangeVsReparentingAndTriggerLockAsync(
+        string connStr, Mdm21Identity adminCtx, Guid facOrd)
+    {
+        Guid facIso = Guid.NewGuid();
+        Guid aisleA, aisleB, sqlA, sqlB;
+        await using (var db = CreatePgDb(connStr, adminCtx))
+        {
+            db.Facilities.Add(new Facility
+            {
+                Id = facIso,
+                FacilityCode = "FAC-R04-RUL",
+                Name = "R04 Rule Race Hub",
+                CountryCode = "US",
+                Timezone = "America/Chicago",
+                DefaultCurrencyCode = "USD",
+                IsActive = true
+            });
+            await db.SaveChangesAsync();
+
+            var auth = new WarehouseMasterAuthorization(db, adminCtx);
+            await new UpsertLocationHierarchyRuleCommandHandler(db, auth).Handle(new UpsertLocationHierarchyRuleCommand
+            {
+                FacilityId = facIso,
+                ParentLocationType = LocationType.Aisle,
+                ChildLocationType = LocationType.Aisle,
+                MaxDepth = 5,
+                IsStorableLeaf = false,
+                IsActive = true
+            }, CancellationToken.None);
+
+            var createLoc = new CreateLocationCommandHandler(db, auth);
+            aisleA = (await createLoc.Handle(new CreateLocationCommand { FacilityId = facIso, LocationType = LocationType.Aisle, LocationCode = "RR-A", Barcode = "BC-RR-A" }, CancellationToken.None)).Id;
+            aisleB = (await createLoc.Handle(new CreateLocationCommand { FacilityId = facIso, LocationType = LocationType.Aisle, LocationCode = "RR-B", Barcode = "BC-RR-B" }, CancellationToken.None)).Id;
+            sqlA = (await createLoc.Handle(new CreateLocationCommand { FacilityId = facIso, LocationType = LocationType.Aisle, LocationCode = "SQL-A", Barcode = "BC-SQL-A" }, CancellationToken.None)).Id;
+            sqlB = (await createLoc.Handle(new CreateLocationCommand { FacilityId = facIso, LocationType = LocationType.Aisle, LocationCode = "SQL-B", Barcode = "BC-SQL-B" }, CancellationToken.None)).Id;
+        }
+
+        // Part A: Concurrent rule disable (Aisle -> Aisle IsActive=false) vs MoveLocation(aisleA -> aisleB)
+        var tDisableRule = Task.Run(async () =>
+        {
+            await using var db1 = CreatePgDb(connStr, adminCtx);
+            await new UpsertLocationHierarchyRuleCommandHandler(db1, new WarehouseMasterAuthorization(db1, adminCtx))
+                .Handle(new UpsertLocationHierarchyRuleCommand
+                {
+                    FacilityId = facIso,
+                    ParentLocationType = LocationType.Aisle,
+                    ChildLocationType = LocationType.Aisle,
+                    MaxDepth = 5,
+                    IsStorableLeaf = false,
+                    IsActive = false
+                }, CancellationToken.None);
+        });
+        var tMove = Task.Run(async () =>
+        {
+            await using var db2 = CreatePgDb(connStr, adminCtx);
+            await new MoveLocationCommandHandler(db2, new WarehouseMasterAuthorization(db2, adminCtx))
+                .Handle(new MoveLocationCommand(aisleA, aisleB), CancellationToken.None);
+        });
+
+        bool ruleOk = false, moveOk = false;
+        try { await tDisableRule; ruleOk = true; } catch (DomainException) { }
+        try { await tMove; moveOk = true; } catch (DomainException) { }
+
+        if (ruleOk && moveOk)
+            throw new InvalidOperationException("PG-20 R04 violation: Both disabling Aisle->Aisle rule and moving Aisle under Aisle succeeded concurrently!");
+
+        // Part B: Direct SQL concurrent opposite reparenting testing upgraded fn_locations_prevent_cycle() advisory lock
+        var tSql1 = Task.Run(async () =>
+        {
+            await using var c1 = new NpgsqlConnection(connStr);
+            await c1.OpenAsync();
+            await using var cmd = new NpgsqlCommand($"UPDATE locations SET parent_location_id = '{sqlB}' WHERE location_id = '{sqlA}'", c1);
+            await cmd.ExecuteNonQueryAsync();
+        });
+        var tSql2 = Task.Run(async () =>
+        {
+            await using var c2 = new NpgsqlConnection(connStr);
+            await c2.OpenAsync();
+            await using var cmd = new NpgsqlCommand($"UPDATE locations SET parent_location_id = '{sqlA}' WHERE location_id = '{sqlB}'", c2);
+            await cmd.ExecuteNonQueryAsync();
+        });
+
+        int sqlOk = 0, sqlRejected = 0;
+        foreach (var t in new[] { tSql1, tSql2 })
+        {
+            try { await t; sqlOk++; }
+            catch (PostgresException pgEx) when (pgEx.MessageText.Contains("LOCATION_HIERARCHY_CYCLE", StringComparison.Ordinal)) { sqlRejected++; }
+        }
+        if (sqlOk != 1 || sqlRejected != 1)
+            throw new InvalidOperationException($"PG-20 R04 violation: Expected 1 direct-SQL success and 1 trigger cycle rejection, got ok={sqlOk}, rejected={sqlRejected}.");
+
+        Console.WriteLine("  [PASS] PG-20 (R04): Concurrent rule mutation vs reparenting & direct-SQL fn_locations_prevent_cycle() advisory lock verified.");
     }
 
     private static async Task AssertPgErrorAsync(NpgsqlConnection conn, string sql, string expectedSqlState, string label)

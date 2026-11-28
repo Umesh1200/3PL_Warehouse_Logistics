@@ -37,7 +37,7 @@ public sealed class GetPackagingMaterialsQueryHandler
 
     public async Task<PagedResult<PackagingMaterialDto>> Handle(GetPackagingMaterialsQuery request, CancellationToken cancellationToken)
     {
-        var (_, facilityId, _) = await _auth.ResolveAuthorizedFacilityAsync(
+        var (_, facilityId, _) = await _auth.ResolveAuthorizedFacilityReadAsync(
             request.FacilityId,
             cancellationToken,
             Permissions.Facilities.PackagingMaterialsView,
@@ -101,7 +101,7 @@ public sealed class GetPackagingMaterialByIdQueryHandler
             .FirstOrDefaultAsync(m => m.Id == request.Id && !m.IsDeleted, cancellationToken)
             ?? throw new EntityNotFoundException(nameof(PackagingMaterial), request.Id);
 
-        await _auth.ResolveAuthorizedFacilityAsync(
+        await _auth.ResolveAuthorizedFacilityReadAsync(
             mat.FacilityId,
             cancellationToken,
             Permissions.Facilities.PackagingMaterialsView,

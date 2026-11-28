@@ -75,10 +75,15 @@ public class BatchGenerateLocationsCommandHandler : IRequestHandler<BatchGenerat
                 throw new EntityNotFoundException(nameof(WarehouseZone), request.ZoneId);
             }
 
+            if (!zone.IsActive)
+            {
+                throw new ValidationException(nameof(request.ZoneId), $"Zone '{zone.ZoneCode}' is inactive and cannot accept generated locations.");
+            }
+
             // Validate configured hierarchy rules for Aisle (L1) -> Rack (L2) -> Bin (L3)
-            await LocationHierarchyRuleEvaluator.ValidatePlacementAsync(_context, facilityId, null, LocationType.Aisle, 1, cancellationToken);
-            await LocationHierarchyRuleEvaluator.ValidatePlacementAsync(_context, facilityId, LocationType.Aisle, LocationType.Rack, 2, cancellationToken);
-            await LocationHierarchyRuleEvaluator.ValidatePlacementAsync(_context, facilityId, LocationType.Rack, LocationType.Bin, 3, cancellationToken);
+            await LocationHierarchyRuleEvaluator.ValidatePlacementAsync(_context, facilityId, null, LocationType.Aisle, 1, cancellationToken, requestedIsStorable: false);
+            await LocationHierarchyRuleEvaluator.ValidatePlacementAsync(_context, facilityId, LocationType.Aisle, LocationType.Rack, 2, cancellationToken, requestedIsStorable: false);
+            await LocationHierarchyRuleEvaluator.ValidatePlacementAsync(_context, facilityId, LocationType.Rack, LocationType.Bin, 3, cancellationToken, requestedIsStorable: true);
 
             var newLocations = new List<Location>();
             var aislesCreated = 0;

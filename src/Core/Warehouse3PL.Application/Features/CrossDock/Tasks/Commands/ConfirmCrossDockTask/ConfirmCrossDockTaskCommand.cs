@@ -99,7 +99,23 @@ public class ConfirmCrossDockTaskCommandHandler : IRequestHandler<ConfirmCrossDo
                     $"Scanned location barcode '{request.ScannedDestinationBarcode}' does not match planned destination '{task.DestinationLocation.LocationCode}'. Override not authorized.");
             }
 
-            var actualDestLocation = scannedDest;
+            // MDM21-R03/R04: Lock cross-dock destination and verify active, unlocked, undamaged status
+            await using var cdLock = await _context.AcquirePutawayExecutionLocksAsync(
+                null, scannedDest.Id, cancellationToken);
+
+            var actualDestLocation = await _context.Locations
+                .AsNoTracking()
+                .FirstOrDefaultAsync(l => l.Id == scannedDest.Id &&
+                                          l.FacilityId == task.FacilityId &&
+                                          !l.IsDeleted &&
+                                          l.IsActive &&
+                                          l.Status == LocationStatus.Active &&
+                                          !l.IsLocked &&
+                                          !l.IsDamaged,
+                    cancellationToken)
+                ?? throw new ValidationException(
+                    nameof(request.ScannedDestinationBarcode),
+                    $"Cross-dock destination location '{scannedDest.LocationCode}' is inactive, locked, or damaged.");
 
             // 3. Atomic Ledger Relocation: Decrement QtyAllocated at Source Staging
             var sourceStock = await _context.StockOnHand

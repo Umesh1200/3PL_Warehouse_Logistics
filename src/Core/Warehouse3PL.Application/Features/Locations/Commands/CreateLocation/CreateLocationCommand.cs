@@ -84,42 +84,67 @@ public class CreateLocationCommandHandler : IRequestHandler<CreateLocationComman
 
             if (request.ZoneId.HasValue)
             {
-                var zoneValid = await _context.WarehouseZones
+                var zone = await _context.WarehouseZones
                     .AsNoTracking()
-                    .AnyAsync(z => z.Id == request.ZoneId.Value && z.FacilityId == facilityId && !z.IsDeleted, cancellationToken);
-                if (!zoneValid)
+                    .FirstOrDefaultAsync(z => z.Id == request.ZoneId.Value && z.FacilityId == facilityId && !z.IsDeleted, cancellationToken);
+                if (zone == null)
                 {
                     throw new ValidationException(
                         nameof(request.ZoneId),
                         $"Zone '{request.ZoneId.Value}' does not exist in facility '{facilityId}'.");
+                }
+
+                if (!zone.IsActive)
+                {
+                    throw new ValidationException(
+                        nameof(request.ZoneId),
+                        $"Zone '{zone.ZoneCode}' is inactive and cannot accept new locations.");
                 }
             }
 
             Location? parent = null;
             if (request.ParentLocationId.HasValue)
             {
-                parent = await _context.Locations
+                var facilityLocs = await _context.Locations
                     .AsNoTracking()
-                    .FirstOrDefaultAsync(l => l.Id == request.ParentLocationId.Value &&
-                                              l.FacilityId == facilityId &&
-                                              !l.IsDeleted,
-                        cancellationToken);
-                if (parent == null)
+                    .Where(l => l.FacilityId == facilityId && !l.IsDeleted)
+                    .ToDictionaryAsync(l => l.Id, cancellationToken);
+
+                if (!facilityLocs.TryGetValue(request.ParentLocationId.Value, out parent))
                 {
                     throw new ValidationException(
                         nameof(request.ParentLocationId),
                         $"Parent location '{request.ParentLocationId.Value}' does not exist in facility '{facilityId}'.");
                 }
+
+                // MDM21-R04 & R06: Prevent creating active child under inactive/decommissioned parent or ancestor
+                var cursor = parent;
+                var visited = new HashSet<Guid>();
+                while (cursor != null && visited.Add(cursor.Id))
+                {
+                    if (cursor.Status != LocationStatus.Active || !cursor.IsActive)
+                    {
+                        throw new DomainException(
+                            $"Cannot create active location beneath inactive or decommissioned ancestor '{cursor.LocationCode}'.",
+                            "LOCATION_INACTIVE_ANCESTOR");
+                    }
+
+                    cursor = cursor.ParentLocationId.HasValue && facilityLocs.TryGetValue(cursor.ParentLocationId.Value, out var anc)
+                        ? anc
+                        : null;
+                }
             }
 
             int hierarchyLevel = parent == null ? 1 : parent.HierarchyLevel + 1;
+            var requestedStorable = request.IsStorable ?? Location.DefaultStorableForType(request.LocationType);
             await LocationHierarchyRuleEvaluator.ValidatePlacementAsync(
                 _context,
                 facilityId,
                 parent?.LocationType,
                 request.LocationType,
                 hierarchyLevel,
-                cancellationToken);
+                cancellationToken,
+                requestedIsStorable: requestedStorable);
 
             // A03: Permanent normalized uniqueness across all records including soft-deleted
             var normalizedCode = Location.NormalizeCode(request.LocationCode);

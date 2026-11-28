@@ -30,7 +30,7 @@ public sealed class GetLocationHierarchyRulesQueryHandler
         Guid? resolvedFacilityId = null;
         if (request.FacilityId.HasValue && request.FacilityId.Value != Guid.Empty)
         {
-            var (_, facId, _) = await _auth.ResolveAuthorizedFacilityAsync(
+            var (_, facId, _) = await _auth.ResolveAuthorizedFacilityReadAsync(
                 request.FacilityId,
                 cancellationToken,
                 Permissions.Facilities.LocationsView,
@@ -88,6 +88,11 @@ public sealed class UpsertLocationHierarchyRuleCommandValidator : AbstractValida
     }
 }
 
+/// <summary>
+/// MDM21-R02 & R04: Serializes facility rule changes via ExecuteWithFacilityHierarchyLockAsync and
+/// global rule changes via ExecuteWithGlobalHierarchyLockAsync (exclusive global lock vs shared facility locks),
+/// rejecting any rule mutation that would silently invalidate existing non-deleted locations.
+/// </summary>
 public sealed class UpsertLocationHierarchyRuleCommandHandler
     : IRequestHandler<UpsertLocationHierarchyRuleCommand, LocationHierarchyRuleDto>
 {
@@ -102,30 +107,74 @@ public sealed class UpsertLocationHierarchyRuleCommandHandler
 
     public async Task<LocationHierarchyRuleDto> Handle(UpsertLocationHierarchyRuleCommand request, CancellationToken cancellationToken)
     {
-        Guid userId;
-        Guid? scopeFacilityId = null;
-
         if (request.FacilityId.HasValue && request.FacilityId.Value != Guid.Empty)
         {
-            var resolved = await _auth.ResolveAuthorizedFacilityAsync(
+            var (userId, scopeFacilityId, _) = await _auth.ResolveAuthorizedFacilityAsync(
                 request.FacilityId,
                 cancellationToken,
                 Permissions.Facilities.LocationsManage,
                 Permissions.Facilities.Manage);
-            userId = resolved.UserId;
-            scopeFacilityId = resolved.FacilityId;
 
-            var facilityExists = await _db.Facilities
-                .AsNoTracking()
-                .AnyAsync(f => f.Id == scopeFacilityId.Value && !f.IsDeleted, cancellationToken);
-            if (!facilityExists)
-                throw new EntityNotFoundException(nameof(Facility), scopeFacilityId.Value);
+            return await _db.ExecuteWithFacilityHierarchyLockAsync(scopeFacilityId, async () =>
+            {
+                var facilityLocations = await _db.Locations
+                    .AsNoTracking()
+                    .Where(l => l.FacilityId == scopeFacilityId && !l.IsDeleted)
+                    .ToListAsync(cancellationToken);
+
+                LocationHierarchyRuleEvaluator.ValidateExistingLocationsAgainstProposedRule(
+                    facilityLocations,
+                    facilityLocations.ToDictionary(l => l.Id),
+                    request.ParentLocationType,
+                    request.ChildLocationType,
+                    request.MaxDepth,
+                    request.IsStorableLeaf,
+                    request.IsActive);
+
+                return await UpsertRuleCoreAsync(scopeFacilityId, userId, request, cancellationToken);
+            }, cancellationToken);
         }
         else
         {
-            userId = await _auth.RequireGlobalHierarchyRuleAdminAsync(cancellationToken);
-        }
+            var userId = await _auth.RequireGlobalHierarchyRuleAdminAsync(cancellationToken);
 
+            return await _db.ExecuteWithGlobalHierarchyLockAsync(async () =>
+            {
+                // Identify facilities that have an explicit facility override for this exact transition;
+                // all other facilities inherit the global rule and must remain valid under the proposed change.
+                var overriddenFacilityIds = await _db.LocationHierarchyRules
+                    .AsNoTracking()
+                    .Where(r => r.FacilityId != null &&
+                                r.ParentLocationType == request.ParentLocationType &&
+                                r.ChildLocationType == request.ChildLocationType)
+                    .Select(r => r.FacilityId!.Value)
+                    .ToHashSetAsync(cancellationToken);
+
+                var candidateLocations = await _db.Locations
+                    .AsNoTracking()
+                    .Where(l => !l.IsDeleted && !overriddenFacilityIds.Contains(l.FacilityId))
+                    .ToListAsync(cancellationToken);
+
+                LocationHierarchyRuleEvaluator.ValidateExistingLocationsAgainstProposedRule(
+                    candidateLocations,
+                    candidateLocations.ToDictionary(l => l.Id),
+                    request.ParentLocationType,
+                    request.ChildLocationType,
+                    request.MaxDepth,
+                    request.IsStorableLeaf,
+                    request.IsActive);
+
+                return await UpsertRuleCoreAsync(null, userId, request, cancellationToken);
+            }, cancellationToken);
+        }
+    }
+
+    private async Task<LocationHierarchyRuleDto> UpsertRuleCoreAsync(
+        Guid? scopeFacilityId,
+        Guid userId,
+        UpsertLocationHierarchyRuleCommand request,
+        CancellationToken cancellationToken)
+    {
         var existing = await _db.LocationHierarchyRules
             .FirstOrDefaultAsync(r =>
                 r.FacilityId == scopeFacilityId &&

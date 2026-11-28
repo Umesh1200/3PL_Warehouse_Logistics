@@ -160,4 +160,4 @@ public class LocationsController : BaseApiController
 
 public sealed record MoveLocationRequest(Guid? NewParentLocationId, Guid? NewZoneId = null);
 public sealed record UpdateLocationStatusRequest(LocationStatus Status, string? Remarks = null);
-public sealed record AddEquipmentRequirementRequest(WarehouseEquipmentType EquipmentType, bool IsMandatory = true);
+public sealed record AddEquipmentRequirementRequest(WarehouseEquipmentType EquipmentType, bool IsMandatory = false);

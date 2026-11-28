@@ -34,7 +34,7 @@ public sealed class GetWarehouseEquipmentQueryHandler
 
     public async Task<PagedResult<WarehouseEquipmentDto>> Handle(GetWarehouseEquipmentQuery request, CancellationToken cancellationToken)
     {
-        var (_, facilityId, _) = await _auth.ResolveAuthorizedFacilityAsync(
+        var (_, facilityId, _) = await _auth.ResolveAuthorizedFacilityReadAsync(
             request.FacilityId,
             cancellationToken,
             Permissions.Facilities.EquipmentView,
@@ -91,7 +91,7 @@ public sealed class GetWarehouseEquipmentByIdQueryHandler
             .FirstOrDefaultAsync(e => e.Id == request.Id && !e.IsDeleted, cancellationToken)
             ?? throw new EntityNotFoundException(nameof(WarehouseEquipment), request.Id);
 
-        await _auth.ResolveAuthorizedFacilityAsync(
+        await _auth.ResolveAuthorizedFacilityReadAsync(
             eq.FacilityId,
             cancellationToken,
             Permissions.Facilities.EquipmentView,
