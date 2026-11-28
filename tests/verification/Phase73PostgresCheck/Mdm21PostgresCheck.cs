@@ -142,6 +142,13 @@ internal static class Mdm21PostgresCheck
 
             Console.WriteLine("  [PASS] PG-13 & All MDM-2.1 (R01-R06) Live PostgreSQL 16 verification checks passed!");
         }
+        catch (Exception ex)
+        {
+            var singleLine = $"{ex.GetType().Name}: {ex.Message} | Inner: {ex.InnerException?.Message} | Stack: {ex.StackTrace}"
+                .Replace("\r", " ").Replace("\n", " ");
+            Console.WriteLine($"::error title=Mdm21PostgresCheck Failure::{singleLine}");
+            throw;
+        }
         finally
         {
             await DropDbAsync(adminBuilder.ConnectionString, dbName);
