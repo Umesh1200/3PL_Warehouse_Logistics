@@ -179,6 +179,11 @@ public class GrantClientFacilityAccessCommandHandler : IRequestHandler<GrantClie
                     prev.PrimaryOperatingFacility = false;
                     prev.ConfigRevision++;
                 }
+
+                if (currentPrimaries.Count > 0)
+                {
+                    await _context.SaveChangesAsync(cancellationToken);
+                }
             }
 
             ClientFacilityAccess access;
@@ -303,6 +308,11 @@ public class UpdateClientFacilityAccessStatusCommandHandler : IRequestHandler<Up
                 {
                     prev.PrimaryOperatingFacility = false;
                     prev.ConfigRevision++;
+                }
+
+                if (currentPrimaries.Count > 0)
+                {
+                    await _context.SaveChangesAsync(cancellationToken);
                 }
             }
 
