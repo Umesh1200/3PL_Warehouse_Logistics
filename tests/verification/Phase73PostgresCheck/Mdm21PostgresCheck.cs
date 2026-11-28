@@ -1316,7 +1316,7 @@ internal static class Mdm21PostgresCheck
         db.Items.Add(itemA);
 
         var origOrder = new OutboundOrder { ClientId = clientA, FacilityId = facOrd, OrderNumber = "ORD-PG23-RET", CustomerName = "PG23 Cust", Status = OutboundOrderStatus.Completed };
-        var origHu = new HandlingUnit { ClientId = clientA, FacilityId = facOrd, LpnCode = "LPN-PG23-ORIG", UnitType = HandlingUnitType.Carton, Status = HandlingUnitStatus.Shipped };
+        var origHu = new HandlingUnit { ClientId = clientA, FacilityId = facOrd, LpnCode = "LPN-PG23-ORIG", UnitType = HandlingUnitType.Pallet };
         var origPkg = new Package { ClientId = clientA, FacilityId = facOrd, OutboundOrderId = origOrder.Id, HandlingUnitId = origHu.Id, PackageNumber = "PKG-PG23-RET", TrackingNumber = "TRK-PG23-RET", Status = PackageStatus.Loaded };
         var retAuth = ReturnAuthorization.Create(clientA, facOrd, facOrd, origOrder.Id, null, origPkg.Id, null, "RA-PG23", ReturnReason.DamagedInTransit, "PG23 Test", adminCtx.UserId!.Value, "RMA-PG23", DateTime.UtcNow.AddDays(7));
         var retShip = new ReturnShipment { ClientId = clientA, ReturnAuthorizationId = retAuth.Id, OrderId = origOrder.Id, PackageId = origPkg.Id, OriginFacilityId = facOrd, DestinationFacilityId = facOrd, CarrierCode = "FEDEX", TrackingNumber = origPkg.TrackingNumber, AuthorizedByUserId = adminCtx.UserId!.Value, Status = ReturnShipmentStatus.DeliveredAtWarehouse, DeliveredAtWarehouseUtc = DateTime.UtcNow.AddHours(-1) };
