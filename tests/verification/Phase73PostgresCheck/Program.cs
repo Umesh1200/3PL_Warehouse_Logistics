@@ -55,6 +55,16 @@ using Warehouse3PL.Infrastructure.Services.Shipping;
 using Warehouse3PL.WebApi.Controllers;
 using Warehouse3PL.WebApi.Middleware;
 
+AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+{
+    if (e.ExceptionObject is Exception ex)
+    {
+        var msg = $"{ex.GetType().Name}: {ex.Message} | Inner: {ex.InnerException?.Message} | Stack: {ex.StackTrace}"
+            .Replace("\r", " ").Replace("\n", " ");
+        Console.WriteLine($"::error title=Phase73PostgresCheck Failure::{msg}");
+    }
+};
+
 var baseConnection = Environment.GetEnvironmentVariable("PHASE73_POSTGRES_CONNECTION")
     ?? throw new InvalidOperationException("Set PHASE73_POSTGRES_CONNECTION to a disposable PostgreSQL server.");
 var builder = new NpgsqlConnectionStringBuilder(baseConnection) { Database = "postgres" };
