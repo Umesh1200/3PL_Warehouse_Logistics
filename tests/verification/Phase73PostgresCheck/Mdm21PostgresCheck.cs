@@ -990,7 +990,7 @@ internal static class Mdm21PostgresCheck
     private static async Task VerifyR04ConcurrentProfileTighteningVsTransferAsync(
         string connStr, Mdm21Identity adminCtx, Guid facOrd, Guid clientA)
     {
-        Guid srcId, destId, itemId;
+        Guid srcId, destId, item2Id;
         await using (var db = CreatePgDb(connStr, adminCtx))
         {
             var createLoc = new CreateLocationCommandHandler(db, new WarehouseMasterAuthorization(db, adminCtx));
@@ -999,10 +999,13 @@ internal static class Mdm21PostgresCheck
             srcId = src.Id;
             destId = dest.Id;
 
-            var item = new Item { ClientId = clientA, Sku = "SKU-R04-PR", Description = "R04 Profile Item", WeightKg = 1m };
-            db.Items.Add(item);
-            itemId = item.Id;
-            db.StockOnHand.Add(new StockOnHand { ClientId = clientA, FacilityId = facOrd, ItemId = itemId, LocationId = srcId, QtyAvailable = 10m });
+            var item1 = new Item { ClientId = clientA, Sku = "SKU-R04-PR-1", Description = "R04 Profile Item 1", WeightKg = 1m };
+            var item2 = new Item { ClientId = clientA, Sku = "SKU-R04-PR-2", Description = "R04 Profile Item 2", WeightKg = 1m };
+            db.Items.AddRange(item1, item2);
+            item2Id = item2.Id;
+            db.StockOnHand.AddRange(
+                new StockOnHand { ClientId = clientA, FacilityId = facOrd, ItemId = item1.Id, LocationId = destId, QtyAvailable = 5m },
+                new StockOnHand { ClientId = clientA, FacilityId = facOrd, ItemId = item2Id, LocationId = srcId, QtyAvailable = 10m });
             await db.SaveChangesAsync();
         }
 
@@ -1010,7 +1013,7 @@ internal static class Mdm21PostgresCheck
         {
             await using var db1 = CreatePgDb(connStr, adminCtx);
             await new UpsertLocationStorageProfileCommandHandler(db1, new WarehouseMasterAuthorization(db1, adminCtx))
-                .Handle(new UpsertLocationStorageProfileCommand { LocationId = destId, IsPutawayAllowed = false }, CancellationToken.None);
+                .Handle(new UpsertLocationStorageProfileCommand { LocationId = destId, AllowMixedSku = false }, CancellationToken.None);
         });
         var tTransfer = Task.Run(async () =>
         {
@@ -1020,27 +1023,34 @@ internal static class Mdm21PostgresCheck
                 {
                     ClientId = clientA,
                     FacilityId = facOrd,
-                    ItemId = itemId,
+                    ItemId = item2Id,
                     FromLocationId = srcId,
                     ToLocationId = destId,
                     Quantity = 4m
                 }, CancellationToken.None);
         });
 
-        try { await tTighten; } catch (DomainException) { }
-        try { await tTransfer; } catch (ValidationException) { } catch (DomainException) { }
+        bool tightenOk = false, transferOk = false;
+        try { await tTighten; tightenOk = true; } catch (DomainException) { }
+        try { await tTransfer; transferOk = true; } catch (DomainException) { }
+
+        if (tightenOk && transferOk)
+            throw new InvalidOperationException("PG-19 R04 violation: Both AllowMixedSku=false and transferring a second SKU succeeded concurrently!");
 
         await using (var checkDb = CreatePgDb(connStr, adminCtx))
         {
             var profile = await checkDb.LocationStorageProfiles.AsNoTracking().FirstOrDefaultAsync(p => p.Id == destId);
-            var stockQty = await checkDb.StockOnHand.IgnoreQueryFilters().AsNoTracking()
-                .Where(s => s.LocationId == destId)
-                .SumAsync(s => s.QtyAvailable + s.QtyAllocated + s.QtyReserved + s.QtyQuarantined + s.QtyDamaged + s.QtyOnHold);
-            if (profile != null && !profile.IsPutawayAllowed && stockQty > 0m)
-                throw new InvalidOperationException($"PG-19 R04 invariant broken: Storage profile has IsPutawayAllowed=false while holding {stockQty} stock!");
+            var distinctSkus = await checkDb.StockOnHand.IgnoreQueryFilters().AsNoTracking()
+                .Where(s => s.LocationId == destId &&
+                            (s.QtyAvailable + s.QtyAllocated + s.QtyReserved + s.QtyQuarantined + s.QtyDamaged + s.QtyOnHold) > 0m)
+                .Select(s => s.ItemId)
+                .Distinct()
+                .CountAsync();
+            if (profile != null && !profile.AllowMixedSku && distinctSkus > 1)
+                throw new InvalidOperationException($"PG-19 R04 invariant broken: Storage profile has AllowMixedSku=false while holding {distinctSkus} distinct SKUs!");
         }
 
-        Console.WriteLine("  [PASS] PG-19 (R04): Concurrent storage-profile tightening vs TransferInventoryCommand serialized cleanly.");
+        Console.WriteLine("  [PASS] PG-19 (R04): Concurrent storage-profile tightening (AllowMixedSku=false) vs TransferInventoryCommand serialized cleanly.");
     }
 
     private static async Task VerifyR04ConcurrentRuleChangeVsReparentingAndTriggerLockAsync(
