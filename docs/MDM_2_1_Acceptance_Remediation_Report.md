@@ -137,7 +137,7 @@ sequenceDiagram
   - `PG-16` (R04): Concurrent parent deactivation vs child creation across 2 independent PG contexts.
   - `PG-17` (R04): Concurrent location deactivation vs `GeneratePutawayTasksCommand` across 2 independent PG contexts.
   - `PG-18` (R04): Concurrent `IsStorable = false` vs `TransferInventoryCommand` across 2 independent PG contexts.
-  - `PG-19` (R04): Concurrent storage-profile tightening (`IsPutawayAllowed = false`) vs `TransferInventoryCommand` across 2 independent PG contexts.
+  - `PG-19` (R04): Concurrent storage-profile tightening (`AllowMixedSku = false`) vs `TransferInventoryCommand` (second SKU) across 2 independent PG contexts.
   - `PG-20` (R04): Concurrent hierarchy rule mutation vs reparenting + direct-SQL concurrent opposite reparenting testing upgraded `fn_locations_prevent_cycle()` advisory lock.
 
 ---

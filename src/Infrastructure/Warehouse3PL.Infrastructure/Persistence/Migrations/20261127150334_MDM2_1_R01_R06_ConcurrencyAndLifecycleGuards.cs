@@ -10,6 +10,17 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
         /// <inheritdoc />
         protected override void Up(MigrationBuilder migrationBuilder)
         {
+            // Align seeded global StagingLane hierarchy rules with Location.DefaultStorableForType(StagingLane) = true
+            // (StagingLanes hold staged received inventory and are storable leaves by default).
+            migrationBuilder.Sql("""
+                UPDATE location_hierarchy_rules
+                SET is_storable_leaf = true,
+                    config_revision = config_revision + 1
+                WHERE facility_id IS NULL
+                  AND child_location_type = 'StagingLane'
+                  AND is_storable_leaf = false;
+                """);
+
             // MDM21-R01 / R02 / R04 Fail-closed corrective preflight guards:
             // 1. All 6 StockOnHand quantity buckets in non-storable non-receiving/staging locations
             // 2. Existing non-deleted locations must comply with effective location_hierarchy_rules (MaxDepth & IsStorableLeaf)
@@ -128,6 +139,16 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
         /// <inheritdoc />
         protected override void Down(MigrationBuilder migrationBuilder)
         {
+            migrationBuilder.Sql("""
+                UPDATE location_hierarchy_rules
+                SET is_storable_leaf = false
+                WHERE rule_id IN (
+                    '21000000-0000-0000-0000-000000000011',
+                    '21000000-0000-0000-0000-000000000109',
+                    '21000000-0000-0000-0000-000000000118'
+                );
+                """);
+
             // Restore original MDM-2.1 fn_locations_prevent_cycle without touching tables, IDs, or FKs
             migrationBuilder.Sql("""
                 CREATE OR REPLACE FUNCTION fn_locations_prevent_cycle()
