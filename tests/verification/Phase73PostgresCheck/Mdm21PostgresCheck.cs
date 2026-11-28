@@ -131,12 +131,33 @@ internal static class Mdm21PostgresCheck
             // PG-20 (R04): Concurrent Hierarchy rule mutation vs Reparenting + direct SQL opposite reparenting
             await VerifyR04ConcurrentRuleChangeVsReparentingAndTriggerLockAsync(targetConn, adminCtx, facOrd);
 
-            // PG-13: Reversible Down() (corrective -> base -> pre-MDM2.1) and clean re-Up() to corrective migration
+            // PG-13: Reversible Down() & re-Up():
+            // (a) Incremental rollback/re-apply of corrective migration preserving facility rules & populated data
+            // (b) Full rollback to PreMdm21Migration (drops custom Aisle->Aisle rules), verifying R02 preflight fails closed
+            //     with MDM21_R02_PREFLIGHT_FAILED until custom-rule test links are cleared, then succeeds cleanly.
             await using (var revDb = CreatePgDb(targetConn))
             {
                 var migrator = revDb.GetInfrastructure().GetRequiredService<IMigrator>();
                 await migrator.MigrateAsync(Mdm21Migration);
+                await migrator.MigrateAsync(Mdm21CorrectiveMigration);
+
                 await migrator.MigrateAsync(PreMdm21Migration);
+
+                bool r02PreflightBlocked = false;
+                try
+                {
+                    await migrator.MigrateAsync(Mdm21CorrectiveMigration);
+                }
+                catch (Exception ex) when (ex.ToString().Contains("MDM21_R02_PREFLIGHT_FAILED", StringComparison.Ordinal))
+                {
+                    r02PreflightBlocked = true;
+                }
+                if (!r02PreflightBlocked)
+                    throw new InvalidOperationException("PG-13 violation: Corrective migration did not fail closed with MDM21_R02_PREFLIGHT_FAILED on custom Aisle->Aisle links without rules.");
+
+                await revDb.Database.ExecuteSqlRawAsync(
+                    "UPDATE locations SET parent_location_id = NULL WHERE location_code IN ('RACE-A','RACE-B','RR-A','RR-B','SQL-A','SQL-B');");
+
                 await migrator.MigrateAsync(Mdm21CorrectiveMigration);
             }
 
