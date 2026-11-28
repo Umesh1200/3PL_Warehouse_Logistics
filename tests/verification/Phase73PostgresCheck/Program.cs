@@ -1377,9 +1377,26 @@ try
     Console.WriteLine("PASS Non-staff without tenant context fail-closed on list, detail, update, delete -> 403 Forbidden verified.");
 
     // 4.7b Non-staff user assigned to client1Id attempting foreign tenant (createdClientId) access
+    var client1ActorId = Guid.NewGuid();
+    await using (var clientActorDb = CreateDb(operationalConn, user))
+    {
+        clientActorDb.Users.Add(new User
+        {
+            Id = client1ActorId,
+            Email = $"client1-actor-{client1ActorId:N}@nexus3pl.test",
+            PasswordHash = "hash",
+            FirstName = "Client1",
+            LastName = "User",
+            UserType = UserType.Client,
+            Status = UserStatus.Active,
+            ClientId = client1Id
+        });
+        await clientActorDb.SaveChangesAsync();
+    }
+
     TestAuthHandler.CustomClaims = new List<Claim>
     {
-        new Claim(ClaimTypes.NameIdentifier, Guid.NewGuid().ToString()),
+        new Claim(ClaimTypes.NameIdentifier, client1ActorId.ToString()),
         new Claim(ClaimTypes.Role, "ClientUser"),
         new Claim("user_type", "Client"),
         new Claim("tenant_id", client1Id.ToString()),
