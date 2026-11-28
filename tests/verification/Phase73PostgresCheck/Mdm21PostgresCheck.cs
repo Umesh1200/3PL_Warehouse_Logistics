@@ -1333,6 +1333,12 @@ internal static class Mdm21PostgresCheck
             ClientId = clientA,
             FacilityId = facOrd,
             ReturnInboundHandoffId = handoff.Id,
+            ReturnShipmentId = retShip.Id,
+            ReturnAuthorizationId = retAuth.Id,
+            OrderId = origOrder.Id,
+            PackageId = origPkg.Id,
+            ReceivedByUserId = adminCtx.UserId!.Value,
+            StartedAtUtc = DateTime.UtcNow.AddMinutes(-5),
             SessionNumber = "RRS-PG23-001",
             Status = ReturnReceivingSessionStatus.Inspected,
             IsInventoryPosted = false
@@ -1559,7 +1565,7 @@ internal static class Mdm21PostgresCheck
                 LocationCode = "PG28-PKSTN",
                 Barcode = "BC-PG28-PKSTN"
             }, CancellationToken.None)).Id;
-            var ord = new OutboundOrder { ClientId = clientA, FacilityId = facOrd, OrderNumber = "ORD-PG28", Status = OutboundOrderStatus.Allocated };
+            var ord = new OutboundOrder { ClientId = clientA, FacilityId = facOrd, OrderNumber = "ORD-PG28", CustomerName = "PG28 Customer", Status = OutboundOrderStatus.Allocated };
             db.OutboundOrders.Add(ord);
             order28Id = ord.Id;
             await db.SaveChangesAsync();
