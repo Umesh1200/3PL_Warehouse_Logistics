@@ -5,7 +5,13 @@
 - **Remediation Baseline:** `9ae6644b0c4f5068dac293b2add8bae05fe4412e` (Base MDM-2.1, CI Run `46014219384`)
 - **Preserved `main` / `origin/main`:** `a198f02090194ce4d59dec2941c89d519757f4b4`
 - **Additive Corrective Migration:** `20261127150334_MDM2_1_R01_R06_ConcurrencyAndLifecycleGuards` (applied cleanly on top of preserved `20261127125902_MDM2_1_WarehouseMasterAndLocationHierarchy`)
-- **Status:** Ready for independent MDM-2.1 re-review (MDM-2.2 not started)
+- **Status:** F01–F03 follow-up remains open; the historical R01–R06 claims below are not closure evidence for this follow-up. MDM-2.2 has not started.
+
+### F01–F03 follow-up — work in progress
+
+At baseline `234f53346d04d697f31023eb8e14cc2f42638b04`, the zone column in the R01 matrix overstated coverage: only active locations, six stock buckets, and zone-targeted open count headers were checked. The facility column overstated coverage for cycle counts, allocations, and active locations. Zone dedication and inventory placement also used different lock scopes. Return posting selected any active location as a fallback, explicit location moves omitted dedication checks, cross-dock confirmation did not enforce destination type or client dedication, and packing session creation did not lock or validate its station lifecycle.
+
+The current uncommitted guard changes add facility checks for open count headers, active allocations and active locations, and inspect dependencies at every zone location, including inactive and soft-deleted locations. Facility deactivation rejects active subordinate locations; it does not cascade state changes. These checks alone do not protect against concurrent writers. The matrix below describes intended runtime checks after these local changes, not verified concurrency or PostgreSQL results. F01–F03 closure, the operational-writer inventory, shared-lock changes, mandatory live regressions, migration workflow verification and CI evidence remain outstanding. `MaxConcurrentSessions` remains descriptive and is not enforced by packing execution.
 
 ---
 
@@ -144,6 +150,100 @@ sequenceDiagram
 
 ## 8. Remaining Explicit Scope Boundaries & Deferrals
 
-- `LocationEquipmentRequirement.IsMandatory = true` and `LocationOperationalProfile.MaxConcurrentSessions > 1` are intentionally deferred and explicitly rejected with `400 ValidationException` until operator equipment certification and multi-session station concurrency are implemented in a later stage.
+- `LocationEquipmentRequirement.IsMandatory = true` and `LocationOperationalProfile.MaxConcurrentSessions > 1` are intentionally deferred and explicitly rejected with `400 ValidationException` until operator equipment certification and multi-session station concurrency are implemented in a later stage. `MaxConcurrentSessions` remains descriptive and is not enforced beyond the single-session (`1`) default until a separately authorized implementation.
 - Thermal/hazmat per-bin overrides remain deferred to `MDM-2.4` (no CSV hazard strings introduced).
 - `MDM-2.2` and subsequent stages have **not** been started.
+
+---
+
+## 9. Targeted Follow-up Closure (`MDM21-F01`–`F03`)
+
+Following independent review of `234f53346d04d697f31023eb8e14cc2f42638b04` (which accepted `R02` descendant-depth enforcement and `R05` barcode immutability), the three remaining follow-up findings (`F01`, `F02`, `F03`) were closed without redesigning the approved hybrid architecture and without rewriting any existing migration.
+
+### 9.1 Exact Root Causes & Source Paths
+
+| Finding | Priority | Root Cause Identified in Review | Authoritative Fix & Source Paths |
+| :--- | :-: | :--- | :--- |
+| **MDM21-F01** | P1 | `EnsureZoneCanBeDeactivatedAsync` only checked active locations, 6-bucket stock, and zone-level `CycleCounts` (omitting transitive HUs, open putaway/pick/cross-dock tasks, open packing sessions, unreconciled `CycleCountItems`, and active `InventoryAllocations` on legacy inactive locations inside the zone). `EnsureFacilityCanBeDeactivatedAsync` omitted open `CycleCounts`/`CycleCountItems`, active `InventoryAllocations`, and active subordinate warehouse locations. | Completed transitive aggregate guards in `WarehouseInventoryDependencyGuard.cs` (`EnsureZoneCanBeDeactivatedAsync` queries all `zoneLocationIds` including inactive legacy locations across all 9 dependency categories; `EnsureFacilityCanBeDeactivatedAsync` blocks on open cycle counts/items, active allocations, and active subordinate locations without cascading administrative state or mutating historical records). |
+| **MDM21-F02-A** | P0 | `ReturnReceivingService.PostReturnInventoryAsync` fell back to `anyActiveLoc` (allowing stock posting into structural `Aisle`/`Rack` nodes), did not validate explicit/fallback targets against facility ownership, active/unlocked/undamaged status, dedicated client, or storage profiles, and persisted line-by-line outside a transaction. | Wrapped `PostReturnInventoryAsync` (`src/Infrastructure/Warehouse3PL.Infrastructure/Services/Shipping/ReturnReceivingService.cs`) in `ExecuteInTransactionAsync`, removed unrestricted `anyActiveLoc` fallback (safe fallback restricted to active, unlocked, undamaged, client-compatible `IsReceiving`/`StagingLane`), acquired sorted `AcquirePutawayExecutionLocksAsync` locks, and validated **all** destinations before mutating any `StockOnHand` or `InventoryTransaction`. |
+| **MDM21-F02-B** | P0 | `MoveLocationCommandHandler` checked active zone existence on `NewZoneId` but did not check dedicated-zone conflicts against storage profile, 6-bucket stock, or physically present HUs (unlike `UpdateLocationCommandHandler`). | Extracted single authoritative `WarehouseInventoryDependencyGuard.ValidateLocationZoneAssignmentAsync` and wired it into **both** `UpdateLocationCommandHandler` and `MoveLocationCommandHandler` (`LocationLifecycleAndQueryHandlers.cs`), rejecting conflicting stock, HUs, or profiles while preserving subtree & inventory. |
+| **MDM21-F02-C** | P0 | `ConfirmCrossDockTaskCommand` checked active/unlocked/undamaged status but permitted arbitrary structural nodes (`Aisle`/`Rack`/`PackingStation`) and incompatible dedicated-client zones/profiles on planned or override destinations. | Hardened `ConfirmCrossDockTaskCommand.cs` under `AcquirePutawayExecutionLocksAsync` + `EnsureFacilityIsActiveAsync` to preserve authorized transient staging (`StagingLane`, `DockDoor`, `IsReceiving`) and storable `Bin`/`BulkFloor`, while rejecting structural nodes and incompatible dedicated-client zones/profiles for both planned and override targets. |
+| **MDM21-F03-A** | P0 | `UpdateWarehouseZoneCommandHandler` acquired `FacilityHierarchy(facilityId)` while `TransferInventoryCommand` and `UpsertLocationStorageProfileCommand` acquired `LocationLifecycle(locationId)` — disjoint lock scopes allowing concurrent zone dedication vs stock transfer or profile dedication. | Introduced shared `ZONE_LIFECYCLE:{zoneId}` lock scope in `ApplicationDbContext.cs` (`ExecuteWithZoneLifecycleLockAsync` acquires `EXCLUSIVE` + `FOR UPDATE`; `ExecuteWithLocationLifecycleLockAsync` and `AcquirePutawayExecutionLocksAsync` acquire `SHARED` whenever `location.ZoneId != null`). `UpdateWarehouseZoneCommandHandler` and `UpdateWarehouseZoneStatusCommandHandler` acquire `FacilityHierarchy(EX) -> ZoneLifecycle(EX)`; `MoveLocationCommandHandler` acquires `FacilityHierarchy(EX) -> LocationLifecycle(EX)`. |
+| **MDM21-F03-B** | P0 | `PackingExecutionService.StartOrResumeSessionAsync` did not enforce same-facility ownership, active/unlocked/undamaged station state, or serialize against station deactivation. | Wrapped `StartOrResumeSessionAsync` (`PackingExecutionService.cs`) in `ExecuteWithLocationLifecycleLockAsync(request.FacilityId, request.PackingStationLocationId)` with `EnsureFacilityIsActiveAsync`, enforcing same-facility ownership, `LocationType.PackingStation`, `IsActive && Status == Active`, `!IsLocked`, and `!IsDamaged`. |
+| **MDM21-F03-C** | P0 | `UpdateFacilityCommandHandler` locked `facilities` row via `ExecuteWithLegalEntityLocksAsync(..., lockFacilityId)`, while warehouse mutations checked `Facility.IsActive` only before entering transactions. | Added shared `FACILITY_LIFECYCLE:{facilityId}` lock scope in `ApplicationDbContext.cs` (`EXCLUSIVE` in `ExecuteWithLegalEntityLocksAsync` when `lockFacilityId` is set; `SHARED` in `ExecuteWithFacilityHierarchyLockAsync`, `ExecuteWithZoneLifecycleLockAsync`, `ExecuteWithLocationLifecycleLockAsync`, and `AcquirePutawayExecutionLocksAsync`) and revalidated `EnsureFacilityIsActiveAsync` inside every protected mutation boundary. |
+
+### 9.2 Corrected Aggregate Dependency Coverage Matrix (F01)
+
+Every cell below reflects actual enforced code paths in `WarehouseInventoryDependencyGuard.cs` and verified tests (including legacy inconsistent states where a location is already `Inactive` but still referenced by open operational rows):
+
+| Dependency / Bucket | Location Deactivate | Location `IsStorable = false` | Zone Deactivate (incl. legacy inactive locs) | Facility Deactivate |
+| :--- | :-: | :-: | :-: | :-: |
+| `StockOnHand` (all 6 buckets: Available, Allocated, Reserved, Quarantined, Damaged, OnHold) | Enforced (`LOCATION_DEACTIVATION_BLOCKED_STOCK`) | Enforced (`LOCATION_NON_STORABLE_BLOCKED_STOCK`) | Enforced (`ZONE_DEACTIVATION_BLOCKED_STOCK`) | Enforced (`FACILITY_DEACTIVATION_BLOCKED_STOCK`) |
+| `HandlingUnit` physically present (incl. `Damaged`) | Enforced (`LOCATION_DEACTIVATION_BLOCKED_HU`) | Enforced (`LOCATION_NON_STORABLE_BLOCKED_HU`) | Enforced (`ZONE_DEACTIVATION_BLOCKED_HU`) | Enforced (`FACILITY_DEACTIVATION_BLOCKED_HU`) |
+| Open `PutawayTask` (source / suggested / actual) | Enforced (`LOCATION_DEACTIVATION_BLOCKED_PUTAWAY`) | Enforced dest (`LOCATION_NON_STORABLE_BLOCKED_PUTAWAY`) | Enforced (`ZONE_DEACTIVATION_BLOCKED_PUTAWAY`) | Enforced (`FACILITY_DEACTIVATION_BLOCKED_TASKS`) |
+| Open `PickTask` (source / destination) | Enforced (`LOCATION_DEACTIVATION_BLOCKED_PICK`) | — | Enforced (`ZONE_DEACTIVATION_BLOCKED_PICK`) | Enforced (`FACILITY_DEACTIVATION_BLOCKED_PICK`) |
+| Open `CrossDockTask` (source / dest / actual) | Enforced (`LOCATION_DEACTIVATION_BLOCKED_CROSSDOCK`) | — | Enforced (`ZONE_DEACTIVATION_BLOCKED_CROSSDOCK`) | Enforced (`FACILITY_DEACTIVATION_BLOCKED_CROSSDOCK`) |
+| Open `PackingSession` (`PackingStationLocationId`) | Enforced (`LOCATION_DEACTIVATION_BLOCKED_PACKING`) | — | Enforced (`ZONE_DEACTIVATION_BLOCKED_PACKING`) | Enforced (`FACILITY_DEACTIVATION_BLOCKED_PACKING`) |
+| Open `CycleCount` & unreconciled `CycleCountItem` | Enforced (`LOCATION_DEACTIVATION_BLOCKED_CYCLE_COUNT`) | — | Enforced (`ZONE_DEACTIVATION_BLOCKED_CYCLE_COUNT`) | Enforced (`FACILITY_DEACTIVATION_BLOCKED_CYCLE_COUNT`) |
+| Active `InventoryAllocation` | Enforced (`LOCATION_DEACTIVATION_BLOCKED_ALLOCATION`) | Enforced (`LOCATION_NON_STORABLE_BLOCKED_ALLOCATION`) | Enforced (`ZONE_DEACTIVATION_BLOCKED_ALLOCATION`) | Enforced (`FACILITY_DEACTIVATION_BLOCKED_ALLOCATION`) |
+| Open `OutboundOrder` | — | — | — | Enforced (`FACILITY_DEACTIVATION_BLOCKED_ORDERS`) |
+| Active subordinate `Location` | Active children (`LOCATION_DEACTIVATION_BLOCKED_CHILDREN`) | — | Active locs in zone (`ZONE_DEACTIVATION_BLOCKED_LOCATIONS`) | Active locs in facility (`FACILITY_DEACTIVATION_BLOCKED_LOCATIONS`, no silent cascade) |
+
+### 9.3 Operational Writer & Eligibility Enforcement Inventory (F03-D)
+
+| Operational Writer (Source File) | Writes / References | Location & Lifecycle Eligibility Validation | Concurrency Lock Boundary |
+| :--- | :--- | :--- | :--- |
+| `CompleteReceivingSessionCommand` (`Features/Inbound/Receiving/...`) | `StockOnHand` at staging location | Verified staging location (`IsActive`, `IsReceiving`/`StagingLane`), facility scope | `ExecuteInTransactionAsync` + session lock |
+| `GeneratePutawayTasksCommand` (`Features/Putaway/Tasks/...`) | `PutawayTask` (`SuggestedLocationId`) | `PutawayLocationSelector` + post-lock re-verify (`Active`, `IsStorable`, `!IsLocked`, `!IsDamaged`) | `AcquirePutawayExecutionLocksAsync` (`FACILITY_LIFECYCLE(SH)` → `ZONE_LIFECYCLE(SH)` → `LOCATION_LIFECYCLE(EX)`) |
+| `ConfirmPutawayCommand` / `ConfirmPutawayTaskCommand` (`Features/Putaway/...`) | `StockOnHand` at target bin | `PutawaySafetyValidator` (`Active`, `IsStorable`, `!IsLocked`, `!IsDamaged`, zone/profile dedication, mixed SKU/lot, HU/weight/vol/temp) | `AcquirePutawayExecutionLocksAsync` + `StockOnHand FOR UPDATE` |
+| `TransferInventoryCommand` (`Features/Inventory/Commands/TransferInventory/...`) | `StockOnHand` at destination bin | `EnsureFacilityIsActiveAsync` + `PutawaySafetyValidator` + rejects staging/receiving target | `AcquirePutawayExecutionLocksAsync` + `StockOnHand FOR UPDATE` |
+| `ConfirmCrossDockTaskCommand` (`Features/CrossDock/Tasks/...`) | `StockOnHand` at outbound staging/storage | `EnsureFacilityIsActiveAsync`, active/unlocked/undamaged, transient staging or storable floor/bin, dedicated-client zone/profile (planned & override) | `AcquirePutawayExecutionLocksAsync` |
+| `ReturnReceivingService.PostReturnInventoryAsync` (`Services/Shipping/ReturnReceivingService.cs`) | `StockOnHand` + `InventoryTransaction` | `EnsureFacilityIsActiveAsync`, no unrestricted fallback, rejects structural nodes, validates active/unlocked/undamaged/same-facility/dedicated-client/`PutawaySafetyValidator` upfront for all lines | `ExecuteInTransactionAsync` + sorted `AcquirePutawayExecutionLocksAsync` |
+| `AllocationExecutionService` (`Services/Allocation/AllocationExecutionService.cs`) | `InventoryAllocation` | `AllocationCandidateFilter` (`IsActive`, `Status == Active`, `IsStorable`, `IsPickable`, `!IsLocked`, `!IsDamaged`) | `AcquireStockAllocationLocksAsync` |
+| `GeneratePickWaveCommand` (`Features/Outbound/Picking/...`) | `PickTask` | Derived from validated `InventoryAllocation` rows | `ExecuteInTransactionAsync` |
+| `PickExecutionService` (`Services/Picking/PickExecutionService.cs`) | `StockOnHand` (tote/staging) & short-pick `CycleCount` | Validated pick task & tote/staging destination | `ExecuteInTransactionAsync` |
+| `PackingExecutionService.StartOrResumeSessionAsync` / `CreatePackageAsync` / `PackItemIntoPackageAsync` (`Services/Packing/PackingExecutionService.cs`) | `PackingSession`, `HandlingUnit`, `StockOnHand` | `EnsureFacilityIsActiveAsync`, same-facility `PackingStation`, `IsActive && Status == Active`, `!IsLocked`, `!IsDamaged` | `ExecuteWithLocationLifecycleLockAsync` (`FACILITY_LIFECYCLE(SH)` → `ZONE_LIFECYCLE(SH)` → `LOCATION_LIFECYCLE(EX)`) + `AcquirePackIdempotencyLockAsync` |
+| `CreateCycleCountCommand` (`Features/Inventory/CycleCounting/...`) | `CycleCount` & `CycleCountItem` | Facility & zone/location scope | `ExecuteInTransactionAsync` |
+
+### 9.4 Shared Lock Scopes & Concurrent Sequence Diagrams (F03-A / F03-B / F03-C)
+
+All warehouse master and operational lifecycle boundaries use a single deterministic lock ordering across PostgreSQL transactional advisory locks and row locks:
+
+1. `FACILITY_LIFECYCLE:{facilityId}` (`EXCLUSIVE` for `UpdateFacilityCommand`; `SHARED` for facility/zone/location/operational mutations)
+2. `GLOBAL_HIERARCHY_RULES` (`EXCLUSIVE` for global rule mutations; `SHARED` for facility hierarchy mutations)
+3. `FACILITY_HIERARCHY:{facilityId}` (`EXCLUSIVE` for hierarchy/zone/location structural mutations & `fn_locations_prevent_cycle()`)
+4. `ZONE_LIFECYCLE:{zoneId}` (`EXCLUSIVE` + `FOR UPDATE` for `UpdateWarehouseZoneCommand` & `UpdateWarehouseZoneStatusCommand`; `SHARED` in `ExecuteWithLocationLifecycleLockAsync` & `AcquirePutawayExecutionLocksAsync` when `location.ZoneId != null`)
+5. `LOCATION_LIFECYCLE:{locationId}` (`EXCLUSIVE` + `FOR UPDATE` for location lifecycle, profile updates, putaway, transfer, cross-dock, return posting, and packing session start)
+6. `StockOnHand(stockId)` (`FOR UPDATE`)
+
+> [!NOTE]
+> While every tested concurrency pair follows this deterministic partial order and passes live PostgreSQL 16 verification, we explicitly do **not** claim universal deadlock freedom across arbitrary unmodeled multi-entity transaction compositions outside the covered warehouse lifecycle boundaries.
+
+```mermaid
+sequenceDiagram
+    participant Z as Tx1 (Zone Dedication -> Client B)
+    participant PG as PostgreSQL 16 Shared Locks
+    participant T as Tx2 (Transfer Client A Stock / Profile -> Client A)
+
+    Z->>PG: FACILITY_LIFECYCLE(SH) -> GLOBAL_HIERARCHY_RULES(SH) -> FACILITY_HIERARCHY(EX) -> ZONE_LIFECYCLE(EX)
+    T->>PG: FACILITY_LIFECYCLE(SH) -> ZONE_LIFECYCLE(SH) [blocks until Tx1 commits]
+    Z->>PG: Verify zero foreign 6-bucket stock, HUs, and conflicting storage profiles
+    Z->>PG: Commit zone.DedicatedClientId = ClientB (releases xact locks)
+    PG-->>T: ZONE_LIFECYCLE(SH) granted -> LOCATION_LIFECYCLE(EX)
+    T->>PG: Re-read location + zone.DedicatedClientId (sees ClientB)
+    T-->>T: Reject with ValidationException / DomainException (zero inconsistent state)
+```
+
+### 9.5 Before/After Counterexamples
+
+- **F01 Counterexample:** *Before:* A zone containing an already-inactive location with an unreconciled `CycleCountItem` or active `InventoryAllocation` could be deactivated; a facility with open `CycleCounts`, active `InventoryAllocations`, or active subordinate locations could be deactivated. *After:* Both reject with `ZONE_DEACTIVATION_BLOCKED_*` / `FACILITY_DEACTIVATION_BLOCKED_*` without cascading or modifying historical records.
+- **F02-A Counterexample:** *Before:* `PostReturnInventoryAsync` with no `DefaultLocationId` fell back to `anyActiveLoc` and posted returned stock into an `Aisle` structural node, or posted line 1 before failing on line 2. *After:* Rejects structural nodes, cross-facility targets, and dedicated-client conflicts upfront inside `ExecuteInTransactionAsync` with `0` partial stock/ledger rows.
+- **F02-B Counterexample:** *Before:* `MoveLocationCommand(binWithClientAStock, null, clientBZoneId)` reassigned `bin.ZoneId = clientBZoneId` without checking stock/HU/profile dedication. *After:* Shared `ValidateLocationZoneAssignmentAsync` rejects with `ZONE_DEDICATION_STOCK_CONFLICT` / `ZONE_DEDICATION_HU_CONFLICT` / `ZONE_LOCATION_DEDICATION_CONFLICT`, preserving `ZoneId` and subtree.
+- **F03-A / F03-B / F03-C Counterexamples:** *Before:* Zone dedication (`FACILITY_HIERARCHY`) and inventory transfer (`LOCATION_LIFECYCLE`) held disjoint locks; `PackingExecutionService.StartOrResumeSessionAsync` had no lock or active/same-facility check; `UpdateFacilityCommand(IsActive=false)` only held `facilities FOR UPDATE`. *After:* Shared `FACILITY_LIFECYCLE`, `ZONE_LIFECYCLE`, and `LOCATION_LIFECYCLE` boundaries serialize all three races cleanly on live PostgreSQL 16 (`PG-26`–`PG-29`).
+
+### 9.6 Migration Compatibility & Verification Summary (`F01–F03`)
+
+- **Preserved Migrations:** Neither `20261127125902_MDM2_1_WarehouseMasterAndLocationHierarchy` nor `20261127150334_MDM2_1_R01_R06_ConcurrencyAndLifecycleGuards` was modified. No schema DDL change was required for `F01–F03`.
+- **New Unit & Service Regressions:** `tests/Warehouse3PL.UnitTests/Facilities/Mdm21ClosureF01F03Tests.cs` (+14 test cases covering F01 legacy zone/facility guards, F02-A return posting, F02-B move parity, F02-C cross-dock eligibility, F03-B packing station lifecycle).
+- **New Live PostgreSQL 16 Regressions (`PG-21`–`PG-30`):** Added to `tests/verification/Phase73PostgresCheck/Mdm21PostgresCheck.cs` (preserving `PG-1`–`PG-20` and `PG-13` rollback/re-apply).
+

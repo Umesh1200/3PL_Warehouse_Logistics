@@ -223,10 +223,12 @@ public sealed class UpdateLocationCommandHandler : IRequestHandler<UpdateLocatio
             Permissions.Facilities.LocationsManage,
             Permissions.Facilities.Manage);
 
-        // MDM21-R04: Canonical lock order FacilityHierarchy -> LocationLifecycle
+        // MDM21-R04 & F03-C: Canonical lock order FacilityLifecycle(SH) -> FacilityHierarchy(EX) -> ZoneLifecycle(SH) -> LocationLifecycle(EX)
         return await _db.ExecuteWithFacilityHierarchyLockAsync(facilityId, async () =>
             await _db.ExecuteWithLocationLifecycleLockAsync(facilityId, request.Id, async () =>
             {
+                await WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(_db, facilityId, cancellationToken);
+
                 var location = await _db.Locations
                     .Include(l => l.ParentLocation)
                     .Include(l => l.StorageProfile)
@@ -254,48 +256,11 @@ public sealed class UpdateLocationCommandHandler : IRequestHandler<UpdateLocatio
                     }
                 }
 
-                // MDM21-R03 & R06: Active zone check + zone dedication compatibility with existing stock & storage profile
+                // MDM21-R03, R06 & F02-B: Shared authoritative zone-assignment & dedication validation
                 if (request.ZoneId.HasValue && request.ZoneId != location.ZoneId)
                 {
-                    var zone = await _db.WarehouseZones
-                        .AsNoTracking()
-                        .FirstOrDefaultAsync(z => z.Id == request.ZoneId.Value && z.FacilityId == facilityId && !z.IsDeleted, cancellationToken);
-                    if (zone == null)
-                    {
-                        throw new ValidationException(
-                            nameof(request.ZoneId),
-                            $"Zone '{request.ZoneId.Value}' does not exist in facility '{facilityId}'.");
-                    }
-
-                    if (!zone.IsActive)
-                    {
-                        throw new ValidationException(
-                            nameof(request.ZoneId),
-                            $"Zone '{zone.ZoneCode}' is inactive and cannot accept new location assignments.");
-                    }
-
-                    if (zone.DedicatedClientId.HasValue)
-                    {
-                        if (location.StorageProfile?.DedicatedClientId is Guid profileClientId &&
-                            profileClientId != zone.DedicatedClientId.Value)
-                        {
-                            throw new DomainException(
-                                $"Zone '{zone.ZoneCode}' dedicated client conflicts with location storage profile dedication.",
-                                "ZONE_LOCATION_DEDICATION_CONFLICT");
-                        }
-
-                        var hasForeignStock = await _db.StockOnHand
-                            .IgnoreQueryFilters()
-                            .AsNoTracking()
-                            .Where(s => s.FacilityId == facilityId && s.LocationId == location.Id && s.ClientId != zone.DedicatedClientId.Value)
-                            .AnyAsync(WarehouseInventoryDependencyGuard.HasAnyStockExpression, cancellationToken);
-                        if (hasForeignStock)
-                        {
-                            throw new DomainException(
-                                $"Cannot assign location '{location.LocationCode}' to dedicated zone '{zone.ZoneCode}' while stock for another client exists in the location.",
-                                "ZONE_DEDICATION_STOCK_CONFLICT");
-                        }
-                    }
+                    await WarehouseInventoryDependencyGuard.ValidateLocationZoneAssignmentAsync(
+                        _db, facilityId, location.Id, location.LocationCode, request.ZoneId.Value, cancellationToken);
                 }
 
                 // MDM21-R01: Complete 6-bucket stock & operational guard when turning IsStorable off
@@ -380,38 +345,30 @@ public sealed class MoveLocationCommandHandler : IRequestHandler<MoveLocationCom
             Permissions.Facilities.LocationsManage,
             Permissions.Facilities.Manage);
 
+        // MDM21-F02-B, F03-A, F03-C: Acquire FacilityHierarchy(EX) -> LocationLifecycle(EX) so move & zone reassignment
+        // serialize cleanly against incoming inventory, zone dedication updates, and facility deactivation.
         return await _db.ExecuteWithFacilityHierarchyLockAsync(facilityId, async () =>
-        {
-            var location = await _db.Locations
-                .FirstOrDefaultAsync(l => l.Id == request.LocationId && l.FacilityId == facilityId && !l.IsDeleted, cancellationToken)
-                ?? throw new EntityNotFoundException(nameof(Location), request.LocationId);
-
-            if (request.NewParentLocationId.HasValue && request.NewParentLocationId.Value == location.Id)
+            await _db.ExecuteWithLocationLifecycleLockAsync(facilityId, request.LocationId, async () =>
             {
-                throw new DomainException(
-                    $"Location '{location.LocationCode}' cannot be its own parent.",
-                    "LOCATION_HIERARCHY_CYCLE");
-            }
+                await WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(_db, facilityId, cancellationToken);
 
-            if (request.NewZoneId.HasValue)
-            {
-                var zone = await _db.WarehouseZones
-                    .AsNoTracking()
-                    .FirstOrDefaultAsync(z => z.Id == request.NewZoneId.Value && z.FacilityId == facilityId && !z.IsDeleted, cancellationToken);
-                if (zone == null)
+                var location = await _db.Locations
+                    .FirstOrDefaultAsync(l => l.Id == request.LocationId && l.FacilityId == facilityId && !l.IsDeleted, cancellationToken)
+                    ?? throw new EntityNotFoundException(nameof(Location), request.LocationId);
+
+                if (request.NewParentLocationId.HasValue && request.NewParentLocationId.Value == location.Id)
                 {
-                    throw new ValidationException(
-                        nameof(request.NewZoneId),
-                        $"Zone '{request.NewZoneId.Value}' does not exist in facility '{facilityId}'.");
+                    throw new DomainException(
+                        $"Location '{location.LocationCode}' cannot be its own parent.",
+                        "LOCATION_HIERARCHY_CYCLE");
                 }
 
-                if (!zone.IsActive)
+                // MDM21-F02-B: Shared authoritative zone-assignment & dedication conflict check (parity with UpdateLocationCommandHandler)
+                if (request.NewZoneId.HasValue && request.NewZoneId != location.ZoneId)
                 {
-                    throw new ValidationException(
-                        nameof(request.NewZoneId),
-                        $"Zone '{zone.ZoneCode}' is inactive and cannot accept moved locations.");
+                    await WarehouseInventoryDependencyGuard.ValidateLocationZoneAssignmentAsync(
+                        _db, facilityId, location.Id, location.LocationCode, request.NewZoneId.Value, cancellationToken);
                 }
-            }
 
             var facilityLocations = await _db.Locations
                 .Where(l => l.FacilityId == facilityId && !l.IsDeleted)
@@ -526,7 +483,7 @@ public sealed class MoveLocationCommandHandler : IRequestHandler<MoveLocationCom
 
             await _db.SaveChangesAsync(cancellationToken);
             return WarehouseMasterMappers.ToLocationDto(targetNode);
-        }, cancellationToken);
+            }, cancellationToken), cancellationToken);
     }
 }
 
@@ -562,10 +519,12 @@ public sealed class UpdateLocationStatusCommandHandler : IRequestHandler<UpdateL
             Permissions.Facilities.LocationsManage,
             Permissions.Facilities.Manage);
 
-        // MDM21-R04: FacilityHierarchy -> LocationLifecycle serializes parent deactivation vs child creation/move
+        // MDM21-R04 & F03-C: FacilityHierarchy -> LocationLifecycle serializes parent deactivation vs child creation/move & facility deactivation
         return await _db.ExecuteWithFacilityHierarchyLockAsync(facilityId, async () =>
             await _db.ExecuteWithLocationLifecycleLockAsync(facilityId, request.LocationId, async () =>
             {
+                await WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(_db, facilityId, cancellationToken);
+
                 var location = await _db.Locations
                     .FirstOrDefaultAsync(l => l.Id == request.LocationId && l.FacilityId == facilityId && !l.IsDeleted, cancellationToken)
                     ?? throw new EntityNotFoundException(nameof(Location), request.LocationId);

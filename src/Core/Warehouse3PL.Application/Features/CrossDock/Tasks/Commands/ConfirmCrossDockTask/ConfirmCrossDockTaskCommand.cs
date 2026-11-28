@@ -99,12 +99,17 @@ public class ConfirmCrossDockTaskCommandHandler : IRequestHandler<ConfirmCrossDo
                     $"Scanned location barcode '{request.ScannedDestinationBarcode}' does not match planned destination '{task.DestinationLocation.LocationCode}'. Override not authorized.");
             }
 
-            // MDM21-R03/R04: Lock cross-dock destination and verify active, unlocked, undamaged status
+            // MDM21-R03/R04 & F02-C/F03-C: Lock cross-dock destination (both planned and override) under shared lifecycle boundary
             await using var cdLock = await _context.AcquirePutawayExecutionLocksAsync(
                 null, scannedDest.Id, cancellationToken);
 
+            await WarehouseMaster.WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(
+                _context, task.FacilityId, cancellationToken);
+
             var actualDestLocation = await _context.Locations
                 .AsNoTracking()
+                .Include(l => l.Zone)
+                .Include(l => l.StorageProfile)
                 .FirstOrDefaultAsync(l => l.Id == scannedDest.Id &&
                                           l.FacilityId == task.FacilityId &&
                                           !l.IsDeleted &&
@@ -116,6 +121,35 @@ public class ConfirmCrossDockTaskCommandHandler : IRequestHandler<ConfirmCrossDo
                 ?? throw new ValidationException(
                     nameof(request.ScannedDestinationBarcode),
                     $"Cross-dock destination location '{scannedDest.LocationCode}' is inactive, locked, or damaged.");
+
+            // MDM21-F02-C: Preserve authorized transient staging (StagingLane, DockDoor, IsReceiving) and storable floor/bin;
+            // reject structural container nodes (Aisle, Rack, ShelfLevel, Mezzanine, Facility, Zone, PackingStation, Cantilever).
+            var isTransientStaging = actualDestLocation.IsReceiving ||
+                                     actualDestLocation.LocationType == LocationType.StagingLane ||
+                                     actualDestLocation.LocationType == LocationType.DockDoor;
+            var isEligibleStorable = actualDestLocation.IsStorable &&
+                                     (actualDestLocation.LocationType == LocationType.BulkFloor ||
+                                      actualDestLocation.LocationType == LocationType.Bin);
+            if (!isTransientStaging && !isEligibleStorable)
+            {
+                throw new ValidationException(
+                    nameof(request.ScannedDestinationBarcode),
+                    $"Location '{actualDestLocation.LocationCode}' (type '{actualDestLocation.LocationType}') is not an eligible cross-dock staging or storage destination.");
+            }
+
+            if (actualDestLocation.Zone?.DedicatedClientId is Guid cdZoneClientId && cdZoneClientId != task.ClientId)
+            {
+                throw new ValidationException(
+                    nameof(request.ScannedDestinationBarcode),
+                    $"Cross-dock destination zone '{actualDestLocation.Zone.ZoneCode}' is dedicated to another client.");
+            }
+
+            if (actualDestLocation.StorageProfile?.DedicatedClientId is Guid cdProfileClientId && cdProfileClientId != task.ClientId)
+            {
+                throw new ValidationException(
+                    nameof(request.ScannedDestinationBarcode),
+                    $"Cross-dock destination location '{actualDestLocation.LocationCode}' is dedicated to another client.");
+            }
 
             // 3. Atomic Ledger Relocation: Decrement QtyAllocated at Source Staging
             var sourceStock = await _context.StockOnHand

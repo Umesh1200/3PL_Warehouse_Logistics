@@ -254,6 +254,11 @@ public interface IApplicationDbContext
         Guid facilityId,
         Func<Task<TResult>> action,
         CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithZoneLifecycleLockAsync<TResult>(
+        Guid facilityId,
+        Guid zoneId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default);
     Task<TResult> ExecuteWithLocationLifecycleLockAsync<TResult>(
         Guid facilityId,
         Guid locationId,

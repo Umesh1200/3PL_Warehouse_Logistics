@@ -601,152 +601,289 @@ public class ReturnReceivingService : IReturnReceivingService
                 "Inventory has already been posted for this return receiving session. Double posting prevented.");
         }
 
-        // 4. Resolve Fallback Storage Location if not specified
-        Guid? fallbackLocationId = request.DefaultLocationId;
-        if (!fallbackLocationId.HasValue)
+        // MDM21-F02-A & F03-C: Validate all destinations atomically inside a transaction under shared lifecycle locks
+        return await _context.ExecuteInTransactionAsync(async () =>
         {
-            var receivingLoc = await _context.Locations
-                .FirstOrDefaultAsync(l => l.FacilityId == session.FacilityId && l.IsActive && !l.IsDeleted && l.IsReceiving, cancellationToken);
+            await Application.Features.WarehouseMaster.WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(
+                _context, session.FacilityId, cancellationToken);
 
-            if (receivingLoc != null)
-            {
-                fallbackLocationId = receivingLoc.Id;
-            }
-            else
-            {
-                var anyActiveLoc = await _context.Locations
-                    .FirstOrDefaultAsync(l => l.FacilityId == session.FacilityId && l.IsActive && !l.IsDeleted, cancellationToken);
+            var linesToPost = session.Lines
+                .Where(l => l.ReceivedQuantity > 0 && !l.IsInventoryPosted)
+                .ToList();
 
-                if (anyActiveLoc != null)
+            // 4. Resolve Safe Fallback Location ONLY from eligible active, unlocked, undamaged, client-compatible receiving/staging locations
+            // (Never fall back to arbitrary active or structural aisle/rack locations)
+            Guid? fallbackLocationId = request.DefaultLocationId;
+            if (!fallbackLocationId.HasValue && linesToPost.Any(l => !l.TargetLocationId.HasValue))
+            {
+                var candidateReceiving = await _context.Locations
+                    .AsNoTracking()
+                    .Include(l => l.Zone)
+                    .Include(l => l.StorageProfile)
+                    .Where(l => l.FacilityId == session.FacilityId &&
+                                !l.IsDeleted &&
+                                l.IsActive &&
+                                l.Status == LocationStatus.Active &&
+                                !l.IsLocked &&
+                                !l.IsDamaged &&
+                                (l.IsReceiving || l.LocationType == LocationType.StagingLane) &&
+                                l.LocationType != LocationType.Facility &&
+                                l.LocationType != LocationType.Zone &&
+                                l.LocationType != LocationType.Aisle &&
+                                l.LocationType != LocationType.Rack &&
+                                l.LocationType != LocationType.ShelfLevel &&
+                                l.LocationType != LocationType.Mezzanine &&
+                                l.LocationType != LocationType.DockDoor &&
+                                l.LocationType != LocationType.PackingStation)
+                    .OrderBy(l => l.LocationCode)
+                    .ToListAsync(cancellationToken);
+
+                var eligibleFallback = candidateReceiving.FirstOrDefault(l =>
+                    (!l.Zone?.DedicatedClientId.HasValue ?? true || l.Zone!.DedicatedClientId!.Value == session.ClientId) &&
+                    (!l.StorageProfile?.DedicatedClientId.HasValue ?? true || l.StorageProfile!.DedicatedClientId!.Value == session.ClientId));
+
+                if (eligibleFallback != null)
                 {
-                    fallbackLocationId = anyActiveLoc.Id;
+                    fallbackLocationId = eligibleFallback.Id;
                 }
             }
-        }
 
-        decimal totalAccepted = 0m;
-        decimal totalDamaged = 0m;
-        decimal totalQuarantined = 0m;
-        var postedTxIds = new List<long>();
-        int postedLineCount = 0;
-
-        // 5. Post to Inventory Ledger & Update StockOnHand
-        foreach (var line in session.Lines.Where(l => l.ReceivedQuantity > 0))
-        {
-            if (line.IsInventoryPosted)
+            // Resolve every line's destination upfront and acquire deterministic sorted location lifecycle locks
+            var resolvedTargets = new Dictionary<Guid, Guid>();
+            foreach (var line in linesToPost)
             {
-                continue;
-            }
-
-            var targetLocId = line.TargetLocationId ?? fallbackLocationId;
-            if (!targetLocId.HasValue)
-            {
-                throw new DomainException(
-                    $"No active warehouse storage location found for returned SKU '{line.Sku}' at facility '{session.FacilityId}'.");
-            }
-
-            // Find or initialize StockOnHand balance record
-            var stock = await _context.StockOnHand
-                .FirstOrDefaultAsync(s => s.ClientId == session.ClientId &&
-                                          s.FacilityId == session.FacilityId &&
-                                          s.ItemId == line.ItemId &&
-                                          s.LocationId == targetLocId.Value &&
-                                          s.HandlingUnitId == null, cancellationToken);
-
-            if (stock == null)
-            {
-                stock = new StockOnHand
+                var targetLocId = line.TargetLocationId ?? fallbackLocationId;
+                if (!targetLocId.HasValue)
                 {
-                    Id = Guid.NewGuid(),
-                    ClientId = session.ClientId,
-                    FacilityId = session.FacilityId,
-                    ItemId = line.ItemId,
-                    LocationId = targetLocId.Value,
-                    ReceivedAtUtc = DateTime.UtcNow,
-                    Version = 1
+                    throw new DomainException(
+                        $"No eligible active receiving/staging or storage location found for returned SKU '{line.Sku}' at facility '{session.FacilityId}'.",
+                        "RETURN_DESTINATION_UNAVAILABLE");
+                }
+                resolvedTargets[line.Id] = targetLocId.Value;
+            }
+
+            var distinctLocIds = resolvedTargets.Values.Distinct().OrderBy(id => id).ToList();
+            var acquiredLocks = new List<IAsyncDisposable>(distinctLocIds.Count);
+            try
+            {
+                foreach (var locId in distinctLocIds)
+                {
+                    acquiredLocks.Add(await _context.AcquirePutawayExecutionLocksAsync(null, locId, cancellationToken));
+                }
+
+                // Re-read all target locations after acquiring locks and validate EVERY line BEFORE posting any stock or ledger rows
+                var lockedLocations = await _context.Locations
+                    .AsNoTracking()
+                    .Include(l => l.Zone)
+                    .Include(l => l.StorageProfile)
+                    .Where(l => distinctLocIds.Contains(l.Id) && !l.IsDeleted)
+                    .ToDictionaryAsync(l => l.Id, cancellationToken);
+
+                var lineItemIds = linesToPost.Select(l => l.ItemId).Distinct().ToList();
+                var itemsById = await _context.Items
+                    .AsNoTracking()
+                    .Where(i => lineItemIds.Contains(i.Id))
+                    .ToDictionaryAsync(i => i.Id, cancellationToken);
+
+                foreach (var line in linesToPost)
+                {
+                    var targetLocId = resolvedTargets[line.Id];
+                    if (!lockedLocations.TryGetValue(targetLocId, out var destLoc) || destLoc.FacilityId != session.FacilityId)
+                    {
+                        throw new ValidationException(
+                            nameof(request.DefaultLocationId),
+                            $"Return destination location '{targetLocId}' does not exist in facility '{session.FacilityId}'.");
+                    }
+
+                    if (!destLoc.IsActive || destLoc.Status != LocationStatus.Active)
+                    {
+                        throw new ValidationException(
+                            nameof(request.DefaultLocationId),
+                            $"Return destination location '{destLoc.LocationCode}' is inactive or decommissioned (status: '{destLoc.Status}').");
+                    }
+
+                    if (destLoc.IsLocked || destLoc.IsDamaged)
+                    {
+                        throw new ValidationException(
+                            nameof(request.DefaultLocationId),
+                            $"Return destination location '{destLoc.LocationCode}' is locked or damaged and cannot accept returned inventory.");
+                    }
+
+                    var isEligibleType = destLoc.LocationType is LocationType.Bin
+                        or LocationType.BulkFloor
+                        or LocationType.Cantilever
+                        or LocationType.StagingLane;
+                    var isTransientStaging = destLoc.IsReceiving || destLoc.LocationType == LocationType.StagingLane;
+
+                    if (!isEligibleType || (!destLoc.IsStorable && !isTransientStaging))
+                    {
+                        throw new ValidationException(
+                            nameof(request.DefaultLocationId),
+                            $"Location '{destLoc.LocationCode}' (type '{destLoc.LocationType}', storable: {destLoc.IsStorable}) is not an eligible return staging or storage destination.");
+                    }
+
+                    if (line.Disposition == ReturnDisposition.RestockToAvailable &&
+                        line.AcceptedQuantity > 0 &&
+                        !destLoc.IsStorable &&
+                        !isTransientStaging)
+                    {
+                        throw new ValidationException(
+                            nameof(request.DefaultLocationId),
+                            $"Restock-to-available disposition for SKU '{line.Sku}' requires a storable or receiving/staging destination.");
+                    }
+
+                    if (destLoc.Zone?.DedicatedClientId is Guid zoneClientId && zoneClientId != session.ClientId)
+                    {
+                        throw new ValidationException(
+                            nameof(request.DefaultLocationId),
+                            $"Return destination zone '{destLoc.Zone.ZoneCode}' is dedicated to another client.");
+                    }
+
+                    if (destLoc.StorageProfile?.DedicatedClientId is Guid profileClientId && profileClientId != session.ClientId)
+                    {
+                        throw new ValidationException(
+                            nameof(request.DefaultLocationId),
+                            $"Return destination location '{destLoc.LocationCode}' is dedicated to another client.");
+                    }
+
+                    if (!isTransientStaging)
+                    {
+                        if (itemsById.TryGetValue(line.ItemId, out var item))
+                        {
+                            await Application.Features.Putaway.PutawaySafetyValidator.ValidateDestinationSafetyAndCapacityAsync(
+                                _context, destLoc, item, line.ReceivedQuantity, cancellationToken);
+                        }
+                        else if (destLoc.StorageProfile != null && !destLoc.StorageProfile.IsPutawayAllowed)
+                        {
+                            throw new ValidationException(
+                                nameof(request.DefaultLocationId),
+                                $"Putaway is disallowed by storage profile on location '{destLoc.LocationCode}'.");
+                        }
+                    }
+                }
+
+                decimal totalAccepted = 0m;
+                decimal totalDamaged = 0m;
+                decimal totalQuarantined = 0m;
+                var postedTxIds = new List<long>();
+                int postedLineCount = 0;
+
+                // 5. Post to Inventory Ledger & Update StockOnHand atomically
+                foreach (var line in linesToPost)
+                {
+                    var targetLocId = resolvedTargets[line.Id];
+
+                    // Find or initialize StockOnHand balance record
+                    var stock = await _context.StockOnHand
+                        .FirstOrDefaultAsync(s => s.ClientId == session.ClientId &&
+                                                  s.FacilityId == session.FacilityId &&
+                                                  s.ItemId == line.ItemId &&
+                                                  s.LocationId == targetLocId &&
+                                                  s.HandlingUnitId == null, cancellationToken);
+
+                    if (stock == null)
+                    {
+                        stock = new StockOnHand
+                        {
+                            Id = Guid.NewGuid(),
+                            ClientId = session.ClientId,
+                            FacilityId = session.FacilityId,
+                            ItemId = line.ItemId,
+                            LocationId = targetLocId,
+                            ReceivedAtUtc = DateTime.UtcNow,
+                            Version = 1
+                        };
+                        _context.StockOnHand.Add(stock);
+                    }
+
+                    // Partition quantities into distinct inventory states
+                    if (line.AcceptedQuantity > 0)
+                    {
+                        if (line.Disposition == ReturnDisposition.RestockToAvailable)
+                        {
+                            stock.QtyAvailable += line.AcceptedQuantity;
+                        }
+                        else if (line.Disposition == ReturnDisposition.RestockToRefurbished)
+                        {
+                            stock.QtyOnHold += line.AcceptedQuantity;
+                        }
+                        else
+                        {
+                            stock.QtyAvailable += line.AcceptedQuantity;
+                        }
+
+                        totalAccepted += line.AcceptedQuantity;
+                    }
+
+                    if (line.DamagedQuantity > 0)
+                    {
+                        stock.QtyDamaged += line.DamagedQuantity;
+                        totalDamaged += line.DamagedQuantity;
+                    }
+
+                    if (line.QuarantinedQuantity > 0)
+                    {
+                        stock.QtyQuarantined += line.QuarantinedQuantity;
+                        totalQuarantined += line.QuarantinedQuantity;
+                    }
+
+                    stock.Version++;
+
+                    // Create Immutable Ledger Entry
+                    var tx = new InventoryTransaction
+                    {
+                        ClientId = session.ClientId,
+                        FacilityId = session.FacilityId,
+                        ItemId = line.ItemId,
+                        ToLocationId = targetLocId,
+                        TxType = line.DamagedQuantity > 0 && line.AcceptedQuantity == 0 && line.QuarantinedQuantity == 0 && line.Disposition == ReturnDisposition.ScrapOrDestroy
+                            ? InventoryTxType.Scrap
+                            : InventoryTxType.Receive,
+                        Quantity = line.ReceivedQuantity,
+                        ReferenceType = "ReturnReceivingSession",
+                        ReferenceId = session.Id,
+                        UserId = request.OperatorUserId,
+                        Notes = $"Return receipt: Sku '{line.Sku}', Session '{session.SessionNumber}', Accepted: {line.AcceptedQuantity}, Damaged: {line.DamagedQuantity}, Quarantined: {line.QuarantinedQuantity}, Disp: {line.Disposition}",
+                        TxTimestamp = DateTime.UtcNow
+                    };
+                    _context.InventoryTransactions.Add(tx);
+
+                    // Persist ledger entry inside transaction to acquire database identity
+                    await _context.SaveChangesAsync(cancellationToken);
+
+                    line.MarkInventoryPosted(tx.Id);
+                    postedTxIds.Add(tx.Id);
+                    postedLineCount++;
+                }
+
+                // Mark session inventory posted
+                session.MarkInventoryPosted();
+                await _context.SaveChangesAsync(cancellationToken);
+
+                _logger.LogInformation(
+                    "Return inventory posted for session '{SessionNumber}'. Total items: {Lines}, Accepted: {Acc}, Damaged: {Dam}, Quarantined: {Quar}.",
+                    session.SessionNumber, postedLineCount, totalAccepted, totalDamaged, totalQuarantined);
+
+                return new PostReturnInventoryResult
+                {
+                    IsSuccess = true,
+                    SessionId = session.Id,
+                    TotalItemsPosted = postedLineCount,
+                    TotalAcceptedQuantity = totalAccepted,
+                    TotalDamagedQuantity = totalDamaged,
+                    TotalQuarantinedQuantity = totalQuarantined,
+                    InventoryTransactionIds = postedTxIds,
+                    Message = "Return inventory successfully posted to warehouse stock and transaction ledger."
                 };
-                _context.StockOnHand.Add(stock);
             }
-
-            // Partition quantities into distinct inventory states
-            if (line.AcceptedQuantity > 0)
+            finally
             {
-                if (line.Disposition == ReturnDisposition.RestockToAvailable)
+                for (int i = acquiredLocks.Count - 1; i >= 0; i--)
                 {
-                    stock.QtyAvailable += line.AcceptedQuantity;
+                    await acquiredLocks[i].DisposeAsync();
                 }
-                else if (line.Disposition == ReturnDisposition.RestockToRefurbished)
-                {
-                    stock.QtyOnHold += line.AcceptedQuantity;
-                }
-                else
-                {
-                    stock.QtyAvailable += line.AcceptedQuantity;
-                }
-
-                totalAccepted += line.AcceptedQuantity;
             }
-
-            if (line.DamagedQuantity > 0)
-            {
-                stock.QtyDamaged += line.DamagedQuantity;
-                totalDamaged += line.DamagedQuantity;
-            }
-
-            if (line.QuarantinedQuantity > 0)
-            {
-                stock.QtyQuarantined += line.QuarantinedQuantity;
-                totalQuarantined += line.QuarantinedQuantity;
-            }
-
-            stock.Version++;
-
-            // Create Immutable Ledger Entry
-            var tx = new InventoryTransaction
-            {
-                ClientId = session.ClientId,
-                FacilityId = session.FacilityId,
-                ItemId = line.ItemId,
-                ToLocationId = targetLocId.Value,
-                TxType = line.DamagedQuantity > 0 && line.AcceptedQuantity == 0 && line.QuarantinedQuantity == 0 && line.Disposition == ReturnDisposition.ScrapOrDestroy
-                    ? InventoryTxType.Scrap
-                    : InventoryTxType.Receive,
-                Quantity = line.ReceivedQuantity,
-                ReferenceType = "ReturnReceivingSession",
-                ReferenceId = session.Id,
-                UserId = request.OperatorUserId,
-                Notes = $"Return receipt: Sku '{line.Sku}', Session '{session.SessionNumber}', Accepted: {line.AcceptedQuantity}, Damaged: {line.DamagedQuantity}, Quarantined: {line.QuarantinedQuantity}, Disp: {line.Disposition}",
-                TxTimestamp = DateTime.UtcNow
-            };
-            _context.InventoryTransactions.Add(tx);
-
-            // Persist ledger entry to acquire database identity
-            await _context.SaveChangesAsync(cancellationToken);
-
-            line.MarkInventoryPosted(tx.Id);
-            postedTxIds.Add(tx.Id);
-            postedLineCount++;
-        }
-
-        // Mark session inventory posted
-        session.MarkInventoryPosted();
-        await _context.SaveChangesAsync(cancellationToken);
-
-        _logger.LogInformation(
-            "Return inventory posted for session '{SessionNumber}'. Total items: {Lines}, Accepted: {Acc}, Damaged: {Dam}, Quarantined: {Quar}.",
-            session.SessionNumber, postedLineCount, totalAccepted, totalDamaged, totalQuarantined);
-
-        return new PostReturnInventoryResult
-        {
-            IsSuccess = true,
-            SessionId = session.Id,
-            TotalItemsPosted = postedLineCount,
-            TotalAcceptedQuantity = totalAccepted,
-            TotalDamagedQuantity = totalDamaged,
-            TotalQuarantinedQuantity = totalQuarantined,
-            InventoryTransactionIds = postedTxIds,
-            Message = "Return inventory successfully posted to warehouse stock and transaction ledger."
-        };
+        }, cancellationToken);
     }
 
     /// <inheritdoc />

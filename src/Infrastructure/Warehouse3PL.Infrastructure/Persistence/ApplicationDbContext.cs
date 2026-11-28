@@ -39,6 +39,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryFacilityCalendarLocks = new();
     private static readonly SemaphoreSlim InMemoryGlobalHierarchyLock = new(1, 1);
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryFacilityHierarchyLocks = new();
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryZoneLifecycleLocks = new();
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryLocationLifecycleLocks = new();
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryScopeEpochLocks = new(StringComparer.Ordinal);
     private bool _isInsideConfigurationOutboxSave;
@@ -1462,6 +1463,29 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
             {
                 if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
                 {
+                    var locScope = await Locations
+                        .IgnoreQueryFilters()
+                        .AsNoTracking()
+                        .Where(l => l.Id == destinationLocationId)
+                        .Select(l => new { l.FacilityId, l.ZoneId })
+                        .FirstOrDefaultAsync(cancellationToken);
+
+                    if (locScope != null)
+                    {
+                        var facLockKey = $"FACILITY_LIFECYCLE:{locScope.FacilityId:N}";
+                        await Database.ExecuteSqlInterpolatedAsync(
+                            $"SELECT pg_advisory_xact_lock_shared(hashtextextended({facLockKey}, 0::bigint))",
+                            cancellationToken);
+
+                        if (locScope.ZoneId.HasValue)
+                        {
+                            var zoneLockKey = $"ZONE_LIFECYCLE:{locScope.ZoneId.Value:N}";
+                            await Database.ExecuteSqlInterpolatedAsync(
+                                $"SELECT pg_advisory_xact_lock_shared(hashtextextended({zoneLockKey}, 0::bigint))",
+                                cancellationToken);
+                        }
+                    }
+
                     var locLockKey = $"LOCATION_LIFECYCLE:{destinationLocationId:N}";
                     await Database.ExecuteSqlInterpolatedAsync(
                         $"SELECT pg_advisory_xact_lock(hashtextextended({locLockKey}, 0::bigint))",
@@ -1866,6 +1890,14 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
 
             if (lockFacilityId.HasValue && lockFacilityId.Value != Guid.Empty)
             {
+                if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+                {
+                    var facLockKey = $"FACILITY_LIFECYCLE:{lockFacilityId.Value:N}";
+                    await Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT pg_advisory_xact_lock(hashtextextended({facLockKey}, 0::bigint))",
+                        cancellationToken);
+                }
+
                 await Database.ExecuteSqlInterpolatedAsync(
                     $"SELECT 1 FROM facilities WHERE facility_id = {lockFacilityId.Value} FOR UPDATE",
                     cancellationToken);
@@ -2255,6 +2287,11 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         {
             if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
             {
+                var facLockKey = $"FACILITY_LIFECYCLE:{facilityId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock_shared(hashtextextended({facLockKey}, 0::bigint))",
+                    cancellationToken);
+
                 const string globalKey = "GLOBAL_HIERARCHY_RULES";
                 await Database.ExecuteSqlInterpolatedAsync(
                     $"SELECT pg_advisory_xact_lock_shared(hashtextextended({globalKey}, 0::bigint))",
@@ -2298,6 +2335,77 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         });
     }
 
+    public async Task<TResult> ExecuteWithZoneLifecycleLockAsync<TResult>(
+        Guid facilityId,
+        Guid zoneId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Database.IsRelational())
+        {
+            var gate = InMemoryZoneLifecycleLocks.GetOrAdd(zoneId, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                return await action();
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        async Task AcquireZoneLifecycleLockAsync()
+        {
+            if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var facLockKey = $"FACILITY_LIFECYCLE:{facilityId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock_shared(hashtextextended({facLockKey}, 0::bigint))",
+                    cancellationToken);
+
+                var zoneLockKey = $"ZONE_LIFECYCLE:{zoneId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({zoneLockKey}, 0::bigint))",
+                    cancellationToken);
+
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT 1 FROM warehouse_zones WHERE zone_id = {zoneId} AND facility_id = {facilityId} FOR UPDATE",
+                    cancellationToken);
+            }
+        }
+
+        if (Database.CurrentTransaction != null || _currentTransaction != null)
+        {
+            await AcquireZoneLifecycleLockAsync();
+            return await action();
+        }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt)
+            {
+                ClearChangeTracker();
+            }
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await AcquireZoneLifecycleLockAsync();
+                var result = await action();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
+    }
+
     public async Task<TResult> ExecuteWithLocationLifecycleLockAsync<TResult>(
         Guid facilityId,
         Guid locationId,
@@ -2322,6 +2430,25 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
         {
             if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
             {
+                var facLockKey = $"FACILITY_LIFECYCLE:{facilityId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock_shared(hashtextextended({facLockKey}, 0::bigint))",
+                    cancellationToken);
+
+                var zoneId = await Locations
+                    .IgnoreQueryFilters()
+                    .AsNoTracking()
+                    .Where(l => l.Id == locationId && l.FacilityId == facilityId)
+                    .Select(l => l.ZoneId)
+                    .FirstOrDefaultAsync(cancellationToken);
+                if (zoneId.HasValue)
+                {
+                    var zoneLockKey = $"ZONE_LIFECYCLE:{zoneId.Value:N}";
+                    await Database.ExecuteSqlInterpolatedAsync(
+                        $"SELECT pg_advisory_xact_lock_shared(hashtextextended({zoneLockKey}, 0::bigint))",
+                        cancellationToken);
+                }
+
                 var lockKey = $"LOCATION_LIFECYCLE:{locationId:N}";
                 await Database.ExecuteSqlInterpolatedAsync(
                     $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0::bigint))",

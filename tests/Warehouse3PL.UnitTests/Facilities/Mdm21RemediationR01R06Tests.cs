@@ -493,6 +493,57 @@ public sealed class Mdm21RemediationR01R06Tests
         }
     }
 
+    [Fact]
+    public async Task F01_FacilityGuard_RejectsOpenCountsAllocationsAndActiveLocations()
+    {
+        var (db, _, facilityId, clientId, _) = await SeedBaseAsync();
+        await using var dispose = db;
+        var count = new CycleCount { FacilityId = facilityId, CountNumber = "F01-COUNT" };
+        db.CycleCounts.Add(count);
+        await db.SaveChangesAsync();
+
+        var error = await Assert.ThrowsAsync<DomainException>(() =>
+            WarehouseInventoryDependencyGuard.EnsureFacilityCanBeDeactivatedAsync(db, facilityId, "FAC", CancellationToken.None));
+        Assert.Contains("cycle count", error.Message);
+
+        count.Status = CycleCountStatus.Completed;
+        var location = new Location { FacilityId = facilityId, LocationCode = "F01-BIN", Barcode = "F01-BAR", Status = LocationStatus.Inactive, IsActive = false };
+        db.Locations.Add(location);
+        var allocation = new InventoryAllocation { FacilityId = facilityId, ClientId = clientId, LocationId = location.Id };
+        db.InventoryAllocations.Add(allocation);
+        await db.SaveChangesAsync();
+        error = await Assert.ThrowsAsync<DomainException>(() =>
+            WarehouseInventoryDependencyGuard.EnsureFacilityCanBeDeactivatedAsync(db, facilityId, "FAC", CancellationToken.None));
+        Assert.Contains("allocation", error.Message);
+
+        allocation.Status = AllocationStatus.Released;
+        location.Status = LocationStatus.Active;
+        location.IsActive = true;
+        await db.SaveChangesAsync();
+        error = await Assert.ThrowsAsync<DomainException>(() =>
+            WarehouseInventoryDependencyGuard.EnsureFacilityCanBeDeactivatedAsync(db, facilityId, "FAC", CancellationToken.None));
+        Assert.Contains("active locations", error.Message);
+        Assert.Equal(LocationStatus.Active, location.Status);
+    }
+
+    [Fact]
+    public async Task F01_ZoneGuard_RejectsOpenTaskAtInactiveLocation()
+    {
+        var (db, _, facilityId, clientId, _) = await SeedBaseAsync();
+        await using var dispose = db;
+        var zone = new WarehouseZone { FacilityId = facilityId, ZoneCode = "F01-ZONE", Name = "F01" };
+        var location = new Location { FacilityId = facilityId, ZoneId = zone.Id, LocationCode = "F01-INACTIVE", Barcode = "F01-INACTIVE-BC", Status = LocationStatus.Inactive, IsActive = false };
+        db.WarehouseZones.Add(zone);
+        db.Locations.Add(location);
+        db.PutawayTasks.Add(new PutawayTask { FacilityId = facilityId, ClientId = clientId, SourceLocationId = location.Id, SuggestedLocationId = location.Id });
+        await db.SaveChangesAsync();
+
+        var error = await Assert.ThrowsAsync<DomainException>(() =>
+            WarehouseInventoryDependencyGuard.EnsureZoneCanBeDeactivatedAsync(db, facilityId, zone.Id, zone.ZoneCode, CancellationToken.None));
+        Assert.Contains("putaway", error.Message);
+        Assert.Equal(LocationStatus.Inactive, location.Status);
+    }
+
     private static string IssueJwt(Guid userId, UserType userType, Guid? facilityId, IEnumerable<string> roles, IEnumerable<string> permissions)
     {
         var claims = new List<Claim>

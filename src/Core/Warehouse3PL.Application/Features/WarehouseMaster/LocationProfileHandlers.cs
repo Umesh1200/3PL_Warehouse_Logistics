@@ -68,6 +68,8 @@ public sealed class UpsertLocationStorageProfileCommandHandler
 
         return await _db.ExecuteWithLocationLifecycleLockAsync(facilityId, request.LocationId, async () =>
         {
+            await WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(_db, facilityId, cancellationToken);
+
             var location = await _db.Locations
                 .AsNoTracking()
                 .FirstOrDefaultAsync(l => l.Id == request.LocationId && l.FacilityId == facilityId && !l.IsDeleted, cancellationToken)

@@ -74,13 +74,7 @@ public class CreateLocationCommandHandler : IRequestHandler<CreateLocationComman
 
         return await _context.ExecuteWithFacilityHierarchyLockAsync(facilityId, async () =>
         {
-            var facilityExists = await _context.Facilities
-                .AsNoTracking()
-                .AnyAsync(f => f.Id == facilityId && !f.IsDeleted, cancellationToken);
-            if (!facilityExists)
-            {
-                throw new EntityNotFoundException(nameof(Facility), facilityId);
-            }
+            await WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(_context, facilityId, cancellationToken);
 
             if (request.ZoneId.HasValue)
             {

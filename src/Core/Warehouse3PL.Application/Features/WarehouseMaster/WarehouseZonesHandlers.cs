@@ -152,38 +152,43 @@ public sealed class CreateWarehouseZoneCommandHandler : IRequestHandler<CreateWa
             await _auth.ValidateClientFacilityBindingAsync(facilityId, request.DedicatedClientId.Value, cancellationToken);
         }
 
-        var normalizedCode = WarehouseZone.NormalizeCode(request.ZoneCode);
-        var codeExists = await _db.WarehouseZones
-            .IgnoreQueryFilters()
-            .AsNoTracking()
-            .AnyAsync(z => z.FacilityId == facilityId && z.NormalizedZoneCode == normalizedCode, cancellationToken);
-        if (codeExists)
+        return await _db.ExecuteWithFacilityHierarchyLockAsync(facilityId, async () =>
         {
-            throw new ValidationException(
-                nameof(request.ZoneCode),
-                $"Zone code '{request.ZoneCode.Trim()}' already exists (including soft-deleted records) in this facility.");
-        }
+            await WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(_db, facilityId, cancellationToken);
 
-        var zone = new WarehouseZone
-        {
-            FacilityId = facilityId,
-            ZoneCode = request.ZoneCode.Trim(),
-            NormalizedZoneCode = normalizedCode,
-            Name = request.Name.Trim(),
-            ZoneType = request.ZoneType,
-            TempMinC = request.TempMinC,
-            TempMaxC = request.TempMaxC,
-            DedicatedClientId = request.DedicatedClientId,
-            Remarks = string.IsNullOrWhiteSpace(request.Remarks) ? null : request.Remarks.Trim(),
-            IsActive = true,
-            ConfigRevision = 1,
-            CreatedBy = userId
-        };
+            var normalizedCode = WarehouseZone.NormalizeCode(request.ZoneCode);
+            var codeExists = await _db.WarehouseZones
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .AnyAsync(z => z.FacilityId == facilityId && z.NormalizedZoneCode == normalizedCode, cancellationToken);
+            if (codeExists)
+            {
+                throw new ValidationException(
+                    nameof(request.ZoneCode),
+                    $"Zone code '{request.ZoneCode.Trim()}' already exists (including soft-deleted records) in this facility.");
+            }
 
-        _db.WarehouseZones.Add(zone);
-        await _db.SaveChangesAsync(cancellationToken);
+            var zone = new WarehouseZone
+            {
+                FacilityId = facilityId,
+                ZoneCode = request.ZoneCode.Trim(),
+                NormalizedZoneCode = normalizedCode,
+                Name = request.Name.Trim(),
+                ZoneType = request.ZoneType,
+                TempMinC = request.TempMinC,
+                TempMaxC = request.TempMaxC,
+                DedicatedClientId = request.DedicatedClientId,
+                Remarks = string.IsNullOrWhiteSpace(request.Remarks) ? null : request.Remarks.Trim(),
+                IsActive = true,
+                ConfigRevision = 1,
+                CreatedBy = userId
+            };
 
-        return WarehouseMasterMappers.ToDto(zone);
+            _db.WarehouseZones.Add(zone);
+            await _db.SaveChangesAsync(cancellationToken);
+
+            return WarehouseMasterMappers.ToDto(zone);
+        }, cancellationToken);
     }
 }
 
@@ -238,66 +243,86 @@ public sealed class UpdateWarehouseZoneCommandHandler : IRequestHandler<UpdateWa
             Permissions.Facilities.ZonesManage,
             Permissions.Facilities.Manage);
 
+        // MDM21-F03-A & F03-C: Shared FacilityHierarchy -> ZoneLifecycle lock boundary + active facility revalidation
         return await _db.ExecuteWithFacilityHierarchyLockAsync(facilityId, async () =>
-        {
-            var zone = await _db.WarehouseZones
-                .FirstOrDefaultAsync(z => z.Id == request.Id && z.FacilityId == facilityId && !z.IsDeleted, cancellationToken)
-                ?? throw new EntityNotFoundException(nameof(WarehouseZone), request.Id);
-
-            if (!string.IsNullOrWhiteSpace(request.ZoneCode) &&
-                !string.Equals(WarehouseZone.NormalizeCode(request.ZoneCode), zone.NormalizedZoneCode, StringComparison.Ordinal))
+            await _db.ExecuteWithZoneLifecycleLockAsync(facilityId, request.Id, async () =>
             {
-                throw new DomainException(
-                    $"ZoneCode '{zone.ZoneCode}' is immutable and cannot be changed to '{request.ZoneCode}'.",
-                    "ZONE_IMMUTABLE_CODE");
-            }
+                await WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(_db, facilityId, cancellationToken);
 
-            if (request.DedicatedClientId.HasValue)
-            {
-                await _auth.ValidateClientFacilityBindingAsync(facilityId, request.DedicatedClientId.Value, cancellationToken);
+                var zone = await _db.WarehouseZones
+                    .FirstOrDefaultAsync(z => z.Id == request.Id && z.FacilityId == facilityId && !z.IsDeleted, cancellationToken)
+                    ?? throw new EntityNotFoundException(nameof(WarehouseZone), request.Id);
 
-                // MDM21-R03: Reject zone dedication that contradicts existing stock or location storage profile dedication
-                var hasForeignStock = await _db.StockOnHand
-                    .IgnoreQueryFilters()
-                    .AsNoTracking()
-                    .Where(s => s.FacilityId == facilityId &&
-                                s.Location.ZoneId == zone.Id &&
-                                s.ClientId != request.DedicatedClientId.Value)
-                    .AnyAsync(WarehouseInventoryDependencyGuard.HasAnyStockExpression, cancellationToken);
-                if (hasForeignStock)
+                if (!string.IsNullOrWhiteSpace(request.ZoneCode) &&
+                    !string.Equals(WarehouseZone.NormalizeCode(request.ZoneCode), zone.NormalizedZoneCode, StringComparison.Ordinal))
                 {
                     throw new DomainException(
-                        $"Cannot dedicate zone '{zone.ZoneCode}' to client '{request.DedicatedClientId.Value}' while stock belonging to another client resides in the zone.",
-                        "ZONE_DEDICATION_STOCK_CONFLICT");
+                        $"ZoneCode '{zone.ZoneCode}' is immutable and cannot be changed to '{request.ZoneCode}'.",
+                        "ZONE_IMMUTABLE_CODE");
                 }
 
-                var hasConflictingProfile = await _db.LocationStorageProfiles
-                    .AsNoTracking()
-                    .AnyAsync(p => p.FacilityId == facilityId &&
-                                   p.Location.ZoneId == zone.Id &&
-                                   p.DedicatedClientId.HasValue &&
-                                   p.DedicatedClientId.Value != request.DedicatedClientId.Value,
-                        cancellationToken);
-                if (hasConflictingProfile)
+                if (request.DedicatedClientId.HasValue)
                 {
-                    throw new DomainException(
-                        $"Cannot dedicate zone '{zone.ZoneCode}' to client '{request.DedicatedClientId.Value}' while a location storage profile in the zone is dedicated to another client.",
-                        "ZONE_LOCATION_DEDICATION_CONFLICT");
+                    await _auth.ValidateClientFacilityBindingAsync(facilityId, request.DedicatedClientId.Value, cancellationToken);
+
+                    // MDM21-R03 & F03-A: Reject zone dedication contradicting existing stock, physically present HUs, or location storage profiles
+                    var hasForeignStock = await _db.StockOnHand
+                        .IgnoreQueryFilters()
+                        .AsNoTracking()
+                        .Where(s => s.FacilityId == facilityId &&
+                                    s.Location.ZoneId == zone.Id &&
+                                    s.ClientId != request.DedicatedClientId.Value)
+                        .AnyAsync(WarehouseInventoryDependencyGuard.HasAnyStockExpression, cancellationToken);
+                    if (hasForeignStock)
+                    {
+                        throw new DomainException(
+                            $"Cannot dedicate zone '{zone.ZoneCode}' to client '{request.DedicatedClientId.Value}' while stock belonging to another client resides in the zone.",
+                            "ZONE_DEDICATION_STOCK_CONFLICT");
+                    }
+
+                    var hasForeignHu = await _db.HandlingUnits
+                        .IgnoreQueryFilters()
+                        .AsNoTracking()
+                        .AnyAsync(hu => hu.FacilityId == facilityId &&
+                                        !hu.IsDeleted &&
+                                        hu.CurrentLocation != null &&
+                                        hu.CurrentLocation.ZoneId == zone.Id &&
+                                        hu.ClientId != request.DedicatedClientId.Value,
+                            cancellationToken);
+                    if (hasForeignHu)
+                    {
+                        throw new DomainException(
+                            $"Cannot dedicate zone '{zone.ZoneCode}' to client '{request.DedicatedClientId.Value}' while handling units belonging to another client are physically present in the zone.",
+                            "ZONE_DEDICATION_HU_CONFLICT");
+                    }
+
+                    var hasConflictingProfile = await _db.LocationStorageProfiles
+                        .AsNoTracking()
+                        .AnyAsync(p => p.FacilityId == facilityId &&
+                                       p.Location.ZoneId == zone.Id &&
+                                       p.DedicatedClientId.HasValue &&
+                                       p.DedicatedClientId.Value != request.DedicatedClientId.Value,
+                            cancellationToken);
+                    if (hasConflictingProfile)
+                    {
+                        throw new DomainException(
+                            $"Cannot dedicate zone '{zone.ZoneCode}' to client '{request.DedicatedClientId.Value}' while a location storage profile in the zone is dedicated to another client.",
+                            "ZONE_LOCATION_DEDICATION_CONFLICT");
+                    }
                 }
-            }
 
-            zone.Name = request.Name.Trim();
-            zone.ZoneType = request.ZoneType;
-            zone.TempMinC = request.TempMinC;
-            zone.TempMaxC = request.TempMaxC;
-            zone.DedicatedClientId = request.DedicatedClientId;
-            zone.Remarks = string.IsNullOrWhiteSpace(request.Remarks) ? null : request.Remarks.Trim();
-            zone.ConfigRevision++;
-            zone.UpdatedBy = userId;
+                zone.Name = request.Name.Trim();
+                zone.ZoneType = request.ZoneType;
+                zone.TempMinC = request.TempMinC;
+                zone.TempMaxC = request.TempMaxC;
+                zone.DedicatedClientId = request.DedicatedClientId;
+                zone.Remarks = string.IsNullOrWhiteSpace(request.Remarks) ? null : request.Remarks.Trim();
+                zone.ConfigRevision++;
+                zone.UpdatedBy = userId;
 
-            await _db.SaveChangesAsync(cancellationToken);
-            return WarehouseMasterMappers.ToDto(zone);
-        }, cancellationToken);
+                await _db.SaveChangesAsync(cancellationToken);
+                return WarehouseMasterMappers.ToDto(zone);
+            }, cancellationToken), cancellationToken);
     }
 }
 
@@ -329,29 +354,32 @@ public sealed class UpdateWarehouseZoneStatusCommandHandler : IRequestHandler<Up
             Permissions.Facilities.ZonesManage,
             Permissions.Facilities.Manage);
 
-        // MDM21-R04: Serialize zone deactivation against concurrent location bindings
+        // MDM21-R04 & F03-A/F03-C: Serialize zone deactivation against concurrent location bindings & operational writers
         return await _db.ExecuteWithFacilityHierarchyLockAsync(facilityId, async () =>
-        {
-            var zone = await _db.WarehouseZones
-                .FirstOrDefaultAsync(z => z.Id == request.Id && z.FacilityId == facilityId && !z.IsDeleted, cancellationToken)
-                ?? throw new EntityNotFoundException(nameof(WarehouseZone), request.Id);
-
-            if (zone.IsActive && !request.IsActive)
+            await _db.ExecuteWithZoneLifecycleLockAsync(facilityId, request.Id, async () =>
             {
-                await WarehouseInventoryDependencyGuard.EnsureZoneCanBeDeactivatedAsync(
-                    _db, facilityId, zone.Id, zone.ZoneCode, cancellationToken);
-            }
+                await WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(_db, facilityId, cancellationToken);
 
-            zone.IsActive = request.IsActive;
-            if (request.Remarks != null)
-            {
-                zone.Remarks = string.IsNullOrWhiteSpace(request.Remarks) ? null : request.Remarks.Trim();
-            }
-            zone.ConfigRevision++;
-            zone.UpdatedBy = userId;
+                var zone = await _db.WarehouseZones
+                    .FirstOrDefaultAsync(z => z.Id == request.Id && z.FacilityId == facilityId && !z.IsDeleted, cancellationToken)
+                    ?? throw new EntityNotFoundException(nameof(WarehouseZone), request.Id);
 
-            await _db.SaveChangesAsync(cancellationToken);
-            return WarehouseMasterMappers.ToDto(zone);
-        }, cancellationToken);
+                if (zone.IsActive && !request.IsActive)
+                {
+                    await WarehouseInventoryDependencyGuard.EnsureZoneCanBeDeactivatedAsync(
+                        _db, facilityId, zone.Id, zone.ZoneCode, cancellationToken);
+                }
+
+                zone.IsActive = request.IsActive;
+                if (request.Remarks != null)
+                {
+                    zone.Remarks = string.IsNullOrWhiteSpace(request.Remarks) ? null : request.Remarks.Trim();
+                }
+                zone.ConfigRevision++;
+                zone.UpdatedBy = userId;
+
+                await _db.SaveChangesAsync(cancellationToken);
+                return WarehouseMasterMappers.ToDto(zone);
+            }, cancellationToken), cancellationToken);
     }
 }

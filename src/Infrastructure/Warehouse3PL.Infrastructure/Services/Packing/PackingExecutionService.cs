@@ -36,116 +36,148 @@ public class PackingExecutionService : IPackingExecutionService
         StartPackingSessionRequest request,
         CancellationToken cancellationToken = default)
     {
-        // 1. Validate Packing Station Location
-        var location = await _context.Locations
-            .FirstOrDefaultAsync(l => l.Id == request.PackingStationLocationId && !l.IsDeleted, cancellationToken);
-
-        if (location == null)
+        // MDM21-F03-B & F03-C: Acquire shared LocationLifecycle lock (which acquires FacilityLifecycle(SH) -> ZoneLifecycle(SH) -> LocationLifecycle(EX))
+        // so starting/resuming a packing session cannot race against station or facility deactivation.
+        return await _context.ExecuteWithLocationLifecycleLockAsync(request.FacilityId, request.PackingStationLocationId, async () =>
         {
-            throw new EntityNotFoundException(nameof(Location), request.PackingStationLocationId);
-        }
+            await Application.Features.WarehouseMaster.WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(
+                _context, request.FacilityId, cancellationToken);
 
-        if (location.LocationType != LocationType.PackingStation)
-        {
-            throw new ValidationException(nameof(request.PackingStationLocationId),
-                $"Location '{location.LocationCode}' is a '{location.LocationType}', not a 'PackingStation'.");
-        }
+            // 1. Validate Packing Station Location (same-facility, active, unlocked, undamaged, PackingStation type)
+            var location = await _context.Locations
+                .FirstOrDefaultAsync(l => l.Id == request.PackingStationLocationId && !l.IsDeleted, cancellationToken);
 
-        // 2. Validate Outbound Order
-        var order = await _context.OutboundOrders
-            .FirstOrDefaultAsync(o => o.Id == request.OutboundOrderId && !o.IsDeleted, cancellationToken);
+            if (location == null)
+            {
+                throw new EntityNotFoundException(nameof(Location), request.PackingStationLocationId);
+            }
 
-        if (order == null)
-        {
-            throw new EntityNotFoundException(nameof(OutboundOrder), request.OutboundOrderId);
-        }
+            if (location.FacilityId != request.FacilityId)
+            {
+                throw new ValidationException(nameof(request.PackingStationLocationId),
+                    $"Packing station '{location.LocationCode}' does not belong to facility '{request.FacilityId}'.");
+            }
 
-        if (order.Status == OutboundOrderStatus.Cancelled || order.Status == OutboundOrderStatus.Completed)
-        {
-            throw new InvalidDomainStateException(
-                $"Cannot pack order '{order.OrderNumber}' with status '{order.Status}'.");
-        }
+            if (location.LocationType != LocationType.PackingStation)
+            {
+                throw new ValidationException(nameof(request.PackingStationLocationId),
+                    $"Location '{location.LocationCode}' is a '{location.LocationType}', not a 'PackingStation'.");
+            }
 
-        // 3. Concurrency Protection: Check for existing active/suspended session for this order
-        var existingSession = await _context.PackingSessions
-            .FirstOrDefaultAsync(s => s.OutboundOrderId == order.Id &&
-                                     (s.Status == PackingSessionStatus.Active || s.Status == PackingSessionStatus.Suspended) &&
-                                     !s.IsDeleted, cancellationToken);
-
-        if (existingSession != null)
-        {
-            // If another operator has locked this order, reject concurrent session attempt
-            if (existingSession.OperatorUserId != request.OperatorUserId)
+            if (!location.IsActive || location.Status != LocationStatus.Active)
             {
                 throw new InvalidDomainStateException(
-                    $"Order '{order.OrderNumber}' is already being packed in active session '{existingSession.Id}' by operator '{existingSession.OperatorUserId}'.");
+                    $"Packing station '{location.LocationCode}' is inactive or decommissioned (status: '{location.Status}').");
             }
 
-            // If same operator, resume session if suspended
-            if (existingSession.Status == PackingSessionStatus.Suspended)
+            if (location.IsLocked || location.IsDamaged)
             {
-                existingSession.Resume(request.OperatorUserId);
-                await _context.SaveChangesAsync(cancellationToken);
+                throw new InvalidDomainStateException(
+                    $"Packing station '{location.LocationCode}' is locked or damaged and cannot accept packing sessions.");
             }
 
-            var activePkgs = await _context.Packages
-                .CountAsync(p => p.OutboundOrderId == order.Id && p.Status == PackageStatus.Open && !p.IsDeleted, cancellationToken);
+            // 2. Validate Outbound Order
+            var order = await _context.OutboundOrders
+                .FirstOrDefaultAsync(o => o.Id == request.OutboundOrderId && !o.IsDeleted, cancellationToken);
+
+            if (order == null)
+            {
+                throw new EntityNotFoundException(nameof(OutboundOrder), request.OutboundOrderId);
+            }
+
+            if (order.FacilityId != request.FacilityId)
+            {
+                throw new ValidationException(nameof(request.OutboundOrderId),
+                    $"Outbound order '{order.OrderNumber}' does not belong to facility '{request.FacilityId}'.");
+            }
+
+            if (order.Status == OutboundOrderStatus.Cancelled || order.Status == OutboundOrderStatus.Completed)
+            {
+                throw new InvalidDomainStateException(
+                    $"Cannot pack order '{order.OrderNumber}' with status '{order.Status}'.");
+            }
+
+            // 3. Concurrency Protection: Check for existing active/suspended session for this order
+            var existingSession = await _context.PackingSessions
+                .FirstOrDefaultAsync(s => s.OutboundOrderId == order.Id &&
+                                         (s.Status == PackingSessionStatus.Active || s.Status == PackingSessionStatus.Suspended) &&
+                                         !s.IsDeleted, cancellationToken);
+
+            if (existingSession != null)
+            {
+                // If another operator has locked this order, reject concurrent session attempt
+                if (existingSession.OperatorUserId != request.OperatorUserId)
+                {
+                    throw new InvalidDomainStateException(
+                        $"Order '{order.OrderNumber}' is already being packed in active session '{existingSession.Id}' by operator '{existingSession.OperatorUserId}'.");
+                }
+
+                // If same operator, resume session if suspended
+                if (existingSession.Status == PackingSessionStatus.Suspended)
+                {
+                    existingSession.Resume(request.OperatorUserId);
+                    await _context.SaveChangesAsync(cancellationToken);
+                }
+
+                var activePkgs = await _context.Packages
+                    .CountAsync(p => p.OutboundOrderId == order.Id && p.Status == PackageStatus.Open && !p.IsDeleted, cancellationToken);
+
+                return new PackingSessionResult
+                {
+                    IsSuccess = true,
+                    SessionId = existingSession.Id,
+                    Status = existingSession.Status,
+                    OutboundOrderId = order.Id,
+                    OrderNumber = order.OrderNumber,
+                    PackingStationLocationId = existingSession.PackingStationLocationId,
+                    StationLocationCode = location.LocationCode,
+                    OperatorUserId = existingSession.OperatorUserId,
+                    StartedAtUtc = existingSession.StartedAtUtc,
+                    ActivePackagesCount = activePkgs,
+                    Message = "Resumed existing packing session."
+                };
+            }
+
+            // 4. Create New Packing Session
+            var session = new PackingSession
+            {
+                ClientId = order.ClientId,
+                FacilityId = request.FacilityId,
+                PackingStationLocationId = request.PackingStationLocationId,
+                OutboundOrderId = order.Id,
+                OperatorUserId = request.OperatorUserId,
+                Status = PackingSessionStatus.Active,
+                StartedAtUtc = DateTime.UtcNow
+            };
+
+            _context.PackingSessions.Add(session);
+
+            if (order.Status != OutboundOrderStatus.InProgress)
+            {
+                order.Status = OutboundOrderStatus.InProgress;
+            }
+
+            await _context.SaveChangesAsync(cancellationToken);
+
+            _logger.LogInformation(
+                "Created packing session '{SessionId}' for order '{OrderNumber}' at station '{Station}'",
+                session.Id, order.OrderNumber, location.LocationCode);
 
             return new PackingSessionResult
             {
                 IsSuccess = true,
-                SessionId = existingSession.Id,
-                Status = existingSession.Status,
+                SessionId = session.Id,
+                Status = session.Status,
                 OutboundOrderId = order.Id,
                 OrderNumber = order.OrderNumber,
-                PackingStationLocationId = existingSession.PackingStationLocationId,
+                PackingStationLocationId = session.PackingStationLocationId,
                 StationLocationCode = location.LocationCode,
-                OperatorUserId = existingSession.OperatorUserId,
-                StartedAtUtc = existingSession.StartedAtUtc,
-                ActivePackagesCount = activePkgs,
-                Message = "Resumed existing packing session."
+                OperatorUserId = session.OperatorUserId,
+                StartedAtUtc = session.StartedAtUtc,
+                ActivePackagesCount = 0,
+                Message = "Created new packing session."
             };
-        }
-
-        // 4. Create New Packing Session
-        var session = new PackingSession
-        {
-            ClientId = order.ClientId,
-            FacilityId = request.FacilityId,
-            PackingStationLocationId = request.PackingStationLocationId,
-            OutboundOrderId = order.Id,
-            OperatorUserId = request.OperatorUserId,
-            Status = PackingSessionStatus.Active,
-            StartedAtUtc = DateTime.UtcNow
-        };
-
-        _context.PackingSessions.Add(session);
-
-        if (order.Status != OutboundOrderStatus.InProgress)
-        {
-            order.Status = OutboundOrderStatus.InProgress;
-        }
-
-        await _context.SaveChangesAsync(cancellationToken);
-
-        _logger.LogInformation(
-            "Created packing session '{SessionId}' for order '{OrderNumber}' at station '{Station}'",
-            session.Id, order.OrderNumber, location.LocationCode);
-
-        return new PackingSessionResult
-        {
-            IsSuccess = true,
-            SessionId = session.Id,
-            Status = session.Status,
-            OutboundOrderId = order.Id,
-            OrderNumber = order.OrderNumber,
-            PackingStationLocationId = session.PackingStationLocationId,
-            StationLocationCode = location.LocationCode,
-            OperatorUserId = session.OperatorUserId,
-            StartedAtUtc = session.StartedAtUtc,
-            ActivePackagesCount = 0,
-            Message = "Created new packing session."
-        };
+        }, cancellationToken);
     }
 
     public async Task<CreatePackageResult> CreatePackageAsync(

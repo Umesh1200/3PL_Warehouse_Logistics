@@ -76,9 +76,12 @@ public class TransferInventoryCommandHandler : IRequestHandler<TransferInventory
                     $"Insufficient available stock at source location. Requested: {request.Quantity}, Available: {available}.");
             }
 
-            // 2. Acquire canonical LocationLifecycle + StockOnHand locks (MDM21-R04) and validate destination
+            // 2. Acquire canonical FacilityLifecycle(SH) -> ZoneLifecycle(SH) -> LocationLifecycle(EX) -> StockOnHand locks (MDM21-R04 & F03-A/C)
             await using var moveLocks = await _context.AcquirePutawayExecutionLocksAsync(
                 sourceStock.Id, request.ToLocationId, cancellationToken);
+
+            await WarehouseMaster.WarehouseInventoryDependencyGuard.EnsureFacilityIsActiveAsync(
+                _context, request.FacilityId, cancellationToken);
 
             var destLocation = await _context.Locations
                 .AsNoTracking()
