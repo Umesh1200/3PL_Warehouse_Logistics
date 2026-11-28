@@ -1397,7 +1397,7 @@ internal static class Mdm21PostgresCheck
 
         db.StockOnHand.Add(new StockOnHand { ClientId = clientA, FacilityId = facOrd, ItemId = itemA.Id, LocationId = cdSrc.Id, QtyAllocated = 5m });
         var plan = new CrossDockPlan { ClientId = clientA, FacilityId = facOrd, PlanNumber = "CDP-PG30", TotalPlannedQuantity = 5m, Status = CrossDockPlanStatus.InProgress };
-        var planLine = new CrossDockPlanLine { CrossDockPlanId = plan.Id, ItemId = itemA.Id, PlannedQuantity = 5m, Status = CrossDockLineStatus.InProgress };
+        var planLine = new CrossDockPlanLine { CrossDockPlanId = plan.Id, ItemId = itemA.Id, SourceLocationId = cdSrc.Id, TargetLocationId = cdDst.Id, PlannedQuantity = 5m, Status = CrossDockLineStatus.InProgress };
         var cdTask = new CrossDockTask
         {
             CrossDockPlanId = plan.Id,
