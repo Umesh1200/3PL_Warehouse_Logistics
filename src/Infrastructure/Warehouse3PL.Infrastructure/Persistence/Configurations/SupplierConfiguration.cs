@@ -24,8 +24,17 @@ public class SupplierConfiguration : IEntityTypeConfiguration<Supplier>
         builder.HasIndex(s => new { s.ClientId, s.SupplierCode })
             .IsUnique();
 
+        builder.HasIndex(s => new { s.ClientId, s.NormalizedSupplierCode })
+            .IsUnique()
+            .HasDatabaseName("ux_suppliers_client_normalized_code");
+
         builder.Property(s => s.SupplierCode)
             .HasColumnName("supplier_code")
+            .HasMaxLength(50)
+            .IsRequired();
+
+        builder.Property(s => s.NormalizedSupplierCode)
+            .HasColumnName("normalized_supplier_code")
             .HasMaxLength(50)
             .IsRequired();
 
@@ -33,6 +42,16 @@ public class SupplierConfiguration : IEntityTypeConfiguration<Supplier>
             .HasColumnName("supplier_name")
             .HasMaxLength(200)
             .IsRequired();
+
+        builder.Property(s => s.TaxRegistrationNumber)
+            .HasColumnName("tax_registration_number")
+            .HasMaxLength(64);
+
+        builder.Property(s => s.PaymentTermsDays)
+            .HasColumnName("payment_terms_days");
+
+        builder.Property(s => s.LeadTimeDays)
+            .HasColumnName("lead_time_days");
 
         builder.Property(s => s.ContactName)
             .HasColumnName("contact_name")
@@ -80,6 +99,11 @@ public class SupplierConfiguration : IEntityTypeConfiguration<Supplier>
         builder.Property(s => s.IsActive)
             .HasColumnName("is_active")
             .HasDefaultValue(true);
+
+        builder.Property(s => s.ConfigRevision)
+            .HasColumnName("config_revision")
+            .HasDefaultValue(1)
+            .IsConcurrencyToken();
 
         builder.Property(s => s.IsDeleted)
             .HasColumnName("is_deleted")

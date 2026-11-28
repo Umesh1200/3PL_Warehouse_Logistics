@@ -7,6 +7,7 @@ public interface ICurrentUserContext
     Guid? UserId { get; }
     string? Email { get; }
     Guid? TenantId { get; }
+    Guid? RequestedTenantId => null;
     Guid? FacilityId { get; }
     Guid? RequestedFacilityId { get; }
     UserType? UserType { get; }

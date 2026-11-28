@@ -2,8 +2,11 @@ using FluentValidation;
 using Mapster;
 using MediatR;
 using Microsoft.EntityFrameworkCore;
+using Warehouse3PL.Application.Common.Helpers;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
+using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
@@ -18,12 +21,26 @@ public record CreateClientCommand : IRequest<ClientDto>
     public ClientStatus Status { get; init; } = ClientStatus.Active;
     public SlaTier SlaTier { get; init; } = SlaTier.Standard;
     public string Currency { get; init; } = "USD";
+    public string? BusinessClassification { get; init; }
+    public string? TaxRegistrationNumber { get; init; }
+    public string? BillingAddressLine1 { get; init; }
+    public string? BillingAddressLine2 { get; init; }
+    public string? BillingCity { get; init; }
+    public string? BillingStateOrProvince { get; init; }
+    public string? BillingPostalCode { get; init; }
+    public string? BillingCountryCode { get; init; }
+    public List<CreateClientContactDto> Contacts { get; init; } = [];
+}
 
-    // Optional primary contact details
-    public string? ContactFirstName { get; init; }
-    public string? ContactLastName { get; init; }
-    public string? ContactEmail { get; init; }
-    public string? ContactPhone { get; init; }
+public record CreateClientContactDto
+{
+    public string FirstName { get; init; } = string.Empty;
+    public string LastName { get; init; } = string.Empty;
+    public string? RoleTitle { get; init; }
+    public string Email { get; init; } = string.Empty;
+    public string? Phone { get; init; }
+    public bool IsBillingContact { get; init; }
+    public bool IsPrimary { get; init; }
 }
 
 public class CreateClientCommandValidator : AbstractValidator<CreateClientCommand>
@@ -32,22 +49,33 @@ public class CreateClientCommandValidator : AbstractValidator<CreateClientComman
     {
         RuleFor(x => x.CompanyName)
             .NotEmpty().WithMessage("Company name is required.")
-            .MaximumLength(200);
+            .MaximumLength(200).WithMessage("Company name must not exceed 200 characters.");
 
         RuleFor(x => x.AccountCode)
             .NotEmpty().WithMessage("Account code is required.")
-            .MinimumLength(3).WithMessage("Account code must be at least 3 characters.")
-            .MaximumLength(50)
-            .Matches(@"^[A-Z0-9_\-]+$").WithMessage("Account code must contain uppercase alphanumeric characters, dashes, or underscores only.");
+            .MaximumLength(50).WithMessage("Account code must not exceed 50 characters.")
+            .Matches("^[A-Za-z0-9_-]+$").WithMessage("Account code must only contain alphanumeric characters, hyphens, or underscores.");
 
         RuleFor(x => x.Currency)
             .NotEmpty().WithMessage("Currency is required.")
-            .Length(3).WithMessage("Currency must be a 3-character ISO code.");
+            .Length(3).WithMessage("Currency must be a 3-letter ISO 4217 code (e.g., USD, EUR).");
 
-        When(x => !string.IsNullOrEmpty(x.ContactEmail), () =>
+        RuleFor(x => x.BusinessClassification).MaximumLength(100);
+        RuleFor(x => x.TaxRegistrationNumber).MaximumLength(64);
+        RuleFor(x => x.BillingAddressLine1).MaximumLength(255);
+        RuleFor(x => x.BillingAddressLine2).MaximumLength(255);
+        RuleFor(x => x.BillingCity).MaximumLength(100);
+        RuleFor(x => x.BillingStateOrProvince).MaximumLength(100);
+        RuleFor(x => x.BillingPostalCode).MaximumLength(30);
+        RuleFor(x => x.BillingCountryCode).MaximumLength(50);
+
+        RuleForEach(x => x.Contacts).ChildRules(contact =>
         {
-            RuleFor(x => x.ContactEmail)
-                .EmailAddress().WithMessage("Contact email must be a valid email.");
+            contact.RuleFor(c => c.FirstName).NotEmpty().MaximumLength(100);
+            contact.RuleFor(c => c.LastName).NotEmpty().MaximumLength(100);
+            contact.RuleFor(c => c.Email).NotEmpty().EmailAddress().MaximumLength(255);
+            contact.RuleFor(c => c.Phone).MaximumLength(50);
+            contact.RuleFor(c => c.RoleTitle).MaximumLength(100);
         });
     }
 }
@@ -55,43 +83,84 @@ public class CreateClientCommandValidator : AbstractValidator<CreateClientComman
 public class CreateClientCommandHandler : IRequestHandler<CreateClientCommand, ClientDto>
 {
     private readonly IApplicationDbContext _context;
+    private readonly PartnerMasterAuthorization? _auth;
 
-    public CreateClientCommandHandler(IApplicationDbContext context)
+    public CreateClientCommandHandler(IApplicationDbContext context, PartnerMasterAuthorization? auth = null)
     {
         _context = context;
+        _auth = auth;
     }
 
     public async Task<ClientDto> Handle(CreateClientCommand request, CancellationToken cancellationToken)
     {
-        var normalizedAccountCode = request.AccountCode.Trim().ToUpperInvariant();
-
-        var existing = await _context.Clients
-            .AnyAsync(c => c.AccountCode == normalizedAccountCode && !c.IsDeleted, cancellationToken);
-
-        if (existing)
+        if (_auth != null)
         {
-            throw new ValidationException(nameof(request.AccountCode), $"A client with account code '{normalizedAccountCode}' already exists.");
+            await _auth.RequireStaffPermissionAsync(cancellationToken, Permissions.Clients.Create);
         }
+
+        var normalizedAccountCode = Client.NormalizeCode(request.AccountCode);
+
+        // Permanent uniqueness check across ALL rows including soft-deleted records
+        var exists = await _context.Clients
+            .IgnoreQueryFilters()
+            .AsNoTracking()
+            .AnyAsync(c => c.NormalizedAccountCode == normalizedAccountCode ||
+                           c.AccountCode.ToUpper() == normalizedAccountCode,
+                cancellationToken);
+
+        if (exists)
+        {
+            throw new ValidationException(
+                "AccountCode",
+                $"A client with account code '{normalizedAccountCode}' already exists (including historical/archived records).");
+        }
+
+        var currency = _auth != null
+            ? await _auth.ValidateRequiredCurrencyAsync(request.Currency, cancellationToken)
+            : request.Currency.Trim().ToUpperInvariant();
+
+        var (billingCountry, countryNormStatus) = await PartnerAddressValidationHelper.ValidateAndNormalizeAddressAsync(
+            _context,
+            request.BillingCountryCode,
+            request.BillingStateOrProvince,
+            request.BillingPostalCode,
+            "Billing",
+            cancellationToken);
 
         var client = new Client
         {
             CompanyName = request.CompanyName.Trim(),
             AccountCode = normalizedAccountCode,
+            NormalizedAccountCode = normalizedAccountCode,
             Status = request.Status,
             SlaTier = request.SlaTier,
-            Currency = request.Currency.Trim().ToUpperInvariant()
+            Currency = currency,
+            BusinessClassification = request.BusinessClassification?.Trim(),
+            TaxRegistrationNumber = request.TaxRegistrationNumber?.Trim(),
+            BillingAddressLine1 = request.BillingAddressLine1?.Trim(),
+            BillingAddressLine2 = request.BillingAddressLine2?.Trim(),
+            BillingCity = request.BillingCity?.Trim(),
+            BillingStateOrProvince = request.BillingStateOrProvince?.Trim(),
+            BillingPostalCode = request.BillingPostalCode?.Trim(),
+            BillingCountryCode = billingCountry,
+            CountryNormalizationStatus = countryNormStatus,
+            ConfigRevision = 1
         };
 
-        if (!string.IsNullOrWhiteSpace(request.ContactFirstName) && !string.IsNullOrWhiteSpace(request.ContactEmail))
+        foreach (var contactDto in request.Contacts)
         {
             client.Contacts.Add(new ClientContact
             {
-                Client = client,
-                FirstName = request.ContactFirstName.Trim(),
-                LastName = request.ContactLastName?.Trim() ?? string.Empty,
-                Email = request.ContactEmail.Trim().ToLower(),
-                Phone = request.ContactPhone,
-                IsBillingContact = true
+                ClientId = client.Id,
+                FirstName = contactDto.FirstName.Trim(),
+                LastName = contactDto.LastName.Trim(),
+                RoleTitle = contactDto.RoleTitle?.Trim(),
+                Email = contactDto.Email.Trim().ToLowerInvariant(),
+                Phone = contactDto.Phone?.Trim(),
+                IsBillingContact = contactDto.IsBillingContact,
+                IsPrimary = contactDto.IsPrimary,
+                IsActive = true,
+                ConfigRevision = 1
             });
         }
 

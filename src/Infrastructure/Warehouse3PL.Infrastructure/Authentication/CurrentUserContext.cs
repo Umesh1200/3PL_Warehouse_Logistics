@@ -42,6 +42,15 @@ public class CurrentUserContext : ICurrentUserContext
         }
     }
 
+    public Guid? RequestedTenantId
+    {
+        get
+        {
+            var header = _httpContextAccessor.HttpContext?.Request.Headers["X-Tenant-Id"].FirstOrDefault();
+            return Guid.TryParse(header, out var headerTenantId) ? headerTenantId : null;
+        }
+    }
+
     public Guid? FacilityId
     {
         get

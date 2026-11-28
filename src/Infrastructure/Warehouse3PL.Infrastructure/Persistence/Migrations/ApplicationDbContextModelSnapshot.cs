@@ -10720,6 +10720,13 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("client_id");
 
+                    b.Property<int>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("config_revision");
+
                     b.Property<string>("ContactName")
                         .HasMaxLength(150)
                         .HasColumnType("character varying(150)")
@@ -10771,6 +10778,20 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasDefaultValue(false)
                         .HasColumnName("is_deleted");
 
+                    b.Property<int?>("LeadTimeDays")
+                        .HasColumnType("integer")
+                        .HasColumnName("lead_time_days");
+
+                    b.Property<string>("NormalizedSupplierCode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("normalized_supplier_code");
+
+                    b.Property<int?>("PaymentTermsDays")
+                        .HasColumnType("integer")
+                        .HasColumnName("payment_terms_days");
+
                     b.Property<string>("Phone")
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
@@ -10798,6 +10819,11 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(200)")
                         .HasColumnName("supplier_name");
 
+                    b.Property<string>("TaxRegistrationNumber")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("tax_registration_number");
+
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("updated_at");
@@ -10809,11 +10835,118 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.HasKey("Id")
                         .HasName("pk_suppliers");
 
+                    b.HasIndex("ClientId", "NormalizedSupplierCode")
+                        .IsUnique()
+                        .HasDatabaseName("ux_suppliers_client_normalized_code");
+
                     b.HasIndex("ClientId", "SupplierCode")
                         .IsUnique()
                         .HasDatabaseName("ix_suppliers_client_id_supplier_code");
 
                     b.ToTable("suppliers", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Inbound.SupplierContact", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("supplier_contact_id");
+
+                    b.Property<Guid>("ClientId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("client_id");
+
+                    b.Property<int>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("config_revision");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<DateTime?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<Guid?>("DeletedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deleted_by");
+
+                    b.Property<string>("Email")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("email");
+
+                    b.Property<string>("FirstName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("first_name");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_deleted");
+
+                    b.Property<bool>("IsPrimary")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_primary");
+
+                    b.Property<string>("LastName")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("last_name");
+
+                    b.Property<string>("Phone")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("phone");
+
+                    b.Property<string>("RoleTitle")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("role_title");
+
+                    b.Property<Guid>("SupplierId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("supplier_id");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_supplier_contacts");
+
+                    b.HasIndex("SupplierId")
+                        .HasDatabaseName("ix_supplier_contacts_supplier_id");
+
+                    b.HasIndex("ClientId", "SupplierId")
+                        .HasDatabaseName("ix_supplier_contacts_client_supplier");
+
+                    b.ToTable("supplier_contacts", (string)null);
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Inventory.CycleCount", b =>
@@ -12277,9 +12410,54 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("customer_id");
 
+                    b.Property<string>("BillingAddressLine1")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("billing_address_line1");
+
+                    b.Property<string>("BillingAddressLine2")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("billing_address_line2");
+
+                    b.Property<string>("BillingCity")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("billing_city");
+
+                    b.Property<string>("BillingCountryCode")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("billing_country_code");
+
+                    b.Property<string>("BillingCountryNormalizationStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("PendingNormalization")
+                        .HasColumnName("billing_country_normalization_status");
+
+                    b.Property<string>("BillingPostalCode")
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("billing_postal_code");
+
+                    b.Property<string>("BillingStateOrProvince")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("billing_state_or_province");
+
                     b.Property<Guid>("ClientId")
                         .HasColumnType("uuid")
                         .HasColumnName("client_id");
+
+                    b.Property<int>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("config_revision");
 
                     b.Property<string>("ContactName")
                         .HasMaxLength(100)
@@ -12371,10 +12549,21 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("boolean")
                         .HasColumnName("is_deleted");
 
+                    b.Property<string>("NormalizedCustomerCode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("normalized_customer_code");
+
                     b.Property<string>("Phone")
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
                         .HasColumnName("phone");
+
+                    b.Property<string>("TaxRegistrationNumber")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("tax_registration_number");
 
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -12399,7 +12588,154 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.HasIndex("ClientId", "CustomerName")
                         .HasDatabaseName("ix_customers_client_id_customer_name");
 
+                    b.HasIndex("ClientId", "NormalizedCustomerCode")
+                        .IsUnique()
+                        .HasDatabaseName("ux_customers_client_normalized_code");
+
                     b.ToTable("customers", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Outbound.CustomerAddress", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("customer_address_id");
+
+                    b.Property<string>("AddressLine1")
+                        .IsRequired()
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("address_line_1");
+
+                    b.Property<string>("AddressLine2")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("address_line_2");
+
+                    b.Property<string>("AddressType")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("Delivery")
+                        .HasColumnName("address_type");
+
+                    b.Property<string>("City")
+                        .IsRequired()
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("city");
+
+                    b.Property<Guid>("ClientId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("client_id");
+
+                    b.Property<int>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("config_revision");
+
+                    b.Property<string>("CountryCode")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("country_code");
+
+                    b.Property<string>("CountryNormalizationStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("PendingNormalization")
+                        .HasColumnName("country_normalization_status");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<Guid>("CustomerId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("customer_id");
+
+                    b.Property<DateTime?>("DeletedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("deleted_at");
+
+                    b.Property<Guid?>("DeletedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("deleted_by");
+
+                    b.Property<string>("DeliveryInstructions")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("delivery_instructions");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<bool>("IsDefault")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_default");
+
+                    b.Property<bool>("IsDeleted")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_deleted");
+
+                    b.Property<string>("Label")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("label");
+
+                    b.Property<string>("Phone")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("phone");
+
+                    b.Property<string>("PostalCode")
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("postal_code");
+
+                    b.Property<string>("RecipientName")
+                        .HasMaxLength(200)
+                        .HasColumnType("character varying(200)")
+                        .HasColumnName("recipient_name");
+
+                    b.Property<string>("StateOrProvince")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("state_or_province");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_customer_addresses");
+
+                    b.HasIndex("CustomerId")
+                        .HasDatabaseName("ix_customer_addresses_customer_id");
+
+                    b.HasIndex("ClientId", "CustomerId")
+                        .HasDatabaseName("ix_customer_addresses_client_customer");
+
+                    b.ToTable("customer_addresses", (string)null);
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Outbound.DeliveryExceptionContactLog", b =>
@@ -17749,11 +18085,61 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(50)")
                         .HasColumnName("account_code");
 
+                    b.Property<string>("BillingAddressLine1")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("billing_address_line_1");
+
+                    b.Property<string>("BillingAddressLine2")
+                        .HasMaxLength(255)
+                        .HasColumnType("character varying(255)")
+                        .HasColumnName("billing_address_line_2");
+
+                    b.Property<string>("BillingCity")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("billing_city");
+
+                    b.Property<string>("BillingCountryCode")
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("billing_country_code");
+
+                    b.Property<string>("BillingPostalCode")
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasColumnName("billing_postal_code");
+
+                    b.Property<string>("BillingStateOrProvince")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("billing_state_or_province");
+
+                    b.Property<string>("BusinessClassification")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("business_classification");
+
                     b.Property<string>("CompanyName")
                         .IsRequired()
                         .HasMaxLength(200)
                         .HasColumnType("character varying(200)")
                         .HasColumnName("company_name");
+
+                    b.Property<int>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("config_revision");
+
+                    b.Property<string>("CountryNormalizationStatus")
+                        .IsRequired()
+                        .ValueGeneratedOnAdd()
+                        .HasMaxLength(30)
+                        .HasColumnType("character varying(30)")
+                        .HasDefaultValue("PendingNormalization")
+                        .HasColumnName("country_normalization_status");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -17783,6 +18169,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasDefaultValue(false)
                         .HasColumnName("is_deleted");
 
+                    b.Property<string>("NormalizedAccountCode")
+                        .IsRequired()
+                        .HasMaxLength(50)
+                        .HasColumnType("character varying(50)")
+                        .HasColumnName("normalized_account_code");
+
                     b.Property<string>("SlaTier")
                         .IsRequired()
                         .HasMaxLength(30)
@@ -17794,6 +18186,11 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasMaxLength(30)
                         .HasColumnType("character varying(30)")
                         .HasColumnName("status");
+
+                    b.Property<string>("TaxRegistrationNumber")
+                        .HasMaxLength(64)
+                        .HasColumnType("character varying(64)")
+                        .HasColumnName("tax_registration_number");
 
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -17810,6 +18207,10 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .IsUnique()
                         .HasDatabaseName("ix_clients_account_code");
 
+                    b.HasIndex("NormalizedAccountCode")
+                        .IsUnique()
+                        .HasDatabaseName("ux_clients_normalized_account_code");
+
                     b.HasIndex("Status")
                         .HasDatabaseName("ix_clients_status");
 
@@ -17825,6 +18226,13 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Property<Guid>("ClientId")
                         .HasColumnType("uuid")
                         .HasColumnName("client_id");
+
+                    b.Property<int>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("config_revision");
 
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -17854,6 +18262,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("character varying(100)")
                         .HasColumnName("first_name");
 
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
                     b.Property<bool>("IsBillingContact")
                         .ValueGeneratedOnAdd()
                         .HasColumnType("boolean")
@@ -17866,6 +18280,12 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasDefaultValue(false)
                         .HasColumnName("is_deleted");
 
+                    b.Property<bool>("IsPrimary")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("is_primary");
+
                     b.Property<string>("LastName")
                         .IsRequired()
                         .HasMaxLength(100)
@@ -17876,6 +18296,11 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasMaxLength(50)
                         .HasColumnType("character varying(50)")
                         .HasColumnName("phone");
+
+                    b.Property<string>("RoleTitle")
+                        .HasMaxLength(100)
+                        .HasColumnType("character varying(100)")
+                        .HasColumnName("role_title");
 
                     b.Property<DateTime?>("UpdatedAt")
                         .HasColumnType("timestamp with time zone")
@@ -17907,6 +18332,13 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasColumnType("uuid")
                         .HasColumnName("client_id");
 
+                    b.Property<int>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("config_revision");
+
                     b.Property<DateTime>("CreatedAt")
                         .HasColumnType("timestamp with time zone")
                         .HasColumnName("created_at");
@@ -17929,6 +18361,15 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasDefaultValue(false)
                         .HasColumnName("primary_operating_facility");
 
+                    b.Property<string>("Remarks")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("remarks");
+
+                    b.Property<DateTime?>("RevokedAtUtc")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("revoked_at_utc");
+
                     b.Property<string>("Status")
                         .IsRequired()
                         .HasMaxLength(30)
@@ -17947,7 +18388,9 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasName("pk_client_facility_access");
 
                     b.HasIndex("ClientId")
-                        .HasDatabaseName("ix_client_facility_access_client_id");
+                        .IsUnique()
+                        .HasDatabaseName("ux_client_facility_access_primary_active")
+                        .HasFilter("primary_operating_facility = TRUE AND status = 'Active'");
 
                     b.HasIndex("FacilityId")
                         .HasDatabaseName("ix_client_facility_access_facility_id");
@@ -17960,6 +18403,117 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasDatabaseName("ix_client_facility_access_client_id_facility_id");
 
                     b.ToTable("client_facility_access", (string)null);
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.ClientOperationalPreference", b =>
+                {
+                    b.Property<Guid>("Id")
+                        .HasColumnType("uuid")
+                        .HasColumnName("preference_id");
+
+                    b.Property<bool>("AllowLotMixingInLocation")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("allow_lot_mixing_in_location");
+
+                    b.Property<bool>("AllowPartialShipments")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("allow_partial_shipments");
+
+                    b.Property<Guid>("ClientId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("client_id");
+
+                    b.Property<int>("ConfigRevision")
+                        .IsConcurrencyToken()
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("config_revision");
+
+                    b.Property<DateTime>("CreatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("created_at");
+
+                    b.Property<Guid?>("CreatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("created_by");
+
+                    b.Property<int>("DefaultOrderPriority")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("integer")
+                        .HasDefaultValue(1)
+                        .HasColumnName("default_order_priority");
+
+                    b.Property<Guid?>("DefaultReceivingZoneId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("default_receiving_zone_id");
+
+                    b.Property<Guid?>("DefaultShippingZoneId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("default_shipping_zone_id");
+
+                    b.Property<Guid?>("FacilityId")
+                        .HasColumnType("uuid")
+                        .HasColumnName("facility_id");
+
+                    b.Property<bool>("IsActive")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(true)
+                        .HasColumnName("is_active");
+
+                    b.Property<string>("Notes")
+                        .HasMaxLength(500)
+                        .HasColumnType("character varying(500)")
+                        .HasColumnName("notes");
+
+                    b.Property<bool>("RequireAsnBeforeReceiving")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("require_asn_before_receiving");
+
+                    b.Property<bool>("RequireQcInspectionOnReturns")
+                        .ValueGeneratedOnAdd()
+                        .HasColumnType("boolean")
+                        .HasDefaultValue(false)
+                        .HasColumnName("require_qc_inspection_on_returns");
+
+                    b.Property<DateTime?>("UpdatedAt")
+                        .HasColumnType("timestamp with time zone")
+                        .HasColumnName("updated_at");
+
+                    b.Property<Guid?>("UpdatedBy")
+                        .HasColumnType("uuid")
+                        .HasColumnName("updated_by");
+
+                    b.HasKey("Id")
+                        .HasName("pk_client_operational_preferences");
+
+                    b.HasIndex("ClientId")
+                        .IsUnique()
+                        .HasDatabaseName("ux_client_op_prefs_client_default")
+                        .HasFilter("facility_id IS NULL");
+
+                    b.HasIndex("DefaultReceivingZoneId")
+                        .HasDatabaseName("ix_client_operational_preferences_default_receiving_zone_id");
+
+                    b.HasIndex("DefaultShippingZoneId")
+                        .HasDatabaseName("ix_client_operational_preferences_default_shipping_zone_id");
+
+                    b.HasIndex("FacilityId")
+                        .HasDatabaseName("ix_client_operational_preferences_facility_id");
+
+                    b.HasIndex("ClientId", "FacilityId")
+                        .IsUnique()
+                        .HasDatabaseName("ux_client_op_prefs_client_facility")
+                        .HasFilter("facility_id IS NOT NULL");
+
+                    b.ToTable("client_operational_preferences", (string)null);
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.Role", b =>
@@ -19892,6 +20446,18 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("Client");
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Inbound.SupplierContact", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Inbound.Supplier", "Supplier")
+                        .WithMany("Contacts")
+                        .HasForeignKey("SupplierId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_supplier_contacts_suppliers_supplier_id");
+
+                    b.Navigation("Supplier");
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Inventory.CycleCount", b =>
                 {
                     b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "Facility")
@@ -20454,6 +21020,18 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                         .HasConstraintName("fk_customers_clients_client_id");
 
                     b.Navigation("Client");
+                });
+
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Outbound.CustomerAddress", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Outbound.Customer", "Customer")
+                        .WithMany("Addresses")
+                        .HasForeignKey("CustomerId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_customer_addresses_customers_customer_id");
+
+                    b.Navigation("Customer");
                 });
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Outbound.DeliveryExceptionContactLog", b =>
@@ -22026,6 +22604,42 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("Facility");
                 });
 
+            modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.ClientOperationalPreference", b =>
+                {
+                    b.HasOne("Warehouse3PL.Domain.Entities.Security.Client", "Client")
+                        .WithMany("OperationalPreferences")
+                        .HasForeignKey("ClientId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .IsRequired()
+                        .HasConstraintName("fk_client_operational_preferences_clients_client_id");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.WarehouseZone", "DefaultReceivingZone")
+                        .WithMany()
+                        .HasForeignKey("DefaultReceivingZoneId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_client_operational_preferences_warehouse_zones_default_rece");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.WarehouseZone", "DefaultShippingZone")
+                        .WithMany()
+                        .HasForeignKey("DefaultShippingZoneId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_client_operational_preferences_warehouse_zones_default_ship");
+
+                    b.HasOne("Warehouse3PL.Domain.Entities.Facilities.Facility", "Facility")
+                        .WithMany()
+                        .HasForeignKey("FacilityId")
+                        .OnDelete(DeleteBehavior.Restrict)
+                        .HasConstraintName("fk_client_operational_preferences_facilities_facility_id");
+
+                    b.Navigation("Client");
+
+                    b.Navigation("DefaultReceivingZone");
+
+                    b.Navigation("DefaultShippingZone");
+
+                    b.Navigation("Facility");
+                });
+
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Security.RolePermission", b =>
                 {
                     b.HasOne("Warehouse3PL.Domain.Entities.Security.Role", "Role")
@@ -22253,6 +22867,8 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                 {
                     b.Navigation("Asns");
 
+                    b.Navigation("Contacts");
+
                     b.Navigation("PurchaseOrders");
                 });
 
@@ -22268,6 +22884,8 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
 
             modelBuilder.Entity("Warehouse3PL.Domain.Entities.Outbound.Customer", b =>
                 {
+                    b.Navigation("Addresses");
+
                     b.Navigation("Orders");
                 });
 
@@ -22401,6 +23019,8 @@ namespace Warehouse3PL.Infrastructure.Persistence.Migrations
                     b.Navigation("Contacts");
 
                     b.Navigation("FacilityAccesses");
+
+                    b.Navigation("OperationalPreferences");
 
                     b.Navigation("Users");
                 });

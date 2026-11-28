@@ -2,6 +2,7 @@ using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.ChangeTracking;
 using Warehouse3PL.Domain.Entities.Dock;
 using Warehouse3PL.Domain.Entities.Facilities;
+using Warehouse3PL.Domain.Entities.Inbound;
 using Warehouse3PL.Domain.Entities.Outbound;
 using Warehouse3PL.Domain.Entities.Reference;
 using Warehouse3PL.Domain.Entities.Security;
@@ -170,6 +171,36 @@ internal static class ConfigurationScopeMapper
                 case Client client:
                     // Handle Added, Modified, and Deleted/Soft-Deleted Client configuration lifecycle uniformly
                     Register(ConfigurationScopeType.Client, client.Id.ToString("D"), nameof(Client), client.Id.ToString("D"));
+                    RegisterCountryBothStates(entry, nameof(Client.BillingCountryCode), client.BillingCountryCode, nameof(Client), client.Id.ToString("D"));
+                    break;
+
+                case ClientContact contact:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Client, nameof(ClientContact.ClientId), contact.ClientId, nameof(ClientContact), contact.Id.ToString("D"));
+                    break;
+
+                case ClientOperationalPreference pref:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Client, nameof(ClientOperationalPreference.ClientId), pref.ClientId, nameof(ClientOperationalPreference), pref.Id.ToString("D"));
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Facility, nameof(ClientOperationalPreference.FacilityId), pref.FacilityId, nameof(ClientOperationalPreference), pref.Id.ToString("D"));
+                    break;
+
+                case Customer customer:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Client, nameof(Customer.ClientId), customer.ClientId, nameof(Customer), customer.Id.ToString("D"));
+                    RegisterCountryBothStates(entry, nameof(Customer.DefaultCountryCode), customer.DefaultCountryCode, nameof(Customer), customer.Id.ToString("D"));
+                    RegisterCountryBothStates(entry, nameof(Customer.BillingCountryCode), customer.BillingCountryCode, nameof(Customer), customer.Id.ToString("D"));
+                    break;
+
+                case CustomerAddress customerAddress:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Client, nameof(CustomerAddress.ClientId), customerAddress.ClientId, nameof(CustomerAddress), customerAddress.Id.ToString("D"));
+                    RegisterCountryBothStates(entry, nameof(CustomerAddress.CountryCode), customerAddress.CountryCode, nameof(CustomerAddress), customerAddress.Id.ToString("D"));
+                    break;
+
+                case Supplier supplier:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Client, nameof(Supplier.ClientId), supplier.ClientId, nameof(Supplier), supplier.Id.ToString("D"));
+                    RegisterCountryBothStates(entry, nameof(Supplier.Country), supplier.Country, nameof(Supplier), supplier.Id.ToString("D"));
+                    break;
+
+                case SupplierContact supplierContact:
+                    RegisterGuidBothStates(entry, ConfigurationScopeType.Client, nameof(SupplierContact.ClientId), supplierContact.ClientId, nameof(SupplierContact), supplierContact.Id.ToString("D"));
                     break;
 
                 case WarehouseZone zone:

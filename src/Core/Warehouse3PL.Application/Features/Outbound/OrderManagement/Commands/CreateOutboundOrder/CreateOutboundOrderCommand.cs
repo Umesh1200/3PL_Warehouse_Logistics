@@ -177,14 +177,21 @@ public class CreateOutboundOrderCommandHandler : IRequestHandler<CreateOutboundO
             }
         }
 
-        // 3. Validate Customer Ownership
+        // 3. Validate Customer Ownership and Active Status
         Customer? customer = null;
         if (request.CustomerId.HasValue)
         {
-            customer = await _context.Customers.FirstOrDefaultAsync(c => c.Id == request.CustomerId.Value && c.ClientId == clientId, cancellationToken);
+            customer = await _context.Customers.FirstOrDefaultAsync(c => c.Id == request.CustomerId.Value && c.ClientId == clientId && !c.IsDeleted, cancellationToken);
             if (customer == null)
             {
                 throw new ValidationException(nameof(request.CustomerId), $"Customer '{request.CustomerId}' does not exist or belong to the client.");
+            }
+
+            if (!customer.IsActive)
+            {
+                throw new DomainException(
+                    $"Customer '{customer.CustomerCode}' is inactive and cannot be used for new outbound orders.",
+                    "CUSTOMER_INACTIVE");
             }
         }
 

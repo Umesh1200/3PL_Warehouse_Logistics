@@ -3,6 +3,8 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
+using Warehouse3PL.Application.Common.Security;
+using Warehouse3PL.Domain.Constants;
 using Warehouse3PL.Domain.Entities.Security;
 using Warehouse3PL.Domain.Exceptions;
 
@@ -13,41 +15,32 @@ public record GetClientByIdQuery(Guid Id) : IRequest<ClientDto>;
 public class GetClientByIdQueryHandler : IRequestHandler<GetClientByIdQuery, ClientDto>
 {
     private readonly IApplicationDbContext _context;
-    private readonly ICurrentUserContext _currentUser;
+    private readonly PartnerMasterAuthorization _auth;
 
-    public GetClientByIdQueryHandler(IApplicationDbContext context, ICurrentUserContext currentUser)
+    public GetClientByIdQueryHandler(
+        IApplicationDbContext context,
+        ICurrentUserContext currentUser,
+        PartnerMasterAuthorization? auth = null)
     {
         _context = context;
-        _currentUser = currentUser;
+        _auth = auth ?? new PartnerMasterAuthorization(context, currentUser);
     }
 
     public async Task<ClientDto> Handle(GetClientByIdQuery request, CancellationToken cancellationToken)
     {
-        // Enforce tenant boundary for non-staff; fail-closed without tenant
-        if (!_currentUser.IsStaff)
-        {
-            if (!_currentUser.TenantId.HasValue)
-            {
-                throw new ForbiddenException("Non-staff users without an assigned tenant context are forbidden from accessing client records.");
-            }
-            if (_currentUser.TenantId.Value != request.Id)
-            {
-                throw new ForbiddenException("You cannot view details for another client tenant.");
-            }
-        }
+        var (_, authorizedClientId) = await _auth.ResolveAuthorizedClientScopeAsync(
+            request.Id,
+            allowClientSelf: true,
+            cancellationToken,
+            allowedStaffPermissions: [Permissions.Clients.View]);
 
         var client = await _context.Clients
             .Include(c => c.Contacts)
             .Include(c => c.Users)
             .AsNoTracking()
-            .FirstOrDefaultAsync(c => c.Id == request.Id && !c.IsDeleted, cancellationToken);
-
-        if (client == null)
-        {
-            throw new EntityNotFoundException(nameof(Client), request.Id);
-        }
+            .FirstOrDefaultAsync(c => c.Id == authorizedClientId && !c.IsDeleted, cancellationToken)
+            ?? throw new EntityNotFoundException(nameof(Client), authorizedClientId);
 
         return client.Adapt<ClientDto>();
     }
 }
-

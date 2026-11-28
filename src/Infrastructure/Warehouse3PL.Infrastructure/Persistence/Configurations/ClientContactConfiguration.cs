@@ -32,6 +32,10 @@ public class ClientContactConfiguration : IEntityTypeConfiguration<ClientContact
             .HasMaxLength(100)
             .IsRequired();
 
+        builder.Property(cc => cc.RoleTitle)
+            .HasColumnName("role_title")
+            .HasMaxLength(100);
+
         builder.Property(cc => cc.Email)
             .HasColumnName("email")
             .HasMaxLength(255)
@@ -44,6 +48,19 @@ public class ClientContactConfiguration : IEntityTypeConfiguration<ClientContact
         builder.Property(cc => cc.IsBillingContact)
             .HasColumnName("is_billing_contact")
             .HasDefaultValue(false);
+
+        builder.Property(cc => cc.IsPrimary)
+            .HasColumnName("is_primary")
+            .HasDefaultValue(false);
+
+        builder.Property(cc => cc.IsActive)
+            .HasColumnName("is_active")
+            .HasDefaultValue(true);
+
+        builder.Property(cc => cc.ConfigRevision)
+            .HasColumnName("config_revision")
+            .HasDefaultValue(1)
+            .IsConcurrencyToken();
 
         builder.Property(cc => cc.IsDeleted)
             .HasColumnName("is_deleted")

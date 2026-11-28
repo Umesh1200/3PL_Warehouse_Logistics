@@ -4845,6 +4845,7 @@ try
     await Mdm15PostgresCheck.RunAsync(builder.ConnectionString);
     await Mdm16PostgresCheck.RunAsync(builder.ConnectionString);
     await Mdm21PostgresCheck.RunAsync(builder.ConnectionString);
+    await Mdm22PostgresCheck.RunAsync(builder.ConnectionString);
 
     if (Directory.Exists(pgPodStorageDir))
     {

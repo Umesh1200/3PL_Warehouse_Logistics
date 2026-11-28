@@ -41,6 +41,8 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryFacilityHierarchyLocks = new();
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryZoneLifecycleLocks = new();
     private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryLocationLifecycleLocks = new();
+    private static readonly ConcurrentDictionary<Guid, SemaphoreSlim> InMemoryClientLifecycleLocks = new();
+    private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryClientFacilityAccessLocks = new(StringComparer.Ordinal);
     private static readonly ConcurrentDictionary<string, SemaphoreSlim> InMemoryScopeEpochLocks = new(StringComparer.Ordinal);
     private bool _isInsideConfigurationOutboxSave;
     private bool? _hasMdm15Schema;
@@ -1066,6 +1068,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
 
     public DbSet<Client> Clients => Set<Client>();
     public DbSet<ClientContact> ClientContacts => Set<ClientContact>();
+    public DbSet<ClientOperationalPreference> ClientOperationalPreferences => Set<ClientOperationalPreference>();
     public DbSet<User> Users => Set<User>();
     public DbSet<Role> Roles => Set<Role>();
     public DbSet<RolePermission> RolePermissions => Set<RolePermission>();
@@ -1101,6 +1104,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<InventoryAdjustment> InventoryAdjustments => Set<InventoryAdjustment>();
 
     public DbSet<Supplier> Suppliers => Set<Supplier>();
+    public DbSet<SupplierContact> SupplierContacts => Set<SupplierContact>();
     public DbSet<PurchaseOrder> PurchaseOrders => Set<PurchaseOrder>();
     public DbSet<PurchaseOrderLine> PurchaseOrderLines => Set<PurchaseOrderLine>();
     public DbSet<AdvanceShippingNotice> AdvanceShippingNotices => Set<AdvanceShippingNotice>();
@@ -1116,6 +1120,7 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
     public DbSet<ReceivingDiscrepancy> ReceivingDiscrepancies => Set<ReceivingDiscrepancy>();
 
     public DbSet<Customer> Customers => Set<Customer>();
+    public DbSet<CustomerAddress> CustomerAddresses => Set<CustomerAddress>();
     public DbSet<OutboundOrder> OutboundOrders => Set<OutboundOrder>();
     public DbSet<OutboundOrderLine> OutboundOrderLines => Set<OutboundOrderLine>();
     public DbSet<ShippingAddress> ShippingAddresses => Set<ShippingAddress>();
@@ -2352,6 +2357,37 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
                         eq.NormalizedEquipmentCode = Domain.Entities.Facilities.WarehouseEquipment.NormalizeCode(eq.EquipmentCode);
                     }
                     break;
+
+                case Client cl:
+                    if (cl.Id == Guid.Empty) cl.Id = Guid.NewGuid();
+                    if (!string.IsNullOrWhiteSpace(cl.AccountCode))
+                    {
+                        cl.AccountCode = cl.AccountCode.Trim();
+                        cl.NormalizedAccountCode = Client.NormalizeCode(cl.AccountCode);
+                    }
+                    if (!string.IsNullOrWhiteSpace(cl.Currency))
+                    {
+                        cl.Currency = cl.Currency.Trim().ToUpperInvariant();
+                    }
+                    break;
+
+                case Customer cust:
+                    if (cust.Id == Guid.Empty) cust.Id = Guid.NewGuid();
+                    if (!string.IsNullOrWhiteSpace(cust.CustomerCode))
+                    {
+                        cust.CustomerCode = cust.CustomerCode.Trim();
+                        cust.NormalizedCustomerCode = Customer.NormalizeCode(cust.CustomerCode);
+                    }
+                    break;
+
+                case Supplier sup:
+                    if (sup.Id == Guid.Empty) sup.Id = Guid.NewGuid();
+                    if (!string.IsNullOrWhiteSpace(sup.SupplierCode))
+                    {
+                        sup.SupplierCode = sup.SupplierCode.Trim();
+                        sup.NormalizedSupplierCode = Supplier.NormalizeCode(sup.SupplierCode);
+                    }
+                    break;
             }
         }
     }
@@ -2668,6 +2704,148 @@ public class ApplicationDbContext : DbContext, IApplicationDbContext
                 ClearChangeTracker();
             }
         }
+    }
+
+    public async Task<TResult> ExecuteWithClientLifecycleLockAsync<TResult>(
+        Guid clientId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Database.IsRelational())
+        {
+            var gate = InMemoryClientLifecycleLocks.GetOrAdd(clientId, _ => new SemaphoreSlim(1, 1));
+            await gate.WaitAsync(cancellationToken);
+            try
+            {
+                return await action();
+            }
+            finally
+            {
+                gate.Release();
+            }
+        }
+
+        async Task AcquireClientLockAsync()
+        {
+            if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                var lockKey = $"CLIENT_LIFECYCLE:{clientId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({lockKey}, 0::bigint))",
+                    cancellationToken);
+            }
+        }
+
+        if (HasActiveTransaction)
+        {
+            await AcquireClientLockAsync();
+            return await action();
+        }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt)
+            {
+                ClearChangeTracker();
+            }
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await AcquireClientLockAsync();
+                var result = await action();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
+    }
+
+    public async Task<TResult> ExecuteWithClientFacilityAccessLockAsync<TResult>(
+        Guid clientId,
+        Guid facilityId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default)
+    {
+        if (!Database.IsRelational())
+        {
+            var clientGate = InMemoryClientLifecycleLocks.GetOrAdd(clientId, _ => new SemaphoreSlim(1, 1));
+            var accessKey = $"{clientId:N}:{facilityId:N}";
+            var accessGate = InMemoryClientFacilityAccessLocks.GetOrAdd(accessKey, _ => new SemaphoreSlim(1, 1));
+            await clientGate.WaitAsync(cancellationToken);
+            try
+            {
+                await accessGate.WaitAsync(cancellationToken);
+                try
+                {
+                    return await action();
+                }
+                finally
+                {
+                    accessGate.Release();
+                }
+            }
+            finally
+            {
+                clientGate.Release();
+            }
+        }
+
+        async Task AcquireLocksAsync()
+        {
+            if (Database.ProviderName?.Contains("Npgsql", StringComparison.OrdinalIgnoreCase) == true)
+            {
+                // Consistent lock order: CLIENT_LIFECYCLE -> FACILITY_LIFECYCLE (shared) -> CLIENT_FACILITY_ACCESS
+                var clientLockKey = $"CLIENT_LIFECYCLE:{clientId:N}";
+                var facLockKey = $"FACILITY_LIFECYCLE:{facilityId:N}";
+                var accessLockKey = $"CLIENT_FACILITY_ACCESS:{clientId:N}:{facilityId:N}";
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({clientLockKey}, 0::bigint))",
+                    cancellationToken);
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock_shared(hashtextextended({facLockKey}, 0::bigint))",
+                    cancellationToken);
+                await Database.ExecuteSqlInterpolatedAsync(
+                    $"SELECT pg_advisory_xact_lock(hashtextextended({accessLockKey}, 0::bigint))",
+                    cancellationToken);
+            }
+        }
+
+        if (HasActiveTransaction)
+        {
+            await AcquireLocksAsync();
+            return await action();
+        }
+
+        bool firstAttempt = true;
+        return await Database.CreateExecutionStrategy().ExecuteAsync(async () =>
+        {
+            if (!firstAttempt)
+            {
+                ClearChangeTracker();
+            }
+            firstAttempt = false;
+
+            await BeginTransactionAsync(cancellationToken);
+            try
+            {
+                await AcquireLocksAsync();
+                var result = await action();
+                await CommitTransactionAsync(cancellationToken);
+                return result;
+            }
+            catch
+            {
+                await RollbackTransactionAsync(cancellationToken);
+                throw;
+            }
+        });
     }
 
     protected override void OnConfiguring(DbContextOptionsBuilder optionsBuilder)

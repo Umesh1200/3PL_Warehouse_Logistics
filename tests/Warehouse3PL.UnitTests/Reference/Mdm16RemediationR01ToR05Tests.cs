@@ -575,10 +575,12 @@ public sealed class Mdm16RemediationR01ToR05Tests
 
             var platRole = new Role { RoleName = "F01Plat", Description = "Plat", IsSystemRole = false };
             platRole.RolePermissions.Add(new RolePermission { Role = platRole, PermissionKey = Permissions.Global.NormalizationView, AccessLevel = AccessLevel.Read });
-            db.Roles.Add(platRole);
+            var superRole = new Role { RoleName = SystemRoles.SuperAdmin, Description = "SuperAdmin", IsSystemRole = true };
+            db.Roles.AddRange(platRole, superRole);
             var uPlat = new User { Id = staffPlatId, Email = "plat@f01.test", FirstName = "P", LastName = "S", UserType = UserType.Staff, Status = UserStatus.Active, PasswordHash = "x" };
             db.Users.Add(uPlat);
             db.UserRoles.Add(new UserRole { User = uPlat, Role = platRole });
+            db.UserRoles.Add(new UserRole { User = uPlat, Role = superRole });
             await db.SaveChangesAsync();
         });
 

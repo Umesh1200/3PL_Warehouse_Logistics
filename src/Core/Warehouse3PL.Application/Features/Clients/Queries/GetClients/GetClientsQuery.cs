@@ -3,40 +3,74 @@ using MediatR;
 using Microsoft.EntityFrameworkCore;
 using Warehouse3PL.Application.Common.Interfaces;
 using Warehouse3PL.Application.Common.Models;
-using Warehouse3PL.Domain.Entities.Security;
+using Warehouse3PL.Application.Common.Security;
+using Warehouse3PL.Domain.Constants;
+using Warehouse3PL.Domain.Enums;
 using Warehouse3PL.Domain.Exceptions;
 
 namespace Warehouse3PL.Application.Features.Clients.Queries.GetClients;
 
-public record GetClientsQuery : PagedQuery, IRequest<PagedResult<ClientDto>>;
+public record GetClientsQuery : PagedQuery, IRequest<PagedResult<ClientDto>>
+{
+    public ClientStatus? Status { get; init; }
+}
 
 public class GetClientsQueryHandler : IRequestHandler<GetClientsQuery, PagedResult<ClientDto>>
 {
     private readonly IApplicationDbContext _context;
-    private readonly ICurrentUserContext _currentUser;
+    private readonly PartnerMasterAuthorization _auth;
 
-    public GetClientsQueryHandler(IApplicationDbContext context, ICurrentUserContext currentUser)
+    public GetClientsQueryHandler(
+        IApplicationDbContext context,
+        ICurrentUserContext currentUser,
+        PartnerMasterAuthorization? auth = null)
     {
         _context = context;
-        _currentUser = currentUser;
+        _auth = auth ?? new PartnerMasterAuthorization(context, currentUser);
     }
 
     public async Task<PagedResult<ClientDto>> Handle(GetClientsQuery request, CancellationToken cancellationToken)
     {
+        var caller = await _auth.VerifyAuthenticatedCallerAsync(cancellationToken);
+
         var query = _context.Clients
             .Include(c => c.Contacts)
             .Include(c => c.Users)
             .Where(c => !c.IsDeleted)
             .AsNoTracking();
 
-        // Multi-tenancy isolation: non-staff only see their assigned client; fail-closed without tenant
-        if (!_currentUser.IsStaff)
+        if (caller.UserType == UserType.Client)
         {
-            if (!_currentUser.TenantId.HasValue)
+            if (!caller.AssignedClientId.HasValue || caller.AssignedClientId.Value == Guid.Empty)
             {
-                throw new ForbiddenException("Non-staff users without an assigned tenant context are forbidden from accessing client records.");
+                throw new ForbiddenException("Client user without a verified tenant context cannot access client records.");
             }
-            query = query.Where(c => c.Id == _currentUser.TenantId.Value);
+            query = query.Where(c => c.Id == caller.AssignedClientId.Value);
+        }
+        else if (!caller.IsSuperAdmin)
+        {
+            if (!caller.Permissions.Contains(Permissions.Clients.View))
+            {
+                throw new ForbiddenException($"Staff user lacks required database-verified permission ({Permissions.Clients.View}).");
+            }
+            if (!caller.AssignedFacilityId.HasValue || caller.AssignedFacilityId.Value == Guid.Empty)
+            {
+                throw new ForbiddenException("Non-SuperAdmin Staff user has no assigned facility scope.");
+            }
+
+            var staffFacilityId = caller.AssignedFacilityId.Value;
+            var facilityClientIds = _context.ClientFacilityAccesses
+                .IgnoreQueryFilters()
+                .AsNoTracking()
+                .Where(a => a.FacilityId == staffFacilityId)
+                .Select(a => a.ClientId);
+
+            query = query.Where(c => facilityClientIds.Contains(c.Id));
+        }
+
+        if (request.Status.HasValue)
+        {
+            query = query.Where(c => c.Status == request.Status.Value);
         }
 
         if (!string.IsNullOrWhiteSpace(request.SearchTerm))
@@ -48,10 +82,9 @@ public class GetClientsQueryHandler : IRequestHandler<GetClientsQuery, PagedResu
 
         var totalCount = await query.CountAsync(cancellationToken);
 
-        // Server-side sorting with strict validated contract
         if (!string.IsNullOrWhiteSpace(request.SortBy))
         {
-            query = (request.SortBy.Trim().ToLowerInvariant()) switch
+            query = request.SortBy.Trim().ToLowerInvariant() switch
             {
                 "companyname" => request.SortDescending
                     ? query.OrderByDescending(c => c.CompanyName)
@@ -78,9 +111,7 @@ public class GetClientsQueryHandler : IRequestHandler<GetClientsQuery, PagedResu
         }
         else
         {
-            query = request.SortDescending
-                ? query.OrderByDescending(c => c.CreatedAt)
-                : query.OrderByDescending(c => c.CreatedAt);
+            query = query.OrderByDescending(c => c.CreatedAt);
         }
 
         var items = await query
@@ -93,4 +124,3 @@ public class GetClientsQueryHandler : IRequestHandler<GetClientsQuery, PagedResu
         return PagedResult<ClientDto>.Create(dtos, totalCount, request.PageNumber, request.PageSize);
     }
 }
-

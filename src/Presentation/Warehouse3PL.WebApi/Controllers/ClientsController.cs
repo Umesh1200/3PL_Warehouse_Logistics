@@ -1,3 +1,5 @@
+using MediatR;
+using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 using Warehouse3PL.Application.Common.Models;
 using Warehouse3PL.Application.Features.Clients.Commands.CreateClient;
@@ -6,80 +8,73 @@ using Warehouse3PL.Application.Features.Clients.Commands.UpdateClient;
 using Warehouse3PL.Application.Features.Clients.Queries.GetClientById;
 using Warehouse3PL.Application.Features.Clients.Queries.GetClients;
 using Warehouse3PL.Domain.Constants;
-using Warehouse3PL.Infrastructure.Authorization;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.WebApi.Controllers;
 
-[Tags("Clients & Multi-Tenancy Master")]
-public class ClientsController : BaseApiController
+[ApiController]
+[Authorize]
+[Route("api/v1/clients")]
+public class ClientsController : ControllerBase
 {
-    /// <summary>
-    /// Retrieve paginated list of client tenants. Staff sees all; clients see only their tenant partition.
-    /// </summary>
+    private readonly ISender _mediator;
+
+    public ClientsController(ISender mediator)
+    {
+        _mediator = mediator;
+    }
+
     [HttpGet]
-    [HasPermission(Permissions.Clients.View)]
-    [ProducesResponseType(typeof(PagedResult<ClientDto>), StatusCodes.Status200OK)]
-    public async Task<ActionResult<PagedResult<ClientDto>>> GetClients([FromQuery] GetClientsQuery query, CancellationToken ct)
+    public async Task<ActionResult<PagedResult<ClientDto>>> GetClients([FromQuery] GetClientsQuery query)
     {
-        var response = await Mediator.Send(query, ct);
-        return Ok(response);
+        var result = await _mediator.Send(query);
+        return Ok(result);
     }
 
-    /// <summary>
-    /// Retrieve client tenant by unique UUID identifier.
-    /// </summary>
     [HttpGet("{id:guid}")]
-    [HasPermission(Permissions.Clients.View)]
-    [ProducesResponseType(typeof(ClientDto), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<ActionResult<ClientDto>> GetClientById([FromRoute] Guid id, CancellationToken ct)
+    public async Task<ActionResult<ClientDto>> GetClientById(Guid id)
     {
-        var response = await Mediator.Send(new GetClientByIdQuery(id), ct);
-        return Ok(response);
+        var result = await _mediator.Send(new GetClientByIdQuery(id));
+        return Ok(result);
     }
 
-    /// <summary>
-    /// Create a new 3PL client tenant with account code, SLA tier, and currency.
-    /// </summary>
     [HttpPost]
-    [HasPermission(Permissions.Clients.Create)]
-    [ProducesResponseType(typeof(ClientDto), StatusCodes.Status201Created)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<ClientDto>> CreateClient([FromBody] CreateClientCommand command, CancellationToken ct)
+    [Authorize(Policy = Permissions.Clients.Create)]
+    public async Task<ActionResult<ClientDto>> CreateClient([FromBody] CreateClientCommand command)
     {
-        var response = await Mediator.Send(command, ct);
-        return CreatedAtAction(nameof(GetClientById), new { id = response.Id }, response);
+        var result = await _mediator.Send(command);
+        return CreatedAtAction(nameof(GetClientById), new { id = result.Id }, result);
     }
 
-    /// <summary>
-    /// Update client tenant details, SLA tier, or status.
-    /// </summary>
     [HttpPut("{id:guid}")]
-    [HasPermission(Permissions.Clients.Edit)]
-    [ProducesResponseType(typeof(ClientDto), StatusCodes.Status200OK)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status400BadRequest)]
-    public async Task<ActionResult<ClientDto>> UpdateClient([FromRoute] Guid id, [FromBody] UpdateClientCommand command, CancellationToken ct)
+    [Authorize(Policy = Permissions.Clients.Edit)]
+    public async Task<ActionResult<ClientDto>> UpdateClient(Guid id, [FromBody] UpdateClientCommand command)
     {
-        if (id != command.Id)
+        if (command.Id != Guid.Empty && id != command.Id)
         {
-            return BadRequest("Route id does not match request body id.");
+            return BadRequest("Route ID does not match body ID.");
         }
 
-        var response = await Mediator.Send(command, ct);
-        return Ok(response);
+        var result = await _mediator.Send(command with { Id = id });
+        return Ok(result);
     }
 
-    /// <summary>
-    /// Deactivate / soft delete a client tenant.
-    /// </summary>
-    [HttpDelete("{id:guid}")]
-    [HasPermission(Permissions.Clients.Delete)]
-    [ProducesResponseType(StatusCodes.Status204NoContent)]
-    [ProducesResponseType(typeof(ProblemDetails), StatusCodes.Status404NotFound)]
-    public async Task<IActionResult> DeactivateClient([FromRoute] Guid id, CancellationToken ct)
+    [HttpPatch("{id:guid}/status")]
+    public async Task<ActionResult<ClientDto>> TransitionClientStatus(
+        Guid id,
+        [FromBody] TransitionClientStatusRequest request)
     {
-        await Mediator.Send(new DeactivateClientCommand(id), ct);
+        var result = await _mediator.Send(new TransitionClientStatusCommand(id, request.TargetStatus, request.ExpectedConfigRevision));
+        return Ok(result);
+    }
+
+    [HttpDelete("{id:guid}")]
+    [Authorize(Policy = Permissions.Clients.Delete)]
+    public async Task<IActionResult> DeactivateClient(Guid id)
+    {
+        await _mediator.Send(new DeactivateClientCommand(id));
         return NoContent();
     }
 }
 
+public record TransitionClientStatusRequest(ClientStatus TargetStatus, int? ExpectedConfigRevision = null);

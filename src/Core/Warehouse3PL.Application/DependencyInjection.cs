@@ -25,6 +25,7 @@ public static class DependencyInjection
         services.AddScoped<OutboundOperationalAuthorization>();
         services.AddScoped<CompliancePlatformAuthorization>();
         services.AddScoped<WarehouseMasterAuthorization>();
+        services.AddScoped<PartnerMasterAuthorization>();
 
         // Register MediatR & Pipeline Behaviors
         services.AddMediatR(cfg =>

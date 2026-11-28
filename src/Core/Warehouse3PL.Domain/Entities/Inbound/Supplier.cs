@@ -12,7 +12,11 @@ public class Supplier : AuditableEntity<Guid>, ITenantEntity, ISoftDeletable
 {
     public Guid ClientId { get; set; }
     public string SupplierCode { get; set; } = string.Empty;
+    public string NormalizedSupplierCode { get; set; } = string.Empty;
     public string SupplierName { get; set; } = string.Empty;
+    public string? TaxRegistrationNumber { get; set; }
+    public int? PaymentTermsDays { get; set; }
+    public int? LeadTimeDays { get; set; }
     public string? ContactName { get; set; }
     public string? Email { get; set; }
     public string? Phone { get; set; }
@@ -24,6 +28,7 @@ public class Supplier : AuditableEntity<Guid>, ITenantEntity, ISoftDeletable
     public string? Country { get; set; }
     public CountryNormalizationStatus CountryNormalizationStatus { get; set; } = CountryNormalizationStatus.PendingNormalization;
     public bool IsActive { get; set; } = true;
+    public int ConfigRevision { get; set; } = 1;
 
     // Soft delete
     public bool IsDeleted { get; set; }
@@ -34,6 +39,9 @@ public class Supplier : AuditableEntity<Guid>, ITenantEntity, ISoftDeletable
     public Client Client { get; set; } = null!;
     public ICollection<PurchaseOrder> PurchaseOrders { get; set; } = [];
     public ICollection<AdvanceShippingNotice> Asns { get; set; } = [];
+    public ICollection<SupplierContact> Contacts { get; set; } = [];
+
+    public static string NormalizeCode(string code) => code.Trim().ToUpperInvariant();
 
     public Supplier()
     {

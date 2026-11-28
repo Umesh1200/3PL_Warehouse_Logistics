@@ -1,6 +1,7 @@
 using Microsoft.EntityFrameworkCore;
 using Microsoft.EntityFrameworkCore.Metadata.Builders;
 using Warehouse3PL.Domain.Entities.Security;
+using Warehouse3PL.Domain.Enums;
 
 namespace Warehouse3PL.Infrastructure.Persistence.Configurations;
 
@@ -25,8 +26,17 @@ public class ClientConfiguration : IEntityTypeConfiguration<Client>
             .HasMaxLength(50)
             .IsRequired();
 
+        builder.Property(c => c.NormalizedAccountCode)
+            .HasColumnName("normalized_account_code")
+            .HasMaxLength(50)
+            .IsRequired();
+
         builder.HasIndex(c => c.AccountCode)
             .IsUnique();
+
+        builder.HasIndex(c => c.NormalizedAccountCode)
+            .IsUnique()
+            .HasDatabaseName("ux_clients_normalized_account_code");
 
         builder.Property(c => c.Status)
             .HasColumnName("status")
@@ -47,6 +57,49 @@ public class ClientConfiguration : IEntityTypeConfiguration<Client>
             .HasColumnName("currency")
             .HasMaxLength(3)
             .IsRequired();
+
+        builder.Property(c => c.BusinessClassification)
+            .HasColumnName("business_classification")
+            .HasMaxLength(100);
+
+        builder.Property(c => c.TaxRegistrationNumber)
+            .HasColumnName("tax_registration_number")
+            .HasMaxLength(64);
+
+        builder.Property(c => c.BillingAddressLine1)
+            .HasColumnName("billing_address_line_1")
+            .HasMaxLength(255);
+
+        builder.Property(c => c.BillingAddressLine2)
+            .HasColumnName("billing_address_line_2")
+            .HasMaxLength(255);
+
+        builder.Property(c => c.BillingCity)
+            .HasColumnName("billing_city")
+            .HasMaxLength(100);
+
+        builder.Property(c => c.BillingStateOrProvince)
+            .HasColumnName("billing_state_or_province")
+            .HasMaxLength(100);
+
+        builder.Property(c => c.BillingPostalCode)
+            .HasColumnName("billing_postal_code")
+            .HasMaxLength(30);
+
+        builder.Property(c => c.BillingCountryCode)
+            .HasColumnName("billing_country_code")
+            .HasMaxLength(50);
+
+        builder.Property(c => c.CountryNormalizationStatus)
+            .HasColumnName("country_normalization_status")
+            .HasConversion<string>()
+            .HasMaxLength(30)
+            .HasDefaultValue(CountryNormalizationStatus.PendingNormalization);
+
+        builder.Property(c => c.ConfigRevision)
+            .HasColumnName("config_revision")
+            .HasDefaultValue(1)
+            .IsConcurrencyToken();
 
         builder.Property(c => c.IsDeleted)
             .HasColumnName("is_deleted")

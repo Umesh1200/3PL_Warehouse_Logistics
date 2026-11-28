@@ -119,16 +119,23 @@ public class CreateAsnCommandHandler : IRequestHandler<CreateAsnCommand, Advance
             throw new ValidationException(nameof(request.AsnNumber), $"ASN '{asnNumberNormalized}' already exists for this client.");
         }
 
-        // 3. Verify Supplier (if provided) belongs to the client
+        // 3. Verify Supplier (if provided) belongs to the client and is active
         Supplier? supplier = null;
         if (request.SupplierId.HasValue)
         {
             supplier = await _context.Suppliers
-                .FirstOrDefaultAsync(s => s.Id == request.SupplierId.Value && s.ClientId == targetClientId, cancellationToken);
+                .FirstOrDefaultAsync(s => s.Id == request.SupplierId.Value && s.ClientId == targetClientId && !s.IsDeleted, cancellationToken);
 
             if (supplier == null)
             {
                 throw new ValidationException(nameof(request.SupplierId), $"Supplier '{request.SupplierId}' does not belong to this client or does not exist.");
+            }
+
+            if (!supplier.IsActive)
+            {
+                throw new DomainException(
+                    $"Supplier '{supplier.SupplierCode}' is inactive and cannot be used for new ASNs.",
+                    "SUPPLIER_INACTIVE");
             }
         }
 

@@ -46,6 +46,18 @@ public class ClientFacilityAccessConfiguration : IEntityTypeConfiguration<Client
             .HasColumnName("primary_operating_facility")
             .HasDefaultValue(false);
 
+        builder.Property(cfa => cfa.RevokedAtUtc)
+            .HasColumnName("revoked_at_utc");
+
+        builder.Property(cfa => cfa.Remarks)
+            .HasColumnName("remarks")
+            .HasMaxLength(500);
+
+        builder.Property(cfa => cfa.ConfigRevision)
+            .HasColumnName("config_revision")
+            .HasDefaultValue(1)
+            .IsConcurrencyToken();
+
         builder.Property(cfa => cfa.CreatedAt).HasColumnName("created_at").IsRequired();
         builder.Property(cfa => cfa.CreatedBy).HasColumnName("created_by");
         builder.Property(cfa => cfa.UpdatedAt).HasColumnName("updated_at");
@@ -53,6 +65,11 @@ public class ClientFacilityAccessConfiguration : IEntityTypeConfiguration<Client
 
         builder.HasIndex(cfa => new { cfa.ClientId, cfa.FacilityId })
             .IsUnique();
+
+        builder.HasIndex(cfa => cfa.ClientId)
+            .IsUnique()
+            .HasDatabaseName("ux_client_facility_access_primary_active")
+            .HasFilter("primary_operating_facility = TRUE AND status = 'Active'");
     }
 }
 

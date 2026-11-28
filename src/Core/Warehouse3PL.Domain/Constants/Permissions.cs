@@ -9,6 +9,15 @@ public static class Permissions
         public const string Edit = "clients:edit";
         public const string Delete = "clients:delete";
         public const string ManageAccess = "clients:manage-access";
+        public const string ManagePreferences = "clients:manage-preferences";
+    }
+
+    public static class Customers
+    {
+        public const string View = "customers:view";
+        public const string Create = "customers:create";
+        public const string Edit = "customers:edit";
+        public const string Delete = "customers:delete";
     }
 
     public static class Users
@@ -86,6 +95,7 @@ public static class Permissions
         public const string SuppliersView = "inbound:suppliers:view";
         public const string SuppliersCreate = "inbound:suppliers:create";
         public const string SuppliersEdit = "inbound:suppliers:edit";
+        public const string SuppliersDelete = "inbound:suppliers:delete";
 
         public const string AppointmentsView = "inbound:appointments:view";
         public const string AppointmentsSchedule = "inbound:appointments:schedule";
@@ -187,7 +197,8 @@ public static class Permissions
     /// </summary>
     public static IReadOnlyList<string> GetAllPermissions() =>
     [
-        Clients.View, Clients.Create, Clients.Edit, Clients.Delete, Clients.ManageAccess,
+        Clients.View, Clients.Create, Clients.Edit, Clients.Delete, Clients.ManageAccess, Clients.ManagePreferences,
+        Customers.View, Customers.Create, Customers.Edit, Customers.Delete,
         Users.View, Users.Create, Users.Edit, Users.Delete, Users.AssignRoles,
         Roles.View, Roles.Create, Roles.Edit, Roles.Delete, Roles.ManagePermissions,
         Facilities.View, Facilities.Manage,
@@ -202,7 +213,7 @@ public static class Permissions
         Inbound.PutawayOverride, Inbound.Approve, Inbound.DiscrepancyResolve,
         Inbound.OrdersView, Inbound.OrdersCreate, Inbound.OrdersEdit, Inbound.OrdersCancel,
         Inbound.AsnView, Inbound.AsnCreate, Inbound.AsnEdit, Inbound.AsnCancel,
-        Inbound.SuppliersView, Inbound.SuppliersCreate, Inbound.SuppliersEdit,
+        Inbound.SuppliersView, Inbound.SuppliersCreate, Inbound.SuppliersEdit, Inbound.SuppliersDelete,
         Inbound.AppointmentsView, Inbound.AppointmentsSchedule, Inbound.AppointmentsCancel,
         Inbound.YardView, Inbound.YardCheckIn, Inbound.DockAssign, Inbound.DockRelease,
         Inbound.QualityInspect,

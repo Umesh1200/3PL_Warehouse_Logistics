@@ -16,8 +16,10 @@ public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
 
         builder.Property(c => c.ClientId).HasColumnName("client_id").IsRequired();
         builder.Property(c => c.CustomerCode).HasColumnName("customer_code").HasMaxLength(50).IsRequired();
+        builder.Property(c => c.NormalizedCustomerCode).HasColumnName("normalized_customer_code").HasMaxLength(50).IsRequired();
         builder.Property(c => c.CustomerName).HasColumnName("customer_name").HasMaxLength(200).IsRequired();
         builder.Property(c => c.CustomerType).HasColumnName("customer_type").HasConversion<string>().HasMaxLength(50).IsRequired();
+        builder.Property(c => c.TaxRegistrationNumber).HasColumnName("tax_registration_number").HasMaxLength(64);
 
         builder.Property(c => c.ContactName).HasColumnName("contact_name").HasMaxLength(100);
         builder.Property(c => c.Email).HasColumnName("email").HasMaxLength(150);
@@ -36,8 +38,21 @@ public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
             .HasDefaultValue(CountryNormalizationStatus.PendingNormalization)
             .IsRequired();
 
+        builder.Property(c => c.BillingAddressLine1).HasColumnName("billing_address_line1").HasMaxLength(255);
+        builder.Property(c => c.BillingAddressLine2).HasColumnName("billing_address_line2").HasMaxLength(255);
+        builder.Property(c => c.BillingCity).HasColumnName("billing_city").HasMaxLength(100);
+        builder.Property(c => c.BillingStateOrProvince).HasColumnName("billing_state_or_province").HasMaxLength(100);
+        builder.Property(c => c.BillingPostalCode).HasColumnName("billing_postal_code").HasMaxLength(30);
+        builder.Property(c => c.BillingCountryCode).HasColumnName("billing_country_code").HasMaxLength(50);
+        builder.Property(c => c.BillingCountryNormalizationStatus)
+            .HasColumnName("billing_country_normalization_status")
+            .HasConversion<string>()
+            .HasMaxLength(30)
+            .HasDefaultValue(CountryNormalizationStatus.PendingNormalization);
+
         builder.Property(c => c.IsActive).HasColumnName("is_active").IsRequired();
         builder.Property(c => c.Version).HasColumnName("version").IsConcurrencyToken();
+        builder.Property(c => c.ConfigRevision).HasColumnName("config_revision").HasDefaultValue(1).IsConcurrencyToken();
 
         // Auditing
         builder.Property(c => c.CreatedAt).HasColumnName("created_at").IsRequired();
@@ -53,6 +68,9 @@ public class CustomerConfiguration : IEntityTypeConfiguration<Customer>
 
         // Indexes
         builder.HasIndex(c => new { c.ClientId, c.CustomerCode }).IsUnique();
+        builder.HasIndex(c => new { c.ClientId, c.NormalizedCustomerCode })
+            .IsUnique()
+            .HasDatabaseName("ux_customers_client_normalized_code");
         builder.HasIndex(c => new { c.ClientId, c.CustomerName });
 
         // Relationships

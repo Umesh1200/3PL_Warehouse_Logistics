@@ -17,6 +17,7 @@ public interface IApplicationDbContext
 {
     DbSet<Client> Clients { get; }
     DbSet<ClientContact> ClientContacts { get; }
+    DbSet<ClientOperationalPreference> ClientOperationalPreferences { get; }
     DbSet<User> Users { get; }
     DbSet<Role> Roles { get; }
     DbSet<RolePermission> RolePermissions { get; }
@@ -52,6 +53,7 @@ public interface IApplicationDbContext
     DbSet<InventoryAdjustment> InventoryAdjustments { get; }
 
     DbSet<Supplier> Suppliers { get; }
+    DbSet<SupplierContact> SupplierContacts { get; }
     DbSet<PurchaseOrder> PurchaseOrders { get; }
     DbSet<PurchaseOrderLine> PurchaseOrderLines { get; }
     DbSet<AdvanceShippingNotice> AdvanceShippingNotices { get; }
@@ -67,6 +69,7 @@ public interface IApplicationDbContext
     DbSet<ReceivingDiscrepancy> ReceivingDiscrepancies { get; }
 
     DbSet<Customer> Customers { get; }
+    DbSet<CustomerAddress> CustomerAddresses { get; }
     DbSet<OutboundOrder> OutboundOrders { get; }
     DbSet<OutboundOrderLine> OutboundOrderLines { get; }
     DbSet<ShippingAddress> ShippingAddresses { get; }
@@ -263,6 +266,15 @@ public interface IApplicationDbContext
     Task<TResult> ExecuteWithLocationLifecycleLockAsync<TResult>(
         Guid facilityId,
         Guid locationId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithClientLifecycleLockAsync<TResult>(
+        Guid clientId,
+        Func<Task<TResult>> action,
+        CancellationToken cancellationToken = default);
+    Task<TResult> ExecuteWithClientFacilityAccessLockAsync<TResult>(
+        Guid clientId,
+        Guid facilityId,
         Func<Task<TResult>> action,
         CancellationToken cancellationToken = default);
     bool IsRelationalDatabase { get; }
