@@ -227,7 +227,7 @@ stateDiagram-v2
 
 Migration `20261128061719_MDM2_2_ClientCustomerSupplierAndPreferences` is strictly additive and reversible:
 1. Adds new columns to `clients`, `client_contacts`, `client_facility_access`, `customers`, `suppliers` and creates `client_operational_preferences`, `customer_addresses`, `supplier_contacts`.
-2. Executes fail-closed `DO $$` preflight collision detection across `clients` (`normalized_account_code`), `customers` (`(client_id, normalized_customer_code)`), `suppliers` (`(client_id, normalized_supplier_code)`), and `client_facility_access` (multiple active `primary_operating_facility = TRUE`).
+2. Executes fail-closed `DO $$` preflight collision detection across `clients` (`normalized_account_code`), `customers` (`(client_id, normalized_customer_code)`), and `suppliers` (`(client_id, normalized_supplier_code)`), and deterministically reconciles any legacy pre-MDM-2.2 `client_facility_access` clients with multiple active `primary_operating_facility = TRUE` rows by retaining the earliest active assignment (`effective_date ASC, access_id ASC`).
 3. Deterministically backfills `normalized_account_code`, `normalized_customer_code`, `normalized_supplier_code` via `UPPER(BTRIM(...))`.
 4. Creates permanent unique indexes and partial unique indexes.
 5. `Down()` cleanly reverts all MDM-2.2 tables, indexes, and columns without data loss to pre-existing tables.

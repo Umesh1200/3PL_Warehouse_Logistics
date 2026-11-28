@@ -418,18 +418,18 @@ BEGIN
         RAISE EXCEPTION 'MDM-2.2 preflight failed: duplicate normalized supplier_code values within tenant detected: %', dup_suppliers;
     END IF;
 
-    SELECT string_agg(client_id::text || ' (' || cnt || ')', ', ')
-    INTO dup_primary_fac
-    FROM (
-        SELECT client_id, COUNT(*) AS cnt
+    -- Deterministically reconcile legacy pre-MDM-2.2 clients that had multiple active primary_operating_facility rows
+    -- by preserving the earliest active assignment (effective_date ASC, access_id ASC) as primary.
+    WITH ranked AS (
+        SELECT access_id,
+               ROW_NUMBER() OVER (PARTITION BY client_id ORDER BY effective_date ASC, access_id ASC) AS rn
         FROM client_facility_access
         WHERE primary_operating_facility = TRUE AND status = 'Active'
-        GROUP BY client_id
-        HAVING COUNT(*) > 1
-    ) t;
-    IF dup_primary_fac IS NOT NULL THEN
-        RAISE EXCEPTION 'MDM-2.2 preflight failed: multiple active primary_operating_facility assignments detected for client(s): %', dup_primary_fac;
-    END IF;
+    )
+    UPDATE client_facility_access cfa
+    SET primary_operating_facility = FALSE
+    FROM ranked r
+    WHERE cfa.access_id = r.access_id AND r.rn > 1;
 END $$;
 
 UPDATE clients SET normalized_account_code = UPPER(BTRIM(account_code)) WHERE normalized_account_code = '';
